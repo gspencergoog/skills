@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PR Feedback Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --bg-color: #1e1e1e;
+      --panel-bg: #2d2d2d;
+      --text-color: #d4d4d4;
+      --text-light: #aaaaaa;
+      --border-color: #3e3e3e;
+      --primary-color: #007acc;
+      --success-color: #4caf50;
+      --warning-color: #ff9800;
+      --danger-color: #f44336;
+      --badge-bg: #444;
+      --code-bg: #1a1a1a;
+    }
+    
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      line-height: 1.5;
+    }
+    
+    header {
+      background-color: var(--panel-bg);
+      border-bottom: 1px solid var(--border-color);
+      padding: 16px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    
+    header h1 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    header h1 span.repo {
+      color: var(--text-light);
+      font-size: 1rem;
+    }
+    
+    .save-btn {
+      background-color: var(--success-color);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      padding: 8px 16px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    
+    .save-btn:hover {
+      opacity: 0.9;
+    }
+    
+    main {
+      max-width: 1000px;
+      margin: 32px auto;
+      padding: 0 24px;
+    }
+    
+    .thread-card {
+      background-color: var(--panel-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+    
+    .thread-header {
+      background-color: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .file-path {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.9rem;
+      color: #9cdcfe;
+    }
+    
+    .badge {
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+      background-color: var(--badge-bg);
+      color: var(--text-color);
+    }
+    
+    .badge.outdated {
+      background-color: rgba(244, 67, 54, 0.2);
+      color: #f44336;
+      border: 1px solid rgba(244, 67, 54, 0.3);
+    }
+    
+    .badge.status-addressed {
+      background-color: rgba(76, 175, 80, 0.2);
+      color: #8bc34a;
+      border: 1px solid rgba(76, 175, 80, 0.3);
+    }
+    
+    .badge.status-modified {
+      background-color: rgba(255, 152, 0, 0.2);
+      color: #ffb74d;
+      border: 1px solid rgba(255, 152, 0, 0.3);
+    }
+    
+    .thread-body {
+      padding: 18px;
+    }
+    
+    .comments-history {
+      margin-bottom: 18px;
+    }
+    
+    .comment-bubble {
+      background-color: rgba(0,0,0,0.15);
+      border-radius: 4px;
+      padding: 12px;
+      margin-bottom: 12px;
+      border-left: 3px solid var(--border-color);
+    }
+    
+    .comment-bubble:last-child {
+      margin-bottom: 0;
+    }
+    
+    .comment-meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-light);
+      margin-bottom: 6px;
+    }
+    
+    .comment-author {
+      font-weight: 600;
+      color: #e5c07b;
+    }
+    
+    .comment-content {
+      font-size: 0.9rem;
+    }
+    
+    .comment-content p {
+      margin-top: 0;
+      margin-bottom: 8px;
+    }
+    
+    .comment-content p:last-child {
+      margin-bottom: 0;
+    }
+    
+    .comment-content code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background-color: rgba(255, 255, 255, 0.12);
+      padding: 2px 4px;
+      border-radius: 3px;
+      font-size: 0.85em;
+    }
+    
+    .comment-content pre {
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 10px;
+      margin: 8px 0;
+      overflow-x: auto;
+    }
+    
+    .comment-content pre code {
+      background-color: transparent;
+      padding: 0;
+      border-radius: 0;
+      font-size: 0.85rem;
+    }
+    
+    .comment-content blockquote {
+      margin: 8px 0;
+      padding-left: 12px;
+      border-left: 3px solid rgba(255, 255, 255, 0.25);
+      color: var(--text-light);
+    }
+    
+    .comment-content ul, .comment-content ol {
+      margin-top: 0;
+      margin-bottom: 8px;
+      padding-left: 20px;
+    }
+    
+    .comment-content li {
+      margin-bottom: 4px;
+    }
+    
+    .comment-content a {
+      color: #9cdcfe;
+      text-decoration: none;
+    }
+    
+    .comment-content a:hover {
+      text-decoration: underline;
+    }
+    
+    .comment-content img {
+      max-width: 100%;
+      height: auto;
+    }
+    
+    .suggestion-block {
+      background-color: var(--code-bg);
+      border: 1px solid #444;
+      border-radius: 4px;
+      margin: 12px 0;
+      overflow: hidden;
+    }
+    
+    .suggestion-header {
+      background-color: #252526;
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      color: var(--text-light);
+      border-bottom: 1px solid #333;
+      display: flex;
+      justify-content: space-between;
+    }
+    
+    .suggestion-code {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      padding: 12px;
+      font-size: 0.85rem;
+      color: #a9b1d6;
+      overflow-x: auto;
+      margin: 0;
+      white-space: pre-wrap;
+    }
+    
+    .action-panel {
+      background-color: rgba(0, 122, 204, 0.05);
+      border: 1px solid rgba(0, 122, 204, 0.2);
+      border-radius: 4px;
+      padding: 16px;
+      margin-top: 16px;
+    }
+    
+    .action-row {
+      display: flex;
+      gap: 24px;
+      margin-bottom: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    
+    .action-option {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 0.9rem;
+    }
+    
+    .reply-box {
+      margin-top: 12px;
+    }
+    
+    .reply-box label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--text-light);
+      margin-bottom: 4px;
+    }
+    
+    .reply-textarea {
+      width: 100%;
+      background-color: #1e1e1e;
+      color: var(--text-color);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: vertical;
+      box-sizing: border-box;
+    }
+    
+    .checkbox-row {
+      display: flex;
+      gap: 24px;
+      margin-top: 12px;
+    }
+    
+    .checkbox-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 48px;
+      color: var(--text-light);
+      background-color: var(--panel-bg);
+      border: 1px dashed var(--border-color);
+      border-radius: 6px;
+    }
+    
+    .status-badge-container {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>PR Review Feedback <span class="repo" id="repo-name">Loading...</span></h1>
+    <div style="display: flex; gap: 12px;">
+      <button class="save-btn" id="save-all">
+        <svg width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+          <path d="M12.736 14H5.666a1.999 1.999 0 0 1-1.999-1.999V5.006L4 5.005v7a1 1 0 0 0 1 1h7.736a1 1 0 0 0 1-1V5.005l.264.001a2 2 0 0 1 1.999 1.999v7A2 2 0 0 1 12.736 14zm-9.734-7.5H13V3H3.002v3.5zm0-4.5H13v-1H3.002v1zM3 13h10v-1H3v1z"/>
+        </svg>
+        Save & Apply Plan
+      </button>
+      <button id="abort-btn" style="background-color: var(--danger-color); color: white; border: none; border-radius: 4px; padding: 8px 16px; font-size: 0.9rem; font-weight: 600; cursor: pointer;">
+        Abort
+      </button>
+    </div>
+  </header>
+
+  <main id="main-container">
+    <div class="empty-state">Loading feedback threads...</div>
+  </main>
+
+  <script>
+    let feedbackData = null;
+    const decisions = {};
+
+    function unescapeNewlines(text) {
+      if (!text || typeof text !== 'string') return text || '';
+      return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t');
+    }
+
+    function parseMarkdown(text) {
+      if (!text) return '';
+      text = unescapeNewlines(text);
+      try {
+        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+          return marked.parse(text);
+        } else if (typeof marked === 'function') {
+          return marked(text);
+        }
+      } catch (e) {
+        console.error('Error parsing markdown:', e);
+      }
+      return escapeHtml(text);
+    }
+
+    async function loadComments() {
+      try {
+        const response = await fetch('/api/comments');
+        if (!response.ok) {
+          throw new Error('Failed to load comments');
+        }
+        feedbackData = await response.json();
+        document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
+        renderThreads(feedbackData.threads);
+      } catch (err) {
+        document.getElementById('main-container').innerHTML = `
+          <div class="empty-state" style="border-color: var(--danger-color); color: var(--danger-color);">
+            Error loading feedback comments: ${err.message}
+          </div>
+        `;
+      }
+    }
+
+    function renderThreads(threads) {
+      const container = document.getElementById('main-container');
+      if (!threads || threads.length === 0) {
+        container.innerHTML = '<div class="empty-state">No active or unresolved review comments found on this PR.</div>';
+        return;
+      }
+      
+      container.innerHTML = '';
+      
+      threads.forEach(thread => {
+        // Initialize default decision state
+        decisions[thread.id] = {
+          approved: false,
+          action: 'accept', // default
+          reply: thread.draftReply || (thread.suggestion ? 'Applied suggestion.' : 'Fixed.'),
+          resolve: true,
+          agentInstructions: ''
+        };
+        
+        const card = document.createElement('div');
+        card.className = 'thread-card';
+        card.id = `card-${thread.id}`;
+        
+        const outdatedBadge = thread.isOutdated ? '<span class="badge outdated">Outdated (Pushed)</span>' : '';
+        const resolvedBadge = thread.isResolved ? '<span class="badge status-addressed">Resolved (GitHub)</span>' : '';
+        const hiddenBadge = thread.isHidden ? '<span class="badge outdated">Hidden/Minimized</span>' : '';
+        
+        let localStatusBadge = '';
+        if (thread.localStatus.startsWith('Addressed')) {
+          localStatusBadge = `<span class="badge status-addressed">Addressed (Local)</span>`;
+          decisions[thread.id].approved = true; // Auto check if addressed
+        } else if (thread.localStatus.startsWith('Modified')) {
+          localStatusBadge = `<span class="badge status-modified">Modified Locally</span>`;
+          decisions[thread.id].approved = true;
+        } else {
+          localStatusBadge = `<span class="badge">Unaddressed</span>`;
+        }
+
+        const commentsHtml = thread.comments.map(c => `
+          <div class="comment-bubble">
+            <div class="comment-meta">
+              <span class="comment-author">@${c.author}</span>
+              <span>${new Date(c.createdAt).toLocaleString()}</span>
+            </div>
+            <div class="comment-content">${parseMarkdown(c.body)}</div>
+          </div>
+        `).join('');
+        
+        let suggestionHtml = '';
+        if (thread.suggestion) {
+          suggestionHtml = `
+            <div class="suggestion-block">
+              <div class="suggestion-header">
+                <span>SUGGESTED CHANGE</span>
+              </div>
+              <pre class="suggestion-code"><code>${escapeHtml(unescapeNewlines(thread.suggestion))}</code></pre>
+            </div>
+          `;
+        }
+
+        let proposedFixHtml = '';
+        if (thread.proposedFix) {
+          proposedFixHtml = `
+            <div class="proposed-fix-block" style="background-color: rgba(0, 122, 204, 0.05); border: 1px solid rgba(0, 122, 204, 0.2); border-radius: 4px; padding: 12px; margin: 12px 0;">
+              <strong style="color: #9cdcfe;">Proposed Fix:</strong>
+              <div style="margin-top: 6px; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(unescapeNewlines(thread.proposedFix))}</div>
+            </div>
+          `;
+        }
+        
+        card.innerHTML = `
+          <div class="thread-header">
+            <span class="file-path">${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ' (File)'}</span>
+            <div class="status-badge-container">
+              ${localStatusBadge}
+              ${outdatedBadge}
+              ${resolvedBadge}
+              ${hiddenBadge}
+            </div>
+          </div>
+          <div class="thread-body">
+            <div class="comments-history">
+              ${commentsHtml}
+            </div>
+            ${suggestionHtml}
+            ${proposedFixHtml}
+            
+            <div class="action-panel">
+              <div class="action-row">
+                <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">DECISION:</span>
+                <label class="action-option">
+                  <input type="radio" name="action-${thread.id}" value="accept" checked onchange="updateAction('${thread.id}', 'accept')">
+                  Accept Fix
+                </label>
+                <label class="action-option">
+                  <input type="radio" name="action-${thread.id}" value="clarify" onchange="updateAction('${thread.id}', 'clarify')">
+                  Request Clarification
+                </label>
+                <label class="action-option">
+                  <input type="radio" name="action-${thread.id}" value="decline" onchange="updateAction('${thread.id}', 'decline')">
+                  Decline/Ignore
+                </label>
+              </div>
+              
+              <div class="reply-box">
+                <label for="reply-text-${thread.id}">Draft Reply Comment:</label>
+                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="2" oninput="updateReply('${thread.id}', this.value)">${decisions[thread.id].reply}</textarea>
+              </div>
+
+              <div class="reply-box" style="margin-top: 12px;">
+                <label for="instructions-${thread.id}">Instructions for Agent (adjust plan):</label>
+                <textarea id="instructions-${thread.id}" class="reply-textarea" rows="2" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
+              </div>
+              
+              <div class="checkbox-row">
+                <label class="checkbox-option">
+                  <input type="checkbox" id="approve-${thread.id}" ${decisions[thread.id].approved ? 'checked' : ''} onchange="updateApproval('${thread.id}', this.checked)">
+                  <strong>Approve Action</strong>
+                </label>
+                <label class="checkbox-option">
+                  <input type="checkbox" id="resolve-${thread.id}" checked onchange="updateResolve('${thread.id}', this.checked)">
+                  Mark thread resolved
+                </label>
+              </div>
+            </div>
+          </div>
+        `;
+        
+        container.appendChild(card);
+      });
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function updateAction(threadId, action) {
+      decisions[threadId].action = action;
+      const replyArea = document.getElementById(`reply-text-${threadId}`);
+      
+      // Suggest template text based on selected action
+      if (action === 'accept') {
+        const thread = feedbackData.threads.find(t => t.id === threadId);
+        decisions[threadId].reply = thread.draftReply || (thread.suggestion ? 'Applied suggestion.' : 'Fixed.');
+      } else if (action === 'clarify') {
+        decisions[threadId].reply = 'Could you clarify what you mean by...';
+        decisions[threadId].resolve = false; // default false for clarification
+        document.getElementById(`resolve-${threadId}`).checked = false;
+      } else if (action === 'decline') {
+        decisions[threadId].reply = 'Declining this because...';
+      }
+      replyArea.value = decisions[threadId].reply;
+    }
+
+    function updateReply(threadId, val) {
+      decisions[threadId].reply = val;
+    }
+
+    function updateApproval(threadId, val) {
+      decisions[threadId].approved = val;
+      const card = document.getElementById(`card-${threadId}`);
+      if (val) {
+        card.style.borderColor = 'rgba(76, 175, 80, 0.4)';
+      } else {
+        card.style.borderColor = 'var(--border-color)';
+      }
+    }
+
+    function updateResolve(threadId, val) {
+      decisions[threadId].resolve = val;
+    }
+
+    function updateInstructions(threadId, val) {
+      decisions[threadId].agentInstructions = val;
+    }
+
+    document.getElementById('save-all').addEventListener('click', async () => {
+      // Validate approvals: make sure approved cards actually have values filled in
+      const list = Object.keys(decisions).map(id => ({
+        threadId: id,
+        ...decisions[id]
+      }));
+      
+      try {
+        const response = await fetch('/api/save', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: jsonPayload = JSON.stringify({
+            repo: feedbackData.repo,
+            pr: feedbackData.pr,
+            decisions: list
+          })
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to save decisions to workspace');
+        }
+        
+        document.body.innerHTML = `
+          <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
+            <h1 style="color: var(--success-color);">Plan Saved!</h1>
+            <p>You can close this tab now. The agent is resuming to apply changes.</p>
+          </div>
+        `;
+      } catch (err) {
+        alert('Error saving plan: ' + err.message);
+      }
+    });
+
+    document.getElementById('abort-btn').addEventListener('click', async () => {
+      if (confirm('Are you sure you want to abort the review? No changes will be applied.')) {
+        try {
+          const response = await fetch('/api/abort', {
+            method: 'POST'
+          });
+          if (!response.ok) {
+            throw new Error('Failed to abort');
+          }
+          document.body.innerHTML = `
+            <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
+              <h1 style="color: var(--danger-color);">Review Aborted</h1>
+              <p>You can close this tab now. The agent has been notified.</p>
+            </div>
+          `;
+        } catch (err) {
+          alert('Error aborting: ' + err.message);
+        }
+      }
+    });
+
+    window.addEventListener('DOMContentLoaded', loadComments);
+  </script>
+</body>
+</html>
