@@ -335,6 +335,77 @@
       gap: 8px;
       align-items: center;
     }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-light);
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      padding: 8px 16px;
+      border-bottom: 3px solid transparent;
+      transition: all 0.2s ease;
+    }
+    
+    .tab-btn:hover {
+      color: var(--text-color);
+    }
+    
+    .tab-btn.active {
+      color: var(--text-color);
+      border-bottom-color: var(--primary-color);
+    }
+    
+    .tab-content {
+      display: none;
+    }
+    
+    .tab-content.active {
+      display: block;
+    }
+
+    .check-card {
+      background-color: var(--panel-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+
+    .check-header {
+      background-color: rgba(255,255,255,0.02);
+      border-bottom: 1px solid var(--border-color);
+      padding: 12px 18px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .check-name {
+      font-weight: 600;
+      color: var(--danger-color);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .check-body {
+      padding: 18px;
+    }
+
+    .check-logs {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      color: #a9b1d6;
+      white-space: pre;
+      margin: 0;
+    }
   </style>
 </head>
 <body>
@@ -354,8 +425,26 @@
     </div>
   </header>
 
-  <main id="main-container">
-    <div class="empty-state">Loading feedback threads...</div>
+  <div id="warning-banner" style="display: none; background-color: rgba(244, 67, 54, 0.15); border-bottom: 1px solid var(--danger-color); padding: 12px 24px; color: #ff8888; font-size: 0.95rem; font-weight: 500; line-height: 1.4;">
+  </div>
+
+  <main>
+    <div style="display: flex; gap: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
+      <button id="tab-comments" class="tab-btn active" onclick="switchTab('comments')">
+        Review Comments (<span id="comments-count">0</span>)
+      </button>
+      <button id="tab-checks" class="tab-btn" onclick="switchTab('checks')">
+        CI/CD Failures (<span id="checks-count">0</span>)
+      </button>
+    </div>
+
+    <div id="content-comments" class="tab-content active">
+      <div class="empty-state">Loading feedback threads...</div>
+    </div>
+
+    <div id="content-checks" class="tab-content">
+      <div class="empty-state">Loading check runs...</div>
+    </div>
   </main>
 
   <script>
@@ -390,9 +479,14 @@
         }
         feedbackData = await response.json();
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
+        
+        document.getElementById('comments-count').textContent = (feedbackData.threads || []).length;
+        document.getElementById('checks-count').textContent = (feedbackData.checks || []).length;
+        
         renderThreads(feedbackData.threads);
+        renderChecks(feedbackData.checks);
       } catch (err) {
-        document.getElementById('main-container').innerHTML = `
+        document.getElementById('content-comments').innerHTML = `
           <div class="empty-state" style="border-color: var(--danger-color); color: var(--danger-color);">
             Error loading feedback comments: ${err.message}
           </div>
@@ -401,7 +495,7 @@
     }
 
     function renderThreads(threads) {
-      const container = document.getElementById('main-container');
+      const container = document.getElementById('content-comments');
       if (!threads || threads.length === 0) {
         container.innerHTML = '<div class="empty-state">No active or unresolved review comments found on this PR.</div>';
         return;
@@ -638,7 +732,124 @@
       }
     });
 
-    window.addEventListener('DOMContentLoaded', loadComments);
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+      });
+      document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.remove('active');
+      });
+      
+      document.getElementById(`tab-${tabName}`).classList.add('active');
+      document.getElementById(`content-${tabName}`).classList.add('active');
+    }
+
+    function checkGitState(gitState) {
+      const banner = document.getElementById('warning-banner');
+      const saveBtn = document.getElementById('save-all');
+      
+      if (!gitState) {
+        banner.style.display = 'none';
+        return;
+      }
+      
+      let warnings = [];
+      let blockSave = false;
+      
+      if (!gitState.isGit) {
+        warnings.push(`<strong>Error:</strong> ${gitState.error || 'Project directory is not a git repository.'}`);
+        blockSave = true;
+      } else {
+        if (!gitState.isCorrectRepo) {
+          warnings.push(`<strong>Repository Mismatch:</strong> Expected repository <code>${gitState.expectedRepo}</code>, but local remote points to <code>${gitState.activeRepo || 'none'}</code>.`);
+          blockSave = true;
+        }
+        if (!gitState.isCorrectBranch) {
+          warnings.push(`<strong>Branch Mismatch:</strong> Expected branch <code>${gitState.expectedBranch}</code>, but active branch is <code>${gitState.activeBranch}</code>. Run <code>gh pr checkout ${feedbackData.pr}</code> to switch.`);
+          blockSave = true;
+        }
+        if (gitState.isDirty) {
+          warnings.push(`<strong>Dirty Workspace:</strong> Local repository has uncommitted changes. Please commit or stash them before applying the feedback plan.`);
+          blockSave = true;
+        }
+        if (gitState.hasUnpushed) {
+          const count = gitState.unpushedCommits.length;
+          warnings.push(`<strong>Unpushed Commits:</strong> There are ${count} unpushed commits. Please push changes before responding/resolving review threads.`);
+          blockSave = true;
+        }
+      }
+      
+      if (warnings.length > 0) {
+        banner.innerHTML = '<ul style="margin: 0; padding-left: 20px; font-family: inherit;">' + warnings.map(w => `<li style="margin-bottom: 4px;">${w}</li>`).join('') + '</ul>';
+        banner.style.display = 'block';
+      } else {
+        banner.style.display = 'none';
+      }
+      
+      if (blockSave) {
+        saveBtn.disabled = true;
+        saveBtn.style.opacity = '0.5';
+        saveBtn.style.cursor = 'not-allowed';
+        saveBtn.title = "Save & Apply is disabled because git state is out of sync. Resolve warnings to enable.";
+      } else {
+        saveBtn.disabled = false;
+        saveBtn.style.opacity = '1.0';
+        saveBtn.style.cursor = 'pointer';
+        saveBtn.title = "";
+      }
+    }
+
+    function renderChecks(checks) {
+      const container = document.getElementById('content-checks');
+      if (!checks || checks.length === 0) {
+        container.innerHTML = '<div class="empty-state">All checks passing! ✅</div>';
+        return;
+      }
+      
+      container.innerHTML = '';
+      
+      checks.forEach(check => {
+        const card = document.createElement('div');
+        card.className = 'check-card';
+        
+        card.innerHTML = `
+          <div class="check-header">
+            <span class="check-name">
+              <svg width="16" height="16" fill="currentColor" style="color: var(--danger-color);" viewBox="0 0 16 16">
+                <path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+              </svg>
+              ${escapeHtml(check.name)}
+            </span>
+            <span class="badge outdated" style="text-transform: uppercase;">${escapeHtml(check.state)}</span>
+          </div>
+          <div class="check-body">
+            <div style="font-size: 0.9rem; margin-bottom: 12px; color: var(--text-light);">
+              <strong>Workflow:</strong> ${escapeHtml(check.workflow || 'N/A')} | 
+              <strong>Link:</strong> <a href="${escapeHtml(check.link)}" target="_blank" style="color: #9cdcfe; text-decoration: none;">View on GitHub</a>
+            </div>
+            <pre class="check-logs"><code>${escapeHtml(check.logs || 'No logs available.')}</code></pre>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      loadComments();
+      
+      const eventSource = new EventSource('/api/git-events');
+      eventSource.onmessage = (event) => {
+        try {
+          const gitState = JSON.parse(event.data);
+          checkGitState(gitState);
+        } catch (e) {
+          console.error("Error parsing git events:", e);
+        }
+      };
+      eventSource.onerror = (err) => {
+        console.error("EventSource failed:", err);
+      };
+    });
   </script>
 </body>
 </html>

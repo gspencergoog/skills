@@ -3,10 +3,9 @@ import argparse
 import subprocess
 import json
 import sys
+import os
 
-def run_cmd(args):
-    result = subprocess.run(args, capture_output=True, text=True, check=True)
-    return result.stdout.strip()
+from utils import run_cmd
 
 def reply_to_thread(thread_id, body):
     query = """

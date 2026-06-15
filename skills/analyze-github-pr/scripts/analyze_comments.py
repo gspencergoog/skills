@@ -6,9 +6,7 @@ import sys
 import os
 import argparse
 
-def run_cmd(args):
-    result = subprocess.run(args, capture_output=True, text=True, check=True)
-    return result.stdout.strip()
+from utils import run_cmd
 
 def get_repo_info():
     for remote in ["upstream", "origin"]:
@@ -55,6 +53,7 @@ def fetch_pr_data(owner, repo, pr_number):
       repository(owner: $owner, name: $repo) {
         pullRequest(number: $pr) {
           body
+          headRefName
           reviewThreads(first: 100) {
             nodes {
               ...threadFields
@@ -75,6 +74,8 @@ def fetch_pr_data(owner, repo, pr_number):
     
     output = run_cmd(cmd)
     data = json.loads(output)
+    if "errors" in data:
+        raise RuntimeError(f"GraphQL errors: {data['errors']}")
     pr_data = data["data"]["repository"]["pullRequest"]
     nodes = pr_data["reviewThreads"]["nodes"]
         
@@ -85,7 +86,8 @@ def fetch_pr_data(owner, repo, pr_number):
             seen.add(node["id"])
             unique_nodes.append(node)
             
-    return pr_data.get("body", ""), unique_nodes
+    return pr_data.get("body", ""), pr_data.get("headRefName", ""), unique_nodes
+
 
 def parse_suggestion(body):
     pattern = r"```suggestion\s*(.*?)\s*```"
@@ -149,10 +151,91 @@ def get_modified_lines(base_branch="origin/main"):
                     
     return modified_lines
 
+def truncate_log(log_text):
+    if not log_text:
+        return ""
+    lines = log_text.splitlines()
+    N = len(lines)
+    if N <= 100:
+        return log_text
+        
+    keep_indices = set()
+    
+    # Keep first 15 lines
+    for i in range(min(15, N)):
+        keep_indices.add(i)
+        
+    # Keep last 85 lines
+    for i in range(max(0, N - 85), N):
+        keep_indices.add(i)
+        
+    # Scan for keywords
+    keywords = ["fail", "error", "unexpected", "deprecated", "warning"]
+    for i in range(N):
+        line_lower = lines[i].lower()
+        if any(kw in line_lower for kw in keywords):
+            start = max(0, i - 30)
+            end = min(N - 1, i + 10)
+            for j in range(start, end + 1):
+                keep_indices.add(j)
+                
+    sorted_keep = sorted(list(keep_indices))
+    if len(sorted_keep) == N:
+        return log_text
+        
+    truncated_lines = []
+    for idx, line_idx in enumerate(sorted_keep):
+        if idx > 0 and line_idx > sorted_keep[idx - 1] + 1:
+            elided_count = line_idx - sorted_keep[idx - 1] - 1
+            truncated_lines.append(f"... [ELIDED {elided_count} LINES] ...")
+        truncated_lines.append(lines[line_idx])
+        
+    return "\n".join(truncated_lines)
+
+def fetch_failed_checks_logs(pr_number):
+    try:
+        checks_output = run_cmd(["gh", "pr", "checks", str(pr_number), "--json", "name,state,bucket,link,workflow"])
+        checks = json.loads(checks_output)
+    except Exception as e:
+        if "no checks reported" in str(e).lower():
+            return []
+        return []
+        
+    failed_checks = [c for c in checks if c.get("bucket") == "fail"]
+    output_checks = []
+    
+    for check in failed_checks:
+        name = check.get("name", "Unknown Check")
+        link = check.get("link", "")
+        state = check.get("state", "FAILED")
+        workflow = check.get("workflow", "")
+        
+        logs = ""
+        match = re.search(r'/actions/runs/(\d+)', link)
+        if match:
+            run_id = match.group(1)
+            try:
+                raw_logs = run_cmd(["gh", "run", "view", run_id, "--log-failed"])
+                logs = truncate_log(raw_logs)
+            except Exception as e:
+                logs = f"Failed to fetch logs: {e}"
+        else:
+            logs = f"Non-GitHub Actions run. Inspect details at: {link}"
+            
+        output_checks.append({
+            "name": name,
+            "link": link,
+            "state": state,
+            "workflow": workflow,
+            "logs": logs
+        })
+        
+    return output_checks
+
 def analyze(include_all=False):
     owner, repo = get_repo_info()
     pr_number = get_pr_number()
-    pr_description, threads = fetch_pr_data(owner, repo, pr_number)
+    pr_description, head_ref_name, threads = fetch_pr_data(owner, repo, pr_number)
     modified = get_modified_lines()
     
     output_threads = []
@@ -202,18 +285,29 @@ def analyze(include_all=False):
             } for c in comments]
         })
         
+    failed_checks = fetch_failed_checks_logs(pr_number)
+        
     return {
         "repo": f"{owner}/{repo}",
         "pr": pr_number,
         "prDescription": pr_description,
-        "threads": output_threads
+        "headRefName": head_ref_name,
+        "threads": output_threads,
+        "checks": failed_checks
     }
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze PR review comments.")
     parser.add_argument("--json", action="store_true", help="Output raw JSON.")
     parser.add_argument("--all", action="store_true", help="Include resolved and hidden/minimized threads.")
+    parser.add_argument("--dir", default=".", help="Directory to run git/gh commands from.")
     args = parser.parse_args()
+    
+    target_dir = os.path.abspath(os.path.expanduser(args.dir))
+    if not os.path.exists(target_dir):
+        print(f"Error: Directory '{target_dir}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+    os.chdir(target_dir)
     
     try:
         report = analyze(include_all=args.all)
@@ -244,6 +338,17 @@ def main():
                         print(f"    + {line}")
                 print("="*80)
             print(f"Total threads displayed: {len(report['threads'])}")
+            
+            print("\n" + "="*80)
+            print(f"Failed Status Checks ({len(report['checks'])}):")
+            print("="*80)
+            for check in report["checks"]:
+                print(f"Check: {check['name']}")
+                print(f"Workflow: {check['workflow']}")
+                print(f"Link: {check['link']}")
+                print("Logs:")
+                print(check["logs"])
+                print("-"*80)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

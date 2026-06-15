@@ -29,8 +29,8 @@ Follow these steps when tasked with addressing PR review feedback:
 
 To allow the user to interactively review proposed fixes, draft replies, and provide feedback, run the interactive dashboard.
 
-1. **Fetch Comments**: Employ the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill to fetch the unresolved PR comments in JSON format:
-   `python3 ~/.gemini/jetski/skills/analyze-github-pr/scripts/analyze_comments.py --json`
+1. **Fetch Comments**: Employ the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill to fetch the unresolved PR comments and CI/CD check failures in JSON format:
+   `python3 ~/.gemini/jetski/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <path-to-target-workspace-directory>`
 
 2. **Propose Fixes and Draft Replies**: For each thread in the output:
    - Inspect the target file (at the specified line if given, or the overall file if it is a file-level comment).
@@ -39,8 +39,8 @@ To allow the user to interactively review proposed fixes, draft replies, and pro
 
 3. **Write Data File**: Save the enriched JSON report to a file named `pr_comments.json` in the scratch directory (`~/.gemini/jetski/scratch/pr_comments.json`).
 
-4. **Launch Dashboard**: Start the standalone dashboard app as a background task from the workspace root:
-   `python3 ~/.gemini/jetski/skills/pr-feedback-handler/scripts/launch_dashboard.py`
+4. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory:
+   `python3 ~/.gemini/jetski/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory>`
    Set a reasonable `WaitMsBeforeAsync` (e.g., `1000`) so the command runs in the background.
 
 5. **Wait for Completion**: Stop calling tools and go idle. The launcher will automatically open the browser for the user and block until they either click "Save & Apply Plan" or "Abort". Once they do, the background task will complete, and you will receive a notification with the command's exit status.
