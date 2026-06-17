@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Performance Optimizer Dashboard</title>
+  <style>
+    :root {
+      --bg-primary: #121214;
+      --bg-secondary: #1a1a1e;
+      --bg-tertiary: #24242b;
+      --text-primary: #f1f1f4;
+      --text-secondary: #a1a1ab;
+      --accent-color: #3b82f6;
+      --accent-hover: #2563eb;
+      --success-color: #10b981;
+      --success-bg: rgba(16, 185, 129, 0.15);
+      --danger-color: #ef4444;
+      --danger-bg: rgba(239, 68, 68, 0.15);
+      --border-color: #2e2e38;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      margin: 0;
+      padding: 0;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #sidebar {
+      width: 280px;
+      background-color: var(--bg-secondary);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+
+    .sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border-color);
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: 0.5px;
+    }
+
+    #steps-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      overflow-y: auto;
+      flex-grow: 1;
+    }
+
+    .step-item {
+      padding: 15px 20px;
+      border-bottom: 1px solid var(--border-color);
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .step-item:hover {
+      background-color: var(--bg-tertiary);
+    }
+
+    .step-item.active {
+      background-color: var(--bg-tertiary);
+      border-left: 4px solid var(--accent-color);
+    }
+
+    .step-title {
+      font-weight: 600;
+      margin-bottom: 5px;
+    }
+
+    .step-meta {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    #main-content {
+      flex-grow: 1;
+      padding: 30px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card {
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 25px;
+    }
+
+    h1, h2, h3, h4 {
+      margin-top: 0;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .badge-success {
+      background-color: var(--success-bg);
+      color: var(--success-color);
+    }
+
+    .badge-danger {
+      background-color: var(--danger-bg);
+      color: var(--danger-color);
+    }
+
+    .badge-info {
+      background-color: rgba(59, 130, 246, 0.15);
+      color: var(--accent-color);
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 15px;
+    }
+
+    .metric-card {
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 15px;
+      text-align: center;
+    }
+
+    .metric-name {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      margin-bottom: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .metric-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 15px;
+    }
+
+    th, td {
+      padding: 12px 15px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    th {
+      background-color: var(--bg-tertiary);
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .candidate-row:hover {
+      background-color: rgba(255, 255, 255, 0.02);
+    }
+
+    .diff-block {
+      background-color: #0f1419;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      overflow-x: auto;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem;
+      padding: 15px;
+      margin-top: 15px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .diff-line {
+      white-space: pre;
+      display: block;
+      padding: 2px 5px;
+    }
+
+    .diff-add {
+      background-color: rgba(16, 185, 129, 0.12);
+      color: #34d399;
+    }
+
+    .diff-del {
+      background-color: rgba(239, 68, 68, 0.12);
+      color: #f87171;
+    }
+
+    .diff-info {
+      color: #60a5fa;
+      background-color: rgba(59, 130, 246, 0.05);
+    }
+
+    .collapsible-header {
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 15px;
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      margin-top: 15px;
+    }
+
+    .collapsible-content {
+      display: none;
+    }
+
+    .collapsible-content.expanded {
+      display: block;
+    }
+
+    #progression-chart-container {
+      height: 150px;
+      margin-bottom: 25px;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chart-axis {
+      flex-grow: 1;
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      border-bottom: 2px solid var(--border-color);
+      padding: 0 10px;
+      position: relative;
+    }
+
+    .chart-bar-wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      flex-grow: 1;
+      max-width: 80px;
+    }
+
+    .chart-bar {
+      width: 30px;
+      background-color: var(--accent-color);
+      border-radius: 4px 4px 0 0;
+      transition: height 0.5s ease;
+      position: relative;
+    }
+
+    .chart-bar:hover {
+      background-color: var(--accent-hover);
+    }
+
+    .chart-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      margin-top: 5px;
+    }
+
+    .chart-tooltip {
+      position: absolute;
+      bottom: 100%;
+      background: var(--bg-tertiary);
+      padding: 5px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border-color);
+      font-size: 0.75rem;
+      white-space: nowrap;
+      display: none;
+    }
+
+    .chart-bar:hover .chart-tooltip {
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div class="sidebar-header">Performance Optimizer</div>
+    <ul id="steps-list"></ul>
+  </div>
+
+  <div id="main-content">
+    <div id="progression-chart-container">
+      <h3 style="margin-bottom: 10px; font-size: 0.95rem; color: var(--text-secondary);">Baseline Metric Progression</h3>
+      <div id="progression-chart" class="chart-axis"></div>
+    </div>
+
+    <div id="step-details-container">
+      <div class="card" id="step-header">
+        <h2 id="step-title-display">Step Details</h2>
+        <div id="step-meta-display" style="margin-bottom: 15px; color: var(--text-secondary);"></div>
+        <div id="step-status-badge"></div>
+      </div>
+
+      <div class="card">
+        <h3>Baseline Status</h3>
+        <div class="metrics-grid" id="baseline-metrics-grid"></div>
+      </div>
+
+      <div class="card">
+        <h3>Mutation Trial Candidates</h3>
+        <table id="candidates-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Candidate Name</th>
+              <th>Commentary</th>
+              <th>Metrics</th>
+            </tr>
+          </thead>
+          <tbody id="candidates-body"></tbody>
+        </table>
+      </div>
+
+      <div id="candidates-diffs"></div>
+    </div>
+  </div>
+
+  <script>
+    let optimizationHistory = [];
+    let currentStepIndex = 0;
+
+    async function loadHistory() {
+      try {
+        const res = await fetch('/api/history');
+        if (!res.ok) throw new Error("Failed to load history data.");
+        optimizationHistory = await res.json();
+        
+        if (optimizationHistory.length === 0) {
+          document.getElementById('step-details-container').innerHTML = '<div class="card"><h3>No optimization history found yet</h3><p>Run the performance optimization loop first to see results here.</p></div>';
+          return;
+        }
+
+        renderSidebar();
+        renderChart();
+        showStep(optimizationHistory.length - 1);
+      } catch (err) {
+        console.error(err);
+        document.getElementById('step-details-container').innerHTML = `<div class="card"><h3>Error Loading Dashboard</h3><p>${err.message}</p></div>`;
+      }
+    }
+
+    function renderSidebar() {
+      const list = document.getElementById('steps-list');
+      list.innerHTML = '';
+      optimizationHistory.forEach((step, idx) => {
+        const li = document.createElement('li');
+        li.className = 'step-item';
+        if (idx === currentStepIndex) li.classList.add('active');
+        li.onclick = () => showStep(idx);
+
+        const time = new Date(step.timestamp).toLocaleTimeString();
+        li.innerHTML = `
+          <div class="step-title">Step ${step.step} - ${step.winner ? 'Winner' : 'No Winner'}</div>
+          <div class="step-meta">${time} | Base: ${step.base_branch}</div>
+        `;
+        list.appendChild(li);
+      });
+    }
+
+    function renderChart() {
+      const chart = document.getElementById('progression-chart');
+      chart.innerHTML = '';
+      
+      // Determine the primary metric name (first key of baseline_metrics)
+      if (optimizationHistory.length === 0) return;
+      const firstStepMetrics = optimizationHistory[0].baseline_metrics || {};
+      const metricKeys = Object.keys(firstStepMetrics);
+      if (metricKeys.length === 0) return;
+      const primaryMetric = metricKeys[0];
+
+      // Find min/max values to scale
+      const values = optimizationHistory.map(s => s.baseline_metrics[primaryMetric] || 0);
+      const maxVal = Math.max(...values, 1);
+
+      optimizationHistory.forEach((step, idx) => {
+        const val = step.baseline_metrics[primaryMetric] || 0;
+        const percentHeight = Math.max(10, Math.min(100, (val / maxVal) * 100));
+
+        const barWrapper = document.createElement('div');
+        barWrapper.className = 'chart-bar-wrapper';
+
+        const bar = document.createElement('div');
+        bar.className = 'chart-bar';
+        bar.style.height = `${percentHeight}%`;
+
+        // Tooltip
+        const tooltip = document.createElement('div');
+        tooltip.className = 'chart-tooltip';
+        tooltip.innerText = `Step ${step.step}: ${val.toFixed(3)}`;
+        bar.appendChild(tooltip);
+
+        const label = document.createElement('div');
+        label.className = 'chart-label';
+        label.innerText = `S${step.step}`;
+
+        barWrapper.appendChild(bar);
+        barWrapper.appendChild(label);
+        chart.appendChild(barWrapper);
+      });
+    }
+
+    function showStep(index) {
+      currentStepIndex = index;
+      
+      // Update sidebar active class
+      const items = document.querySelectorAll('.step-item');
+      items.forEach((item, idx) => {
+        if (idx === index) item.classList.add('active');
+        else item.classList.remove('active');
+      });
+
+      const step = optimizationHistory[index];
+      
+      // Header
+      document.getElementById('step-title-display').innerText = `Step ${step.step} Details`;
+      document.getElementById('step-meta-display').innerText = `Executed at: ${new Date(step.timestamp).toLocaleString()} | Base Branch: ${step.base_branch}`;
+      
+      const badge = document.getElementById('step-status-badge');
+      if (step.winner) {
+        badge.innerHTML = `<span class="badge badge-success">Improved (Winner: ${step.winner})</span>`;
+      } else {
+        badge.innerHTML = `<span class="badge badge-danger">No Improvement (Kept Baseline)</span>`;
+      }
+
+      // Baseline Metrics Grid
+      const grid = document.getElementById('baseline-metrics-grid');
+      grid.innerHTML = '';
+      for (const [key, val] of Object.entries(step.baseline_metrics || {})) {
+        const card = document.createElement('div');
+        card.className = 'metric-card';
+        const displayVal = typeof val === 'number' ? val.toFixed(3) : val;
+        card.innerHTML = `
+          <div class="metric-name">${key}</div>
+          <div class="metric-value">${displayVal}</div>
+        `;
+        grid.appendChild(card);
+      }
+
+      // Candidates Table
+      const tbody = document.getElementById('candidates-body');
+      tbody.innerHTML = '';
+      const diffsContainer = document.getElementById('candidates-diffs');
+      diffsContainer.innerHTML = '';
+
+      (step.candidates || []).forEach(cand => {
+        const isWinner = cand.name === step.winner;
+        
+        // Metrics Summary String
+        const metricsList = [];
+        for (const [mName, mVal] of Object.entries(cand.metrics || {})) {
+          const displayMVal = typeof mVal === 'number' ? mVal.toFixed(3) : mVal;
+          metricsList.push(`${mName}: ${displayMVal}`);
+        }
+        
+        const row = document.createElement('tr');
+        row.className = 'candidate-row';
+        row.innerHTML = `
+          <td>
+            <span class="badge ${isWinner ? 'badge-success' : 'badge-info'}">
+              ${isWinner ? 'Winner' : 'Candidate'}
+            </span>
+          </td>
+          <td><strong>${cand.name}</strong><br><small style="color: var(--text-secondary);">${cand.branch}</small></td>
+          <td>${cand.commentary}</td>
+          <td>${metricsList.join('<br>')}</td>
+        `;
+        tbody.appendChild(row);
+
+        // Render Diffs if any
+        if (cand.diff) {
+          const diffCard = document.createElement('div');
+          diffCard.className = 'card';
+          
+          const collapsibleHeader = document.createElement('div');
+          collapsibleHeader.className = 'collapsible-header';
+          collapsibleHeader.innerHTML = `
+            <span>Code Mutation Diff: <strong>${cand.name}</strong></span>
+            <span class="badge badge-info">Toggle Diff</span>
+          `;
+          
+          const collapsibleContent = document.createElement('div');
+          collapsibleContent.className = 'collapsible-content';
+          
+          const diffBlock = document.createElement('div');
+          diffBlock.className = 'diff-block';
+          
+          const lines = cand.diff.split('\n');
+          lines.forEach(line => {
+            const span = document.createElement('span');
+            span.className = 'diff-line';
+            if (line.startsWith('+') && !line.startsWith('+++')) {
+              span.classList.add('diff-add');
+            } else if (line.startsWith('-') && !line.startsWith('---')) {
+              span.classList.add('diff-del');
+            } else if (line.startsWith('@@')) {
+              span.classList.add('diff-info');
+            }
+            span.innerText = line;
+            diffBlock.appendChild(span);
+          });
+
+          collapsibleHeader.onclick = () => {
+            collapsibleContent.classList.toggle('expanded');
+          };
+
+          collapsibleContent.appendChild(diffBlock);
+          diffCard.appendChild(collapsibleHeader);
+          diffCard.appendChild(collapsibleContent);
+          diffsContainer.appendChild(diffCard);
+        }
+      });
+    }
+
+    window.onload = loadHistory;
+  </script>
+</body>
+</html>

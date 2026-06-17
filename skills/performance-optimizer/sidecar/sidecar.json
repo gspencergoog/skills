@@ -1,0 +1,8 @@
+{
+  "command": "python3",
+  "args": ["server.py"],
+  "restart_policy": "always",
+  "description": "Serves the Performance Optimizer interactive history dashboard.",
+  "has_web_ui": true,
+  "display_name": "Performance Optimizer Dashboard"
+}

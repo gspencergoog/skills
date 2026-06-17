@@ -1,0 +1,29 @@
+{
+  "metrics": [
+    {
+      "name": "latency",
+      "type": "float",
+      "source": "stdout",
+      "regex": "Mean Latency:\\s*([0-9.]+)\\s*s",
+      "higher_is_better": false,
+      "priority": 1
+    },
+    {
+      "name": "throughput",
+      "type": "float",
+      "source": "stdout",
+      "regex": "Throughput:\\s*([0-9.]+)\\s*ops/sec",
+      "higher_is_better": true,
+      "priority": 2
+    },
+    {
+      "name": "max_memory_mb",
+      "type": "float",
+      "source": "file",
+      "file_path": "tmp/bench_report.json",
+      "json_path": "memory.peak_rss_mb",
+      "higher_is_better": false,
+      "priority": 3
+    }
+  ]
+}
