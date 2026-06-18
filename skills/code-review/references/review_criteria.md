@@ -4,7 +4,12 @@ This reference document outlines the criteria to prioritize when performing a co
 
 ## Prioritized Criteria
 
-### 1. Correctness
+### 1. Testing
+
+New or modified code should be tested with tests that cover the modified code. Fixes for bugs should include regression tests if possible. Review the tests before reviewing the code using the [Reviewing Tests reference](./reviewing_tests.md).
+
+### 2. Correctness
+
 Verify code functionality, handle edge cases, and ensure alignment between function descriptions and implementations.
 - **Logic errors**: Check for flawed logic or incorrect algorithms.
 - **Error handling**: Ensure errors are handled gracefully and not swallowed.
@@ -12,13 +17,13 @@ Verify code functionality, handle edge cases, and ensure alignment between funct
 - **Data validation**: Verify that inputs are validated correctly.
 - **API usage**: Ensure APIs are used correctly and efficiently.
 
-### 2. Efficiency
+### 3. Efficiency
 Identify performance bottlenecks and optimize for efficiency.
 - Avoid unnecessary loops, iterations, or calculations.
 - Watch for memory leaks or inefficient data structures.
 - Avoid excessive logging in performance-critical paths.
 
-### 3. Maintainability
+### 4. Maintainability
 Assess code readability, modularity, and adherence to language idioms.
 - **Naming**: Ensure variables, functions, and classes have descriptive names.
 - **Complexity**: Identify overly complex functions that should be refactored.
@@ -26,7 +31,7 @@ Assess code readability, modularity, and adherence to language idioms.
 - **Style**: Adhere to specified style guides. Violations should be noted.
 - **Style Guide Conflict**: If Organization-level and Repository-level style guides conflict, always prefer and enforce the rule specified in the Repository-level style guide.
 
-### 4. Security
+### 5. Security
 Identify potential vulnerabilities.
 - Insecure storage of sensitive data.
 - Injection attacks (SQL, command, etc.).
