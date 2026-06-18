@@ -85,7 +85,7 @@ def check_git_state(project_dir, expected_branch, expected_repo):
     is_correct_branch = (active_branch == expected_branch)
     
     # 3. Check dirty
-    status_porcelain = run_git(["status", "--porcelain"], cwd)
+    status_porcelain = run_git(["status", "--porcelain", "-uno"], cwd)
     is_dirty = len(status_porcelain) > 0
     
     # 4. Check unpushed commits
