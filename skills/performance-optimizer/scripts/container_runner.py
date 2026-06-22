@@ -19,6 +19,8 @@ import json
 import re
 import subprocess
 import argparse
+import glob
+import zipfile
 
 def run_benchmark(workspace, command, environment="local", podman_image=None):
     """Runs the benchmark command locally or inside a Podman container."""
@@ -118,8 +120,6 @@ def parse_metrics(workspace, stdout, stderr, config_path):
             rel_file_path = metric.get("file_path")
             json_path = metric.get("json_path")
             
-            import glob
-            import zipfile
             search_path = os.path.join(workspace, rel_file_path)
             matching_files = glob.glob(search_path)
             if matching_files:

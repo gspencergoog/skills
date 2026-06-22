@@ -1,144 +1,149 @@
 ---
 name: natural-writing
-description: Contains well-defined rules for creating natural, accurate, and readable writing. Use whenever authoring longer text, like analysis documents, PR or CL descriptions, or documentation.
+description: Contains well-defined rules for creating natural, accurate, and readable writing. Use this skill whenever authoring longer text, including reports, PR or CL descriptions, READMEs, system designs, analysis documents, or general documentation.
 ---
-# Rules for Natural Writing
+# Rules for natural writing
 
-This document outlines strict rules to avoid common "AI-isms"—stylistic and structural patterns that language models typically fall into. Follow these rules to produce content that is more understandable, and reads as natural, human-authored text.
+This document outlines strict rules to avoid common "AI-isms": stylistic and structural patterns that language models typically fall into. Follow these rules to produce content that is more understandable, and reads as natural, human-authored text.
 
-## 1. Vocabulary & Phrasing Controls
+## 1. Vocabulary & phrasing controls
 
-### The "Banned" List
+### The "banned" list
 
-Avoid these words, which are statistically overrepresented in AI text. Use simpler, more direct alternatives.
+Avoid words that are statistically overrepresented in AI text. Use simpler, more direct alternatives.
 
-* **Verbs:** delve, underscore, highlight (as verb), foster, cultivate, maximize, leverage, democratize, ensure, align with, resonate with, encompass, bridge.  
-* **Nouns:** tapestry, landscape (abstract), realm, testament, interplay, synergy, cornerstone, hub, ecosystem (abstract).  
-* **Adjectives:** pivotal, crucial, vibrant, intricate, nuanced, unwavering, indelible, uncharted, rapidly evolving, transformative, breathtaking, nestled, dynamic.
+Avoid verbs that are commonly overused, such as delve, underscore, highlight (as a verb), foster, cultivate, maximize, leverage, democratize, ensure, align with, resonate with, encompass, and bridge. Also avoid adverbs like seamlessly and extensively.
 
-### Avoid "Copula" Substitutions
+For nouns, avoid abstract uses of tapestry, landscape, realm, testament, interplay, synergy, cornerstone, hub, and ecosystem.
 
-Do not replace simple "is/are" verbs with flowery equivalents.
+For adjectives, avoid puffery and vague descriptors like pivotal, crucial, vibrant, intricate, nuanced, unwavering, indelible, uncharted, rapidly evolving, transformative, breathtaking, nestled, dynamic, comprehensive, intuitive, holistic, robust, frictionless, scalable, and synergistic.
 
-* **Bad:** "The library *serves as* a center for learning."  
-* **Bad:** "The statue *stands as* a monument to..."  
-* **Good:** "The library *is* a center for learning."  
-* **Good:** "The statue *is* a monument to..."
+### Avoid "copula" substitutions
 
-### Eliminate "Elegant Variation"
+Do not replace simple "is" or "are" verbs with flowery equivalents.
+
+- Instead of: "The library *serves as* a center for learning."
+- Write: "The library *is* a center for learning."
+- Instead of: "The statue *stands as* a monument to..."
+- Write: "The statue *is* a monument to..."
+
+### Eliminate "elegant variation"
 
 Do not use synonyms just to avoid repeating a subject's name (e.g., "the eponymous character," "the titular protagonist," "the celebrated author"). It is acceptable to repeat the name or use pronouns naturally.
 
-## 2. Content & Tone
+## 2. Content & tone
 
-### No "Puffery" or Forced Significance
+### No "puffery" or forced significance
 
 Do not inflate the importance of a topic with vague praise. If a subject is important, the facts should demonstrate it without help.
 
-* **Rule:** Avoid phrases like *"serves as a testament to," "marking a pivotal moment," "underscoring the importance of," "leaving an indelible mark,"* or *"shaping the landscape."*  
-* **Bad:** "The founding of the institute marked a pivotal moment in the evolution of regional statistics, representing a significant shift toward independence."  
-* **Good:** "The institute was founded in 1989 to collect regional statistics."
+Avoid phrases like "serves as a testament to," "marking a pivotal moment," "underscoring the importance of," "leaving an indelible mark," or "shaping the landscape."
 
-### No Superficial Analysis
+- Instead of: "The founding of the institute marked a pivotal moment in the evolution of regional statistics, representing a significant shift toward independence."
+- Write: "The institute was founded in 1989 to collect regional statistics."
+
+### No superficial analysis
 
 Avoid attaching "dangling" present-participle phrases that offer vague commentary.
 
-* **Rule:** Delete clauses starting with *"highlighting," "emphasizing," "reflecting," "showcasing,"* or *"demonstrating"* if they just restate the obvious or add fluff.  
-* **Bad:** "The building uses blue glass, *reflecting the region's natural beauty and symbolizing unity.*"  
-* **Good:** "The building uses blue glass."
+Delete clauses starting with "highlighting," "emphasizing," "reflecting," "showcasing," or "demonstrating" if they just restate the obvious or add fluff.
 
-### Avoid Promotional Language
+- Instead of: "The building uses blue glass, *reflecting the region's natural beauty and symbolizing unity.*"
+- Write: "The building uses blue glass."
 
-Maintain a neutral tone. Avoid "advertisement" words.
+### Avoid promotional language
 
-* **Words to Watch:** boasts, features (as a verb), offers, premier, leading, state-of-the-art, committed to, dedicated to.  
-* **Bad:** "Nestled in the heart of the city, the hotel boasts a vibrant atmosphere."  
-* **Good:** "The hotel is located in the city center."
+Maintain a neutral tone. Avoid "advertisement" words like boasts, features (as a verb), offers, premier, leading, state-of-the-art, committed to, and dedicated to.
 
-### No "Challenges and Future Outlook" Formula
+- Instead of: "Nestled in the heart of the city, the hotel boasts a vibrant atmosphere."
+- Write: "The hotel is located in the city center."
 
-LLMs often end articles with a generic "Despite challenges... remains important" conclusion.
+### No "challenges and future outlook" formula
 
-* **Rule:** Do not end with a summary paragraph starting with "Despite \[X\], \[Subject\] continues to..." or speculating on the future. End with the last fact.  
-* **Bad:** "Despite facing economic hurdles, the company continues to thrive and remains a beacon of innovation."
+Language models often end articles with a generic "Despite challenges... remains important" conclusion. Do not end with a summary paragraph starting with "Despite [X], [Subject] continues to..." or speculating on the future. End with the last fact.
 
-### No "Title as Proper Noun" Leads
+- Bad: "Despite facing economic hurdles, the company continues to thrive and remains a beacon of innovation."
+
+### No "title as proper noun" leads
 
 Do not treat a descriptive article title (like a list or broad topic) as a proper noun in the first sentence.
 
-* **Bad:** "*The List of songs about Mexico* is a curated compilation..."  
-* **Good:** "This list contains songs about Mexico..."
+- Instead of: "*The List of songs about Mexico* is a curated compilation..."
+- Write: "This list contains songs about Mexico..."
 
-### No Generic "See Also" Links
+### No generic "see also" links
 
-Do not populate "See Also" sections with broad, generic terms.
+Do not populate "See Also" sections with broad, generic terms. Links must be directly relevant and specific to the subject.
 
-* **Rule:** Links must be directly relevant and specific to the subject.  
-* **Bad:** Linking *Financial technology* in an article about a specific startup.  
-* **Good:** Linking a competitor or specific related technology.
+- Bad: Linking *Financial technology* in an article about a specific startup.
+- Good: Linking a competitor or specific related technology.
 
-### Attribution Precision
+### Attribution precision
 
-Do not use vague "weasel words."
+Avoid vague "weasel words" like "Experts argue," "Observers have noted," or "Several sources indicate" unless you cite specific people immediately. Do not claim a subject interacts with a "broader" history or trend unless a source explicitly says so.
 
-* **Rule:** Avoid *"Experts argue," "Observers have noted,"* or *"Several sources indicate"* unless you cite specific people immediately.  
-* **Rule:** Do not claim a subject interacts with a "broader" history or trend unless a source explicitly says so.
+## 3. Sentence structure
 
-## 3. Sentence Structure
-
-### No Negative Parallelism
+### No negative parallelism
 
 Avoid sentences that structure a contrast unnecessarily.
 
-* **Bad:** "It is *not only* a painting, *but also* a representation of..."  
-* **Bad:** "It is *not* just about X; *it is* about Y."  
-* **Good:** "It is a painting that represents..."
+- Instead of: "It is *not only* a painting, *but also* a representation of..."
+- Instead of: "It is *not* just about X; *it is* about Y."
+- Write: "It is a painting that represents..."
 
-### No "Rule of Three"
+### No "rule of three"
 
 Avoid listing exactly three adjectives or three noun phrases to sound "comprehensive."
 
-* **Bad:** "The event brings together *marketers, engineers, and designers*." (Unless those specific three groups are the *only* ones).  
-* **Bad:** "It is *bold, innovative, and unique*."
+- Bad: "The event brings together *marketers, engineers, and designers*." (Unless those specific three groups are the *only* ones).
+- Bad: "It is *bold, innovative, and unique*."
 
-### No False Ranges
+### No false ranges
 
 Do not use "from X to Y" unless X and Y are endpoints of a logical scale (like time or size).
 
-* **Bad:** "The book covers everything *from* biology *to* space travel." (These are just two random topics, not a range).  
-* **Good:** "The book covers topics including biology and space travel."
+- Instead of: "The book covers everything *from* biology *to* space travel." (These are just two random topics, not a range).
+- Write: "The book covers topics including biology and space travel."
 
-## 4. Structure & Formatting
+## 4. Structure & formatting
 
 ### Headers
 
-* **Rule:** Use Sentence case for headers (e.g., "Early life," not "Early Life").  
-* **Rule:** Do not use "Title Case" in headers.
+Use sentence case for headers (e.g., "Early life," not "Early Life"). Do not use title case in headers.
 
-### Formatting Avoidance
+### Formatting avoidance
 
-* **No Inline-Header Lists:** Do not use the format: `* **Header:** Description...`. Use prose or simple lists.  
-* **No Excessive Bold:** Do not bold keywords, "key takeaways," or names in the body text (except the first mention in the lead).  
-* **No Symbols/Emojis:** Do not use emojis (🚀, 🧠) or unusual bullets (`#`, `-`) in lists. Use standard bullets (`*`).  
-* **No Unnecessary Tables:** Do not create tables for simple information that fits in a sentence.  
-* **Context-Appropriate Markup:** Do not use Markdown (like `##`) in formats that do not support it (like Wikitext), unless explicitly converted.
+Do not use inline-header lists (such as `* **Header:** Description...`). Instead, use prose or simple lists.
+
+Avoid excessive bolding of keywords, "key takeaways," or names in the body text, except for the first mention in the lead.
+
+Do not use emojis (🚀, 🧠) or unusual bullets (`#`, `-`) in lists. Use standard bullets (`*`).
+
+Avoid creating tables for simple information that easily fits in a sentence.
+
+Ensure markup is context-appropriate; do not use Markdown (like `##`) in formats that do not support it (like Wikitext) unless it is explicitly converted.
 
 ### Punctuation
 
-* **Quotes:** Use straight quotes (`"`, `'`) and straight apostrophes (`'`). Do not use curly/smart quotes (`“`, `’`).  
-* **Em Dashes:** Use em dashes sparingly. LLMs overuse them for emphasis. Use commas or parentheses instead.
+Use straight quotes (`"`, `'`) and straight apostrophes (`'`). Do not use curly or smart quotes (`“`, `’`).
 
-## 5. Citations & Integrity
+Use em dashes sparingly, as language models often overuse them for emphasis. Prefer commas or parentheses instead.
 
-### No Hallucinations
+## 5. Citations & integrity
 
-* **Rule:** Never generate a citation unless you are looking at the source.  
-* **Rule:** Do not invent URLs or DOIs.  
-* **Rule:** Do not assume a book exists or contains a specific fact without verification.
+### No hallucinations
 
-## 6. Communication (Chat Context)
+Never generate a citation unless you are looking at the source.
+Do not invent URLs or DOIs.
+Do not assume a book exists or contains a specific fact without verification.
 
-* **No "Collaborative" Filler:** Avoid starting responses with *"Certainly\!", "Here is the information,"* or *"I hope this helps."* Just provide the content.  
-* **No Knowledge Cutoffs:** Do not apologize for being an AI or state *"As of my last update in..."* unless relevant to a specific time-sensitive fact.  
-* **No Subject Lines:** Do not preface a response with `Subject: ...`  
-* **Concise Edit Summaries:** If generating an edit summary, keep it brief and informal. Avoid verbose, formal paragraphs explaining "I have ensured compliance with..."
+## 6. Communication (chat context)
+
+Avoid collaborative filler at the start of responses, such as "Certainly!", "Here is the information," or "I hope this helps." State the content directly.
+
+Do not apologize for being an AI or mention knowledge cutoffs unless it is relevant to a specific, time-sensitive fact.
+
+Do not preface responses with subject lines.
+
+Keep edit summaries concise and informal, avoiding verbose paragraphs.

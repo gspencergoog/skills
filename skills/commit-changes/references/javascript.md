@@ -1,6 +1,6 @@
 # JavaScript / TypeScript / Angular / Node.js Commit Checks
 
-Time to clean up in preparation for commit. Please perform these tasks:
+Clean up and verify JavaScript/TypeScript/Angular/Node.js code integrity before committing:
 
 1.  **Format**: Run the project's formatter.
     - Check `package.json` for a format script (e.g., `npm run format`).

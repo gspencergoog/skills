@@ -1,6 +1,6 @@
 # Python Commit Checks
 
-Time to clean up in preparation for commit. Please perform these tasks:
+Clean up and verify Python code integrity before committing:
 
 1.  **Format**: Check for standard python formatters.
     - Try `ruff format .` or `black .`.

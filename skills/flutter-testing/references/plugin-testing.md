@@ -1,5 +1,24 @@
 # Plugin Testing Guide
 
+## Table of Contents
+- [Overview](#overview)
+- [Test Types for Plugins](#test-types-for-plugins)
+- [Project Structure](#project-structure)
+- [Dart Unit Tests](#dart-unit-tests)
+- [Dart Integration Tests](#dart-integration-tests)
+- [Android Unit Tests](#android-unit-tests)
+- [iOS Unit Tests](#ios-unit-tests)
+- [Native UI Tests (Espresso/XCUITest)](#native-ui-tests-espressexcuitest)
+- [Testing Plugin Initialization](#testing-plugin-initialization)
+- [Testing Error Handling](#testing-error-handling)
+- [Testing Platform-Specific Features](#testing-platform-specific-features)
+- [Testing Multiple Platforms](#testing-multiple-platforms)
+- [Testing Performance](#testing-performance)
+- [Best Practices](#best-practices)
+- [CI/CD for Plugins](#cicd-for-plugins)
+
+---
+
 ## Overview
 
 Flutter plugins require special testing strategies because they include native code. This guide covers testing plugin packages with Dart, native, and integration tests.

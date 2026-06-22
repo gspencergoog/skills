@@ -5,7 +5,7 @@ description: Protocols for enforcing concurrency best practices using Dart stati
 
 # Static Analysis & AST Remediation Protocols
 
-The first line of defense against concurrency anomalies is the Abstract Syntax Tree (AST). The agent must enforce the following rules and apply the associated remediation strategies if they are discovered using the `mcp_dart_analyze_files` tool.
+The first line of defense against concurrency anomalies is the Abstract Syntax Tree (AST). Enforce the following rules and apply the associated remediation strategies if violations are discovered using the `analyze_files` tool.
 
 ## 1. `unawaited_futures` / `discarded_futures`
 
@@ -36,7 +36,7 @@ unawaited(logAnalytics()); // Explicitly marked
 
 ```dart
 await database.save();
-if (!context.mounted) return; // Agent must inject this check
+if (!context.mounted) return; // Inject this check to verify the widget is still mounted
 Navigator.pop(context);
 ```
 

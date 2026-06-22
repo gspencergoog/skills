@@ -1,6 +1,6 @@
 ---
 name: code-documentation
-description: Guide for writing effective code documentation. Use when writing new code, adding features, or improving existing documentation to ensure clarity and maintainability.
+description: Guide for writing effective code documentation, including docstrings, JSDoc, dartdoc, and implementation comments. Use this skill when writing new code, adding features, or improving existing documentation in Dart, Python, or TypeScript to ensure clarity and maintainability.
 ---
 
 # Code Documentation Skill
@@ -10,17 +10,17 @@ This skill provides comprehensive guidelines for documenting code, prioritizing 
 ## 1. General Philosophy
 
 - **User-Centric**: Write for the person using your API. If you had to look up how to use something, document it so others don't have to.
-- **Explain "Why"**: The code signature tells _what_ it does. The documentation should explain _why_ it exists and _how_ to use it effectively.
-- **Be Concise**: Omit fluff. If the documentation only restates the code name, it's not helpful.
+- **Explain "Why"**: Explain _why_ code exists and _how_ to use it effectively, since the code signature already tells _what_ it does.
+- **Be Concise**: Omit fluff. Avoid merely restating the code name, as it is not helpful.
 - **Consistency**: Use standard terminology and consistent formatting.
-- **Public APIs**: Documentation is **mandatory** for all public APIs (classes, members, top-level functions).
+- **Public APIs**: Document all public APIs (classes, members, top-level functions) without exception.
 - **Code Samples**: Strongly consider adding code samples to explain usage.
 
 ## 2. General Structure
 
-Most languages follow a similar structure for documentation comments:
+Follow this general structure for documentation comments across languages:
 
-1.  **Summary Sentence**: The first line must be a single-sentence summary, ending with a period.
+1.  **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
 2.  **Blank Line**: Follow the summary with a blank line.
 3.  **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
 4.  **Annotations**: Place doc comments **before** any metadata annotations.
@@ -49,20 +49,20 @@ Most languages follow a similar structure for documentation comments:
 
 ## 4. Implementation Comments
 
-Implementation comments (`//`) should be accurate, relevant, provide information that isn't readily understandable from the code, and factual. If they don't meet those conditions, then they need to be removed or reworded. If they provide information not already in the documentation comments that would be useful to the developer using the API, consider moving them to documentation comments.
+Ensure implementation comments (`//`) are accurate, relevant, factual, and provide information that is not readily understandable from the code. Remove or reword comments that do not meet these criteria. If an implementation comment provides information useful to an API consumer that is not already in the documentation comments, move it to the documentation comments.
 
 ## 5. Review Checklist
 
 Use this checklist to verify your documentation:
 
-1.  [ ] **Summary**: Does every public member start with a one-sentence summary ending in a period?
-2.  [ ] **Brevity**: Have you removed "This class..." or "This function..." fluff?
-3.  [ ] **Completeness**: Are strict constraints (e.g., "must not be null") and exceptions documented?
+1.  [ ] **Summary**: Ensure every public member starts with a one-sentence summary ending in a period.
+2.  [ ] **Brevity**: Remove "This class..." or "This function..." fluff.
+3.  [ ] **Completeness**: Document strict constraints (e.g., "must not be null") and exceptions.
 4.  [ ] **Examples**: Consider adding a code sample for complex widgets or methods.
 
 ## 6. Language Specific Instructions
 
-For detailed instructions on structure, linking, and framework-specific patterns, refer to the language guides:
+Refer to the language guides for detailed instructions on structure, linking, and framework-specific patterns:
 
 - **Dart / Flutter**: [references/dart.md](references/dart.md)
 - **TypeScript / JavaScript**: [references/typescript.md](references/typescript.md)

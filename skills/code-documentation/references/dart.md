@@ -2,11 +2,11 @@
 
 ## Documentation Structure (`///`)
 
-Use `///` (doc comments) for all public members. This allows tools like `dartdoc` to process them.
+Use `///` (doc comments) for all public members to allow tools like `dartdoc` to process them.
 
 ### Comments Format
 
-1.  **Summary Sentence**: The first line must be a single-sentence summary, ending with a period.
+1.  **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
 2.  **Blank Line**: Follow the summary with a blank line.
 3.  **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
 4.  **Annotations**: Place doc comments **before** any metadata annotations (e.g., `@override`, `@Deprecated`).
@@ -22,7 +22,7 @@ class PurchaseButton extends StatelessWidget { ... }
 
 ### Property Documentation
 
-- **Getters override Setters**: Document the getter. The tools will combine them. Do NOT document both.
+- **Getters override Setters**: Document the getter and omit documentation on the setter, as documentation tools combine them automatically. Do not document both.
   ```dart
   /// The current optimization level (0.0 to 1.0).
   double get optimizationLevel => _level;
@@ -60,7 +60,7 @@ class PurchaseButton extends StatelessWidget { ... }
 
 - **Purpose**: Explain what the widget does and when to use it.
 - **Parameters**: Document key parameters, especially if they are required or have complex constraints.
-- **State**: If the widget has interesting state behavior (e.g., keeping position on scroll), mention it.
+- **State**: Explain any interesting state behavior, such as keeping position on scroll.
 
 ```dart
 /// Displays a flight path on a map.
@@ -76,5 +76,5 @@ class FlightPath extends StatelessWidget {
 
 ### State Management
 
-- **Lifecycle**: If a class manages a complex lifecycle (like a controller), explain how to dispose of it.
-- **Private Classes**: While public APIs are the priority, significantly complex private classes (like intricate `State` logic) _should_ be documented to aid maintainability.
+- **Lifecycle**: Explain how to dispose of controllers or other classes that manage a complex lifecycle.
+- **Private Classes**: Document significantly complex private classes (such as intricate `State` logic) to aid maintainability, even though public APIs are the priority.

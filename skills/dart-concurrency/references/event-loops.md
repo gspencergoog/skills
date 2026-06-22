@@ -23,20 +23,20 @@ Dart employs a dual-queue system: the **Event Queue** (I/O, UI, Timers) and the 
 
 ## Remediation Strategy
 
-The agent must break the synchronous or microtask lock to allow the Event Loop to breathe.
+Break the synchronous or microtask lock to allow the Event Loop to breathe.
 
 ### Code Injection
 
 Inject a zero-duration delay, which effectively places the continuation at the back of the Event Queue, yielding control to the engine.
 
 ```dart
-// Agent injects this inside the detected loop
+// Inject this inside the detected loop
 await Future.delayed(Duration.zero);
 ```
 
 ### 2. Watchdog Strategy (Optional)
 
-For complex or intermittent stalls, inject a monitoring mechanism (e.g., a separate Isolate that pings the main Isolate). If the main Isolate fails to respond within a threshold (e.g., 100ms), the watchdog can log the stack trace or throw an error to identify the blocking synchronous code.
+For complex or intermittent stalls, inject a monitoring mechanism (e.g., a separate Isolate that pings the main Isolate). If the main Isolate fails to respond within a threshold (e.g., 100ms), log the stack trace or throw an error to identify the blocking synchronous code.
 
 ### Microtasks vs Events
 

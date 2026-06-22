@@ -1,15 +1,11 @@
 ---
 name: "flutter-architecture"
-description: "Use the Flutter team's recommended app architecture"
-metadata:
-  model: "models/gemini-3.1-pro-preview"
-  last_modified: "Thu, 26 Feb 2026 23:42:30 GMT"
-
+description: "Implement the Flutter team's recommended app architecture (MVVM, unidirectional data flow, repositories, view models, and dependency injection with provider) when structuring new apps or refactoring features."
 ---
 # Flutter App Architecture Implementation
 
 ## Goal
-Implements a scalable, maintainable Flutter application architecture using the MVVM pattern, unidirectional data flow, and strict separation of concerns across UI, Domain, and Data layers. Assumes a standard Flutter environment utilizing `provider` for dependency injection and `ListenableBuilder` for reactive UI updates.
+Implement a scalable, maintainable Flutter application architecture using the MVVM pattern, unidirectional data flow, and strict separation of concerns across UI, Domain, and Data layers. Use `provider` for dependency injection and `ListenableBuilder` for reactive UI updates.
 
 ## Decision Logic
 Before implementing a feature, evaluate the architectural requirements using the following logic:
@@ -45,7 +41,7 @@ Before implementing a feature, evaluate the architectural requirements using the
    ```
 
 3. **Implement the Data Layer: Repositories**
-   Create a repository to act as the single source of truth. The repository consumes the service, handles errors using `Result` objects, and exposes domain models or streams.
+   Create a repository to act as the single source of truth. The repository consumes the service, handles errors using `Result` objects (see the [Result and Command Reference Guide](references/result_command.md)), and exposes domain models or streams.
    ```dart
    class ThemeRepository {
      ThemeRepository(this._service);
@@ -77,7 +73,7 @@ Before implementing a feature, evaluate the architectural requirements using the
    ```
 
 4. **Implement the UI Layer: ViewModels**
-   Create a `ChangeNotifier` to manage UI state. Use the Command pattern to handle user interactions and asynchronous repository calls.
+   Create a `ChangeNotifier` to manage UI state. Use the Command pattern (see the [Result and Command Reference Guide](references/result_command.md)) to handle user interactions and asynchronous repository calls.
    ```dart
    class ThemeSwitchViewModel extends ChangeNotifier {
      ThemeSwitchViewModel(this._themeRepository) {
@@ -131,9 +127,11 @@ Before implementing a feature, evaluate the architectural requirements using the
                builder: (context, _) {
                  return Switch(
                    value: viewmodel.isDarkMode,
-                   onChanged: (_) {
-                     viewmodel.toggle.execute();
-                   },
+                   onChanged: viewmodel.toggle.running
+                       ? null
+                       : (_) {
+                           viewmodel.toggle.execute();
+                         },
                  );
                },
              ),

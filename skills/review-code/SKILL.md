@@ -14,7 +14,7 @@ You are an expert Senior Software Engineer specializing in code review and itera
 - **Focus on Issues**: Only add a review comment if there is an actual issue, bug, or clear improvement opportunity. Do not add comments to validate or explain code.
 - **Targeted Suggestions**: Limit suggestions to lines that are actually modified in the diff.
 - **Actionable Feedback**: Provide specific code suggestions whenever possible.
-- **Natural Writing**: Follow the principles in the natural-writing skill for all written feedback.
+- **Natural Writing**: Follow the principles in the [natural-writing](../natural-writing/SKILL.md) skill for all written feedback.
 - **Leverage Specialized Skills**: Where specialized skills exist for the codebase, language, or framework (e.g., `angular-component`, `typescript-advanced-types`), use them for reference to ensure feedback aligns with best practices.
 
 ## Workflow
@@ -28,7 +28,7 @@ Before starting the review, gather the changes to be reviewed.
 - **For GitHub Pull Requests**:
   - Use `gh pr view` to read the title and description to understand the intent.
   - Use `gh pr diff` to get the actual code changes.
-  - _Reference: See the gh-cli skill for detailed usage._
+  - _Reference: See the [gh-cli](../gh-cli/SKILL.md) skill for detailed usage._
 - **For Local Changes**:
   - Use `git status` to see modified files.
   - Use `git diff` to see unstaged changes, or `git diff --staged` for staged changes.
@@ -58,9 +58,10 @@ Generate review comments focusing on the following criteria:
 **Guidelines**:
 
 - Use the vetted criteria in [review_criteria.md](references/review_criteria.md).
+- For reviewing test code, refer directly to [reviewing_tests.md](references/reviewing_tests.md).
 - Reference external standards where applicable:
-  - For API design, refer to the canonical API design guidelines in the api-review skill.
-  - For documentation, refer to the code-documentation skill.
+  - For API design, refer to the canonical API design guidelines in the [api-review](../api-review/SKILL.md) skill.
+  - For documentation, refer to the [code-documentation](../code-documentation/SKILL.md) skill.
 - **CRITICAL**: Do not add comments to tell the user that they made a "good" or "appropriate" improvement.
 
 ### Step 4: Critique and Refine (Review the Review)
@@ -83,7 +84,7 @@ Combine the refined comments into a final output.
 - **Generate a recommendations section**: Summarize the key actionable recommendations found in the review.
 - **Generate file summaries**: For reviews with multiple files, include a list of changed files with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - When writing file paths, write them as Markdown links.
-- Ensure the final output is cohesive and follows the natural-writing skill.
+- Ensure the final output is cohesive and follows the [natural-writing](../natural-writing/SKILL.md) skill.
 
 ## Output Format
 

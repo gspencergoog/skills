@@ -71,6 +71,5 @@ expect(obj, isA<MyType>()
 -   **Verify Types**: Ensure subject is strictly `Iterable`/`Map` before
     applying collection matchers. Some custom classes (e.g. `PriorityQueue`)
     may have `.length` but don't implement `Iterable`.
--   **Do NOT migrate to package:checks**: Unless explicitly requested. This
-    guide focuses on `package:test` matchers.
+-   **Consider package:checks**: While this guide focuses on `package:test` matchers, consider integrating with the modern `package:checks` assertion library if declarative, highly readable assertions are desired. When migrating or writing new assertions with `package:checks`, refer to the workspace's [matcher-to-checks](../../matcher-to-checks/SKILL.md) skill.
 -   **Preserve Behavior**: Ensure refactorings do not change strictness.

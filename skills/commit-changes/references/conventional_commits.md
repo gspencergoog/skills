@@ -1,8 +1,8 @@
 # Conventional Commits Spec
 
-The commit message should follow the "Conventional Commits" spec:
+Follow the "Conventional Commits" specification:
 
-1. The first commit commit description line MUST be prefixed with a type, which consists of a noun, `feat`, `fix`, etc., followed by the OPTIONAL scope, OPTIONAL `!`, and REQUIRED terminal colon and space.
+1. The first line of the commit message MUST be prefixed with a type, which consists of a noun, `feat`, `fix`, etc., followed by the OPTIONAL scope, OPTIONAL `!`, and REQUIRED terminal colon and space.
 2. The type `feat` MUST be used when a commit adds a new feature to your application or library.
 3. The type `fix` MUST be used when a commit represents a bug fix for your application.
 4. A scope MAY be provided after a type. A scope MUST consist of a noun describing a section of the codebase surrounded by parenthesis, e.g., `fix(parser):`
@@ -17,4 +17,5 @@ The commit message should follow the "Conventional Commits" spec:
 13. If included in the type/scope prefix, breaking changes MUST be indicated by a `!` immediately before the `:`, and the commit description SHALL be used to describe the breaking change. e.g.: _fix(parser)!: Stop allowing env vars to overrride config files. Using env vars will break._
 14. Types other than `feat` and `fix` MAY be used in your commit messages, e.g., _docs: update ref docs._
 15. The units of information that make up Conventional Commits MUST NOT be treated as case sensitive, with the exception of BREAKING-CHANGE which MUST be uppercase.
-16. When describing changes in commit messages or pull request descriptions, avoid hyperbolic phrases like "dramatically", "drastically", or "significantly". That only makes it sounds like we're selling something and reduces the credibility of the description.
+16. When describing changes in commit messages or pull request descriptions, avoid hyperbolic phrases like "dramatically", "drastically", or "significantly". Do not use fluffy or imprecise words (such as "seamlessly", "extensively", "comprehensive", "intuitive", "holistic", "robust", "frictionless", "scalable", "synergistic"). These terms reduce the credibility and clarity of the description. Refer to the [natural-writing](../../natural-writing/SKILL.md) skill for detailed guidelines on writing clear, natural, and factual descriptions.
+

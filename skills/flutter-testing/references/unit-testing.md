@@ -1,5 +1,21 @@
 # Unit Testing Guide
 
+## Table of Contents
+- [Overview](#overview)
+- [When to Write Unit Tests](#when-to-write-unit-tests)
+- [Test Structure](#test-structure)
+- [Testing Patterns](#testing-patterns)
+- [Matchers](#matchers)
+- [Exception Testing](#exception-testing)
+- [Mocking](#mocking)
+- [Testing with Fake Clock](#testing-with-fake-clock)
+- [Test Organization](#test-organization)
+- [Best Practices](#best-practices)
+- [Common Pitfalls](#common-pitfalls)
+- [Running Tests](#running-tests)
+
+---
+
 ## Overview
 
 Unit tests test individual functions, methods, or classes in isolation. They are the foundation of a well-tested Flutter app, providing fast feedback and high maintainability.

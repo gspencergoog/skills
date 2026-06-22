@@ -46,6 +46,10 @@ def wait_for_git_changes(head_path, index_path, check_shutdown):
                     if triggered:
                         return True
         finally:
+            try:
+                kq.close()
+            except Exception:
+                pass
             for fd in fds:
                 try:
                     os.close(fd)
@@ -96,12 +100,22 @@ def check_git_state(project_dir, expected_branch, expected_repo):
     # 5. Check repository URL
     active_repo = ""
     is_correct_repo = False
-    for remote in ["upstream", "origin"]:
+    
+    remotes_output = run_git(["remote"], cwd)
+    remotes = [r.strip() for r in remotes_output.splitlines() if r.strip()]
+    if not remotes:
+        remotes = ["upstream", "origin"]
+        
+    for remote in remotes:
         remote_url = run_git(["remote", "get-url", remote], cwd)
         if remote_url:
-            m = re.search(r'(?:git@github\.com:|https://github\.com/)([^/]+)/([^/.]+)(?:\.git)?', remote_url)
+            m = re.search(r'(?:git@github\.com:|https://github\.com/)([^/]+)/([^/]+)', remote_url)
             if m:
-                active_repo = f"{m.group(1)}/{m.group(2)}"
+                owner = m.group(1)
+                repo = m.group(2).strip()
+                if repo.endswith(".git"):
+                    repo = repo[:-4]
+                active_repo = f"{owner}/{repo}"
                 if active_repo.lower() == expected_repo.lower():
                     is_correct_repo = True
                     break
@@ -303,7 +317,7 @@ def main():
         DashboardHandler.git_dir = os.path.abspath(os.path.join(DashboardHandler.project_dir, raw_git_dir))
     
     # Bind directly to port 0 for race-condition-free port assignment
-    server_address = ("", 0)
+    server_address = ("127.0.0.1", 0)
     httpd = http.server.ThreadingHTTPServer(server_address, DashboardHandler)
     port = httpd.server_port
     

@@ -407,6 +407,7 @@ def do_select(args):
         "status": "IMPROVED" if best_branch else "NO_IMPROVEMENT"
     }
     
+    should_delete_winner = False
     if best_branch:
         print(f"\nWINNING CANDIDATE SELECTED: {best_branch}")
         print("Baseline metrics improved to:")
@@ -414,14 +415,21 @@ def do_select(args):
         
         # Merge best branch
         print(f"Merging winning branch '{best_branch}' into '{args.base_branch}'...")
-        subprocess.run(["git", "checkout", args.base_branch], cwd=args.workspace, check=True)
-        subprocess.run(["git", "merge", best_branch, "--no-edit"], cwd=args.workspace, check=True)
-        
-        # Update baseline metrics
-        with open(baseline_path, "w") as f:
-            json.dump(best_metrics, f, indent=2)
+        try:
+            subprocess.run(["git", "checkout", args.base_branch], cwd=args.workspace, check=True)
+            subprocess.run(["git", "merge", best_branch, "--no-edit"], cwd=args.workspace, check=True)
             
-        step_entry["baseline_metrics"] = best_metrics
+            # Update baseline metrics
+            with open(baseline_path, "w") as f:
+                json.dump(best_metrics, f, indent=2)
+                
+            step_entry["baseline_metrics"] = best_metrics
+            should_delete_winner = True
+        except Exception as e:
+            print(f"Error merging winning branch '{best_branch}': {e}")
+            print("Aborting merge to keep workspace clean...")
+            subprocess.run(["git", "merge", "--abort"], cwd=args.workspace, stderr=subprocess.DEVNULL)
+            step_entry["status"] = "MERGE_FAILED"
     else:
         print("\nNo candidate branch outperformed the baseline.")
         print(f"Baseline remains at: {json.dumps(baseline_metrics, indent=2)}")
@@ -438,7 +446,11 @@ def do_select(args):
             
     # Keep the winner branch or clean it up since it's merged
     if best_branch:
-        subprocess.run(["git", "branch", "-D", best_branch], cwd=args.workspace, stderr=subprocess.DEVNULL)
+        if should_delete_winner:
+            print(f"Deleting merged candidate branch '{best_branch}'...")
+            subprocess.run(["git", "branch", "-D", best_branch], cwd=args.workspace, stderr=subprocess.DEVNULL)
+        else:
+            print(f"Preserving candidate branch '{best_branch}' due to merge failure. Resolve conflicts manually.")
         
     # Register / refresh dashboard sidecar config
     register_sidecar_dashboard(args.workspace)

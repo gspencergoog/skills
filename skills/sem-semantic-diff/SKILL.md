@@ -1,6 +1,6 @@
 ---
 name: sem-semantic-diff
-description: Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Use instead of standard git diff/log when analyzing structural code changes.
+description: Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes.
 ---
 
 # `sem` Semantic Diff Skill
@@ -38,112 +38,21 @@ Many `sem` commands require an `<entity_name>`. You can discover the exact names
 3. **Entity IDs:**
    If a name is ambiguous (e.g., multiple files have a `setup()` function), you can use the fully qualified `entity_id` provided in the JSON output of `sem diff` or `sem entities` (e.g., `--entity-id "src/utils.ts::function::setup"`).
 
-## Core Commands & Full Options Reference (No Need to Run `--help`)
+## Core Commands
 
-To avoid running `--help`, use this comprehensive reference of available commands and their flags. Always use `--format json` when parsing programmatically to guarantee consistency across all subcommands.
+The `sem` tool provides several subcommands for semantic codebase analysis. For a comprehensive list of all flags, options, and advanced command usages, see the [Commands Reference](references/commands.md).
 
-### 1. Semantic Diff (`sem diff`)
-Show added, modified, deleted, or renamed entities in the working tree or between commits.
-
-```bash
-# View semantic changes in the working directory
-sem diff
-
-# View only staged changes
-sem diff --staged
-
-# Show changes from a specific commit
-sem diff --commit <COMMIT>
-
-# View diff between two commits
-sem diff --from <COMMIT_1> --to <COMMIT_2>
-
-# Get verbose inline content diffs for modified entities
-sem diff -v
-
-# Output in JSON format
-sem diff --format json
-```
-*Additional options:* `-C, --cwd <DIR>` (Run as if started in directory), `--file-exts <EXTS>...` (Filter by extensions).
-
-### 2. Impact Analysis (`sem impact`)
-Analyze the transitive impact of changing an entity (BFS traversal).
-
-```bash
-# See what else is affected if you change an entity
-sem impact <entity_name>
-
-# Look up entity by fully qualified ID
-sem impact --entity-id "src/utils.ts::function::setup"
-
-# Disambiguate by specifying the file containing the entity
-sem impact setup --file src/test_utils.ts
-
-# Output as JSON
-sem impact <entity_name> --format json
-
-# Show direct dependencies only
-sem impact <entity_name> --deps
-
-# Show direct dependents only
-sem impact <entity_name> --dependents
-
-# Show only affected tests
-sem impact <entity_name> --tests
-```
-*Additional options:* `--depth <DEPTH>` (Max traversal depth, default 2, 0 = unlimited), `--file-exts <EXTS>...`, `--no-cache`.
-
-### 3. Dependency Graph (`sem graph`)
-View the full entity dependency graph for the codebase.
-
-```bash
-# View graph for current directory
-sem graph
-
-# View graph for specific path in JSON format
-sem graph src/ --format json
-```
-*Additional options:* `--format <FORMAT>` (terminal, json), `--file-exts <EXTS>...`, `--no-cache`.
-
-### 4. Semantic Blame (`sem blame`)
-Identify who last modified each function or class within a file.
-
-```bash
-sem blame <file_path>
-```
-
-### 5. Semantic Log (`sem log`)
-Show the evolution of an entity through git history.
-
-```bash
-sem log <entity_name>
-```
-
-### 6. Entity Context (`sem context`)
-Show token-budgeted context for an entity. This is intended for providing code snippets directly to an LLM's context window.
-
-```bash
-# Show context with token budget (default 8000)
-sem context <entity_name> --budget 8000
-
-# Output in JSON
-sem context <entity_name> --format json
-```
-*Additional options:* `--entity-id <ID>`, `--file <FILE>`, `--file-exts <EXTS>...`, `--no-cache`.
-
-### 7. List Entities (`sem entities`)
-List entities under a file or directory path.
-
-```bash
-# List entities in current directory or specific path
-sem entities src/
-
-# Output in JSON format
-sem entities src/ --format json
-```
+- **[sem diff](references/commands.md#1-semantic-diff-sem-diff)**: View semantic changes in the working tree or between commits.
+- **[sem impact](references/commands.md#2-impact-analysis-sem-impact)**: Trace the transitive impact of changing an entity.
+- **[sem graph](references/commands.md#3-dependency-graph-sem-graph)**: Generate a semantic dependency graph of the codebase.
+- **[sem blame](references/commands.md#4-semantic-blame-sem-blame)**: Identify who last modified each function or class.
+- **[sem log](references/commands.md#5-semantic-log-sem-log)**: View the evolution of an entity through git history.
+- **[sem context](references/commands.md#6-entity-context-sem-context)**: Retrieve token-budgeted context for an entity.
+- **[sem entities](references/commands.md#7-list-entities-sem-entities)**: List all entities parsed within a file or directory.
 
 ## Best Practices
 - **JSON Output for Processing**: Always use `--format json` when you need to parse the output programmatically. This ensures 100% consistency across all `sem` commands (as `sem diff` requires `--format json` and does not support a `--json` shorthand).
+- **Pipe to cat to Avoid Pagers**: `sem` commands that output large amounts of text (such as `sem diff`, `sem log`, or `sem graph`) may automatically launch an interactive pager like `less`. **Always pipe interactive `sem` commands to `| cat`** (e.g., `sem diff | cat` or `sem log <entity> | cat`) to prevent the terminal from pausing.
 - **File Extensions**: Use `--file-exts .ts .js` to filter large codebases.
 - **Handling Ambiguity**: If multiple entities have the same name (e.g., a `setup` function in multiple test files), use `--file <FILE>` or `--entity-id <ENTITY_ID>` to disambiguate:
   ```bash

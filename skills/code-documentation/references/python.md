@@ -4,18 +4,18 @@
 
 ### Docstrings vs Comments
 
-- **Docstrings**: Use `""" ... """` for documentation that describes usage, arguments, and return values (public API). These are accessible via `__doc__` and tools like `pydoc`.
+- **Docstrings**: Use `""" ... """` for documentation that describes usage, arguments, and return values (public API) to make them accessible via `__doc__` and tools like `pydoc`.
 - **Block/Inline Comments**: Use `#` for implementation details relevant only to developers reading the source.
 
 ## Google Style Docstrings
 
-We follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html) for docstrings.
+Follow the [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html) for docstrings.
 
 ### General Format
 
 - **Triple Double-Quotes**: Always use `"""`.
-- **Summary Line**: First line is a concise summary (max 80 chars), ending with a period.
-- **Blank Line**: Follow summary with a blank line.
+- **Summary Line**: Write a concise summary (max 80 chars) on the first line, ending with a period.
+- **Blank Line**: Follow the summary with a blank line.
 - **Sections**: Use specific headers for arguments, return values, and exceptions.
 
 ```python
@@ -47,15 +47,15 @@ def fetch_bigtable_rows(table_handle, other_silly_variable=None):
     pass
 ```
 
-### Sections detailed
+### Sections Detailed
 
-- **Args**: List each parameter by name. A description follows the name.
-- **Returns**: (Or `Yields` for generators). Describe the return value. If the function returns `None`, this section allows omission (though usually explicit is better).
-- **Raises**: List all exceptions that are relevant to the interface.
+- **Args**: List each parameter by name, followed by its description.
+- **Returns**: Describe the return value (or use `Yields` for generators). You may omit this section if the function returns `None`, though explicit documentation is preferred.
+- **Raises**: List all exceptions relevant to the interface.
 
 ### Type Annotations
 
-- **Inline Types**: If you use PEP 484 type hints (strongly recommended), you usually **omit** type information from the docstring args to avoid duplication and drift.
+- **Inline Types**: Omit type information from the docstring arguments if you use PEP 484 type hints (strongly recommended) to avoid duplication and drift.
 
   ```python
   def greet(name: str) -> str:
@@ -72,7 +72,7 @@ def fetch_bigtable_rows(table_handle, other_silly_variable=None):
 
 ## Module Docstrings
 
-Every file should have a top-level docstring describing its contents and usage.
+Provide a top-level docstring in every file describing its contents and usage.
 
 ```python
 """A one-line summary of the module or program, terminating in a period.
@@ -91,7 +91,7 @@ examples.
 
 ## Class Docstrings
 
-Describe the class and its usage. Public attributes should be documented here under an `Attributes` section.
+Describe the class and its usage. Document public attributes here under an `Attributes` section.
 
 ```python
 class SampleClass:

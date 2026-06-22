@@ -1,5 +1,24 @@
 # Integration Testing Guide
 
+## Table of Contents
+- [Overview](#overview)
+- [When to Write Integration Tests](#when-to-write-integration-tests)
+- [Setup](#setup)
+- [Test Structure](#test-structure)
+- [Testing User Flows](#testing-user-flows)
+- [Testing Forms](#testing-forms)
+- [Testing Lists and Data](#testing-lists-and-data)
+- [Testing State Persistence](#testing-state-persistence)
+- [Performance Testing](#performance-testing)
+- [Testing Platform-Specific Features](#testing-platform-specific-features)
+- [Testing Network](#testing-network)
+- [Testing Animations](#testing-animations)
+- [Best Practices](#best-practices)
+- [Debugging Integration Tests](#debugging-integration-tests)
+- [CI/CD Integration](#cicd-integration)
+
+---
+
 ## Overview
 
 Integration tests test complete apps or large parts of apps on real devices or emulators. They verify that all widgets and services work together as expected and can measure performance.

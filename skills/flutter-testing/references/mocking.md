@@ -1,5 +1,21 @@
 # Mocking Guide
 
+## Table of Contents
+- [Overview](#overview)
+- [When to Mock](#when-to-mock)
+- [Using Mockito](#using-mockito)
+- [Mocking Different Types](#mocking-different-types)
+- [Mockito Features](#mockito-features)
+- [Verification](#verification)
+- [Mocking Platform Channels](#mocking-platform-channels)
+- [Mocking Repositories](#mocking-repositories)
+- [Mocking State Management](#mocking-state-management)
+- [Manual Mocks](#manual-mocks)
+- [Best Practices](#best-practices)
+- [Common Patterns](#common-patterns)
+
+---
+
 ## Overview
 
 Mocking replaces real dependencies with test doubles to isolate code and make tests deterministic. This guide covers mocking strategies for Flutter tests.

@@ -109,6 +109,20 @@ class TestAnalyzeComments(unittest.TestCase):
         self.assertEqual(r, "repo")
 
     @patch('analyze_comments.run_cmd')
+    def test_get_repo_info_with_dots(self, mock_run):
+        mock_run.return_value = "https://github.com/google/google.github.io.git"
+        from analyze_comments import get_repo_info
+        o, r = get_repo_info()
+        self.assertEqual(o, "google")
+        self.assertEqual(r, "google.github.io")
+        
+        # Test SSH format too
+        mock_run.return_value = "git@github.com:google/google.github.io"
+        o, r = get_repo_info()
+        self.assertEqual(o, "google")
+        self.assertEqual(r, "google.github.io")
+
+    @patch('analyze_comments.run_cmd')
     def test_get_pr_number_success(self, mock_run):
         mock_run.return_value = "123"
         from analyze_comments import get_pr_number
@@ -140,6 +154,7 @@ class TestAnalyzeComments(unittest.TestCase):
         mock_fetch_pr.return_value = (
             "PR description",
             "feature-branch",
+            "main",
             [
                 {
                     "id": "thread_1",
@@ -228,6 +243,7 @@ class TestAnalyzeComments(unittest.TestCase):
         mock_fetch_pr.return_value = (
             "PR description",
             "feature-branch",
+            "main",
             [
                 {
                     "id": "thread_1",

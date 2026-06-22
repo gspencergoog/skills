@@ -32,13 +32,13 @@ def split_diff(diff_content, output_dir):
     for i, file_diff in enumerate(files):
         if not file_diff.strip():
             continue
-        # Try to find file name
-        match = re.search(r"^diff --git a/(.*?) b/", file_diff, re.MULTILINE)
+        # Try to find file name, handling optional quotes for spaces and trailing timestamps
+        match = re.search(r'^diff --git (?:a/([^\s"]+)|"a/([^"]+)")', file_diff, re.MULTILINE)
         if not match:
-            match = re.search(r"^--- a/(.*?)$", file_diff, re.MULTILINE)
+            match = re.search(r'^--- (?:a/([^\t\n"]+)|"a/([^"]+)")', file_diff, re.MULTILINE)
             
         if match:
-            file_name = match.group(1).strip()
+            file_name = (match.group(1) or match.group(2)).strip()
             safe_name = file_name.replace("/", "_")
         else:
             safe_name = f"chunk_{i}.diff"

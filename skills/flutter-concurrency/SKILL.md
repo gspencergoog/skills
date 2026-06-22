@@ -1,10 +1,6 @@
 ---
 name: "flutter-concurrency"
-description: "Execute long-running tasks in a background thread in Flutter"
-metadata:
-  model: "models/gemini-3.1-pro-preview"
-  last_modified: "Wed, 04 Mar 2026 22:25:47 GMT"
-
+description: "Execute long-running, CPU-bound tasks (like parsing large JSON payloads) in a background isolate in Flutter, handling Web fallbacks and integrating safely with state management while avoiding resource leaks."
 ---
 # Flutter Concurrency and Data Management
 
@@ -84,21 +80,32 @@ class User {
 To prevent UI jank, offload heavy JSON parsing to a background isolate.
 
 **Option A: Short-lived Isolate (Dart 2.19+)**
-Use `Isolate.run()` for one-off heavy computations.
+Use `Isolate.run()` for one-off heavy computations, ensuring a `kIsWeb` check for web compatibility.
 ```dart
 import 'dart:convert';
 import 'dart:isolate';
+import 'package:flutter/foundation.dart'; // For kIsWeb
 import 'package:flutter/services.dart';
 
 Future<List<User>> fetchAndParseUsers() async {
   // 1. Load data on the main isolate
   final String jsonString = await rootBundle.loadString('assets/large_users.json');
   
-  // 2. Spawn an isolate, pass the computation, and await the result
+  // 2. Fall back to synchronous parsing on the Web
+  if (kIsWeb) {
+    final List<dynamic> decoded = jsonDecode(jsonString) as List<dynamic>;
+    return decoded
+        .map((dynamic item) => User.fromJson(item as Map<String, dynamic>))
+        .toList();
+  }
+
+  // 3. Spawn an isolate, pass the computation, and await the result
   final List<User> users = await Isolate.run<List<User>>(() {
     // This runs on the background isolate
     final List<dynamic> decoded = jsonDecode(jsonString) as List<dynamic>;
-    return decoded.cast<Map<String, dynamic>>().map(User.fromJson).toList();
+    return decoded
+        .map((dynamic item) => User.fromJson(item as Map<String, dynamic>))
+        .toList();
   });
   
   return users;
@@ -106,36 +113,78 @@ Future<List<User>> fetchAndParseUsers() async {
 ```
 
 **Option B: Long-lived Isolate (Continuous Data Stream)**
-Use `ReceivePort` and `SendPort` for continuous communication.
+Wrap long-lived isolate logic in a clean, reusable class (`BackgroundWorker`) that manages ports and ensures they are closed cleanly to prevent resource leaks.
 ```dart
 import 'dart:isolate';
 
-Future<void> setupLongLivedIsolate() async {
-  final ReceivePort mainReceivePort = ReceivePort();
-  
-  await Isolate.spawn(_backgroundWorker, mainReceivePort.sendPort);
-  
-  final SendPort backgroundSendPort = await mainReceivePort.first as SendPort;
-  
-  // Send data to the background isolate
-  final ReceivePort responsePort = ReceivePort();
-  backgroundSendPort.send(['https://api.example.com/data', responsePort.sendPort]);
-  
-  final result = await responsePort.first;
-  print('Received from background: $result');
-}
+class BackgroundWorker {
+  Isolate? _isolate;
+  ReceivePort? _mainReceivePort;
+  SendPort? _backgroundSendPort;
 
-static void _backgroundWorker(SendPort mainSendPort) async {
-  final ReceivePort workerReceivePort = ReceivePort();
-  mainSendPort.send(workerReceivePort.sendPort);
-  
-  await for (final message in workerReceivePort) {
-    final String url = message[0] as String;
-    final SendPort replyPort = message[1] as SendPort;
-    
-    // Perform heavy work here
-    final parsedData = await _heavyNetworkAndParse(url);
-    replyPort.send(parsedData);
+  /// Starts the background worker isolate.
+  Future<void> start() async {
+    if (_isolate != null) return;
+
+    _mainReceivePort = ReceivePort();
+    _isolate = await Isolate.spawn(_backgroundWorker, _mainReceivePort!.sendPort);
+
+    // The first message from the worker is its SendPort
+    _backgroundSendPort = await _mainReceivePort!.first as SendPort;
+  }
+
+  /// Sends a request to the background worker to perform work on [url] and returns the result.
+  Future<dynamic> performTask(String url) async {
+    if (_backgroundSendPort == null) {
+      throw StateError('Worker is not started. Call start() first.');
+    }
+
+    final responsePort = ReceivePort();
+    _backgroundSendPort!.send([url, responsePort.sendPort]);
+
+    try {
+      final result = await responsePort.first;
+      return result;
+    } finally {
+      responsePort.close(); // Prevent resource leaks
+    }
+  }
+
+  /// Stops the worker and releases all resources.
+  void stop() {
+    _mainReceivePort?.close();
+    _isolate?.kill(priority: Isolate.beforeNextEvent);
+    _isolate = null;
+    _backgroundSendPort = null;
+    _mainReceivePort = null;
+  }
+
+  /// The entry point for the background isolate.
+  /// Must be a top-level or static function.
+  static void _backgroundWorker(SendPort mainSendPort) async {
+    final workerReceivePort = ReceivePort();
+    mainSendPort.send(workerReceivePort.sendPort);
+
+    await for (final message in workerReceivePort) {
+      if (message == null) break;
+      final String url = message[0] as String;
+      final SendPort replyPort = message[1] as SendPort;
+
+      try {
+        // Perform heavy work here (e.g., HTTP request and parsing)
+        final parsedData = await _heavyNetworkAndParse(url);
+        replyPort.send(parsedData);
+      } catch (e) {
+        replyPort.send(e);
+      }
+    }
+    workerReceivePort.close(); // Prevent resource leaks
+  }
+
+  static Future<dynamic> _heavyNetworkAndParse(String url) async {
+    // Simulated heavy network and parsing task
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    return 'Data from $url';
   }
 }
 ```
@@ -196,7 +245,7 @@ class _UserListScreenState extends State<UserListScreen> {
 
 ## Constraints
 * **No UI in Isolates:** Never attempt to access `dart:ui`, `rootBundle`, or manipulate Flutter Widgets inside a spawned isolate. Isolates do not share memory with the main thread.
-* **Web Platform Limitations:** `dart:isolate` is not supported on Flutter Web. If targeting Web, you MUST use the `compute()` function from `package:flutter/foundation.dart` instead of `Isolate.run()`, as `compute()` safely falls back to the main thread on web platforms.
+* **Web Platform Limitations:** `dart:isolate` is not supported on Flutter Web. If targeting Web, you must perform a `kIsWeb` check and fall back to synchronous execution (or use `compute()` from `package:flutter/foundation.dart` which internally handles web fallback by running on the main thread) to prevent runtime crashes.
 * **Immutable Messages:** When passing data between isolates via `SendPort`, prefer passing immutable objects (like Strings or unmodifiable byte data) to avoid deep-copy performance overhead.
 * **State Immutability:** Always treat `Widget` properties as immutable. Use `StatefulWidget` and `setState` (or a state management package) to trigger rebuilds when asynchronous data resolves.
 * **Reflection:** Do not use `dart:mirrors` for JSON serialization. Flutter disables runtime reflection to enable aggressive tree-shaking and AOT compilation. Always use manual parsing or code generation.

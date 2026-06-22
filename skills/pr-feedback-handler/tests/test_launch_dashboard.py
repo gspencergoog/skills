@@ -51,7 +51,7 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "/Users/gspencer/code/project"
             elif cmd == "symbolic-ref --short HEAD":
                 return "branch-x"
-            elif cmd == "status --porcelain":
+            elif cmd == "status --porcelain -uno":
                 return ""
             elif cmd == "cherry -v":
                 return ""
@@ -81,7 +81,7 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "/Users/gspencer/code/project"
             elif cmd == "symbolic-ref --short HEAD":
                 return "branch-wrong"
-            elif cmd == "status --porcelain":
+            elif cmd == "status --porcelain -uno":
                 return "M lib/foo.dart\n"
             elif cmd == "cherry -v":
                 return "+ 1a2b3c4d commit message\n"

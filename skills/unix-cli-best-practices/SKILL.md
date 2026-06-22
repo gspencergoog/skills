@@ -1,160 +1,176 @@
 ---
 name: unix-cli-best-practices
-description: Pro-level command line patterns for working with standard macOS/BSD Unix tools (grep, find, sed, awk) and their modern alternatives (ripgrep, fd). Use this skill when executing shell commands for fast searching, text processing, or codebase navigation.
+description: Safe, portable, and efficient command-line patterns for macOS/BSD Unix tools (grep, find, sed, awk, xargs, mdfind, pbcopy, open) and modern alternatives (ripgrep, fd). Covers common shell scripting and one-liner use cases including fast searching, text processing, codebase navigation, and parallel execution.
 ---
 
-# Unix CLI Best Practices
+# Unix CLI best practices
 
 This guide provides efficient, safe, and portable techniques for manipulating text and finding files from the command line on macOS. By default, macOS uses BSD-derived UNIX utilities (`grep`, `find`, `sed`, `awk`) which have subtle differences from their GNU/Linux counterparts.
 
-Where applicable, this skill also strongly recommends using modern, high-performance replacements (`ripgrep` / `fd`), but teaches you exactly how to wield the built-in BSD tools.
+When possible, use high-performance replacements (`ripgrep` and `fd`) which respect `.gitignore` rules by default and offer more ergonomic interfaces.
 
-## Modern High-Performance Alternatives
+## Modern high-performance alternatives
 
-Always prefer these faster, ergonomic tools over standard BSD tools like grep and find. **They respect `.gitignore` by default and provide sane, colorful outputs.**
+Use these tools instead of standard BSD utilities for local codebase operations.
 
-- **`ripgrep` (`rg`) instead of `grep`:**
-  `rg` is dramatically faster than `grep`, supports `.gitignore` natively, and provides colorful, developer-friendly output.
-  - **Basic Search:** `rg 'search_term'` (Recursively search the current directory).
-  - **Smart Case:** `rg -S 'term'` (Case-insensitive unless your query contains uppercase letters). Use `-i` for strict case-insensitivity.
-  - **Filter by Glob:** `rg -g '*.ts' -g '!*.spec.ts' 'term'` (Search `.ts` files, but exclude `.spec.ts`).
-  - **Invert Match:** `rg -v 'ignore_me'` (Print lines that DO NOT match).
-  - **Print Filenames Only:** `rg -l 'term'` (List matching files. Use `-0` alongside it for zero-terminating for xargs).
-  - **Literal String:** `rg -F 'foo()'` (Treat search as a fixed string, not a regex, avoiding the need to escape parentheses/brackets).
-  - **Word Boundaries:** `rg -w 'const'` (Match exactly the word 'const', not 'constant').
-  - **Context:** `rg -C 2 'term'` (Show 2 lines of surrounding context. You can also use `-B 2` for before or `-A 2` for after).
+### ripgrep (`rg`)
 
-  use `rg --help` for more details.
+Use `ripgrep` (`rg`) as the preferred tool for searching text. It is faster than standard `grep` and respects `.gitignore` rules by default.
 
-- **`fd` instead of `find`:**
-  `fd` is a simple, smart, and blazingly fast alternative to `find`. Like `rg`, it respects `.gitignore` by default.
-  - **Basic Search:** `fd 'pattern'` (Find files matching the regex pattern anywhere in the path).
-  - **Filter by Extension:** `fd -e py -e txt` (Find files by extension, much faster than `find . -name`).
-  - **Filter by Type:** `fd -t d 'docs'` (Find directories). Use `-t f` for files, `-t l` for symlinks.
-  - **Hidden & Ignored:** `fd -H` (Include hidden files/directories), `fd -I` (Include ignored files like `node_modules`), `fd -HI` (Search literally everything).
-  - **Path Matching:** `fd -p 'src/assets'` (Match against the full path instead of just the filename).
-  - **Command Execution:** `fd -e log -x rm` (Execute command individually on each file). Use `-X rm` to run command once passing all files as arguments (like `xargs`).
-  - **Absolute Paths:** `fd -a 'pattern'` (Return absolute paths instead of relative ones).
+Common use cases:
+* Run `rg 'search_term'` to recursively search the current directory.
+* Run `rg -S 'term'` to search case-insensitively unless the query contains uppercase letters. Use `rg -i 'term'` for strict case-insensitivity.
+* Run `rg -g '*.ts' -g '!*.spec.ts' 'term'` to search `.ts` files while excluding `.spec.ts` files.
+* Run `rg -v 'ignore_me'` to print lines that do not match the pattern.
+* Run `rg -l 'term'` to list only the names of matching files. Combine with `rg -0` for null-terminated output suitable for `xargs`.
+* Run `rg -F 'foo()'` to treat the search pattern as a fixed string rather than a regular expression.
+* Run `rg -w 'const'` to match whole words only.
+* Run `rg -C 2 'term'` to show two lines of surrounding context. Use `rg -B 2` for preceding context or `rg -A 2` for succeeding context.
 
-  use `fd --help` for more details.
+Refer to `rg --help` for the complete options list.
 
-## Pro-Level Built-in Tools (macOS/BSD)
+### fd
 
-Use these tools only if `rg` and `fd` are not available. You must be extremely precise and efficient with the standard POSIX tools to avoid crippling terminal slow-downs.
+Use `fd` as the preferred tool for traversing the filesystem and finding files. It is faster than standard `find` and respects `.gitignore` rules by default.
 
-### `grep` - Efficient Searching
+Common use cases:
+* Run `fd 'pattern'` to find files matching the regex pattern anywhere in their path.
+* Run `fd -e py -e txt` to filter results by file extensions.
+* Run `fd -t d 'docs'` to find directories. Use `fd -t f` for files and `fd -t l` for symbolic links.
+* Run `fd -H` to include hidden files, or `fd -I` to include ignored files (such as `node_modules`). Combine as `fd -HI` to search all files.
+* Run `fd -p 'src/assets'` to match the pattern against the full path instead of just the filename.
+* Run `fd -e log -x rm` to execute a command on each matching file individually. Use `-X` (e.g., `fd -e log -X rm`) to run the command once with all matching files as arguments.
+* Run `fd -a 'pattern'` to return absolute paths instead of relative paths.
 
-Never use `grep | grep -v 'unwanted_dir'` to filter out directories like `node_modules` or `.git`. This is incredibly slow and forces `grep` to read every single junk file before discarding it later. Use native exclusion arguments instead:
+Refer to `fd --help` for the complete options list.
+
+## Built-in tools for macOS and BSD
+
+Use these built-in utilities only when `rg` and `fd` are unavailable. Apply precise filters to prevent performance degradation.
+
+### Efficient searching with grep
+
+Do not use `grep | grep -v 'unwanted_dir'` to exclude directories. This approach reads all files before filtering them. Use native exclusion arguments instead to exclude directories at the filesystem level:
 
 ```bash
-# BAD (Slow, reads binary and ignored files)
+# Slow: reads binary and ignored files
 grep -R "pattern" . | grep -v "node_modules"
 
-# GOOD (Fast, skips the directory completely at the filesystem level)
+# Fast: skips the directory completely at the filesystem level
 grep -R --exclude-dir=node_modules --exclude-dir=.git "pattern" .
 ```
 
-**Essential `grep` Flags:**
-- `-r` / `-R`: Recursive search. (`-R` follows symlinks, `-r` does not).
-- `-I` (Capital i): Ignore binary files (crucial for speed and clean terminal output).
-- `--exclude="*.min.js"`: Ignore files matching a specific glob.
-- `--include="*.dart"`: Only search files matching a specific glob.
-- `-l` (Lowercase L): Print only the names of files containing matches, not the matching lines.
-- `-Z`: Print a zero-byte (NULL) after each filename (used with `xargs -0`).
+Common `grep` flags:
+* `-r` or `-R` to search recursively. `-R` follows symbolic links, while `-r` does not.
+* `-I` to ignore binary files for faster execution and clean output.
+* `--exclude="*.min.js"` to ignore files matching a specific glob.
+* `--include="*.dart"` to search only files matching a specific glob.
+* `-l` to print only the names of files containing matches.
+* `-Z` to print a null character after each filename, which is useful when piping to `xargs -0`.
 
-**Example: Safely deleting files containing a string**
+Example of safely deleting files containing a specific string:
 ```bash
 grep -rlZ -I --exclude-dir=node_modules "DEPRECATED_API" . | xargs -0 rm
 ```
 
-### `find` - High-Performance Traversal
+### High-performance traversal with find
 
-Like `grep`, you must prevent `find` from traversing massive, irrelevant directory trees using `-prune`.
+Prevent `find` from traversing irrelevant directory trees by using the `-prune` option.
 
 ```bash
-# BAD (Traverses node_modules entirely, then filters output string)
+# Slow: traverses node_modules entirely, then filters output
 find . -name "*.ts" | grep -v "node_modules"
 
-# GOOD (Skips node_modules entirely)
+# Fast: skips node_modules entirely
 find . -name "node_modules" -prune -o -name "*.ts" -print
 ```
 
-**Explanation of Prune:**
-`-name "node_modules" -prune` says "if the name is node_modules, prune (stop traversing) it." The `-o` (OR) says "otherwise, if the name ends in `.ts`, print it."
+The expression `-name "node_modules" -prune` stops traversal when encountering a `node_modules` directory. The `-o` (OR) operator specifies that for any other directory or file ending in `.ts`, the path is printed.
 
-### `sed` - macOS Portability
+### macOS portability with sed
 
-macOS uses BSD `sed`, heavily diverging from GNU `sed` (Linux) regarding **in-place editing**, which frequently breaks scripts.
+macOS uses BSD `sed`, which differs from GNU `sed` in its handling of in-place editing.
 
-**In-place replacement (`-i`):**
-On GNU sed, `sed -i 's/a/b/' file` works. On BSD sed (macOS), `-i` requires an explicit backup extension argument, even if it's empty.
+Use the `-i` option with an explicit backup extension. To edit in-place without creating a backup, provide an empty string:
 
 ```bash
-# macOS/BSD (Mandatory empty string argument to -i)
+# Edit in-place without creating a backup
 sed -i '' 's/oldName/newName/g' filename.txt
 
-# Create a backup file like filename.txt.bak
+# Edit in-place and create a backup named filename.txt.bak
 sed -i '.bak' 's/oldName/newName/g' filename.txt
 ```
 
-**Extended Regex (`-E`):**
-To avoid escaping every parenthesis and plus sign, use Extended Regular Expressions.
+Use the `-E` option to enable extended regular expressions, avoiding the need to escape parentheses and plus signs:
 ```bash
 sed -E 's/(foo|bar)+/baz/g' file.txt
 ```
 
-### `awk` - Codebase Analysis
+### Codebase analysis with awk
 
-`awk` is a complete programming language tailored for line-by-line data extraction.
+Use `awk` for line-by-line data extraction and text processing.
 
-**Print specific columns:**
-```bash
-# Print the 1st and 3rd column of space-separated data
-ls -l | awk '{print $1, $3}'
-```
+Common use cases:
+* Print specific columns from space-separated input:
+  ```bash
+  ls -l | awk '{print $1, $3}'
+  ```
+* Find and print duplicate lines in a file without sorting them first:
+  ```bash
+  awk '!seen[$0]++' filename.txt
+  ```
+* Filter lines based on column values (for example, printing lines where the third column is greater than 100):
+  ```bash
+  awk '$3 > 100' data.txt
+  ```
+* Find lines matching a pattern and print their line number (`NR`) along with the content:
+  ```bash
+  awk '/Error/ {print NR, $0}' server.log
+  ```
 
-**Find duplicate lines in a file without sorting:**
-This is a classic pro-level awk one-liner.
-```bash
-awk '!seen[$0]++' filename.txt
-```
+### Safe pipelines and parallelism with xargs
 
-**Filtering with Awk:**
-```bash
-# Print lines where the 3rd column is greater than 100
-awk '$3 > 100 {print $0}' data.txt
-
-# Print lines containing "Error" and print their line number and content
-awk '/Error/ {print NR, $0}' server.log
-```
-
-### `xargs` - Safe Pipelines and Parallelism
-
-`xargs` takes standard input and builds execution commands. Always use `-0` (null-terminated) when dealing with files to prevent catastrophic failures on filenames containing spaces or shell metacharacters.
+Use `xargs` to build and execute commands from standard input. Always use the `-0` option (null-terminated) when processing file paths to handle filenames containing spaces or special characters safely.
 
 ```bash
-# BAD (Will fail and potentially delete wrong files if a filename has a space)
+# Unsafe: will fail or perform unintended actions if filenames contain spaces
 find . -name "*.log" | xargs rm
 
-# GOOD (Safe against spaces and quotes)
+# Safe: handles spaces and special characters correctly
 find . -name "*.log" -print0 | xargs -0 rm
 ```
 
-**Parallelism (`-P`):**
-If you have a CPU-bound task, run it in parallel.
+Use the `-P` option to run tasks in parallel:
 ```bash
-# Run 4 curl jobs in parallel
+# Run up to 4 curl processes in parallel
 cat urls.txt | xargs -n 1 -P 4 curl -O
 ```
 
-### macOS Specific CLI Tools
+### macOS-specific CLI tools
 
-- **`mdfind`**: Command-line interface to macOS Spotlight. Insanely fast for finding files globally by name or content without crawling the disk.
-  - `mdfind -name "project_spec"`
-  - `mdfind "kMDItemTextContent == 'TODO: Refactor'"`
-- **`pbcopy` / `pbpaste`**: Directly pipes stdin to the macOS clipboard, or prints the clipboard.
-  - `cat ssh_key.pub | pbcopy`
-  - `pbpaste > new_file.txt`
-- **`open`**: Opens a file, directory, or URL using the default macOS GUI application.
-  - `open .` (Opens Finder in current directory)
-  - `open -a "Google Chrome" index.html` (Forces using Chrome)
+Use macOS-specific utilities to interact with operating system features:
+
+* Use `mdfind` to query the macOS Spotlight index for fast, global file and content searches without scanning the disk:
+  ```bash
+  # Search by filename
+  mdfind -name "project_spec"
+
+  # Search by text content within files
+  mdfind "kMDItemTextContent == 'TODO: Refactor'"
+  ```
+* Use `pbcopy` and `pbpaste` to interact with the system clipboard:
+  ```bash
+  # Copy file content to the clipboard
+  cat ssh_key.pub | pbcopy
+
+  # Paste clipboard content to a file
+  pbpaste > new_file.txt
+  ```
+* Use `open` to open files, directories, or URLs with their default applications:
+  ```bash
+  # Open the current directory in Finder
+  open .
+
+  # Open a local HTML file using a specific application
+  open -a "Google Chrome" index.html
+  ```

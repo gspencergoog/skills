@@ -36,12 +36,12 @@ This script can:
 
 **Usage Example:**
 ```bash
-python3 agents/skills/code-review/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt
+python3 <skills-directory>/review-code/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt
 ```
 
 For JSON inputs:
 ```bash
-python3 agents/skills/code-review/scripts/split_diff.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
+python3 <skills-directory>/review-code/scripts/split_diff.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
 ```
 
 ## How to Combine Subdivided Reviews
@@ -49,4 +49,4 @@ python3 agents/skills/code-review/scripts/split_diff.py --json --json-key diff -
 After performing subdivided reviews, use the **Synthesis** step to create the final output:
 1. **Deduplicate**: Ensure that the same issue found in multiple passes or files is not reported multiple times unless it manifests differently.
 2. **Prioritize**: Group comments by severity. Ensure critical and high-severity issues are highlighted at the top.
-3. **Cohesiveness**: Ensure the tone and style of all comments are consistent, following the [natural-writing](file:///Users/gspencer/code/cheats/agents/skills/natural-writing/SKILL.md) skill.
+3. **Cohesiveness**: Ensure the tone and style of all comments are consistent, following the [natural-writing](../../natural-writing/SKILL.md) skill.

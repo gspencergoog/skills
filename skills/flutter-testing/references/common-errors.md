@@ -1,5 +1,19 @@
 # Common Testing Errors
 
+## Table of Contents
+- [Overview](#overview)
+- [Layout Errors](#layout-errors)
+- [Widget Lifecycle Errors](#widget-lifecycle-errors)
+- [Parent Widget Errors](#parent-widget-errors)
+- [Testing-Specific Errors](#testing-specific-errors)
+- [Plugin/Platform Errors](#pluginplatform-errors)
+- [Async Errors](#async-errors)
+- [Data Errors](#data-errors)
+- [Debugging Tips](#debugging-tips)
+- [Prevention](#prevention)
+
+---
+
 ## Overview
 
 This guide covers frequently encountered Flutter testing errors and their solutions.

@@ -34,12 +34,12 @@ If the worker isolate encounters an unhandled exception and crashes *before* sen
 
 ### Remediation Strategy
 
-The agent must enforce robust lifecycle management on `Isolate.spawn`.
+Enforce robust lifecycle management on `Isolate.spawn`.
 
-**Refactoring Pattern:** Rewrite the spawn call to register `onError` and `onExit` listeners. This ensures the main thread is notified even in catastrophic failure.
+**Refactoring Pattern:** Rewrite spawn calls to register `onError` and `onExit` listeners. Ensure the main thread is notified even during catastrophic failures.
 
 ```dart
-// Agent Refactoring Target
+// Refactoring Target
 Isolate.spawn(
   workerFunction,
   params,

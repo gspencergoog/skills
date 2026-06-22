@@ -1,5 +1,25 @@
 # Widget Testing Guide
 
+## Table of Contents
+- [Overview](#overview)
+- [When to Write Widget Tests](#when-to-write-widget-tests)
+- [Test Structure](#test-structure)
+- [Finding Widgets](#finding-widgets)
+- [User Interactions](#user-interactions)
+- [Testing Widget Properties](#testing-widget-properties)
+- [Testing with Arguments](#testing-with-arguments)
+- [Testing Orientation](#testing-orientation)
+- [Testing Scrollable Widgets](#testing-scrollable-widgets)
+- [Testing Forms](#testing-forms)
+- [Testing Animations](#testing-animations)
+- [Testing Custom Widgets](#testing-custom-widgets)
+- [Testing with Mock Data](#testing-with-mock-data)
+- [Testing Accessibility](#testing-accessibility)
+- [Best Practices](#best-practices)
+- [Common Patterns](#common-patterns)
+
+---
+
 ## Overview
 
 Widget tests (component tests) verify that widgets render correctly and interact as expected. They run in a test environment that simulates widget lifecycle without a full UI system.

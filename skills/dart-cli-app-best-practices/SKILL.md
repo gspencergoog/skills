@@ -1,21 +1,12 @@
 ---
 name: dart-cli-app-best-practices
-description: |-
-  Best practices for creating high-quality, executable Dart CLI applications.
-  Covers entrypoint structure, exit code handling, and recommended packages.
-license: Apache-2.0
+description: Best practices for creating high-quality, executable Dart CLI applications, covering entrypoint structure, exit code handling, and recommended packages. Trigger this skill when creating new Dart CLI apps, refactoring bin entrypoints, writing executable shell scripts in Dart for Linux/macOS, reviewing CLI code quality, or implementing error handling and exit code logic.
+
 ---
 
 # Dart CLI Application Best Practices
 
-## 1. When to use this skill
-Use this skill when:
--   Creating a new Dart CLI application.
--   Refactoring an existing CLI entrypoint (`bin/`).
--   Reviewing CLI code for quality and standards.
--   Setting up executable scripts for Linux/Mac.
-
-## 2. Best Practices
+## 1. Best Practices
 
 ### Entrypoint Structure (`bin/`)
 Keep the contents of your entrypoint file (e.g., `bin/my_app.dart`) minimal. This improves testability by decoupling logic from the process runner.
@@ -73,15 +64,20 @@ void main() {
 ### Exception Handling
 Uncaught exceptions automatically set a non-zero exit code, but you should handle expected errors gracefully.
 
+> [!IMPORTANT]
+> Always write error messages, crash reports, and stack traces to `stderr` (using `stderr.writeln()`) rather than `stdout` (using `print()`). Writing errors to `stdout` is a CLI anti-pattern that pollutes shell pipes, making it difficult for users to chain commands and filter successful output.
+
 **Example:**
 ```dart
+import 'dart:io';
+
 Future<void> main(List<String> arguments) async {
   try {
     await runApp(arguments);
   } catch (e, stack) {
-    print('App crashed!');
-    print(e);
-    print(stack);
+    stderr.writeln('App crashed!');
+    stderr.writeln(e);
+    stderr.writeln(stack);
     exitCode = 1; // Explicitly fail
   }
 }

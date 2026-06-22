@@ -12,9 +12,13 @@ def get_repo_info():
     for remote in ["upstream", "origin"]:
         try:
             url = run_cmd(["git", "remote", "get-url", remote])
-            m = re.search(r'(?:git@github\.com:|https://github\.com/)([^/]+)/([^/.]+)(?:\.git)?', url)
+            m = re.search(r'(?:git@github\.com:|https://github\.com/)([^/]+)/([^/]+)', url)
             if m:
-                return m.group(1), m.group(2)
+                owner = m.group(1)
+                repo = m.group(2).strip()
+                if repo.endswith(".git"):
+                    repo = repo[:-4]
+                return owner, repo
         except Exception:
             continue
     raise Exception("Could not determine repository owner and name from git remotes.")
@@ -54,6 +58,7 @@ def fetch_pr_data(owner, repo, pr_number):
         pullRequest(number: $pr) {
           body
           headRefName
+          baseRefName
           reviewThreads(first: 100) {
             nodes {
               ...threadFields
@@ -86,7 +91,7 @@ def fetch_pr_data(owner, repo, pr_number):
             seen.add(node["id"])
             unique_nodes.append(node)
             
-    return pr_data.get("body", ""), pr_data.get("headRefName", ""), unique_nodes
+    return pr_data.get("body", ""), pr_data.get("headRefName", ""), pr_data.get("baseRefName", ""), unique_nodes
 
 
 def parse_suggestion(body):
@@ -122,11 +127,25 @@ def check_if_addressed(path, line, suggestion):
     
     return "Pending review"
 
-def get_modified_lines(base_branch="origin/main"):
-    try:
-        merge_base = run_cmd(["git", "merge-base", base_branch, "HEAD"])
-        diff_output = run_cmd(["git", "diff", f"{merge_base}..HEAD", "-U0"])
-    except Exception:
+def get_modified_lines(base_branch="main"):
+    candidates = []
+    if base_branch:
+        if "/" in base_branch:
+            candidates.append(base_branch)
+        else:
+            candidates.extend([f"origin/{base_branch}", f"upstream/{base_branch}", base_branch])
+    candidates.extend(["origin/main", "origin/master", "main", "master"])
+    
+    diff_output = None
+    for candidate in candidates:
+        try:
+            merge_base = run_cmd(["git", "merge-base", candidate, "HEAD"])
+            diff_output = run_cmd(["git", "diff", f"{merge_base}..HEAD", "-U0"])
+            break
+        except Exception:
+            continue
+            
+    if diff_output is None:
         try:
             diff_output = run_cmd(["git", "diff", "HEAD", "-U0"])
         except Exception:
@@ -235,8 +254,8 @@ def fetch_failed_checks_logs(pr_number):
 def analyze(include_all=False):
     owner, repo = get_repo_info()
     pr_number = get_pr_number()
-    pr_description, head_ref_name, threads = fetch_pr_data(owner, repo, pr_number)
-    modified = get_modified_lines()
+    pr_description, head_ref_name, base_ref_name, threads = fetch_pr_data(owner, repo, pr_number)
+    modified = get_modified_lines(base_ref_name)
     
     output_threads = []
     
@@ -292,6 +311,7 @@ def analyze(include_all=False):
         "pr": pr_number,
         "prDescription": pr_description,
         "headRefName": head_ref_name,
+        "baseRefName": base_ref_name,
         "threads": output_threads,
         "checks": failed_checks
     }
