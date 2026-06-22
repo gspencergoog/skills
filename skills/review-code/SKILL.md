@@ -1,9 +1,9 @@
 ---
-name: code-review
+name: review-code
 description: Performs a comprehensive, multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to ensure high-quality, actionable feedback. Use when you need to review code changes thoroughly.
 ---
 
-# Code Review
+# Comprehensive Code Review
 
 This skill provides a multi-step, iterative workflow for performing high-quality code reviews. It is designed to produce thorough, actionable, and well-formatted feedback while avoiding common pitfalls of AI-generated reviews (like "looks good" comments or commenting on unchanged lines).
 
