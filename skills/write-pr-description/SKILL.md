@@ -13,6 +13,10 @@ temporary scratch area as a Markdown file.
 > refer to the [natural-writing](../natural-writing/SKILL.md) skill to ensure
 > clarity, accuracy, and a natural, non-hyperbolic tone.
 
+> [!IMPORTANT] **GITHUB CLI AUTHENTICATION** In order to run the `gh` command
+> line tool, you have to run it with `env -u GITHUB_TOKEN` to unset the dummy
+> environment variable (e.g., `env -u GITHUB_TOKEN gh pr create`).
+
 ## Workflow
 
 1. **Analyze Changes**:
@@ -32,8 +36,9 @@ temporary scratch area as a Markdown file.
 ## Description Line
 
 The description line should follow the same rules as for the
-[conventional-commits](../conventional-commits/SKILL.md) skill. PR Descriptions
-are different from conventional commit descriptions, however.
+[conventional-commits](../commit-changes/references/conventional-commits.md)
+skill. PR Descriptions are different from conventional commit descriptions,
+however.
 
 ## PR Description
 
