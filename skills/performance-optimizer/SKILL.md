@@ -30,7 +30,7 @@ Before launching the optimization loop, verify the benchmark works and set the i
 Run the orchestrator script to automate the optimization cycle:
 
 ```bash
-python3 /Users/gspencer/.gemini/config/skills/performance-optimizer/scripts/orchestrator.py \
+python3 ~/.gemini/config/skills/performance-optimizer/scripts/orchestrator.py \
   --workspace /path/to/workspace \
   --mutations-count 3 \
   --max-iterations 5 \

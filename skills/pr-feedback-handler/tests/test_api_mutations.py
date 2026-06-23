@@ -22,7 +22,7 @@ class TestApiMutations(unittest.TestCase):
     @patch('reply_thread.run_cmd')
     def test_reply_to_thread_success(self, mock_run):
         mock_run.return_value = '{"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "comment_123", "body": "test reply"}}}}'
-        
+
         res = reply_thread.reply_to_thread("thread_1", "test reply")
         self.assertEqual(res["id"], "comment_123")
         self.assertEqual(res["body"], "test reply")
@@ -37,7 +37,7 @@ class TestApiMutations(unittest.TestCase):
     @patch('resolve_thread.run_cmd')
     def test_resolve_thread_success(self, mock_run):
         mock_run.return_value = '{"data": {"resolveReviewThread": {"thread": {"id": "thread_1", "isResolved": true}}}}'
-        
+
         res = resolve_thread.resolve_thread("thread_1")
         self.assertEqual(res["id"], "thread_1")
         self.assertTrue(res["isResolved"])
@@ -89,8 +89,8 @@ class TestApiMutations(unittest.TestCase):
         mock_res.stdout = '{"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "comment_123", "body": "test reply"}}}}'
         mock_res.returncode = 0
         mock_run.return_value = mock_res
-        
-        runpy.run_path("/Users/gspencer/code/cheats/agents/skills/pr-feedback-handler/scripts/reply_thread.py", run_name="__main__")
+
+        runpy.run_path(os.path.join(scripts_dir, "reply_thread.py"), run_name="__main__")
 
     @patch('subprocess.run')
     @patch('sys.argv', ['resolve_thread.py', 'thread_123'])
@@ -100,8 +100,8 @@ class TestApiMutations(unittest.TestCase):
         mock_res.stdout = '{"data": {"resolveReviewThread": {"thread": {"id": "thread_1", "isResolved": true}}}}'
         mock_res.returncode = 0
         mock_run.return_value = mock_res
-        
-        runpy.run_path("/Users/gspencer/code/cheats/agents/skills/pr-feedback-handler/scripts/resolve_thread.py", run_name="__main__")
+
+        runpy.run_path(os.path.join(scripts_dir, "resolve_thread.py"), run_name="__main__")
 
 if __name__ == '__main__':
     unittest.main()
