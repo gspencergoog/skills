@@ -30,17 +30,17 @@ Follow these steps when tasked with addressing PR review feedback:
 To allow the user to interactively review proposed fixes, draft replies, and provide feedback, run the interactive dashboard.
 
 1. **Fetch Comments**: Employ the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill to fetch the unresolved PR comments and CI/CD check failures in JSON format:
-   `python3 ~/.gemini/jetski/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <path-to-target-workspace-directory>`
+   `env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <path-to-target-workspace-directory>`
 
 2. **Propose Fixes and Draft Replies**: For each thread in the output:
    - Inspect the target file (at the specified line if given, or the overall file if it is a file-level comment).
    - Formulate a concrete plan to address the feedback. Add this plan as a `proposedFix` field (string) to the thread object in the JSON.
    - Draft a succinct, professional reply describing what was done to fix the issue (following the `natural-writing` skill). Add this as a `draftReply` field (string) to the thread object. Avoid generic replies like "Fixed." unless it is a trivial change.
 
-3. **Write Data File**: Save the enriched JSON report to a file named `pr_comments.json` in the scratch directory (`~/.gemini/jetski/scratch/pr_comments.json`).
+3. **Write Data File**: Save the enriched JSON report to a file named `pr_comments.json` in your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/pr_comments.json`).
 
-4. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory:
-   `python3 ~/.gemini/jetski/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory>`
+4. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and the conversation's scratch directory:
+   `python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory>`
    Set a reasonable `WaitMsBeforeAsync` (e.g., `1000`) so the command runs in the background.
 
 5. **Wait for Completion**: Stop calling tools and go idle. The launcher will automatically open the browser for the user and block until they either click "Save & Apply Plan" or "Abort". Once they do, the background task will complete, and you will receive a notification with the command's exit status.
@@ -55,7 +55,7 @@ Once the background task completes, check the result:
    - If the task exited with status `0` (success), proceed to implement the fixes.
    - If the task exited with a non-zero status (e.g., `1` for Abort), stop and ask the user for further instructions.
 
-2. **Read the Plan**: Read `feedback_state.json` from the scratch directory (`~/.gemini/jetski/scratch/feedback_state.json`).
+2. **Read the Plan**: Read `feedback_state.json` from your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/feedback_state.json`).
 
 3. **Execute Approved Fixes**: For each item in `decisions` where `approved: true` and `action: "accept"`:
    - Apply the suggestion or implement the fix in the target file (at the specified line if given, or in the file overall).
