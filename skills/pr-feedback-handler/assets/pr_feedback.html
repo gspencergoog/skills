@@ -600,12 +600,12 @@
               
               <div class="reply-box">
                 <label for="reply-text-${thread.id}">Draft Reply Comment:</label>
-                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="2" oninput="updateReply('${thread.id}', this.value)">${decisions[thread.id].reply}</textarea>
+                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="4" oninput="updateReply('${thread.id}', this.value)">${decisions[thread.id].reply}</textarea>
               </div>
 
               <div class="reply-box" style="margin-top: 12px;">
                 <label for="instructions-${thread.id}">Instructions for Agent (adjust plan):</label>
-                <textarea id="instructions-${thread.id}" class="reply-textarea" rows="2" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
+                <textarea id="instructions-${thread.id}" class="reply-textarea" rows="4" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
               </div>
               
               <div class="checkbox-row">
