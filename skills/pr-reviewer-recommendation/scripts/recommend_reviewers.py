@@ -105,16 +105,17 @@ def get_collaborators(repo, cwd):
     return list(set(logins))
 
 def get_file_contributors(filepath, cwd):
-    log_str = run_cmd(["git", "log", "-n", "50", "--format=%ae|%an|%at", "--", filepath], cwd=cwd)
+    log_str = run_cmd(["git", "log", "-n", "50", "--format=%H|%ae|%an|%at", "--", filepath], cwd=cwd)
     if not log_str:
         return []
     
     contributors = []
     for line in log_str.splitlines():
         parts = line.strip().split("|")
-        if len(parts) == 3:
-            email, name, timestamp = parts
+        if len(parts) == 4:
+            sha, email, name, timestamp = parts
             contributors.append({
+                "sha": sha.strip(),
                 "email": email.strip(),
                 "name": name.strip(),
                 "timestamp": int(timestamp)
@@ -123,25 +124,49 @@ def get_file_contributors(filepath, cwd):
 
 def map_git_to_github(git_email, git_name, github_logins):
     email_prefix = git_email.split("@")[0].lower()
+    email_norm = re.sub(r"[._-]", "", email_prefix)
     name_clean = git_name.lower().replace(" ", "")
+    name_norm = re.sub(r"[._-]", "", name_clean)
     
-    for login in github_logins:
-        if login.lower() == email_prefix:
-            return login
-            
-    for login in github_logins:
-        if login.lower() == name_clean:
-            return login
-            
+    # Try exact match after normalization
     for login in github_logins:
         login_lower = login.lower()
-        if login_lower in email_prefix or email_prefix in login_lower:
+        login_norm = re.sub(r"[._-]", "", login_lower)
+        if login_norm == email_norm or login_norm == name_norm:
             return login
-        if login_lower in name_clean or name_clean in login_lower:
+            
+    # Try substring match after normalization
+    for login in github_logins:
+        login_lower = login.lower()
+        login_norm = re.sub(r"[._-]", "", login_lower)
+        if login_norm in email_norm or email_norm in login_norm:
+            return login
+        if login_norm in name_norm or name_norm in login_norm:
             return login
             
     if "noreply" not in git_email and "github" not in git_email:
         return email_prefix
+        
+    return None
+
+def resolve_username(sha, email, name, repo, cwd, github_logins, cache):
+    """Resolves a git author's email to a GitHub username using Commit API or local fallback."""
+    if email in cache:
+        return cache[email]
+        
+    # 1. Try to resolve via GitHub Commit API (100% reliable)
+    if sha and repo and shutil.which("gh"):
+        username = run_cmd(["gh", "api", f"repos/{repo}/commits/{sha}", "-q", ".author.login"], cwd=cwd)
+        if username and not username.startswith("error") and "not found" not in username.lower() and username.strip():
+            resolved = username.strip()
+            cache[email] = resolved
+            return resolved
+            
+    # 2. Fallback to local heuristic matching
+    username = map_git_to_github(email, name, github_logins)
+    if username:
+        cache[email] = username
+        return username
         
     return None
 
@@ -155,7 +180,8 @@ def main():
     args = parser.parse_args()
     
     cwd = os.path.abspath(args.dir)
-    if not os.path.isdir(os.path.join(cwd, ".git")):
+    # Check if the directory is a git repository (supporting both standard and worktree setups)
+    if not run_cmd(["git", "rev-parse", "--is-inside-work-tree"], cwd=cwd) == "true":
         print(f"Error: {cwd} is not a git repository.", file=sys.stderr)
         sys.exit(1)
         
@@ -207,6 +233,7 @@ def main():
     
     file_ownership = {}
     candidate_scores = defaultdict(lambda: {"commits": 0, "recency": 0, "files": set(), "emails": set(), "names": set()})
+    email_to_username_cache = {}
     
     now = int(datetime.now().timestamp())
     
@@ -216,11 +243,12 @@ def main():
         file_ownership[filepath] = contributors
         
         for idx, contrib in enumerate(contributors):
+            sha = contrib.get("sha")
             email = contrib["email"]
             name = contrib["name"]
             timestamp = contrib["timestamp"]
             
-            gh_username = map_git_to_github(email, name, github_logins)
+            gh_username = resolve_username(sha, email, name, repo, cwd, github_logins, email_to_username_cache)
             if not gh_username:
                 continue
                 
@@ -245,9 +273,11 @@ def main():
             
         dir_contributors = get_file_contributors(dirpath, cwd)
         for contrib in dir_contributors:
+            sha = contrib.get("sha")
             email = contrib["email"]
             name = contrib["name"]
-            gh_username = map_git_to_github(email, name, github_logins)
+            
+            gh_username = resolve_username(sha, email, name, repo, cwd, github_logins, email_to_username_cache)
             if gh_username and (not pr_author or gh_username.lower() != pr_author.lower()):
                 cand = candidate_scores[gh_username]
                 if filepath not in cand["files"]:

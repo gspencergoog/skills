@@ -42,4 +42,12 @@ When asked to find or recommend reviewers for a PR or branch:
 4. **Formulate the Recommendation**:
    * **Primary suggestions**: Prioritize users who have directly authored or modified the changed files, ranked by commit count and recency (within the last 6 months).
    * **Secondary suggestions**: Identify users who have modified surrounding files in the parent directories, or who are prominent contributors to that specific domain.
-   * **Format**: Present a clean markdown table showing the suggested reviewers, their match scores, historical commit count on those files, and contact info, followed by a copyable `gh pr edit` command to assign them.
+   * **Format**: Present a clean markdown table showing the suggested reviewers, their match scores, historical commit count on those files, and contact info, followed by a copyable `gh pr edit` command to assign them, including the `-R` for the appropriate repo.
+
+5. **Assign Recommended Reviewers**:
+   * If analyzing a GitHub PR (i.e., when analyzing a specific `--pr`), use the `ask_question` tool to ask the user if they want you to execute the command to assign the recommended reviewers.
+   * Format the options as:
+     * `"(Recommended) Yes, assign the recommended reviewers to the PR"`
+     * `"No, I will assign them manually"`
+   * If the user selects the option to assign them, run the `gh pr edit <pr-number> --add-reviewer <reviewers> -R <repo>` command using the `run_command` tool.
+

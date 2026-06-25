@@ -16,6 +16,7 @@ from recommend_reviewers import (
     get_collaborators,
     get_file_contributors,
     map_git_to_github,
+    resolve_username,
     main
 )
 
@@ -201,20 +202,22 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.run_cmd")
     def test_get_file_contributors_success(self, mock_run_cmd):
         mock_run_cmd.return_value = (
-            "alice@google.com|Alice Smith|1700000000\n"
-            "bob@gmail.com|Bob Jones|1600000000\n"
+            "sha123|alice@google.com|Alice Smith|1700000000\n"
+            "sha456|bob@gmail.com|Bob Jones|1600000000\n"
         )
         
         contribs = get_file_contributors("path/to/file.py", "/fake/cwd")
         self.assertEqual(len(contribs), 2)
+        self.assertEqual(contribs[0]["sha"], "sha123")
         self.assertEqual(contribs[0]["email"], "alice@google.com")
         self.assertEqual(contribs[0]["name"], "Alice Smith")
         self.assertEqual(contribs[0]["timestamp"], 1700000000)
+        self.assertEqual(contribs[1]["sha"], "sha456")
         self.assertEqual(contribs[1]["email"], "bob@gmail.com")
         self.assertEqual(contribs[1]["name"], "Bob Jones")
         self.assertEqual(contribs[1]["timestamp"], 1600000000)
         mock_run_cmd.assert_called_once_with(
-            ["git", "log", "-n", "50", "--format=%ae|%an|%at", "--", "path/to/file.py"],
+            ["git", "log", "-n", "50", "--format=%H|%ae|%an|%at", "--", "path/to/file.py"],
             cwd="/fake/cwd"
         )
 
@@ -241,11 +244,63 @@ class TestRecommendReviewers(unittest.TestCase):
         self.assertIsNone(map_git_to_github("12345+coder@users.noreply.github.com", "Coder", github_logins))
         self.assertIsNone(map_git_to_github("github-actions@github.com", "GitHub Actions", github_logins))
 
+    @patch("shutil.which")
+    @patch("recommend_reviewers.run_cmd")
+    def test_resolve_username(self, mock_run_cmd, mock_which):
+        github_logins = ["alice", "bob"]
+        cache = {}
+        
+        # 1. Cache hit
+        cache["alice@google.com"] = "alice"
+        resolved = resolve_username("sha123", "alice@google.com", "Alice Smith", "owner/repo", "/fake/cwd", github_logins, cache)
+        self.assertEqual(resolved, "alice")
+        mock_run_cmd.assert_not_called()
+        
+        # Reset cache
+        cache = {}
+        
+        # 2. GitHub Commit API success
+        mock_which.return_value = "/usr/bin/gh"
+        mock_run_cmd.return_value = "bob"
+        resolved = resolve_username("sha456", "bob@google.com", "Bob Jones", "owner/repo", "/fake/cwd", github_logins, cache)
+        self.assertEqual(resolved, "bob")
+        self.assertEqual(cache["bob@google.com"], "bob")
+        mock_run_cmd.assert_called_with(["gh", "api", "repos/owner/repo/commits/sha456", "-q", ".author.login"], cwd="/fake/cwd")
+        
+        # Reset mocks and cache
+        mock_run_cmd.reset_mock()
+        cache = {}
+        
+        # 3. GitHub Commit API returns empty, fall back to local heuristic matching
+        mock_run_cmd.return_value = ""
+        resolved = resolve_username("sha456", "bob@google.com", "Bob Jones", "owner/repo", "/fake/cwd", github_logins, cache)
+        self.assertEqual(resolved, "bob") # resolved via map_git_to_github
+        self.assertEqual(cache["bob@google.com"], "bob")
+        
+        # Reset mocks and cache
+        mock_run_cmd.reset_mock()
+        cache = {}
+        
+        # 4. gh not available, fall back to local heuristic matching
+        mock_which.return_value = None
+        resolved = resolve_username("sha456", "bob@google.com", "Bob Jones", "owner/repo", "/fake/cwd", github_logins, cache)
+        self.assertEqual(resolved, "bob")
+        self.assertEqual(cache["bob@google.com"], "bob")
+        mock_run_cmd.assert_not_called()
+        
+        # Reset cache
+        cache = {}
+        
+        # 5. Fallback fails completely (returns None)
+        resolved = resolve_username("sha789", "dave@github.com", "Dave S", "owner/repo", "/fake/cwd", ["alice", "bob"], cache)
+        self.assertIsNone(resolved)
+
     # --- Main function tests ---
 
-    @patch("os.path.isdir", return_value=False)
+    @patch("recommend_reviewers.run_cmd")
     @patch("sys.exit")
-    def test_main_not_git_repo(self, mock_exit, mock_isdir):
+    def test_main_not_git_repo(self, mock_exit, mock_run_cmd):
+        mock_run_cmd.return_value = "false"
         def raise_system_exit(code=0):
             raise SystemExit(code)
         mock_exit.side_effect = raise_system_exit
@@ -256,19 +311,21 @@ class TestRecommendReviewers(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 main()
             self.assertEqual(cm.exception.code, 1)
+        mock_run_cmd.assert_any_call(["git", "rev-parse", "--is-inside-work-tree"], cwd="/fake/not-git")
 
-    @patch("os.path.isdir", return_value=True)
+    @patch("recommend_reviewers.run_cmd")
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.get_changed_files_from_range", return_value=[])
     @patch("sys.exit")
-    def test_main_no_changed_files(self, mock_exit, mock_changed, mock_branch, mock_repo, mock_isdir):
+    def test_main_no_changed_files(self, mock_exit, mock_changed, mock_branch, mock_repo, mock_run_cmd):
+        mock_run_cmd.return_value = "true"
         test_args = ["recommend_reviewers.py", "--compare", "main...empty"]
         with patch.object(sys, "argv", test_args):
             main()
             mock_exit.assert_called_once_with(0)
 
-    @patch("os.path.isdir", return_value=True)
+    @patch("recommend_reviewers.run_cmd")
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.get_changed_files_from_range")
@@ -277,9 +334,15 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.datetime")
     @patch("shutil.which", return_value="/usr/bin/gh")
     @patch("builtins.print")
-    def test_main_compare_range_success(self, mock_print, mock_which, mock_datetime, mock_file_contribs, mock_collabs, mock_changed, mock_branch, mock_repo, mock_isdir):
+    def test_main_compare_range_success(self, mock_print, mock_which, mock_datetime, mock_file_contribs, mock_collabs, mock_changed, mock_branch, mock_repo, mock_run_cmd):
         # Fix mock datetime for recency scoring
         mock_datetime.now.return_value.timestamp.return_value = 1700000000
+        
+        def run_cmd_side_effect(args, cwd=None):
+            if "rev-parse" in args:
+                return "true"
+            return ""
+        mock_run_cmd.side_effect = run_cmd_side_effect
         
         mock_changed.return_value = ["dir1/file1.py", "dir2/file2.py"]
         mock_collabs.return_value = ["alice", "bob", "charlie"]
@@ -291,11 +354,11 @@ class TestRecommendReviewers(unittest.TestCase):
         # For dir2/ (directory contribution): none
         def mock_contrib_side_effect(path, cwd):
             if path == "dir1/file1.py":
-                return [{"email": "alice@google.com", "name": "Alice Smith", "timestamp": 1700000000}]
+                return [{"sha": "sha1", "email": "alice@google.com", "name": "Alice Smith", "timestamp": 1700000000}]
             elif path == "dir2/file2.py":
-                return [{"email": "bob@google.com", "name": "Bob Jones", "timestamp": 1600000000}]
+                return [{"sha": "sha2", "email": "bob@google.com", "name": "Bob Jones", "timestamp": 1600000000}]
             elif path == "dir1":
-                return [{"email": "charlie@google.com", "name": "Charlie Brown", "timestamp": 1700000000}]
+                return [{"sha": "sha3", "email": "charlie@google.com", "name": "Charlie Brown", "timestamp": 1700000000}]
             return []
             
         mock_file_contribs.side_effect = mock_contrib_side_effect
@@ -324,14 +387,15 @@ class TestRecommendReviewers(unittest.TestCase):
             # Suggested command should be printed since shutil.which("gh") returns truthy
             self.assertIn("gh pr edit <pr-number> --add-reviewer", printed_text)
 
-    @patch("os.path.isdir", return_value=True)
+    @patch("recommend_reviewers.run_cmd")
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.get_pr_details")
     @patch("recommend_reviewers.get_collaborators")
     @patch("recommend_reviewers.get_file_contributors", return_value=[])
     @patch("builtins.print")
-    def test_main_pr_number_success(self, mock_print, mock_file_contribs, mock_collabs, mock_pr_details, mock_branch, mock_repo, mock_isdir):
+    def test_main_pr_number_success(self, mock_print, mock_file_contribs, mock_collabs, mock_pr_details, mock_branch, mock_repo, mock_run_cmd):
+        mock_run_cmd.return_value = "true"
         mock_pr_details.return_value = {
             "title": "Add feature",
             "author": {"login": "pr_author"},
@@ -349,7 +413,7 @@ class TestRecommendReviewers(unittest.TestCase):
             self.assertIn("No primary candidates identified", printed_text)
             self.assertIn("No secondary candidates identified", printed_text)
 
-    @patch("os.path.isdir", return_value=True)
+    @patch("recommend_reviewers.run_cmd")
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.get_pr_details", return_value=None) # fails fetching PR details, falls back to local git
@@ -357,7 +421,8 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.get_collaborators", return_value=[])
     @patch("recommend_reviewers.get_file_contributors", return_value=[])
     @patch("builtins.print")
-    def test_main_pr_number_fallback_to_local(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_pr_details, mock_branch, mock_repo, mock_isdir):
+    def test_main_pr_number_fallback_to_local(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_pr_details, mock_branch, mock_repo, mock_run_cmd):
+        mock_run_cmd.return_value = "true"
         mock_changed.return_value = ["file1.py"]
         
         test_args = ["recommend_reviewers.py", "--pr", "123"]
@@ -367,7 +432,6 @@ class TestRecommendReviewers(unittest.TestCase):
             printed_text = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
             self.assertIn("Found 1 changed files", printed_text)
 
-    @patch("os.path.isdir", return_value=True)
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.run_cmd")
@@ -375,7 +439,8 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.get_collaborators", return_value=[])
     @patch("recommend_reviewers.get_file_contributors", return_value=[])
     @patch("builtins.print")
-    def test_main_branch_argument(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo, mock_isdir):
+    def test_main_branch_argument(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo):
+        mock_run_cmd.return_value = "true"
         mock_changed.return_value = ["file1.py"]
         
         test_args = ["recommend_reviewers.py", "--branch", "feature-branch"]
@@ -384,7 +449,6 @@ class TestRecommendReviewers(unittest.TestCase):
             
             mock_changed.assert_called_with("origin/main...feature-branch", unittest.mock.ANY)
 
-    @patch("os.path.isdir", return_value=True)
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.run_cmd")
@@ -392,8 +456,14 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.get_collaborators", return_value=[])
     @patch("recommend_reviewers.get_file_contributors", return_value=[])
     @patch("builtins.print")
-    def test_main_auto_detect_branch(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo, mock_isdir):
-        mock_run_cmd.return_value = "feature-branch" # current branch
+    def test_main_auto_detect_branch(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo):
+        def run_cmd_side_effect(args, cwd=None):
+            if "rev-parse" in args:
+                return "true"
+            if "--show-current" in args:
+                return "feature-branch"
+            return ""
+        mock_run_cmd.side_effect = run_cmd_side_effect
         mock_changed.return_value = ["file1.py"]
         
         test_args = ["recommend_reviewers.py"]
@@ -402,7 +472,6 @@ class TestRecommendReviewers(unittest.TestCase):
             
             mock_changed.assert_called_with("origin/main...feature-branch", unittest.mock.ANY)
 
-    @patch("os.path.isdir", return_value=True)
     @patch("recommend_reviewers.get_repo_info", return_value=("google", "cheats"))
     @patch("recommend_reviewers.get_default_branch", return_value="main")
     @patch("recommend_reviewers.run_cmd")
@@ -410,8 +479,14 @@ class TestRecommendReviewers(unittest.TestCase):
     @patch("recommend_reviewers.get_collaborators", return_value=[])
     @patch("recommend_reviewers.get_file_contributors", return_value=[])
     @patch("builtins.print")
-    def test_main_auto_detect_branch_same_as_default(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo, mock_isdir):
-        mock_run_cmd.return_value = "main" # current branch same as default
+    def test_main_auto_detect_branch_same_as_default(self, mock_print, mock_file_contribs, mock_collabs, mock_changed, mock_run_cmd, mock_branch, mock_repo):
+        def run_cmd_side_effect(args, cwd=None):
+            if "rev-parse" in args:
+                return "true"
+            if "--show-current" in args:
+                return "main"
+            return ""
+        mock_run_cmd.side_effect = run_cmd_side_effect
         mock_changed.return_value = ["file1.py"]
         
         test_args = ["recommend_reviewers.py"]
