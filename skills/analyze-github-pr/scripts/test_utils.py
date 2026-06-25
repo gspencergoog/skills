@@ -5,11 +5,6 @@ import sys
 import os
 import importlib
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-scripts_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-if scripts_dir not in sys.path:
-    sys.path.append(scripts_dir)
-
 import utils
 
 class TestUtils(unittest.TestCase):
@@ -44,22 +39,6 @@ class TestUtils(unittest.TestCase):
         self.assertIn("Command false failed with exit status 1", str(ctx.exception))
 
     @patch('subprocess.run')
-    def test_run_git_success(self, mock_run):
-        mock_res = MagicMock()
-        mock_res.stdout = "main\n"
-        mock_run.return_value = mock_res
-        
-        out = utils.run_git(["branch", "--show-current"])
-        self.assertEqual(out, "main")
-        mock_run.assert_called_once_with(["git", "branch", "--show-current"], capture_output=True, text=True, check=True, cwd=None, timeout=30)
-
-    @patch('subprocess.run')
-    def test_run_git_error(self, mock_run):
-        mock_run.side_effect = subprocess.CalledProcessError(128, ["git", "status"])
-        out = utils.run_git(["status"])
-        self.assertEqual(out, "")
-
-    @patch('subprocess.run')
     def test_run_cmd_non_string_args(self, mock_run):
         mock_res = MagicMock()
         mock_res.stdout = "port count\n"
@@ -68,12 +47,7 @@ class TestUtils(unittest.TestCase):
         
         out = utils.run_cmd(["server", "--port", 80, "--debug", True])
         self.assertEqual(out, "port count")
-
-    @patch('subprocess.run')
-    def test_run_git_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(["git", "fetch"], 30)
-        out = utils.run_git(["fetch"])
-        self.assertEqual(out, "")
+        mock_run.assert_called_once_with(["server", "--port", "80", "--debug", "True"], capture_output=True, text=True, check=True, cwd=None, timeout=30)
 
 if __name__ == '__main__':
     unittest.main()

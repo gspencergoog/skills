@@ -9,12 +9,6 @@ import threading
 import json
 import time
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-dashboard_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-
-if dashboard_dir not in sys.path:
-    sys.path.append(dashboard_dir)
-
 import launch_dashboard
 from launch_dashboard import check_git_state
 
@@ -274,13 +268,29 @@ class TestDashboardServerIntegration(unittest.TestCase):
         self.assertTrue(first_line.startswith("data:") or first_line.startswith(": heartbeat"))
         response.close()
 
+    def test_get_api_comments_not_found(self):
+        # Temporarily rename the comments file
+        temp_path = self.comments_path + ".bak"
+        os.rename(self.comments_path, temp_path)
+        try:
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                urllib.request.urlopen(url)
+            self.assertEqual(ctx.exception.code, 404)
+        finally:
+            os.rename(temp_path, self.comments_path)
+
 class TestDashboardMain(unittest.TestCase):
+    def _raise_system_exit(self, code=0):
+        raise SystemExit(code)
+
     @patch('launch_dashboard.webbrowser.open')
     @patch('launch_dashboard.run_git')
     @patch('http.server.ThreadingHTTPServer')
     @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
     @patch('sys.exit')
     def test_main_startup(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
+        mock_exit.side_effect = self._raise_system_exit
         mock_git.return_value = ".git"
         mock_server_inst = MagicMock()
         mock_server_inst.server_port = 12345
@@ -288,9 +298,52 @@ class TestDashboardMain(unittest.TestCase):
 
         with patch('launch_dashboard.server_should_shutdown', True):
             from launch_dashboard import main
-            main()
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
 
         mock_webbrowser.assert_called_once_with("http://localhost:12345/")
+
+    @patch('launch_dashboard.webbrowser.open')
+    @patch('launch_dashboard.run_git')
+    @patch('http.server.ThreadingHTTPServer')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
+    @patch('sys.exit')
+    @patch('time.sleep')
+    def test_main_keyboard_interrupt(self, mock_sleep, mock_exit, mock_http_server, mock_git, mock_webbrowser):
+        mock_exit.side_effect = self._raise_system_exit
+        mock_git.return_value = ".git"
+        mock_server_inst = MagicMock()
+        mock_server_inst.server_port = 12345
+        mock_http_server.return_value = mock_server_inst
+        
+        # Raise KeyboardInterrupt when sleeping
+        mock_sleep.side_effect = KeyboardInterrupt()
+        
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        
+        self.assertEqual(cm.exception.code, 1)
+        mock_server_inst.shutdown.assert_called_once()
+
+    @patch('launch_dashboard.webbrowser.open')
+    @patch('launch_dashboard.run_git')
+    @patch('http.server.ThreadingHTTPServer')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
+    @patch('sys.exit')
+    def test_main_aborted_exit(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
+        mock_exit.side_effect = self._raise_system_exit
+        mock_git.return_value = ".git"
+        mock_server_inst = MagicMock()
+        mock_server_inst.server_port = 12345
+        mock_http_server.return_value = mock_server_inst
+        
+        with patch('launch_dashboard.exit_status', 1), patch('launch_dashboard.server_should_shutdown', True):
+            from launch_dashboard import main
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 1)
 
 if __name__ == '__main__':
     unittest.main()

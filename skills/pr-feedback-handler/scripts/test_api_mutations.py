@@ -5,11 +5,7 @@ import os
 import importlib
 import runpy
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-scripts_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-
-if scripts_dir not in sys.path:
-    sys.path.append(scripts_dir)
+scripts_dir = os.path.dirname(os.path.abspath(__file__))
 
 import reply_thread
 import resolve_thread

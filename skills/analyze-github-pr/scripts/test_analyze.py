@@ -5,12 +5,6 @@ import os
 import importlib
 import json
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-analyze_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-
-if analyze_dir not in sys.path:
-    sys.path.append(analyze_dir)
-
 import analyze_comments
 from analyze_comments import truncate_log, parse_suggestion, check_if_addressed
 
@@ -315,6 +309,188 @@ class TestAnalyzeComments(unittest.TestCase):
             from analyze_comments import main
             main()
             mock_print.assert_called()
+
+    # --- Additional Coverage Tests to cover >90% ---
+
+    @patch('analyze_comments.run_cmd', side_effect=Exception("git error"))
+    def test_get_repo_info_failure(self, mock_run):
+        from analyze_comments import get_repo_info
+        with self.assertRaises(Exception) as ctx:
+            get_repo_info()
+        self.assertIn("Could not determine repository owner", str(ctx.exception))
+
+    @patch('analyze_comments.run_cmd', side_effect=Exception("gh error"))
+    def test_get_pr_number_failure(self, mock_run):
+        from analyze_comments import get_pr_number
+        with self.assertRaises(Exception) as ctx:
+            get_pr_number()
+        self.assertIn("Could not find an active PR", str(ctx.exception))
+
+    @patch('analyze_comments.run_cmd')
+    def test_fetch_pr_data_success(self, mock_run):
+        mock_run.return_value = json.dumps({
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "body": "PR Body",
+                        "headRefName": "feature",
+                        "baseRefName": "main",
+                        "reviewThreads": {
+                            "nodes": [
+                                {
+                                    "id": "thread_1",
+                                    "isResolved": False,
+                                    "isOutdated": False,
+                                    "path": "lib/foo.dart",
+                                    "line": 10,
+                                    "originalLine": 10,
+                                    "comments": {"nodes": []}
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        })
+        from analyze_comments import fetch_pr_data
+        body, head, base, threads = fetch_pr_data("owner", "repo", 123)
+        self.assertEqual(body, "PR Body")
+        self.assertEqual(head, "feature")
+        self.assertEqual(base, "main")
+        self.assertEqual(len(threads), 1)
+        self.assertEqual(threads[0]["id"], "thread_1")
+
+    @patch('analyze_comments.run_cmd')
+    def test_get_modified_lines_with_slash(self, mock_run):
+        mock_run.side_effect = [
+            "merge_base_commit",
+            "diff --git a/lib/foo.dart b/lib/foo.dart\n@@ -10,1 +10,1 @@\n"
+        ]
+        from analyze_comments import get_modified_lines
+        lines = get_modified_lines("origin/feature")
+        self.assertIn("lib/foo.dart", lines)
+
+    def test_truncate_log_keep_all(self):
+        # 101 lines, each contains keyword "error" so all should be kept
+        lines = ["error line" for _ in range(101)]
+        log = "\n".join(lines)
+        from analyze_comments import truncate_log
+        self.assertEqual(truncate_log(log), log)
+
+    @patch('analyze_comments.run_cmd')
+    def test_fetch_failed_checks_logs_no_checks(self, mock_run):
+        mock_run.side_effect = Exception("no checks reported")
+        from analyze_comments import fetch_failed_checks_logs
+        self.assertEqual(fetch_failed_checks_logs(123), [])
+
+    @patch('analyze_comments.run_cmd')
+    def test_fetch_failed_checks_logs_generic_exception(self, mock_run):
+        mock_run.side_effect = Exception("random error")
+        from analyze_comments import fetch_failed_checks_logs
+        self.assertEqual(fetch_failed_checks_logs(123), [])
+
+    @patch('analyze_comments.run_cmd')
+    def test_fetch_failed_checks_logs_run_view_error_and_non_github(self, mock_run):
+        mock_run.side_effect = [
+            json.dumps([
+                {
+                    "name": "check_gha",
+                    "state": "FAILURE",
+                    "bucket": "fail",
+                    "link": "https://github.com/owner/repo/actions/runs/123",
+                    "workflow": "CI GHA"
+                },
+                {
+                    "name": "check_other",
+                    "state": "FAILURE",
+                    "bucket": "fail",
+                    "link": "https://other-ci.com/runs/456",
+                    "workflow": "CI Other"
+                }
+            ]),
+            Exception("gh run view failed")
+        ]
+        from analyze_comments import fetch_failed_checks_logs
+        checks = fetch_failed_checks_logs(123)
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(checks[0]["name"], "check_gha")
+        self.assertIn("Failed to fetch logs", checks[0]["logs"])
+        self.assertEqual(checks[1]["name"], "check_other")
+        self.assertIn("Non-GitHub Actions run", checks[1]["logs"])
+
+    @patch('analyze_comments.get_repo_info', return_value=("owner", "repo"))
+    @patch('analyze_comments.get_pr_number', return_value=123)
+    @patch('analyze_comments.fetch_pr_data')
+    @patch('analyze_comments.get_modified_lines')
+    @patch('analyze_comments.fetch_failed_checks_logs', return_value=[])
+    @patch('analyze_comments.check_if_addressed', return_value="Pending review")
+    def test_analyze_resolved_thread_skipped_and_local_status(self, mock_check_addressed, mock_failed, mock_modified, mock_fetch_pr, mock_pr_num, mock_repo_info):
+        mock_fetch_pr.return_value = (
+            "PR description",
+            "feature-branch",
+            "main",
+            [
+                {
+                    "id": "thread_resolved",
+                    "isResolved": True,
+                    "isOutdated": False,
+                    "path": "lib/foo.dart",
+                    "line": 10,
+                    "originalLine": 10,
+                    "comments": {"nodes": []}
+                },
+                {
+                    "id": "thread_local_mod",
+                    "isResolved": False,
+                    "isOutdated": False,
+                    "path": "lib/bar.dart",
+                    "line": 20,
+                    "originalLine": 20,
+                    "comments": {"nodes": [{"id": "c1", "body": "nit comment", "author": {"login": "rev"}, "createdAt": "2026-06-15", "isMinimized": False}]}
+                }
+            ]
+        )
+        mock_modified.return_value = {"lib/bar.dart": {20}}
+        
+        from analyze_comments import analyze
+        res = analyze(include_all=False)
+        self.assertEqual(len(res["threads"]), 1)
+        self.assertEqual(res["threads"][0]["id"], "thread_local_mod")
+        self.assertEqual(res["threads"][0]["localStatus"], "Modified locally")
+
+    @patch('os.path.exists', return_value=False)
+    @patch('sys.exit')
+    @patch('argparse.ArgumentParser.parse_args')
+    def test_main_directory_not_exists(self, mock_parse_args, mock_exit, mock_exists):
+        def raise_system_exit(code=0):
+            raise SystemExit(code)
+        mock_exit.side_effect = raise_system_exit
+        
+        mock_parse_args.return_value = MagicMock(dir="/nonexistent/path")
+        with patch('builtins.print') as mock_print:
+            from analyze_comments import main
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            mock_print.assert_called()
+            self.assertEqual(cm.exception.code, 1)
+
+    @patch('analyze_comments.analyze', side_effect=Exception("analyze failed"))
+    @patch('os.path.exists', return_value=True)
+    @patch('os.chdir')
+    @patch('sys.exit')
+    @patch('argparse.ArgumentParser.parse_args')
+    def test_main_generic_exception(self, mock_parse_args, mock_exit, mock_chdir, mock_exists, mock_analyze):
+        def raise_system_exit(code=0):
+            raise SystemExit(code)
+        mock_exit.side_effect = raise_system_exit
+        
+        mock_parse_args.return_value = MagicMock(dir=".")
+        with patch('builtins.print') as mock_print:
+            from analyze_comments import main
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            mock_print.assert_called()
+            self.assertEqual(cm.exception.code, 1)
 
 if __name__ == '__main__':
     unittest.main()

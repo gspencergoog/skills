@@ -307,6 +307,29 @@
       box-sizing: border-box;
     }
     
+    .approve-action-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border: none;
+      border-radius: 6px;
+      font-family: inherit;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.2s, transform 0.1s, box-shadow 0.2s;
+      color: white;
+    }
+    .approve-action-btn:hover {
+      opacity: 0.95;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+    .approve-action-btn:active {
+      transform: translateY(0);
+    }
+    
     .checkbox-row {
       display: flex;
       gap: 24px;
@@ -608,13 +631,25 @@
                 <textarea id="instructions-${thread.id}" class="reply-textarea" rows="4" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
               </div>
               
-              <div class="checkbox-row">
-                <label class="checkbox-option">
-                  <input type="checkbox" id="approve-${thread.id}" ${decisions[thread.id].approved ? 'checked' : ''} onchange="updateApproval('${thread.id}', this.checked)">
-                  <strong>Approve Action</strong>
-                </label>
-                <label class="checkbox-option">
-                  <input type="checkbox" id="resolve-${thread.id}" checked onchange="updateResolve('${thread.id}', this.checked)">
+              <div class="checkbox-row" style="align-items: center;">
+                <button 
+                  type="button"
+                  id="approve-btn-${thread.id}" 
+                  class="approve-action-btn ${decisions[thread.id].approved ? 'approved' : ''}" 
+                  onclick="toggleApproval('${thread.id}')"
+                  style="
+                    background-color: ${decisions[thread.id].approved ? '#10b981' : '#3b82f6'};
+                  "
+                >
+                  <span id="approve-icon-${thread.id}" style="font-size: 1.1rem; display: flex; align-items: center;">
+                    ${decisions[thread.id].approved ? '☑' : '☐'}
+                  </span>
+                  <span id="approve-text-${thread.id}">
+                    ${decisions[thread.id].approved ? 'Action Approved' : 'Approve Action'}
+                  </span>
+                </button>
+                <label class="checkbox-option" style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-light);">
+                  <input type="checkbox" id="resolve-${thread.id}" checked onchange="updateResolve('${thread.id}', this.checked)" style="cursor: pointer;">
                   Mark thread resolved
                 </label>
               </div>
@@ -668,6 +703,211 @@
       }
     }
 
+    function toggleApproval(threadId) {
+      const isApproved = !decisions[threadId].approved;
+      
+      const btn = document.getElementById(`approve-btn-${threadId}`);
+      const icon = document.getElementById(`approve-icon-${threadId}`);
+      const text = document.getElementById(`approve-text-${threadId}`);
+      
+      if (isApproved) {
+        btn.classList.add("approved");
+        btn.style.backgroundColor = "#10b981"; // Green
+        icon.textContent = "☑";
+        text.textContent = "Action Approved";
+      } else {
+        btn.classList.remove("approved");
+        btn.style.backgroundColor = "#3b82f6"; // Blue
+        icon.textContent = "☐";
+        text.textContent = "Approve Action";
+      }
+      
+      updateApproval(threadId, isApproved);
+    }
+
+    function renderSummaryPage(decisionList) {
+      const approved = decisionList.filter(d => d.approved);
+      const unapproved = decisionList.filter(d => !d.approved);
+      
+      const getThreadDetails = (id) => {
+        const thread = feedbackData.threads.find(t => t.id === id);
+        if (thread) {
+          const firstComment = thread.comments && thread.comments.length > 0 ? thread.comments[0].body : "";
+          const commentSnippet = firstComment.length > 120 ? firstComment.substring(0, 120) + "..." : firstComment;
+          return {
+            path: thread.path,
+            line: thread.line || thread.originalLine,
+            comment: commentSnippet
+          };
+        }
+        return { path: "Unknown File", line: "", comment: "" };
+      };
+      
+      let approvedCardsHtml = "";
+      if (approved.length > 0) {
+        approvedCardsHtml = approved.map(d => {
+          const details = getThreadDetails(d.threadId);
+          
+          const actionLabels = {
+            accept: "Accept proposed fix",
+            clarify: "Request clarification",
+            decline: "Decline/Ignore comment"
+          };
+          const actionText = actionLabels[d.action] || d.action;
+          
+          return `
+            <div style="
+              background-color: #1a1e26;
+              border: 1px solid #2d3340;
+              border-radius: 8px;
+              padding: 1rem;
+              display: flex;
+              flex-direction: column;
+              gap: 0.5rem;
+              text-align: left;
+            ">
+              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
+                <h4 style="font-size: 0.925rem; font-weight: 600; color: #f3f4f6; margin: 0;">
+                  ${details.path}${details.line ? ':' + details.line : ''}
+                </h4>
+                <span style="background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 0.15rem 0.4rem; border-radius: 4px; color: #34d399; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
+                  Approved
+                </span>
+              </div>
+              <p style="font-size: 0.825rem; color: #9ca3af; margin: 0; font-style: italic; line-height: 1.4;">
+                "${escapeHtml(details.comment)}"
+              </p>
+              <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; margin-top: 0.25rem;">
+                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+                  Action: <strong>${actionText}</strong>
+                </span>
+                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+                  Resolve Thread: <strong>${d.resolve ? 'Yes' : 'No'}</strong>
+                </span>
+              </div>
+              ${d.reply ? `
+                <div style="
+                  background-color: #0f1115;
+                  border-radius: 4px;
+                  padding: 0.5rem 0.75rem;
+                  font-size: 0.8rem;
+                  color: #9ca3af;
+                  margin-top: 0.25rem;
+                  border-left: 2px solid #3b82f6;
+                  white-space: nowrap;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                ">
+                  <strong>Draft Reply:</strong> "${escapeHtml(d.reply)}"
+                </div>
+              ` : ''}
+              ${d.agentInstructions ? `
+                <div style="
+                  background-color: #0f1115;
+                  border-radius: 4px;
+                  padding: 0.5rem 0.75rem;
+                  font-size: 0.8rem;
+                  color: #a5b4fc;
+                  margin-top: 0.25rem;
+                  border-left: 2px solid #6366f1;
+                  white-space: nowrap;
+                  overflow: hidden;
+                  text-overflow: ellipsis;
+                ">
+                  <strong>Agent Instructions:</strong> "${escapeHtml(d.agentInstructions)}"
+                </div>
+              ` : ''}
+            </div>
+          `;
+        }).join("");
+      } else {
+        approvedCardsHtml = `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">No feedback actions were approved in this session.</p>`;
+      }
+      
+      let unapprovedCardsHtml = "";
+      if (unapproved.length > 0) {
+        unapprovedCardsHtml = unapproved.map(d => {
+          const details = getThreadDetails(d.threadId);
+          return `
+            <div style="
+              background-color: #1a1e26;
+              border: 1px solid #2d3340;
+              border-radius: 8px;
+              padding: 0.85rem 1rem;
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              gap: 1rem;
+              text-align: left;
+            ">
+              <h4 style="font-size: 0.9rem; font-weight: 500; color: #9ca3af; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">
+                ${details.path}${details.line ? ':' + details.line : ''}
+              </h4>
+              <span style="
+                font-size: 0.75rem;
+                font-weight: 600;
+                padding: 0.15rem 0.4rem;
+                border-radius: 4px;
+                background-color: #2d3340;
+                color: #9ca3af;
+                text-transform: uppercase;
+              ">Not Approved</span>
+            </div>
+          `;
+        }).join("");
+      } else {
+        unapprovedCardsHtml = `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">All feedback actions were approved.</p>`;
+      }
+      
+      document.body.innerHTML = `
+        <div style="
+          min-height: 100vh;
+          background-color: #0f1115;
+          color: #f3f4f6;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 3rem 2rem;
+          overflow-y: auto;
+        ">
+          <!-- Header -->
+          <div style="text-align: center; margin-bottom: 2.5rem; max-width: 36rem;">
+            <div style="font-size: 4.5rem; margin-bottom: 1rem; line-height: 1;">🎉</div>
+            <h2 style="font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem 0; background: linear-gradient(135deg, #60a5fa, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Review Submitted!</h2>
+            <p style="color: #9ca3af; font-size: 0.95rem; line-height: 1.5; margin: 0;">You can close this tab now. The agent is resuming in the background to apply the approved changes. A summary is shown below.</p>
+          </div>
+          
+          <!-- Summary Content Grid -->
+          <div style="width: 100%; max-width: 48rem; display: flex; flex-direction: column; gap: 2.5rem;">
+            
+            <!-- Section 1: Approved Actions -->
+            <div>
+              <h3 style="font-size: 1.05rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #60a5fa; border-bottom: 1px solid #2d3340; padding-bottom: 0.5rem; margin: 0 0 1rem 0; display: flex; justify-content: space-between; align-items: center;">
+                <span>Approved Actions</span>
+                <span style="font-size: 0.8rem; background-color: rgba(59, 130, 246, 0.15); padding: 0.1rem 0.5rem; border-radius: 12px; color: #93c5fd;">${approved.length}</span>
+              </h3>
+              <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                ${approvedCardsHtml}
+              </div>
+            </div>
+            
+            <!-- Section 2: Not Approved -->
+            <div>
+              <h3 style="font-size: 1.05rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #9ca3af; border-bottom: 1px solid #2d3340; padding-bottom: 0.5rem; margin: 0 0 1rem 0; display: flex; justify-content: space-between; align-items: center;">
+                <span>Actions Not Approved</span>
+                <span style="font-size: 0.8rem; background-color: rgba(156, 163, 175, 0.15); padding: 0.1rem 0.5rem; border-radius: 12px; color: #d1d5db;">${unapproved.length}</span>
+              </h3>
+              <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+                ${unapprovedCardsHtml}
+              </div>
+            </div>
+            
+          </div>
+        </div>
+      `;
+    }
+
     function updateResolve(threadId, val) {
       decisions[threadId].resolve = val;
     }
@@ -677,7 +917,6 @@
     }
 
     document.getElementById('save-all').addEventListener('click', async () => {
-      // Validate approvals: make sure approved cards actually have values filled in
       const list = Object.keys(decisions).map(id => ({
         threadId: id,
         ...decisions[id]
@@ -689,7 +928,7 @@
           headers: {
             'Content-Type': 'application/json'
           },
-          body: jsonPayload = JSON.stringify({
+          body: JSON.stringify({
             repo: feedbackData.repo,
             pr: feedbackData.pr,
             decisions: list
@@ -700,12 +939,7 @@
           throw new Error('Failed to save decisions to workspace');
         }
         
-        document.body.innerHTML = `
-          <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
-            <h1 style="color: var(--success-color);">Plan Saved!</h1>
-            <p>You can close this tab now. The agent is resuming to apply changes.</p>
-          </div>
-        `;
+        renderSummaryPage(list);
       } catch (err) {
         alert('Error saving plan: ' + err.message);
       }

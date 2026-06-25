@@ -5,12 +5,6 @@ import os
 import json
 import subprocess
 
-# Append scripts folder
-script_dir = os.path.dirname(os.path.abspath(__file__))
-scripts_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-if scripts_dir not in sys.path:
-    sys.path.append(scripts_dir)
-
 import orchestrator
 
 class TestOrchestrator(unittest.TestCase):
@@ -318,6 +312,134 @@ class TestOrchestrator(unittest.TestCase):
     def test_main_verify(self, mock_verify):
         orchestrator.main()
         mock_verify.assert_called_once()
+
+    # --- Additional Coverage Tests to cover >90% ---
+
+    @patch("os.path.exists", return_value=True)
+    @patch("orchestrator.subprocess.run")
+    @patch("shutil.rmtree")
+    def test_setup_worktree_exists(self, mock_rmtree, mock_run, mock_exists):
+        orchestrator.setup_worktree("/workspace", "my-branch", "/wt/path")
+        mock_run.assert_any_call(["git", "worktree", "remove", "--force", os.path.abspath("/wt/path")], cwd=os.path.abspath("/workspace"), stderr=subprocess.DEVNULL)
+        mock_rmtree.assert_called_once_with(os.path.abspath("/wt/path"), ignore_errors=True)
+
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.open", new_callable=mock_open, read_data='{"metrics": []}')
+    def test_load_metrics_config_success(self, mock_file, mock_exists):
+        config = orchestrator.load_metrics_config("config.json")
+        self.assertEqual(config, {"metrics": []})
+
+    def test_compare_metrics_edge_cases(self):
+        config = {
+            "metrics": [
+                {"name": "latency", "type": "float", "higher_is_better": False, "priority": 1},
+                {"name": "throughput", "type": "float", "higher_is_better": True, "priority": 2}
+            ]
+        }
+        self.assertFalse(orchestrator.compare_metrics({"latency": None}, {"latency": None}, config))
+        self.assertFalse(orchestrator.compare_metrics({"latency": None}, {"latency": 0.5}, config))
+        self.assertTrue(orchestrator.compare_metrics({"latency": 0.5}, {"latency": None}, config))
+
+    @patch("builtins.open")
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.print")
+    def test_update_history_files_json_load_failure(self, mock_print, mock_exists, mock_file):
+        def mock_open_impl(path, mode="r"):
+            if "r" in mode:
+                raise Exception("Read error")
+            return mock_open().return_value
+        mock_file.side_effect = mock_open_impl
+        
+        step_entry = {"step": 1, "timestamp": "now", "base_branch": "main", "baseline_metrics": {"latency": 0.5}}
+        orchestrator.update_history_files(".", "history.json", "history.md", step_entry)
+        mock_print.assert_any_call("Warning: Failed to load history JSON: Read error")
+
+    @patch("builtins.open")
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.print")
+    def test_update_history_files_md_write_failure(self, mock_print, mock_exists, mock_open_file):
+        mock_open_file.side_effect = [
+            mock_open(read_data="[]").return_value,
+            mock_open().return_value,
+            Exception("Write error")
+        ]
+        step_entry = {"step": 1, "timestamp": "now", "base_branch": "main", "baseline_metrics": {"latency": "not-a-float"}}
+        orchestrator.update_history_files(".", "history.json", "history.md", step_entry)
+        mock_print.assert_any_call("Warning: Failed to generate history Markdown: Write error")
+
+    @patch("os.path.expanduser")
+    @patch("os.makedirs", side_effect=Exception("Disk full"))
+    @patch("builtins.print")
+    def test_register_sidecar_dashboard_exception(self, mock_print, mock_makedirs, mock_expanduser):
+        mock_expanduser.return_value = "/fake/home"
+        orchestrator.register_sidecar_dashboard(".")
+        mock_print.assert_any_call("Warning: Could not register Sidecar Dashboard: Disk full")
+
+    @patch("orchestrator.register_sidecar_dashboard")
+    @patch("orchestrator.update_history_files")
+    @patch("orchestrator.get_git_diff", return_value="diff")
+    @patch("orchestrator.load_metrics_config")
+    @patch("orchestrator.subprocess.run")
+    @patch("builtins.open", new_callable=mock_open)
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.print")
+    def test_do_select_merge_failure(self, mock_print, mock_exists, mock_open_file, mock_sub, mock_load_config, mock_diff, mock_update, mock_register):
+        file_contents = {
+            "./optimization_baseline.json": '{"latency": 0.5}',
+            "./tmp/candidates_eval_results.json": '{"branch1": {"metrics": {"latency": 0.1}, "log_path": "log"}}',
+            "./tmp/candidates_commentary.json": '{"branch1": "Rational comment"}',
+            "./optimization_history.json": '[]'
+        }
+        def mock_open_impl(path, mode="r"):
+            return mock_open(read_data=file_contents.get(path, "[]")).return_value
+        mock_open_file.side_effect = mock_open_impl
+        mock_load_config.return_value = {"metrics": [{"name": "latency", "type": "float", "higher_is_better": False, "priority": 1}]}
+        
+        mock_sub.side_effect = [
+            None,
+            subprocess.CalledProcessError(1, "git merge"),
+            None
+        ]
+        
+        args = MagicMock()
+        args.workspace = "."
+        args.base_branch = "main"
+        args.metrics_config = "config.json"
+        
+        orchestrator.do_select(args)
+        
+        mock_print.assert_any_call("Error merging winning branch 'branch1': Command 'git merge' returned non-zero exit status 1.")
+        mock_sub.assert_any_call(["git", "merge", "--abort"], cwd=".", stderr=subprocess.DEVNULL)
+
+    @patch("orchestrator.register_sidecar_dashboard")
+    @patch("orchestrator.update_history_files")
+    @patch("orchestrator.get_git_diff", return_value="diff")
+    @patch("orchestrator.load_metrics_config")
+    @patch("orchestrator.subprocess.run")
+    @patch("builtins.open", new_callable=mock_open)
+    @patch("os.path.exists", return_value=True)
+    @patch("builtins.print")
+    def test_do_select_commentary_load_failure(self, mock_print, mock_exists, mock_open_file, mock_sub, mock_load_config, mock_diff, mock_update, mock_register):
+        file_contents = {
+            "./optimization_baseline.json": '{"latency": 0.5}',
+            "./tmp/candidates_eval_results.json": '{"branch1": {"metrics": {"latency": 0.1}, "log_path": "log"}}',
+            "./tmp/candidates_commentary.json": '{invalid json',
+            "./optimization_history.json": '[]'
+        }
+        def mock_open_impl(path, mode="r"):
+            return mock_open(read_data=file_contents.get(path, "[]")).return_value
+        mock_open_file.side_effect = mock_open_impl
+        mock_load_config.return_value = {"metrics": [{"name": "latency", "type": "float", "higher_is_better": False, "priority": 1}]}
+        
+        args = MagicMock()
+        args.workspace = "."
+        args.base_branch = "main"
+        args.metrics_config = "config.json"
+        
+        orchestrator.do_select(args)
+        # Verify it printed warning for failing to load commentary
+        printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0] and isinstance(call[0][0], str)])
+        self.assertIn("Warning: Failed to load commentary JSON", printed)
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,12 +4,6 @@ import sys
 import os
 import json
 
-# Append scripts folder
-script_dir = os.path.dirname(os.path.abspath(__file__))
-scripts_dir = os.path.abspath(os.path.join(script_dir, "../scripts"))
-if scripts_dir not in sys.path:
-    sys.path.append(scripts_dir)
-
 import container_runner
 
 class TestContainerRunner(unittest.TestCase):
@@ -213,6 +207,132 @@ class TestContainerRunner(unittest.TestCase):
     def test_main_error(self, mock_run):
         with self.assertRaises(SystemExit):
             container_runner.main()
+
+    # --- Additional Coverage Tests to cover >90% ---
+
+    def test_parse_metrics_no_config_path(self):
+        self.assertEqual(container_runner.parse_metrics(".", "stdout", "", None), {})
+
+    @patch("os.path.exists", return_value=False)
+    @patch("builtins.print")
+    def test_parse_metrics_config_file_not_found(self, mock_print, mock_exists):
+        self.assertEqual(container_runner.parse_metrics(".", "stdout", "", "missing_config.json"), {})
+        mock_print.assert_called()
+
+    @patch("builtins.open", new_callable=mock_open, read_data='{"metrics": [{"name": "latency", "source": "stdout", "regex": "([0-9.]+)"}]}')
+    @patch("os.path.exists", return_value=True)
+    def test_parse_metrics_config_file_success(self, mock_exists, mock_open_file):
+        metrics = container_runner.parse_metrics(".", "0.123", "", "config.json")
+        self.assertEqual(metrics.get("latency"), 0.123)
+
+    @patch("builtins.open", new_callable=mock_open, read_data='{"latency": 0.5}')
+    @patch("os.path.exists", return_value=True)
+    def test_parse_metrics_json_no_json_path(self, mock_exists, mock_file):
+        config = {
+            "metrics": [
+                {
+                    "name": "all_data",
+                    "type": "str",
+                    "source": "file",
+                    "file_path": "metrics.json"
+                }
+            ]
+        }
+        metrics = container_runner.parse_metrics(".", "", "", config)
+        self.assertEqual(metrics.get("all_data"), "{'latency': 0.5}")
+
+    @patch("os.path.getmtime")
+    @patch("glob.glob")
+    @patch("zipfile.ZipFile")
+    def test_parse_metrics_inspect_eval_zip_more_paths(self, mock_zip, mock_glob, mock_getmtime):
+        mock_glob.return_value = ["/workspace/eval.zip"]
+        mock_getmtime.return_value = 12345.0
+        
+        mock_zip_instance = MagicMock()
+        mock_summaries_data = """[
+            {
+                "scores": {
+                    "measured_model_graded_qa": {
+                        "value": "C"
+                    }
+                },
+                "model_usage": {
+                    "gemini-2.0-flash": {
+                        "input_tokens": 100,
+                        "output_tokens": 200
+                    }
+                }
+            },
+            {
+                "scores": {
+                    "measured_model_graded_qa": {
+                        "value": "P"
+                    }
+                },
+                "model_usage": {
+                    "gemini-2.0-flash": {
+                        "input_tokens": 150,
+                        "output_tokens": 250
+                    }
+                }
+            }
+        ]"""
+        mock_zip_instance.read.return_value = mock_summaries_data.encode("utf-8")
+        mock_zip.return_value.__enter__.return_value = mock_zip_instance
+
+        config = {
+          "metrics": [
+            {
+              "name": "mean_qa_score",
+              "type": "float",
+              "source": "inspect_eval_zip",
+              "file_path": "logs/*.eval",
+              "json_path": "mean_qa_score"
+            },
+            {
+              "name": "total_input_tokens",
+              "type": "int",
+              "source": "inspect_eval_zip",
+              "file_path": "logs/*.eval",
+              "json_path": "total_input_tokens"
+            },
+            {
+              "name": "total_output_tokens",
+              "type": "int",
+              "source": "inspect_eval_zip",
+              "file_path": "logs/*.eval",
+              "json_path": "total_output_tokens"
+            }
+          ]
+        }
+
+        metrics = container_runner.parse_metrics(".", "", "", config)
+        self.assertEqual(metrics.get("mean_qa_score"), 0.75)
+        self.assertEqual(metrics.get("total_input_tokens"), 250)
+        self.assertEqual(metrics.get("total_output_tokens"), 450)
+
+    @patch("os.path.getmtime")
+    @patch("glob.glob")
+    @patch("zipfile.ZipFile")
+    @patch("builtins.print")
+    def test_parse_metrics_inspect_eval_zip_exception(self, mock_print, mock_zip, mock_glob, mock_getmtime):
+        mock_glob.return_value = ["/workspace/eval.zip"]
+        mock_zip.side_effect = Exception("Zip error")
+        
+        config = {
+          "metrics": [
+            {
+              "name": "mean_score",
+              "type": "float",
+              "source": "inspect_eval_zip",
+              "file_path": "logs/*.eval",
+              "json_path": "mean_a2ui_score"
+            }
+          ]
+        }
+        metrics = container_runner.parse_metrics(".", "", "", config)
+        self.assertEqual(metrics, {})
+        mock_print.assert_called()
 
 if __name__ == '__main__':
     unittest.main()

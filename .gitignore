@@ -1,0 +1,9 @@
+.DS_Store
+timestamps.json
+knowledge.lock
+.dart_tool/
+__pycache__/
+.sem/
+*.pyc
+*.pyo
+.coverage*
