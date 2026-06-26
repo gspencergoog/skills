@@ -72,17 +72,14 @@ Once the background task completes, check the result:
 
 Once the approved code changes are successfully pushed:
 
-1. **Submit Reply Comments**: For each approved item in `decisions` where a reply comment is specified:
-   - Call `scripts/reply_thread.py` with the thread ID and the draft reply body.
+1. **Submit Replies and Resolve Threads**: For each approved item in `decisions`:
+   - Call `scripts/update_thread.py` with the thread ID, passing `--reply "<reply-body>"` if a reply is specified, and/or `--resolve` if `resolve: true`.
    - Ensure the reply content matches the user-approved text from `feedback_state.json`.
-2. **Resolve Review Threads**: For each approved item where `resolve: true`:
-   - Call `scripts/resolve_thread.py` with the thread ID to mark the thread resolved on GitHub.
 
 ---
 
 ## Bundled Resources
 
-- **`scripts/reply_thread.py`**: Sends replies to a specific PR review thread ID.
-- **`scripts/resolve_thread.py`**: Resolves a specific PR review thread ID.
+- **`scripts/update_thread.py`**: Sends replies to and/or resolves a specific PR review thread ID.
 - **`scripts/launch_dashboard.py`**: Standalone dashboard launcher that starts a local server and opens the browser, blocking until saved or aborted.
 - **`assets/pr_feedback.html`**: HTML dashboard template used by the launcher.
