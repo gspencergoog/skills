@@ -11,7 +11,7 @@ This skill guides the process of ensuring code health and crafting a conventiona
 
 Before committing, ensure all intended files are staged and that you understand the changes being committed.
 
-1.  **Stage Changes**: Prefer the `mcp_git_git_add_or_commit` tool (with `action: 'add'`) to stage files. If the MCP tool is not available, use the standard CLI command `git add <files>`.
+1.  **Stage Changes**: Use the standard CLI command `git add <files>`.
 2.  **Verify Integrity**: Perform language-specific checks. **Read the relevant reference file for detailed instructions**:
     - **Dart / Flutter**: [references/dart.md](references/dart.md)
     - **JS / TS / Angular**: [references/javascript.md](references/javascript.md)
@@ -20,7 +20,7 @@ Before committing, ensure all intended files are staged and that you understand 
 3.  **Review**:
     - Check diffs (`git diff --cached | cat`).
     - Review comments for clarity and "why" vs "what".
-4.  **Confirm**: Get user approval for the plan/message.
+4.  **Confirm**: Get user approval for the plan/message. Use the ask_question tool to ask the user if they approve of the plan/message.
 5.  **Commit**:
-    - Prefer the `mcp_git_git_add_or_commit` tool (or `git_add_or_commit`) with `action: 'commit'` and providing a message to commit changes. If the MCP tool is not available, use the standard CLI command `git commit -m "<message>"`.
+    - Use the standard CLI command `git commit -m "<message>"`.
     - Message Format: Follow [references/conventional_commits.md](references/conventional_commits.md).

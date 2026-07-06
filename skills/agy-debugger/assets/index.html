@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Debugger</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <style>
+    :root {
+      --bg-color: #0b0f19;
+      --panel-bg: #151d30;
+      --card-bg: #1e2942;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --success: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --border-color: #2e3d60;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* App Layout & Sidebar */
+    .app-container {
+      display: flex;
+      flex: 1;
+      height: calc(100vh - 73px); /* 73px is header height */
+      overflow: hidden;
+      width: 100%;
+    }
+
+    .sidebar {
+      width: 320px;
+      background-color: var(--panel-bg);
+      border-right: 1px solid var(--border-color);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+
+    .sidebar-header {
+      padding: 1rem 1.5rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .sidebar-header select {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      color: var(--text-main);
+      font-size: 0.75rem;
+      padding: 0.125rem 0.25rem;
+      border-radius: 0.25rem;
+      outline: none;
+      cursor: pointer;
+    }
+
+    .tab-list {
+      display: flex;
+      flex-direction: column;
+      padding: 0.75rem;
+      gap: 0.25rem;
+    }
+
+    .tab-item {
+      padding: 0.75rem 1rem;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      transition: all 0.15s ease;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border: 1px solid transparent;
+      user-select: none;
+    }
+
+    .tab-item:hover {
+      background-color: rgba(255, 255, 255, 0.03);
+      color: var(--text-main);
+    }
+
+    .tab-item.active {
+      background-color: rgba(59, 130, 246, 0.08);
+      color: var(--primary);
+      border-color: rgba(59, 130, 246, 0.15);
+      font-weight: 500;
+    }
+
+    /* Header & Control Panel */
+    header {
+      background-color: var(--panel-bg);
+      border-bottom: 1px solid var(--border-color);
+      padding: 1rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 10;
+    }
+
+    .title-group h1 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      letter-spacing: -0.025em;
+    }
+
+    .title-group p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.375rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      background-color: rgba(59, 130, 246, 0.1);
+      color: var(--primary);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+    }
+
+    .status-badge.paused {
+      background-color: rgba(245, 158, 11, 0.1);
+      color: var(--warning);
+      border: 1px solid rgba(245, 158, 11, 0.2);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .btn {
+      font-family: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      padding: 0.5rem 1rem;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      border: none;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .btn-primary {
+      background-color: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background-color: var(--primary-hover);
+    }
+
+    .btn-danger {
+      background-color: var(--danger);
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background-color: #dc2626;
+    }
+
+    /* Log Stream Container */
+    .log-area {
+      flex: 1;
+      padding: 2rem;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+      width: 100%;
+    }
+
+    /* Log Cards */
+    .card {
+      background-color: var(--card-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 0.5rem;
+      padding: 1.25rem;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      transition: border-color 0.2s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(59, 130, 246, 0.4);
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+
+    .card-type-thought {
+      color: var(--primary);
+    }
+
+    .card-type-tool {
+      color: var(--success);
+    }
+
+    .card-timestamp {
+      color: var(--text-muted);
+    }
+
+    .card-body {
+      font-size: 0.95rem;
+      line-height: 1.5;
+    }
+
+    .thought-text {
+      white-space: pre-wrap;
+    }
+
+    .thought-markdown {
+      line-height: 1.6;
+      font-size: 0.95rem;
+    }
+    .thought-markdown p {
+      margin-bottom: 0.75rem;
+    }
+    .thought-markdown p:last-child {
+      margin-bottom: 0;
+    }
+    .thought-markdown code {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      background-color: var(--bg-color);
+      padding: 0.125rem 0.25rem;
+      border-radius: 0.25rem;
+      color: #f3f4f6;
+    }
+    .thought-markdown pre {
+      background-color: var(--bg-color);
+      padding: 0.75rem;
+      border-radius: 0.25rem;
+      border: 1px solid var(--border-color);
+      overflow-x: auto;
+      margin: 0.75rem 0;
+    }
+    .thought-markdown pre code {
+      padding: 0;
+      background-color: transparent;
+    }
+    .thought-markdown ul, .thought-markdown ol {
+      margin-left: 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .thought-markdown li {
+      margin-bottom: 0.25rem;
+    }
+
+    .tool-info {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.85rem;
+      background-color: var(--bg-color);
+      padding: 0.75rem;
+      border-radius: 0.25rem;
+      border: 1px solid var(--border-color);
+      overflow-x: auto;
+      margin-top: 0.5rem;
+      white-space: pre-wrap;
+    }
+
+    .json-key { color: #f92672; font-weight: 500; }
+    .json-string { color: #a6e22e; }
+    .json-number { color: #ae81ff; }
+    .json-boolean { color: #66d9ef; font-weight: bold; }
+    .json-null { color: #fd971f; }
+
+    .tool-outputs {
+      margin-top: 0.75rem;
+      border-top: 1px solid var(--border-color);
+      padding-top: 0.75rem;
+    }
+
+    .tool-output-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      user-select: none;
+    }
+
+    .tool-output-content {
+      display: none;
+      margin-top: 0.5rem;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      background-color: rgba(0, 0, 0, 0.3);
+      padding: 0.75rem;
+      border-radius: 0.25rem;
+      white-space: pre-wrap;
+      max-height: 300px;
+      overflow-y: auto;
+      border: 1px solid var(--border-color);
+    }
+
+    .tool-output-content.expanded {
+      display: block;
+    }
+
+
+    /* Scrollbar */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: var(--bg-color);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border-color);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(59, 130, 246, 0.4);
+    }
+    ::-webkit-scrollbar-corner {
+      background: var(--bg-color);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="title-group">
+      <h1>Antigravity Auditor & Debugger</h1>
+      <p id="sub-title">Monitoring execution loop...</p>
+    </div>
+    <div class="controls">
+      <div id="status-badge" class="status-badge">Running</div>
+      <button id="btn-pause" class="btn btn-danger" onclick="pauseDebugger()">Pause Execution</button>
+      <button id="btn-resume" class="btn btn-primary" style="display:none;" onclick="resumeDebugger()">Resume Execution</button>
+    </div>
+  </header>
+
+  <div class="app-container">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span>Conversations</span>
+        <select id="select-limit" onchange="changeLimit(this.value)">
+          <option value="10" selected>10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+      </div>
+      <div id="tab-list" class="tab-list">
+        <!-- Tabs will append here -->
+      </div>
+    </aside>
+    <main id="log-container" class="log-area">
+      <!-- Logs will append here -->
+    </main>
+  </div>
+
+  <script>
+    const logContainer = document.getElementById('log-container');
+    const statusBadge = document.getElementById('status-badge');
+    const btnPause = document.getElementById('btn-pause');
+    const btnResume = document.getElementById('btn-resume');
+
+    let selectedConversationId = null;
+    let eventSource = null;
+
+    function connectSSE(id) {
+      if (eventSource) {
+        eventSource.close();
+      }
+      
+      const url = id ? `/stream?conversationId=${id}` : '/stream';
+      eventSource = new EventSource(url);
+
+      eventSource.onmessage = function(event) {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'connected') {
+            return;
+          }
+
+          if (data.type === 'active_conversation') {
+            const convId = data.conversationId;
+            const title = data.title || convId;
+            addConversationOption(convId, title, true);
+            if (!selectedConversationId) {
+              switchConversation(convId);
+            }
+            return;
+          }
+
+          if (data.type === 'state_change') {
+            updateUIState(data.state);
+            return;
+          }
+
+          // Render new step from file stream
+          renderLogCard(data);
+        } catch (err) {
+          console.error('Error parsing event data:', err);
+        }
+      };
+
+      eventSource.onerror = function() {
+        console.log('SSE connection lost. Retrying...');
+      };
+    }
+
+    function loadConversations() {
+      const selectLimit = document.getElementById('select-limit');
+      const limit = selectLimit ? selectLimit.value : '10';
+      fetch(`/conversations?limit=${limit}`)
+        .then(res => res.json())
+        .then(items => {
+          const tabList = document.getElementById('tab-list');
+          tabList.innerHTML = '';
+          items.forEach(item => {
+            addConversationOption(item.id, item.title, false);
+          });
+          if (items.length > 0 && !selectedConversationId) {
+            switchConversation(items[0].id);
+          }
+        })
+        .catch(err => console.error('Error loading conversations:', err));
+    }
+
+    function addConversationOption(id, title, insertAtTop = false) {
+      if (!title) title = id;
+      const tabList = document.getElementById('tab-list');
+      const existingTab = tabList.querySelector(`[data-id="${id}"]`);
+      if (existingTab) {
+        if (existingTab.textContent === id && title !== id) {
+          existingTab.textContent = title;
+          existingTab.title = title;
+        }
+        if (id === selectedConversationId) {
+          existingTab.classList.add('active');
+        } else {
+          existingTab.classList.remove('active');
+        }
+        if (insertAtTop) {
+          tabList.insertBefore(existingTab, tabList.firstChild);
+        }
+        return;
+      }
+      const tab = document.createElement('div');
+      tab.className = 'tab-item';
+      if (id === selectedConversationId) {
+        tab.classList.add('active');
+      }
+      tab.setAttribute('data-id', id);
+      tab.textContent = title;
+      tab.title = title;
+      tab.onclick = function() {
+        switchConversation(id);
+      };
+      
+      if (insertAtTop) {
+        tabList.insertBefore(tab, tabList.firstChild);
+      } else {
+        tabList.appendChild(tab);
+      }
+
+      // Trim list to match limit
+      const selectLimit = document.getElementById('select-limit');
+      const limit = selectLimit ? parseInt(selectLimit.value, 10) : 10;
+      while (tabList.children.length > limit) {
+        tabList.removeChild(tabList.lastChild);
+      }
+    }
+
+    function changeLimit(val) {
+      loadConversations();
+    }
+
+    function switchConversation(id) {
+      selectedConversationId = id;
+      logContainer.innerHTML = '';
+      if (!id) return;
+
+      const tabs = document.querySelectorAll('.tab-item');
+      tabs.forEach(tab => {
+        if (tab.getAttribute('data-id') === id) {
+          tab.classList.add('active');
+        } else {
+          tab.classList.remove('active');
+        }
+      });
+      
+      fetch(`/logs?conversationId=${id}`)
+        .then(res => res.json())
+        .then(logs => {
+          logs.forEach(renderLogCard);
+          connectSSE(id);
+        })
+        .catch(err => console.error('Error fetching logs:', err));
+    }
+
+    function updateUIState(state) {
+      if (state === 'paused') {
+        statusBadge.textContent = 'Paused';
+        statusBadge.className = 'status-badge paused';
+        btnPause.style.display = 'none';
+        btnResume.style.display = 'inline-flex';
+      } else {
+        statusBadge.textContent = 'Running';
+        statusBadge.className = 'status-badge';
+        btnPause.style.display = 'inline-flex';
+        btnResume.style.display = 'none';
+      }
+    }
+
+    function syntaxHighlight(json) {
+      if (typeof json !== 'string') {
+        json = JSON.stringify(json, null, 2);
+      }
+      let escaped = json
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+      return escaped.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, function (match) {
+        let cls = 'json-number';
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'json-key';
+          } else {
+            cls = 'json-string';
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'json-boolean';
+        } else if (/null/.test(match)) {
+          cls = 'json-null';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      });
+    }
+
+    function renderLogCard(step) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const timestamp = step.created_at ? new Date(step.created_at).toLocaleTimeString() : new Date().toLocaleTimeString();
+
+      // 1. User Input
+      if (step.type === 'USER_INPUT') {
+        card.innerHTML = `
+          <div class="card-header card-type-user" style="color: #66d9ef;">
+            <span>User Input</span>
+            <span class="card-timestamp">${timestamp}</span>
+          </div>
+          <div class="card-body thought-text" style="font-weight: 500;">${escapeHtml(step.content || '')}</div>
+        `;
+      }
+      // 2. Model Planner Response (Thinking + Tool Calls)
+      else if (step.type === 'PLANNER_RESPONSE') {
+        let toolCallsHtml = '';
+        if (step.tool_calls && step.tool_calls.length > 0) {
+          step.tool_calls.forEach(tc => {
+            let tcName = tc.name;
+            let tcArgs = tc.args;
+            if (typeof tcArgs === 'string') {
+              try { tcArgs = JSON.parse(tcArgs); } catch(e){}
+            }
+            toolCallsHtml += `
+              <div class="tool-call-section" style="margin-top: 0.75rem;">
+                <div><strong>Tool Call:</strong> <span style="color: var(--success); font-weight: bold;">${escapeHtml(tcName)}</span></div>
+                <pre class="tool-info">${syntaxHighlight(tcArgs)}</pre>
+              </div>
+            `;
+          });
+        }
+
+        let contentHtml = '';
+        if (step.content) {
+          contentHtml = `<div class="thought-text" style="margin-top: 0.5rem; border-top: 1px solid var(--border-color); padding-top: 0.5rem;">${escapeHtml(step.content)}</div>`;
+        }
+
+        card.innerHTML = `
+          <div class="card-header card-type-thought">
+            <span>Agent Thought</span>
+            <span class="card-timestamp">${timestamp}</span>
+          </div>
+          <div class="card-body">
+            ${step.thinking ? `<div class="thought-markdown" style="color: var(--text-muted);">${marked.parse(step.thinking)}</div>` : ''}
+            ${toolCallsHtml}
+            ${contentHtml}
+          </div>
+        `;
+      }
+      // 3. Checkpoint & Ephemeral Messages
+      else if (step.type === 'CHECKPOINT' || step.type === 'EPHEMERAL_MESSAGE') {
+        return; 
+      }
+      // 4. Tool outputs / other steps
+      else {
+        let outputText = step.content || '';
+        outputText = outputText.split('\n').map(line => line.replace(/^\t+/, '')).join('\n');
+        card.innerHTML = `
+          <div class="card-header" style="color: var(--text-muted);">
+            <span>Tool Output (${escapeHtml(step.type)})</span>
+            <span class="card-timestamp">${timestamp}</span>
+          </div>
+          <div class="card-body">
+            <pre class="tool-info" style="background-color: #1a1a1a; border-color: #2b2b2b;">${escapeHtml(outputText)}</pre>
+          </div>
+        `;
+      }
+
+      logContainer.appendChild(card);
+      logContainer.scrollTop = logContainer.scrollHeight;
+    }
+
+    function renderOutputs(payload) {
+      const stdout = payload.stdout || '';
+      const stderr = payload.stderr || '';
+      if (!stdout && !stderr) return '';
+
+      return `
+        <div class="tool-outputs">
+          <div class="tool-output-header" onclick="toggleOutput(this)">
+            <span>Show Output Console</span>
+            <span>▼</span>
+          </div>
+          <div class="tool-output-content">
+            ${stdout ? `<div><strong>stdout:</strong>\n${escapeHtml(stdout)}</div>` : ''}
+            ${stderr ? `<div style="color: var(--danger); margin-top: 0.5rem;"><strong>stderr:</strong>\n${escapeHtml(stderr)}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function toggleOutput(headerElement) {
+      const content = headerElement.nextElementSibling;
+      const arrow = headerElement.querySelector('span:last-child');
+      if (content.classList.contains('expanded')) {
+        content.classList.remove('expanded');
+        arrow.textContent = '▼';
+      } else {
+        content.classList.add('expanded');
+        arrow.textContent = '▲';
+      }
+    }
+
+    function escapeHtml(text) {
+      if (typeof text !== 'string') return text;
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function pauseDebugger() {
+      fetch('/pause', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => updateUIState('paused'))
+        .catch(err => console.error('Error pausing:', err));
+    }
+
+    function resumeDebugger() {
+      fetch('/resume', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => updateUIState('running'))
+        .catch(err => console.error('Error resuming:', err));
+    }
+
+    // Load initial conversations on startup
+    loadConversations();
+
+    // Auto-unpause when closing/navigating away from UI window
+    window.addEventListener('beforeunload', () => {
+      navigator.sendBeacon('/resume');
+    });
+  </script>
+</body>
+</html>

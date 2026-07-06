@@ -18,7 +18,7 @@ Analyze the differences between the current branch and the main branch and const
 ## Workflow
 
 1. **Analyze Changes**:
-   - Evaluate the differences between the current branch and the main branch using `sem diff` (via the [sem-semantic-diff](../sem-semantic-diff/SKILL.md) skill) or the git MCP `git_log_or_diff` tool.
+   - Evaluate the differences between the current branch and the main branch using `sem diff` (via the [sem-semantic-diff](../sem-semantic-diff/SKILL.md) skill) or the `git diff` standard CLI command.
    - If the `git diff` is empty or unclear, do not make up features. Only describe what is present in the provided code.
 
 2. **Construct Description**:
