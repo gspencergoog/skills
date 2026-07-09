@@ -1,6 +1,6 @@
 ---
 name: write-pr-description
-description: Creates a description of the current branch's changes in the form of a pull request description. Use this when the user asks to write, generate, draft, or create a pull request (PR) description.
+description: Creates a description of the current branch's changes in the form of a pull request (PR) description. Use this when the user asks to write, generate, draft, or create a PR or PR description.
 ---
 
 # Write PR Description Skill

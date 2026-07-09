@@ -652,8 +652,11 @@
         `;
       }
 
+      const isAtBottom = (logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight) <= 100;
       logContainer.appendChild(card);
-      logContainer.scrollTop = logContainer.scrollHeight;
+      if (isAtBottom) {
+        logContainer.scrollTop = logContainer.scrollHeight;
+      }
     }
 
     function renderOutputs(payload) {

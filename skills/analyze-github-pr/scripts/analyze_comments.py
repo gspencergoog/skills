@@ -9,6 +9,10 @@ import argparse
 from utils import run_cmd
 
 def get_repo_info():
+    if os.environ.get("GH_REPO"):
+        parts = os.environ["GH_REPO"].split("/")
+        if len(parts) == 2:
+            return parts[0], parts[1].strip()
     for remote in ["upstream", "origin"]:
         try:
             url = run_cmd(["git", "remote", "get-url", remote])
@@ -24,6 +28,8 @@ def get_repo_info():
     raise Exception("Could not determine repository owner and name from git remotes.")
 
 def get_pr_number():
+    if os.environ.get("PR_NUMBER"):
+        return int(os.environ["PR_NUMBER"])
     try:
         pr_num = run_cmd(["gh", "pr", "view", "--json", "number", "--jq", ".number"])
         return int(pr_num)
