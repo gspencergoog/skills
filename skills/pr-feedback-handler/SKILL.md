@@ -72,9 +72,11 @@ Once the background task completes, check the result:
 
 Once the approved code changes are successfully pushed:
 
-1. **Submit Replies and Resolve Threads**: For each approved item in `decisions`:
-   - Call `scripts/update_thread.py` with the thread ID, passing `--reply "<reply-body>"` if a reply is specified, and/or `--resolve` if `resolve: true`.
-   - Ensure the reply content matches the user-approved text from `feedback_state.json`.
+1. **Submit Replies and Resolve Threads in Bulk**:
+   - Run the helper script pointing to the JSON decisions file to post all replies and mark resolved in a single call:
+     `python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json`
+   - If any thread updates fail, the script will print a detailed failure report listing which threads failed and their specific error messages, exiting with a non-zero status. Verify the errors, make any necessary adjustments, and re-run if needed.
+
 
 ---
 
