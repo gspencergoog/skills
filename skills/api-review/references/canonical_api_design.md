@@ -9,6 +9,7 @@ This document contains the canonical principles for designing and improving APIs
   - [2. The KISS mandate (minimal surface area)](#2-the-kiss-mandate-minimal-surface-area)
   - [3. YAGNI (avoid speculative generality)](#3-yagni-avoid-speculative-generality)
   - [4. Separation of concerns (information hiding)](#4-separation-of-concerns-information-hiding)
+  - [5. Explicit configuration (dependency injection over stateful globals)](#5-explicit-configuration-dependency-injection-over-stateful-globals)
 - [Interface ergonomics & semantics](#interface-ergonomics--semantics)
   - [1. The principle of least astonishment (predictability)](#1-the-principle-of-least-astonishment-predictability)
   - [2. Intent-revealing names](#2-intent-revealing-names)
@@ -45,6 +46,10 @@ Do not add parameters, operations, or data fields for hypothetical future needs.
 ### 4. Separation of concerns (information hiding)
 
 The API must expose capabilities, not internal state or storage models. Never leak implementation details, such as database schemas or specific algorithms, through the interface. This encapsulation ensures that the internal architecture can be refactored or completely replaced without breaking consumers.
+
+### 5. Explicit configuration (dependency injection over stateful globals)
+
+Prefer explicit parameter passing and dependency injection over stateful global state, singletons, registries, or environment variables for API configuration. Implicit configurations obscure dependencies from caller visibility, prevent static type safety, and introduce global state mutations that make concurrent execution and parallel testing difficult. Programmatic instantiations are statically verifiable, isolate test cases, and make dependency compilation boundaries transparent to bundling tools.
 
 ## Interface ergonomics & semantics
 

@@ -1,5 +1,5 @@
 ---
-name: review-code
+name: code-review
 description: Performs a comprehensive, multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to ensure high-quality, actionable feedback. Use when you need to review code changes thoroughly.
 ---
 
@@ -54,6 +54,7 @@ Generate review comments focusing on the following criteria:
 - **Efficiency**: Identify bottlenecks, redundant calculations.
 - **Maintainability**: Assess readability, adherence to style guides.
 - **Security**: Identify potential vulnerabilities.
+- **API Soundness**: If the changes modify public API surfaces, signatures, or configuration patterns (e.g. exported classes, functions, REST/RPC endpoints, package/module public exports), delegate the API review to a subagent running the [api-review](../api-review/SKILL.md) skill on the modified files, and integrate the findings into the final feedback report.
 
 **Guidelines**:
 

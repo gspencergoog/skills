@@ -36,12 +36,12 @@ This script can:
 
 **Usage Example:**
 ```bash
-python3 <skills-directory>/review-code/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt
+python3 <skills-directory>/code-review/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt
 ```
 
 For JSON inputs:
 ```bash
-python3 <skills-directory>/review-code/scripts/split_diff.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
+python3 <skills-directory>/code-review/scripts/split_diff.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
 ```
 
 ## How to Combine Subdivided Reviews

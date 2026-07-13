@@ -20,6 +20,7 @@ This skill reviews code against the canonical API Design guidelines.
    - **Ergonomics**: Are names intent-revealing? Do they follow the Principle of Least Astonishment?
    - **CQS**: Are commands and queries separated?
    - **Safety**: Are types used strictly (Enums vs Strings)? Is validation visible?
+   - **Explicit Configuration**: Are dependencies explicitly injected rather than implicitly resolved via global state, registries, or environment variables?
 4. **Report**: Generate a structured report:
    - **Score**: Give a rough letter grade (A-F) based on alignment.
    - **Critical Issues**: Violations that _must_ be fixed (e.g., severe strictness or safety issues).

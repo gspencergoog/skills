@@ -37,6 +37,13 @@ Identify potential vulnerabilities.
 - Injection attacks (SQL, command, etc.).
 - Insufficient access controls or validation.
 
+### 6. API Soundness
+
+If changes alter public APIs or configuration surfaces:
+- **Contract Integrity**: Ensure interfaces are clear, decoupled from implementation details, and statically typed.
+- **Explicit Configuration**: Prevent stateful globals, singletons, registries, or environment variables for configuring packages. Ensure dependencies are explicitly parameter-injected.
+- **KISS/YAGNI**: Avoid over-generalizing or building speculative future-proof features.
+
 ## Severity Levels
 
 Use these severity levels to categorize your findings:
