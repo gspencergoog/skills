@@ -25,6 +25,11 @@ This skill guides the process of retrieving, analyzing, implementing, and resolv
 
 Follow these steps when tasked with addressing PR review feedback:
 
+> [!WARNING]
+> **DO NOT IMPLEMENT CHANGES PREMATURELY**
+> Do **NOT** modify any files in the workspace (source code, tests, etc.) during Step 1. Only write proposed fixes and draft replies to the JSON file and launch the dashboard. Modifying files before the user approves them defeats the purpose of interactive reviews and causes git tree status issues on the dashboard.
+
+
 ### Step 1: Analyze Comments and Launch Dashboard
 
 To allow the user to interactively review proposed fixes, draft replies, and provide feedback, run the interactive dashboard.
