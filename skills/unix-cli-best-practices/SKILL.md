@@ -41,6 +41,14 @@ Common use cases:
 * Run `fd -p 'src/assets'` to match the pattern against the full path instead of just the filename.
 * Run `fd -e log -x rm` to execute a command on each matching file individually. Use `-X` (e.g., `fd -e log -X rm`) to run the command once with all matching files as arguments.
 * Run `fd -a 'pattern'` to return absolute paths instead of relative paths.
+* Run `fd -E 'pattern'` (or `--exclude`) to exclude files or directories matching the pattern from the search (e.g. `fd -E node_modules`). Excluding a directory prevents `fd` from traversing it entirely:
+  ```bash
+  # Slow: traverses node_modules, then filters output
+  fd -I -e ts | grep -v "node_modules"
+
+  # Fast: skips node_modules completely during filesystem traversal
+  fd -I -e ts -E node_modules
+  ```
 
 Refer to `fd --help` for the complete options list.
 
@@ -72,20 +80,6 @@ Example of safely deleting files containing a specific string:
 ```bash
 grep -rlZ -I --exclude-dir=node_modules "DEPRECATED_API" . | xargs -0 rm
 ```
-
-### High-performance traversal with find
-
-Prevent `find` from traversing irrelevant directory trees by using the `-prune` option.
-
-```bash
-# Slow: traverses node_modules entirely, then filters output
-find . -name "*.ts" | grep -v "node_modules"
-
-# Fast: skips node_modules entirely
-find . -name "node_modules" -prune -o -name "*.ts" -print
-```
-
-The expression `-name "node_modules" -prune` stops traversal when encountering a `node_modules` directory. The `-o` (OR) operator specifies that for any other directory or file ending in `.ts`, the path is printed.
 
 ### macOS portability with sed
 
@@ -132,19 +126,37 @@ Common use cases:
 
 Use `xargs` to build and execute commands from standard input. Always use the `-0` option (null-terminated) when processing file paths to handle filenames containing spaces or special characters safely.
 
+> [!TIP]
+> Since `fd` has built-in `-x` and `-X` executors (which automatically handle spaces safely), prefer them for simple execution tasks. Use `xargs` only when you need custom pipeline logic or parallel execution features (`-P`) not supported directly by the source tool.
+
 ```bash
-# Unsafe: will fail or perform unintended actions if filenames contain spaces
-find . -name "*.log" | xargs rm
+# Unsafe: will fail or perform unintended actions if filenames contain spaces or newlines
+fd -e log | xargs rm
 
 # Safe: handles spaces and special characters correctly
-find . -name "*.log" -print0 | xargs -0 rm
+fd -e log -0 | xargs -0 rm
 ```
 
-Use the `-P` option to run tasks in parallel:
-```bash
-# Run up to 4 curl processes in parallel
-cat urls.txt | xargs -n 1 -P 4 curl -O
-```
+Common use cases for `xargs` (where native `fd -x` is not applicable):
+
+* **Processing input from non-file commands** (e.g., `git`, `docker`):
+  ```bash
+  # Delete all local git branches that have been merged
+  git branch --merged | grep -v '^*' | xargs git branch -d
+
+  # Stop all running Docker containers
+  docker ps -q | xargs docker stop
+  ```
+* **Interactive confirmation before execution (`-p`)**:
+  ```bash
+  # Prompts for confirmation (y/n) before deleting files
+  fd -e log -0 | xargs -0 -p rm
+  ```
+* **Parallel processing of arbitrary input lists** (e.g., network requests):
+  ```bash
+  # Run up to 4 curl processes in parallel to download URLs
+  cat urls.txt | xargs -n 1 -P 4 curl -O
+  ```
 
 ### macOS-specific CLI tools
 

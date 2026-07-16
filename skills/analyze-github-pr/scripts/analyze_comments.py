@@ -50,6 +50,7 @@ def fetch_pr_data(owner, repo, pr_number):
         nodes {
           id
           body
+          diffHunk
           isMinimized
           minimizedReason
           author {
@@ -106,6 +107,42 @@ def parse_suggestion(body):
     if match:
         return match.group(1)
     return None
+
+def parse_diff_hunk_right_ref(diff_hunk):
+    if not diff_hunk:
+        return []
+        
+    lines = diff_hunk.splitlines()
+    if not lines:
+        return []
+        
+    start_line = None
+    header_match = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", lines[0])
+    if header_match:
+        start_line = int(header_match.group(1))
+        
+    line_entries = []
+    current_line = start_line
+    
+    for line in lines[1:]:
+        if line.startswith("-"):
+            continue
+        elif line.startswith("+"):
+            line_entries.append({
+                "line": current_line,
+                "content": line[1:]
+            })
+            if current_line is not None:
+                current_line += 1
+        elif line.startswith(" "):
+            line_entries.append({
+                "line": current_line,
+                "content": line[1:]
+            })
+            if current_line is not None:
+                current_line += 1
+                
+    return line_entries
 
 def check_if_addressed(path, line, suggestion):
     if not os.path.exists(path):
@@ -281,6 +318,10 @@ def analyze(include_all=False):
         last_body = comments[-1]["body"]
         suggestion = parse_suggestion(last_body)
         
+        # Get diffHunk from the first comment and parse right ref code block
+        diff_hunk = comments[0].get("diffHunk") if comments else None
+        right_ref_code_block = parse_diff_hunk_right_ref(diff_hunk)
+        
         # Check local state
         local_status = check_if_addressed(path, thread["line"], suggestion)
         
@@ -300,6 +341,7 @@ def analyze(include_all=False):
             "isHidden": is_hidden,
             "localStatus": local_status,
             "suggestion": suggestion,
+            "rightRefCodeBlock": right_ref_code_block,
             "comments": [{
                 "id": c["id"],
                 "body": c["body"],

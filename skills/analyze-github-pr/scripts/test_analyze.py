@@ -492,5 +492,21 @@ class TestAnalyzeComments(unittest.TestCase):
             mock_print.assert_called()
             self.assertEqual(cm.exception.code, 1)
 
+    def test_parse_diff_hunk_right_ref_basic(self):
+        from analyze_comments import parse_diff_hunk_right_ref
+        hunk = "@@ -10,4 +10,5 @@\n line10\n-line11\n+line11 new\n line12"
+        res = parse_diff_hunk_right_ref(hunk)
+        expected = [
+            {"line": 10, "content": "line10"},
+            {"line": 11, "content": "line11 new"},
+            {"line": 12, "content": "line12"}
+        ]
+        self.assertEqual(res, expected)
+
+    def test_parse_diff_hunk_right_ref_empty(self):
+        from analyze_comments import parse_diff_hunk_right_ref
+        self.assertEqual(parse_diff_hunk_right_ref(None), [])
+        self.assertEqual(parse_diff_hunk_right_ref(""), [])
+
 if __name__ == '__main__':
     unittest.main()

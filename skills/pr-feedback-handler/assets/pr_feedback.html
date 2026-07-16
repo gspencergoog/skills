@@ -429,6 +429,81 @@
       white-space: pre;
       margin: 0;
     }
+
+    .copy-btn {
+      background: none;
+      border: none;
+      color: var(--text-light);
+      cursor: pointer;
+      padding: 4px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      margin-left: 6px;
+      transition: all 0.2s ease;
+      vertical-align: middle;
+    }
+    
+    .copy-btn:hover {
+      color: var(--text-color);
+      background-color: rgba(255, 255, 255, 0.08);
+    }
+
+    .code-snippet-box {
+      background-color: var(--code-bg);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      margin-bottom: 18px;
+      overflow: hidden;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem;
+    }
+
+    .code-snippet-header {
+      background-color: rgba(255, 255, 255, 0.02);
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      color: var(--text-light);
+      border-bottom: 1px solid var(--border-color);
+      display: flex;
+      justify-content: space-between;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+
+    .code-snippet-lines {
+      display: table;
+      width: 100%;
+      padding: 8px 0;
+      margin: 0;
+      overflow-x: auto;
+    }
+
+    .code-snippet-line {
+      display: table-row;
+    }
+
+    .code-snippet-number {
+      display: table-cell;
+      text-align: right;
+      padding-right: 12px;
+      padding-left: 12px;
+      color: #6e7681;
+      user-select: none;
+      width: 1%;
+      white-space: nowrap;
+      background-color: rgba(0, 0, 0, 0.15);
+      border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .code-snippet-content {
+      display: table-cell;
+      padding-left: 12px;
+      padding-right: 12px;
+      white-space: pre-wrap;
+      color: #e6edf3;
+    }
   </style>
 </head>
 <body>
@@ -492,6 +567,25 @@
         console.error('Error parsing markdown:', e);
       }
       return escapeHtml(text);
+    }
+
+    async function copyToClipboard(text, btn) {
+      try {
+        await navigator.clipboard.writeText(text);
+        const originalHTML = btn.innerHTML;
+        btn.innerHTML = `
+          <svg width="14" height="14" fill="#4caf50" viewBox="0 0 16 16">
+            <path d="M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z"/>
+          </svg>
+        `;
+        btn.style.color = '#4caf50';
+        setTimeout(() => {
+          btn.innerHTML = originalHTML;
+          btn.style.color = '';
+        }, 1500);
+      } catch (err) {
+        console.error('Failed to copy text: ', err);
+      }
     }
 
     async function loadComments() {
@@ -587,9 +681,38 @@
           `;
         }
         
+        let codeBlockHtml = '';
+        if (thread.rightRefCodeBlock && thread.rightRefCodeBlock.length > 0) {
+          const linesHtml = thread.rightRefCodeBlock.map(line => `
+            <div class="code-snippet-line">
+              <div class="code-snippet-number">${line.line !== null ? line.line : ''}</div>
+              <div class="code-snippet-content">${escapeHtml(line.content)}</div>
+            </div>
+          `).join('');
+          
+          codeBlockHtml = `
+            <div class="code-snippet-box">
+              <div class="code-snippet-header">
+                <span>ORIGINAL CODE CONTEXT</span>
+              </div>
+              <div class="code-snippet-lines">
+                ${linesHtml}
+              </div>
+            </div>
+          `;
+        }
+        
         card.innerHTML = `
           <div class="thread-header">
-            <span class="file-path">${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ' (File)'}</span>
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span class="file-path">${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ' (File)'}</span>
+              <button class="copy-btn" onclick="copyToClipboard('${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ''}', this)" title="Copy file path and line number">
+                <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                  <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                  <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+                </svg>
+              </button>
+            </div>
             <div class="status-badge-container">
               ${localStatusBadge}
               ${outdatedBadge}
@@ -598,6 +721,7 @@
             </div>
           </div>
           <div class="thread-body">
+            ${codeBlockHtml}
             <div class="comments-history">
               ${commentsHtml}
             </div>
