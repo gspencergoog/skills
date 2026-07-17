@@ -46,6 +46,8 @@ The title should follow the same rules as for the [conventional-commits](../comm
 
 ## Constraints
 
+- Keep in mind that the description will be read by someone who hasn't seen the PR and isn't intimately familiar with the code.
+- Avoid recency bias: look at the entire change anew when composing the description, since the reader doesn't generally care what order things happened in.
 - Do not include conversational filler (e.g., "Here is the PR description...").
 - Include references to issues that the PR addresses or resolves.
    - If the issue is completely fixed, write "Resolves <issue_number>", which will close the issue when the PR is submitted.
