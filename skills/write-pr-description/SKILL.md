@@ -8,8 +8,8 @@ description: Creates a description of the current branch's changes in the form o
 Analyze the differences between the current branch and the main branch and construct a well-written pull request description. Write the description to your temporary scratch area as a Markdown file.
 
 > [!IMPORTANT] **WRITING GUIDELINES** Before writing prose like PR descriptions,
-> refer to the [natural-writing](../natural-writing/SKILL.md) skill to ensure
-> clarity, accuracy, and a natural, non-hyperbolic tone.
+> refer to the [write-prose](../write-prose/SKILL.md) master skill to ensure
+> clarity, accessibility, accuracy, and a natural, non-hyperbolic tone.
 
 > [!IMPORTANT] **GITHUB CLI AUTHENTICATION** In order to run the `gh` command
 > line tool, you have to run it with `env -u GITHUB_TOKEN` to unset the dummy
@@ -23,7 +23,8 @@ Analyze the differences between the current branch and the main branch and const
 
 2. **Construct Description**:
    - Draft a well-written pull request description following the guidelines and mandatory structure below.
-   - Write the description to your temporary scratch area as a Markdown file.
+   - Follow the Two-Pass Drafting Protocol in [`write-prose`](../write-prose/SKILL.md) to audit the draft for banned words, fluff, and sentence length before saving.
+   - Write the description to your temporary scratch area (`<appDataDir>/brain/<conversation-id>/scratch/`) as a Markdown file.
    - If the PR already exists, update the PR body using the GitHub CLI command:
      `env -u GITHUB_TOKEN gh pr edit --body-file <file>`
 

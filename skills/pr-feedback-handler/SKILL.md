@@ -9,7 +9,7 @@ This skill guides the process of retrieving, analyzing, implementing, and resolv
 
 > [!IMPORTANT]
 > **WRITING GUIDELINES**
-> When drafting replies, explanations, or any prose, refer to the [natural-writing](../natural-writing/SKILL.md) skill to ensure clarity, accuracy, and tone.
+> When drafting replies, explanations, or any prose, refer to the [write-prose](../write-prose/SKILL.md) skill to ensure clarity, accuracy, and tone.
 
 > [!IMPORTANT]
 > **CRITICAL RULE: USER APPROVAL REQUIRED**
@@ -40,7 +40,7 @@ To allow the user to interactively review proposed fixes, draft replies, and pro
 2. **Propose Fixes and Draft Replies**: For each thread in the output:
    - Inspect the target file (at the specified line if given, or the overall file if it is a file-level comment).
    - Formulate a concrete plan to address the feedback. Add this plan as a `proposedFix` field (string) to the thread object in the JSON. Provide enough detail to understand the solution details (e.g., specific files/functions to modify, logic changes, and APIs to use) while keeping it concise, focused, and actionable.
-   - Draft a succinct, professional reply describing what was done to fix the issue (following the `natural-writing` skill). Add this as a `draftReply` field (string) to the thread object. Avoid generic replies like "Fixed." unless it is a trivial change.
+   - Draft a succinct, professional reply describing what was done to fix the issue (following the `write-prose` skill). Add this as a `draftReply` field (string) to the thread object. Avoid generic replies like "Fixed." unless it is a trivial change.
 
 3. **Write Data File**: Save the enriched JSON report to a file named `pr_comments.json` in your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/pr_comments.json`).
 

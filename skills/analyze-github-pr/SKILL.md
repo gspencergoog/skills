@@ -9,7 +9,7 @@ This skill fetches and analyzes the description and review comments of a GitHub 
 
 > [!IMPORTANT]
 > **WRITING GUIDELINES**
-> When drafting any PR-related analysis, documentation, or summaries, refer to the [natural-writing](../natural-writing/SKILL.md) skill to ensure clarity, accuracy, and tone.
+> When drafting any PR-related analysis, documentation, or summaries, refer to the [write-prose](../write-prose/SKILL.md) skill to ensure clarity, accuracy, and tone.
 
 ## Workflow
 

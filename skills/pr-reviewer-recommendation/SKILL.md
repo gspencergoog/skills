@@ -9,7 +9,7 @@ This skill analyzes a GitHub Pull Request (PR), branch, or commit range to recom
 
 > [!IMPORTANT]
 > **WRITING GUIDELINES**
-> When presenting reviewer recommendations to the user, ensure the tone is professional, factual, and concise, adhering to the [natural-writing](../natural-writing/SKILL.md) standards.
+> When presenting reviewer recommendations to the user, ensure the tone is professional, factual, and concise, adhering to the [write-prose](../write-prose/SKILL.md) standards.
 
 ## Workflow
 

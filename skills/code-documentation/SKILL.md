@@ -5,6 +5,9 @@ description: Guide for writing effective code documentation, including docstring
 
 # Code Documentation Skill
 
+> [!NOTE]
+> For plain language, accessibility, and vocabulary controls, this skill works alongside the master [`write-prose`](../write-prose/SKILL.md) skill.
+
 This skill provides comprehensive guidelines for documenting code, prioritizing user-centric writing, clarity, and consistency.
 
 ## 1. General Philosophy

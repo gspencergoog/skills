@@ -55,7 +55,7 @@ skill to verify the API design.
 
 ### Apply natural writing style
 Follow the rules in the
-[natural-writing](file:///Users/gspencer/.gemini/config/skills/natural-writing/SKILL.md)
+[write-prose](file:///usr/local/google/home/gspencer/.gemini/config/skills/write-prose/SKILL.md)
 skill to ensure the proposal is written in a clear, neutral, and natural tone.
 Avoid AI-specific phrasing, puffery, and promotional language.
 

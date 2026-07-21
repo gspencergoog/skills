@@ -49,4 +49,4 @@ python3 <skills-directory>/code-review/scripts/split_diff.py --json --json-key d
 After performing subdivided reviews, use the **Synthesis** step to create the final output:
 1. **Deduplicate**: Ensure that the same issue found in multiple passes or files is not reported multiple times unless it manifests differently.
 2. **Prioritize**: Group comments by severity. Ensure critical and high-severity issues are highlighted at the top.
-3. **Cohesiveness**: Ensure the tone and style of all comments are consistent, following the [natural-writing](../../natural-writing/SKILL.md) skill.
+3. **Cohesiveness**: Ensure the tone and style of all comments are consistent, following the [write-prose](../../write-prose/SKILL.md) skill.
