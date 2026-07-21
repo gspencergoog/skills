@@ -1,11 +1,11 @@
 ---
 name: ship-it
-description: Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling.
+description: Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation, CHANGELOG, and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling.
 ---
 
 # Ship-It: End-to-End Code Preparation & PR Shipping Workflow
 
-This skill guides agents through a rigorous, multi-step checklist before code is shipped out for peer review. It ensures high quality, high test coverage, clean public APIs, well-structured PR segmentation, and post-PR creation draft tracking.
+This skill guides agents through a rigorous, multi-step checklist before code is shipped out for peer review. It ensures high quality, high test coverage, clean public APIs, well-structured PR segmentation, comprehensive code documentation, up-to-date project documentation (README/CHANGELOG/design docs), and post-PR creation draft tracking.
 
 ---
 
@@ -16,7 +16,7 @@ Execute these 5 phases sequentially:
 1. **Phase 1: PR Segmentation & Stacking Analysis** (Pre-flight git status check, diff scope analysis, and stacked worktree proposals)
 2. **Phase 2: Per-Branch Static Analysis & Test Audit** (Linter/analyzer gate, 90%+ coverage enforcement, and test quality audit)
 3. **Phase 3: Per-Branch Review Homeostasis Loop** (Iterative subagent API & code reviews until clean)
-4. **Phase 4: Per-Branch Documentation Sync & PR Description** (Update code documentation, READMEs, and generate PR description)
+4. **Phase 4: Per-Branch Documentation Sync & PR Description** (Code docs via `code-documentation` skill, README/CHANGELOG/design doc updates via `write-prose` skill, and PR description)
 5. **Phase 5: Post-PR Creation Draft Tracking & Feedback Handling** (Prompt user to submit Draft PR, schedule CI/comment checks, handle feedback, and mark ready for review)
 
 ---
@@ -66,6 +66,9 @@ Execute on each branch/worktree in the stack:
 
 ## Phase 3: Per-Branch Review Homeostasis Loop
 
+> [!NOTE]
+> **ORDER DEPENDENCY**: Execute the API Review Pass BEFORE deep Code Review. Settle public method signatures, class hierarchies, naming conventions, and parameter types first so internal code review is not wasted on implementation details that change during API refactoring.
+
 Execute iterative review passes on the current branch/worktree:
 
 1. **API Review Pass**:
@@ -84,18 +87,26 @@ Execute iterative review passes on the current branch/worktree:
 
 ## Phase 4: Per-Branch Documentation Sync & PR Description
 
-1. **Code-Level Documentation**:
-   - Audit all new or modified public classes, functions, and parameters.
-   - Write clear, concise inline documentation (docstrings / dartdocs / JSDoc / type hints) following the `code-documentation` skill guidelines.
-2. **Project & README Documentation**:
-   - Check if CLI flags, configuration schemas, installation procedures, or public API usage changed.
-   - Update `README.md`, proposal documents, or package guides to reflect updated code behavior.
+> [!NOTE]
+> **ORDER DEPENDENCY**: Phase 4 MUST be executed AFTER Phase 3 Homeostasis is reached. Inline docstrings, README updates, and CHANGELOG entries must document finalized, refactored API signatures rather than intermediate or obsolete code.
+
+> [!IMPORTANT]
+> **PROSE WRITING STANDARDS**
+> All written prose (inline docstrings, README updates, CHANGELOG entries, design docs, commit messages, PR descriptions, and user reports) MUST strictly follow the plain language and anti-AI-ism guidelines in the `write-prose` skill.
+
+1. **Comprehensive Code-Level Documentation**:
+   - Audit 100% of newly added or modified public symbols (classes, methods, functions, types, constants, parameters).
+   - Ensure comprehensive, high-quality inline documentation (docstrings / dartdocs / JSDoc / type hints) is written for all public APIs following the `code-documentation` skill guidelines.
+2. **Project, README, CHANGELOG & Design Documentation**:
+   - Check if CLI flags, configuration schemas, installation procedures, breaking changes, or public API usage changed.
+   - Audit and update existing project documentation files (`README.md`, `CHANGELOG.md`, proposal/design RFC documents, package guides) using `write-prose` skill standards.
+   - **Missing `README.md` Detection**: If no `README.md` exists in the component/package root and creating one would benefit the project, explicitly prompt the user via `ask_question` asking if they would like a new `README.md` generated.
 3. **Final Verification**:
    - Run the full test suite one final time to verify all tests pass.
-   - Commit documentation updates (`git commit -m "docs: sync inline documentation and README"`).
+   - Commit documentation updates (`git commit -m "docs: sync inline documentation, README, and CHANGELOG"`).
 4. **Summary & PR Description**:
    - Output a concise summary to the user outlining coverage stats, review loop iterations completed, and stacking structure.
-   - Automatically run the `write-pr-description` skill to generate the PR title and description artifact for submission.
+   - Automatically run the `write-pr-description` skill (which orchestrates with the `write-prose` skill) to generate the PR title and description artifact for submission.
 
 ---
 
