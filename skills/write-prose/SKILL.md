@@ -5,10 +5,12 @@ description: Master prose writing and orchestration skill for creating clear, pl
 
 # Master Prose Writing & Orchestration (`write-prose`)
 
-> [!CAUTION] **MANDATORY LINGUISTIC AUDIT**
+> [!CAUTION]
+> **MANDATORY LINGUISTIC AUDIT**
 > Language models naturally default to pre-trained "AI-isms" (*delve, leverage, seamless, robust, pivotal, testament, not only... but also*). You MUST actively execute the Two-Pass Drafting Protocol below to audit and replace machine-generated fluff before producing final output.
 
-> [!IMPORTANT] **WORKSPACE HYGIENE & FILE LOCATION RULES**
+> [!IMPORTANT]
+> **WORKSPACE HYGIENE & FILE LOCATION RULES**
 > - **No Repo Pollution**: Never create temporary draft files or scratch markdown in the project repository root or source directories.
 > - **Temporary Drafts**: Store intermediate drafts, multi-pass review files, or scratch notes in the conversation scratch directory: `<appDataDir>/brain/<conversation-id>/scratch/`.
 > - **Final Artifacts**: Write persistent, user-facing markdown reports or documents to the conversation artifacts directory: `<appDataDir>/brain/<conversation-id>/`.

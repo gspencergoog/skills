@@ -7,13 +7,13 @@ description: Creates a description of the current branch's changes in the form o
 
 Analyze the differences between the current branch and the main branch and construct a well-written pull request description. Write the description to your temporary scratch area as a Markdown file.
 
-> [!IMPORTANT] **WRITING GUIDELINES** Before writing prose like PR descriptions,
-> refer to the [write-prose](../write-prose/SKILL.md) master skill to ensure
-> clarity, accessibility, accuracy, and a natural, non-hyperbolic tone.
+> [!IMPORTANT]
+> **WRITING GUIDELINES**
+> Before writing prose like PR descriptions, refer to the [write-prose](../write-prose/SKILL.md) master skill to ensure clarity, accessibility, accuracy, and a natural, non-hyperbolic tone.
 
-> [!IMPORTANT] **GITHUB CLI AUTHENTICATION** In order to run the `gh` command
-> line tool, you have to run it with `env -u GITHUB_TOKEN` to unset the dummy
-> environment variable (e.g., `env -u GITHUB_TOKEN gh pr create`).
+> [!IMPORTANT]
+> **GITHUB CLI AUTHENTICATION**
+> In order to run the `gh` command line tool, you have to run it with `env -u GITHUB_TOKEN` to unset the dummy environment variable (e.g., `env -u GITHUB_TOKEN gh pr create`).
 
 ## Workflow
 
