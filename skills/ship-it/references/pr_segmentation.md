@@ -1,6 +1,6 @@
 # PR Segmentation & Stacking Guide
 
-Use this guide during Phase 1 of the `pre-review-prep` workflow to determine whether a change should be submitted as a single Pull Request or segmented into stacked PRs.
+Use this guide during Phase 1 of the `ship-it` workflow to determine whether a change should be submitted as a single Pull Request or segmented into stacked PRs.
 
 ## 1. Pre-flight Working Tree Check
 

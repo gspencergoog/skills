@@ -1,6 +1,6 @@
 # Review Homeostasis Loop Guide
 
-Use this guide during Phase 3 of the `pre-review-prep` workflow to execute iterative API and Code reviews using background subagents until homeostasis is reached.
+Use this guide during Phase 3 of the `ship-it` workflow to execute iterative API and Code reviews using background subagents until homeostasis is reached.
 
 ## 1. Concept of Review Homeostasis
 

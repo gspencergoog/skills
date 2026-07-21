@@ -1,6 +1,6 @@
 # Test Quality & Coverage Audit Guide
 
-Use this guide during Phase 2 of the `pre-review-prep` workflow to reach 90%+ code coverage and audit test quality.
+Use this guide during Phase 2 of the `ship-it` workflow to reach 90%+ code coverage and audit test quality.
 
 ---
 

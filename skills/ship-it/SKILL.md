@@ -1,22 +1,23 @@
 ---
-name: pre-review-prep
-description: Codifies the systematic pre-review code preparation workflow. Use when preparing code to send out for code review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, and (4) Code documentation and README synchronization.
+name: ship-it
+description: Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling.
 ---
 
-# Pre-Review Code Preparation Workflow
+# Ship-It: End-to-End Code Preparation & PR Shipping Workflow
 
-This skill guides agents through a rigorous, multi-step checklist before code is sent out for peer review. It ensures high quality, high test coverage, clean public APIs, and well-structured PR segmentation.
+This skill guides agents through a rigorous, multi-step checklist before code is shipped out for peer review. It ensures high quality, high test coverage, clean public APIs, well-structured PR segmentation, and post-PR creation draft tracking.
 
 ---
 
 ## Procedural Workflow Summary
 
-Execute these 4 phases sequentially:
+Execute these 5 phases sequentially:
 
 1. **Phase 1: PR Segmentation & Stacking Analysis** (Pre-flight git status check, diff scope analysis, and stacked worktree proposals)
 2. **Phase 2: Per-Branch Static Analysis & Test Audit** (Linter/analyzer gate, 90%+ coverage enforcement, and test quality audit)
 3. **Phase 3: Per-Branch Review Homeostasis Loop** (Iterative subagent API & code reviews until clean)
-4. **Phase 4: Per-Branch Documentation Sync & PR Creation** (Update code documentation, READMEs, and generate PR description)
+4. **Phase 4: Per-Branch Documentation Sync & PR Description** (Update code documentation, READMEs, and generate PR description)
+5. **Phase 5: Post-PR Creation Draft Tracking & Feedback Handling** (Prompt user to submit Draft PR, schedule CI/comment checks, handle feedback, and mark ready for review)
 
 ---
 
@@ -81,7 +82,7 @@ Execute iterative review passes on the current branch/worktree:
 
 ---
 
-## Phase 4: Per-Branch Documentation Sync & PR Creation
+## Phase 4: Per-Branch Documentation Sync & PR Description
 
 1. **Code-Level Documentation**:
    - Audit all new or modified public classes, functions, and parameters.
@@ -95,3 +96,17 @@ Execute iterative review passes on the current branch/worktree:
 4. **Summary & PR Description**:
    - Output a concise summary to the user outlining coverage stats, review loop iterations completed, and stacking structure.
    - Automatically run the `write-pr-description` skill to generate the PR title and description artifact for submission.
+
+---
+
+## Phase 5: Post-PR Creation Draft Tracking & Feedback Handling
+
+Refer to [post_pr_creation.md](references/post_pr_creation.md) for detailed execution steps:
+
+1. **Prompt User for Draft Submission Approval**: Present the generated PR description and prompt the user via `ask_question` for explicit permission to create the Draft PR on GitHub.
+2. **Submit Draft PR**: Upon approval, push branch and run `gh pr create --draft` (following `gh-cli` skill).
+3. **5-Minute CI & Feedback Schedule**: Set a 5-minute schedule timer (`schedule` tool) to monitor CI status (`gh pr checks`) and review comments (`analyze-github-pr` script).
+4. **Feedback Resolution Selection**: If CI fails or review comments exist, prompt the user via `ask_question`:
+   - **Interactive Dashboard**: Delegate to `pr-feedback-handler` skill (`launch_dashboard.py`).
+   - **Direct Fix & Respond**: Fix findings directly, verify with unit tests, commit, push, and submit thread replies via `pr-feedback-handler` scripts (`update_thread.py`).
+5. **Mark Ready for Review**: Once CI passes and feedback is clean, prompt the user via `ask_question` and run `gh pr ready` to publish out of draft state.
