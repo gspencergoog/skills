@@ -27,6 +27,7 @@ Analyze the differences between the current branch and the main branch and const
    - Write the description to your temporary scratch area (`<appDataDir>/brain/<conversation-id>/scratch/`) as a Markdown file.
    - If the PR already exists, update the PR body using the GitHub CLI command:
      `env -u GITHUB_TOKEN gh pr edit --body-file <file>`
+   - To use hashtag notation (e.g. "#42") in a PR description when it isn't intended to be a PR or Issue reference, quote it with backticks so that it doesn't get incorrectly linkified.
 
 ## PR Title (Squash Commit Message)
 
