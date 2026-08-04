@@ -62,7 +62,7 @@ def process_decisions(decisions):
             })
             continue
             
-        thread_id = item.get("threadId") or item.get("thread_id")
+        thread_id = item.get("threadId") or item.get("thread_id") or item.get("id")
         if not thread_id:
             failures.append({
                 "index": i,
@@ -75,7 +75,7 @@ def process_decisions(decisions):
             print(f"Skipping thread {thread_id} because it is not approved.")
             continue
             
-        reply = item.get("reply") or item.get("body")
+        reply = item.get("reply") or item.get("draftReply") or item.get("draft_reply") or item.get("body")
         resolve = item.get("resolve", False)
         
         if not reply and not resolve:

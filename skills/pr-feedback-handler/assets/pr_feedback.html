@@ -1123,17 +1123,14 @@
           blockSave = true;
         }
         if (!gitState.isCorrectBranch) {
-          warnings.push(`<strong>Branch Mismatch:</strong> Expected branch <code>${gitState.expectedBranch}</code>, but active branch is <code>${gitState.activeBranch}</code>. Run <code>gh pr checkout ${feedbackData.pr}</code> to switch.`);
-          blockSave = true;
+          warnings.push(`<strong>Branch Warning:</strong> Active branch is <code>${gitState.activeBranch}</code>, expected <code>${gitState.expectedBranch}</code>. Run <code>gh pr checkout ${feedbackData ? feedbackData.pr : ''}</code> if needed.`);
         }
         if (gitState.isDirty) {
-          warnings.push(`<strong>Dirty Workspace:</strong> Local repository has uncommitted changes. Please commit or stash them before applying the feedback plan.`);
-          blockSave = true;
+          warnings.push(`<strong>Dirty Workspace:</strong> Local repository has uncommitted changes. Ensure active changes do not conflict with review plan.`);
         }
         if (gitState.hasUnpushed) {
           const count = gitState.unpushedCommits.length;
-          warnings.push(`<strong>Unpushed Commits:</strong> There are ${count} unpushed commits. Please push changes before responding/resolving review threads.`);
-          blockSave = true;
+          warnings.push(`<strong>Unpushed Commits:</strong> There are ${count} unpushed commits.`);
         }
       }
       

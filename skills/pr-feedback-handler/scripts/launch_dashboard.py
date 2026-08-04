@@ -307,11 +307,25 @@ def main():
     resolved_data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
     os.makedirs(resolved_data_dir, exist_ok=True)
     
+    # Pre-flight check: Ensure pr_comments.json exists and is valid JSON
+    comments_path = os.path.join(resolved_data_dir, "pr_comments.json")
+    if not os.path.exists(comments_path):
+        print(f"Error: PR comments data file not found at '{comments_path}'.", file=sys.stderr)
+        print("Please generate pr_comments.json before launching the dashboard.", file=sys.stderr)
+        sys.exit(1)
+        
+    try:
+        with open(comments_path, "r", encoding="utf-8") as f:
+            json.load(f)
+    except Exception as e:
+        print(f"Error: Failed to parse '{comments_path}' as valid JSON: {e}", file=sys.stderr)
+        sys.exit(1)
+    
     # Pass to handler
     DashboardHandler.data_dir = resolved_data_dir
     DashboardHandler.project_dir = os.path.abspath(os.path.expanduser(args.project_dir))
     
-    # Resolve git_dir
+    # Resolve git_dir (robust against worktrees)
     raw_git_dir = run_git(["rev-parse", "--git-dir"], DashboardHandler.project_dir)
     if raw_git_dir:
         DashboardHandler.git_dir = os.path.abspath(os.path.join(DashboardHandler.project_dir, raw_git_dir))

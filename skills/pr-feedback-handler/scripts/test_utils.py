@@ -20,7 +20,19 @@ class TestUtils(unittest.TestCase):
         
         out = utils.run_cmd(["echo", "hello"])
         self.assertEqual(out, "hello world")
-        mock_run.assert_called_once_with(["echo", "hello"], capture_output=True, text=True, check=True, cwd=None, timeout=30)
+        mock_run.assert_called_once_with(["echo", "hello"], capture_output=True, text=True, check=True, cwd=None, env=os.environ, timeout=30)
+
+    @patch('subprocess.run')
+    def test_run_cmd_strips_github_token_for_gh(self, mock_run):
+        mock_res = MagicMock()
+        mock_res.stdout = "ok\n"
+        mock_run.return_value = mock_res
+        
+        with patch.dict(os.environ, {"GITHUB_TOKEN": "secret_token"}):
+            utils.run_cmd(["gh", "pr", "view"])
+            self.assertTrue(mock_run.called)
+            call_kwargs = mock_run.call_args.kwargs
+            self.assertNotIn("GITHUB_TOKEN", call_kwargs.get("env", {}))
 
     @patch('subprocess.run')
     def test_run_cmd_timeout(self, mock_run):

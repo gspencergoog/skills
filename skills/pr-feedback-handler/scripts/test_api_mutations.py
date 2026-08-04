@@ -218,6 +218,58 @@ class TestApiMutations(unittest.TestCase):
         with patch('sys.argv', ['update_thread.py', '--file', 'some_file.json']):
             update_thread.main()
             
+    @patch('update_thread.reply_to_thread')
+    @patch('update_thread.resolve_thread')
+    def test_process_decisions_key_aliases(self, mock_resolve, mock_reply):
+        mock_reply.return_value = {"id": "c1"}
+        mock_resolve.return_value = {"id": "t1", "isResolved": True}
+
+        decisions = [
+            {"id": "t1", "draftReply": "draft text 1", "approved": True},
+            {"thread_id": "t2", "draft_reply": "draft text 2", "approved": True},
+        ]
+        success_count, failures = update_thread.process_decisions(decisions)
+        self.assertEqual(success_count, 2)
+        self.assertEqual(len(failures), 0)
+        mock_reply.assert_any_call("t1", "draft text 1")
+        mock_reply.assert_any_call("t2", "draft text 2")
+
+    @patch('update_thread.reply_to_thread')
+    @patch('update_thread.resolve_thread')
+    def test_process_decisions_invalid_items(self, mock_resolve, mock_reply):
+        decisions = [
+            "not a dict item",
+            {"reply": "missing thread id"},
+            {"threadId": "t1", "approved": True}  # No reply or resolve action
+        ]
+        success_count, failures = update_thread.process_decisions(decisions)
+        self.assertEqual(success_count, 0)
+        self.assertEqual(len(failures), 2)
+        self.assertIn("Item is not a dictionary", failures[0]["error"])
+        self.assertIn("Missing threadId/thread_id", failures[1]["error"])
+
+    @patch('sys.exit')
+    def test_main_file_read_error(self, mock_exit):
+        with patch('sys.argv', ['update_thread.py', '--file', 'non_existent_file.json']):
+            update_thread.main()
+        mock_exit.assert_called_once_with(1)
+
+    @patch('sys.exit')
+    @patch('builtins.open')
+    def test_main_invalid_json_format(self, mock_file_open, mock_exit):
+        import io
+        mock_file_open.return_value = io.StringIO('{"invalid_root": 123}')
+        with patch('sys.argv', ['update_thread.py', '--file', 'file.json']):
+            update_thread.main()
+        mock_exit.assert_called_once_with(1)
+
+    @patch('sys.exit')
+    @patch('builtins.open')
+    def test_main_non_list_decisions(self, mock_file_open, mock_exit):
+        import io
+        mock_file_open.return_value = io.StringIO('{"decisions": "not a list"}')
+        with patch('sys.argv', ['update_thread.py', '--file', 'file.json']):
+            update_thread.main()
         mock_exit.assert_called_once_with(1)
 
 if __name__ == '__main__':

@@ -281,6 +281,20 @@ class TestDashboardServerIntegration(unittest.TestCase):
             os.rename(temp_path, self.comments_path)
 
 class TestDashboardMain(unittest.TestCase):
+    def setUp(self):
+        os.makedirs('temp_dashboard_test_data', exist_ok=True)
+        with open('temp_dashboard_test_data/pr_comments.json', 'w') as f:
+            json.dump({'repo': 'test/repo', 'pr': 123}, f)
+
+    def tearDown(self):
+        if os.path.exists('temp_dashboard_test_data/pr_comments.json'):
+            os.remove('temp_dashboard_test_data/pr_comments.json')
+        if os.path.exists('temp_dashboard_test_data'):
+            try:
+                os.rmdir('temp_dashboard_test_data')
+            except Exception:
+                pass
+
     def _raise_system_exit(self, code=0):
         raise SystemExit(code)
 
@@ -344,6 +358,28 @@ class TestDashboardMain(unittest.TestCase):
             with self.assertRaises(SystemExit) as cm:
                 main()
             self.assertEqual(cm.exception.code, 1)
+
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
+    @patch('sys.exit')
+    def test_main_missing_pr_comments_json(self, mock_exit):
+        mock_exit.side_effect = self._raise_system_exit
+        if os.path.exists('temp_dashboard_test_data/pr_comments.json'):
+            os.remove('temp_dashboard_test_data/pr_comments.json')
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 1)
+
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
+    @patch('sys.exit')
+    def test_main_invalid_json_pr_comments_json(self, mock_exit):
+        mock_exit.side_effect = self._raise_system_exit
+        with open('temp_dashboard_test_data/pr_comments.json', 'w') as f:
+            f.write("invalid json {")
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 1)
 
 if __name__ == '__main__':
     unittest.main()
