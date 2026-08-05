@@ -12,13 +12,13 @@ Use this skill to write structured technical proposals for software products.
 Select the appropriate template based on the size and complexity of the project:
 
 * **Lightweight**: Use
-  [lightweight_template.md](file:///Users/gspencer/code/cheats/agents/skills/proposal-writer/references/lightweight_template.md)
+  [lightweight_template.md](file:references/lightweight_template.md)
   for small features, minor changes, or simple refactors.
 * **Standard**: Use
-  [standard_template.md](file:///Users/gspencer/code/cheats/agents/skills/proposal-writer/references/standard_template.md)
+  [standard_template.md](file:references/standard_template.md)
   for typical features, new services, or moderate refactors.
 * **Detailed**: Use
-  [detailed_template.md](file:///Users/gspencer/code/cheats/agents/skills/proposal-writer/references/detailed_template.md)
+  [detailed_template.md](file:references/detailed_template.md)
   for major features, new products, or large-scale system migrations.
 
 Use the `/grill-me` slash command to request the proposal depth or any
@@ -50,12 +50,12 @@ components interact. Verify that the diagram matches the text description.
 
 ### Review APIs
 If the proposal introduces new APIs or modifies existing ones, use the
-[api-review](file:///Users/gspencer/.gemini/config/skills/api-review/SKILL.md)
+[api-review](file:../api-review/SKILL.md)
 skill to verify the API design.
 
 ### Apply natural writing style
 Follow the rules in the
-[write-prose](file:///usr/local/google/home/gspencer/.gemini/config/skills/write-prose/SKILL.md)
+[write-prose](file:../write-prose/SKILL.md)
 skill to ensure the proposal is written in a clear, neutral, and natural tone.
 Avoid AI-specific phrasing, puffery, and promotional language.
 

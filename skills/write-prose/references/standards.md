@@ -16,7 +16,7 @@ When writing or auditing text, aim for these quantitative thresholds:
 | **Word Length** | $\le \mathbf{5\text{ characters}}$ median | Prefer simple words (*use* vs *utilize*, *check* vs *investigate*). |
 | **Noun Clusters** | $\le \mathbf{3\text{ consecutive nouns}}$ | Avoid heavy noun stacks (e.g., write *"system for monitoring engine temperature"*, not *"engine temperature monitoring system"*). |
 
-Run `python3 /usr/local/google/home/gspencer/.gemini/config/skills/write-prose/scripts/analyze_prose.py <path-to-file>` to measure these stats automatically.
+Run `python3 scripts/analyze_prose.py <path-to-file>` to measure these stats automatically.
 
 ---
 
@@ -25,9 +25,19 @@ Run `python3 /usr/local/google/home/gspencer/.gemini/config/skills/write-prose/s
 To ensure technical clarity and prevent UI rendering breakage:
 - **Code Symbols & Paths**: Enclose variable names, function names, CLI flags, and file paths in backticks: `` `my_function()` ``, `` `--verbose` ``, `` `src/main.ts` ``.
 - **Code Blocks**: Always specify a language specifier for code blocks (`python`, `bash`, `json`, `markdown`).
-- **Markdown Links (CRITICAL RULE)**: **NEVER** wrap Markdown link text in backticks. Wrapping a link in backticks breaks clickable formatting in IDEs and web views:
-  - ❌ **Incorrect**: ``[`main.ts`](file:///path/to/main.ts)`` or ``[`MyClass`](file:///path/to/main.ts#L10)``
-  - ✅ **Correct**: `[main.ts](file:///path/to/main.ts)` or `[MyClass](file:///path/to/main.ts#L10)`
+- **Markdown Links (CRITICAL RULE)**: **NEVER** wrap Markdown link text in backticks. Wrapping link text in backticks breaks clickable formatting in IDEs and web views:
+
+  ❌ **Incorrect**:
+  ```markdown
+  [`main.ts`](src/main.ts)
+  [`MyClass`](src/main.ts#L10)
+  ```
+
+  ✅ **Correct**:
+  ```markdown
+  [main.ts](src/main.ts)
+  [MyClass](src/main.ts#L10)
+  ```
 
 ---
 
@@ -106,11 +116,11 @@ Use these contrastive pairs to calibrate self-correction during drafting:
 
 Never use vague praise adjectives (*robust, seamless, intuitive, frictionless, scalable*). Replace them with the actual technical mechanism:
 
-- ❌ *"Implements robust error handling."*  
+- ❌ *"Implements robust error handling."*
   $\rightarrow$ ✅ *"Catches `NetworkException` and retries failed requests up to 3 times before timing out."*
-- ❌ *"Provides a seamless user experience."*  
+- ❌ *"Provides a seamless user experience."*
   $\rightarrow$ ✅ *"Saves user settings automatically without requiring a manual save button."*
-- ❌ *"Highly scalable architecture."*  
+- ❌ *"Highly scalable architecture."*
   $\rightarrow$ ✅ *"Distributes requests across worker isolates using a round-robin pool."*
 
 ---

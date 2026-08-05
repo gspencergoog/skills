@@ -38,10 +38,10 @@ For detailed audience templates and tone matrices, see [references/audiences.md]
 
 #### Step 2: Sub-Skill Coordination
 For specialized document types, delegate content gathering to domain skills while enforcing `write-prose` quality standards:
-- **Pull Request Descriptions**: Refer to [`write-pr-description`](../write-pr-description/SKILL.md) for diff structure and testing steps.
-- **Commit Messages**: Refer to [`commit-changes`](../commit-changes/SKILL.md) for conventional commit formatting.
-- **Code & API Documentation**: Refer to [`code-documentation`](../code-documentation/SKILL.md) for docstring and tag conventions.
-- **AI Prompts & Skill Instructions**: Refer to Section 7 in [`references/standards.md`](references/standards.md#7-prompt-design-standards-for-llm-audiences) for XML tagging, primacy placement, and token conservation.
+- **Pull Request Descriptions**: Refer to [write-pr-description](../write-pr-description/SKILL.md) for diff structure and testing steps.
+- **Commit Messages**: Refer to [commit-changes](../commit-changes/SKILL.md) for conventional commit formatting.
+- **Code & API Documentation**: Refer to [code-documentation](../code-documentation/SKILL.md) for docstring and tag conventions.
+- **AI Prompts & Skill Instructions**: Refer to Section 7 in [references/standards.md](references/standards.md#7-prompt-design-standards-for-llm-audiences) for XML tagging, primacy placement, and token conservation.
 
 #### Step 3: Apply Plain Writing & Accessibility Standards
 Before writing, consult [references/standards.md](references/standards.md) to apply core principles from:
@@ -70,7 +70,7 @@ When the user asks to review, audit, or critique an existing document, PR descri
 1. **Run the Statistical Analyzer**:
    Execute the analyzer script on the target file:
    ```bash
-   python3 /usr/local/google/home/gspencer/.gemini/config/skills/write-prose/scripts/analyze_prose.py <path-to-file>
+   python3 ./scripts/analyze_prose.py <path-to-file>
    ```
 2. **Evaluate Output Metrics**:
    - Check total word count, sentence count, median sentence length, and paragraph stats.
