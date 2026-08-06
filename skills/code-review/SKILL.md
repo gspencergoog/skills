@@ -31,7 +31,8 @@ Before starting the review, gather the changes to be reviewed.
   - _Reference: See the [gh-cli](../gh-cli/SKILL.md) skill for detailed usage._
 - **For Local Changes**:
   - Use `git status` to see modified files.
-  - Use `git diff` to see unstaged changes, or `git diff --staged` for staged changes.
+  - Use `git diff --stat` (or `git diff --staged --stat`) first to assess change volume.
+  - Use targeted diffs (`git diff -- <files... >`) and/or `sem diff` for large changesets to prevent context window saturation.
   - Use `git log -p` to see recent commits if reviewing a local branch.
 
 ### Step 2: Context Enrichment

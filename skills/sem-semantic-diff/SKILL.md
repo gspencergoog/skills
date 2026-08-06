@@ -1,6 +1,6 @@
 ---
 name: sem-semantic-diff
-description: Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes.
+description: "Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes."
 ---
 
 # `sem` Semantic Diff Skill

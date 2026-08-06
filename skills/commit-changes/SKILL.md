@@ -18,7 +18,8 @@ Before committing, ensure all intended files are staged and that you understand 
     - **Python**: [references/python.md](references/python.md)
     - **Other**: Run standard format/lint/test commands for the language.
 3.  **Review**:
-    - Check diffs (`git diff --cached | cat`).
+    - Check diff summary first using `git diff --cached --stat` to gauge scope.
+    - Inspect detailed diffs in groups or per-file (`git diff --cached -- <file> | cat`) for large changesets rather than pulling full raw diffs all at once, but do look at all the diffs.
     - Review comments for clarity and "why" vs "what".
 4.  **Confirm**: Get user approval for the plan/message. Use the ask_question tool to ask the user if they approve of the plan/message.
 5.  **Commit**:
