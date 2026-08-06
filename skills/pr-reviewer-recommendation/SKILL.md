@@ -37,7 +37,7 @@ When asked to find or recommend reviewers for a PR or branch:
 
 3. **Incorporate Related Skills**:
    * If you need deeper understanding of the PR's purpose or discussion to refine suggestions (e.g. finding who commented on related issues), use the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill.
-   * To see precise semantic diffs and impact on structural entities, use the [sem-semantic-diff](../sem-semantic-diff/SKILL.md) skill.
+   * To see precise semantic diffs and impact on structural entities, use the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill.
 
 4. **Formulate the Recommendation**:
    * **Primary suggestions**: Prioritize users who have directly authored or modified the changed files, ranked by commit count and recency (within the last 6 months).

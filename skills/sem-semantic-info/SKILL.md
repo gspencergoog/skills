@@ -1,9 +1,9 @@
 ---
-name: sem-semantic-diff
+name: sem-semantic-info
 description: "Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes."
 ---
 
-# `sem` Semantic Diff Skill
+# `sem` Semantic Info Skill
 
 This skill provides instructions on how to use `sem`, a semantic version control tool that tracks functions, classes, and types rather than just lines of text.
 
