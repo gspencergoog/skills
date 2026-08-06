@@ -6,13 +6,13 @@ This guide provides concrete matrices and **one-shot reference examples** demons
 
 ## 1. Audience Matrix & Rule Adaptations
 
-| Audience | Primary Goal | Voice / Person | Verb & Tense Style | Structural Focus |
-| :--- | :--- | :--- | :--- | :--- |
-| **Peer Engineers** | PR descriptions, commit logs, code reviews | Factual / Impersonal | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*). | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps. |
-| **API Consumers** | Library docs, docstrings, SDK references | Third-person neutral | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample. |
-| **End Users / Devs** | Tutorials, user guides, setup docs | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step. | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result. |
-| **Leadership / RFCs** | System designs, RFCs, technical proposals | Objective / Analytical | Present tense; decision-first layout. | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. |
-| **AI Agents / LLMs** | System prompts, agent skills, tool directives | Imperative / Unambiguous | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives. | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples. |
+| Audience | Primary Goal | Voice / Person | Verb & Tense Style | Structural Focus | Excluded Meta- & Agent Context |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Peer Engineers** | PR descriptions, commit logs, code reviews | Factual / Impersonal | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*). | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps. | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
+| **API Consumers** | Library docs, docstrings, SDK references | Third-person neutral | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample. | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs. |
+| **End Users / Devs** | Tutorials, user guides, setup docs | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step. | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result. | Omit internal project planning terminology, turn references, execution steps. |
+| **Leadership / RFCs** | System designs, RFCs, technical proposals | Objective / Analytical | Present tense; decision-first layout. | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting. |
+| **AI Agents / LLMs** | System prompts, agent skills, tool directives | Imperative / Unambiguous | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives. | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples. | Keep directives clear; define domain terms explicitly. |
 
 ---
 

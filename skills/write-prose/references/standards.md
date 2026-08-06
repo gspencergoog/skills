@@ -151,3 +151,38 @@ When writing system prompts, agent skills, tool guidelines, or automated prompts
 
 6. **Few-Shot Concrete Examples**:
    - Provide 1–2 exact `Input -> Output` pairs for complex output formats. Examples communicate format requirements more effectively than token-heavy prose explanations.
+
+---
+
+## 8. Standalone Readability & Meta-Context Isolation
+
+Prose created by an AI agent must be completely standalone and free from meta-instruction contamination. Readers do not have access to the agent's context window, prompt history, external task plans, or internal execution logs.
+
+### 8.1 Core Rules
+1. **Conceptual & Meta-Instruction Isolation**: Do NOT leak instruction meta-concepts, planning tiers, phase numbers, prompt milestone names, or task division labels into the target prose. If a task instruction references a milestone or plan tier, the resulting document must state the technical behavior or feature directly, without referencing external planning structures (unless those structures are formally defined within the document itself).
+2. **Self-Containment**: Supply essential background so the document is understandable on its own. Never refer to "earlier in our chat", "the plan discussed previously", or "as requested in previous turns".
+3. **Ephemeral Context Stripping**: Remove all subagent IDs (`task-123`), agent tool names, step numbers, and internal agent orchestration artifacts.
+4. **Environment & Path Sanitization**: Always use clean, relative paths (`src/utils/file.ts`) instead of local absolute system paths (`/Users/.../src/utils/file.ts`).
+5. **Explicit Referencing**: Replace vague pointers (*"this issue"*, *"the bug mentioned earlier"*) with concrete named entities (*"the race condition in `AuthService.login()`"*).
+
+### 8.2 The Fresh Reader Audit Checklist
+
+When writing or reviewing prose, execute this 3-question audit:
+
+1. **The Origin Check**: *Did this term, phase label, or classification originate from the user's prompt / execution plan or is it an established concept in the domain / target document?*
+   - If from an external prompt or plan $\rightarrow$ **Strip the meta-label or define it in-line.**
+2. **The Standalone Check**: *Can a reader with no knowledge of the chat, task prompt, or repository history understand every paragraph without asking "What does X refer to?"*
+   - If not $\rightarrow$ **Add explicit context or replace vague pronouns/terms.**
+3. **The Hygiene Check**: *Are there any absolute system paths (`/Users/...`), subagent IDs (`task-xyz`), or transcript turn references (`in turn 2`)?*
+   - If present $\rightarrow$ **Sanitize to relative paths / domain facts.**
+
+### 8.3 Anti-Pattern Context Leaks vs. Standalone Plain Language Fixes
+
+| ❌ Conceptual / Context Leak (AI Artifact) | ✅ Standalone Plain Language Fix | Rationale / Failure Mode |
+| :--- | :--- | :--- |
+| *"Under Tier 1 of the spec update plan, we add rate limiting..."* | *"Adds client-side rate limiting..."* | **Conceptual Frame Leakage**: Plan tier label is external to the spec. |
+| *"As part of Phase 2, the client now retries on HTTP 503."* | *"The HTTP client retries failed requests on HTTP 503."* | **Meta-Plan Contamination**: Phase identifier is unknown to external readers. |
+| *"Subagent task-402 confirmed that the refactoring works."* | *"Unit and integration tests confirmed that the refactoring works."* | **Ephemeral Orchestration Leak**: Remove internal subagent task details. |
+| *"Fixed lint errors in `/Users/gspencer/code/app/lib/main.dart`."* | *"Fixed lint errors in `lib/main.dart`."* | **Path Leakage**: Sanitize local absolute system paths. |
+| *"As we discussed in turn 3 of our conversation, we chose Option B."* | *"We selected Option B because it avoids breaking API changes."* | **Chat Transcript Reference**: Replace turn references with standalone technical rationale. |
+| *"This change addresses the problem."* | *"This change resolves the database query timeout during peak traffic."* | **Referential Ambiguity**: Make pronouns explicit for external readers. |

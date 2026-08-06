@@ -27,6 +27,10 @@ Determine the target audience and document format:
 4. **Architecture / Design RFCs**: Team leads & stakeholders $\rightarrow$ Clear tradeoffs, decision-first layout, plain language.
 5. **Prompts & System Instructions**: AI Agents / LLMs $\rightarrow$ Imperative tone, XML tags, positive directives, assume high baseline knowledge (name concepts without explaining them).
 
+Evaluate **Reader Knowledge & Conceptual Boundaries**:
+- Strip external meta-task framing (e.g. plan phase numbers, task milestone labels, execution option names, or prompt scoping structures) unless the concept is explicitly defined *within* the document itself.
+- Ensure the document stands alone without assuming the reader has access to prompt history, conversation transcripts, or external planning documents.
+
 > [!NOTE]
 > If the target audience or document context is ambiguous, use `ask_question` to clarify before drafting.
 
@@ -59,6 +63,7 @@ Execute this mandatory two-pass procedure before finalizing output:
    - Flag and replace any banned verbs (*delve, leverage, foster, cultivate, maximize, democratize, resonate, encompass, bridge, underscore*).
    - Replace vague adjectives (*robust, seamless, pivotal, crucial, holistic, intuitive*) with **specific physical/technical behaviors** (e.g. replace *"robust error handling"* with *"retries failed HTTP requests up to 3 times"*).
    - Eliminate copula substitutions (*"serves as"* $\rightarrow$ *"is"*), negative parallelism (*"not only... but also"*), and rule-of-three lists.
+   - **Conceptual & Frame Isolation Check**: Run the **Fresh Reader Test** ([references/standards.md](references/standards.md#8-standalone-readability--meta-context-isolation)). Remove un-defined meta-task labels (plan tiers, phase numbers), ephemeral subagent IDs, conversation turn references, and absolute local system paths.
 3. **Output**: Present only the polished, post-audit prose.
 
 ---
