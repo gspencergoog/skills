@@ -1,9 +1,15 @@
 ---
 name: pr-feedback-handler
-description: Handles retrieving, analyzing, and addressing code review feedback on a GitHub Pull Request. Use this skill when the user requests addressing or fixing a PR.
+description: Interactively handles GitHub PR review feedback by launching a review dashboard before applying any workspace changes. Use when tasked with addressing PR comments.
 ---
 
 # PR Feedback Handler Skill
+
+> [!CAUTION]
+> **MANDATORY DASHBOARD WORKFLOW & TOOL RESTRICTIONS**
+> - You MUST NOT modify repository code files (`replace_file_content`, `write_to_file`, etc.) during the analysis phase.
+> - During Phase 1, you may ONLY use read/view tools to inspect code and `write_to_file` to write to `<scratch>/pr_comments.json`.
+> - You MUST execute `launch_dashboard.py` and wait for user approval on the dashboard before making any code modifications.
 
 This skill guides the process of retrieving, analyzing, implementing, and resolving PR review comments using an interactive browser-based dashboard.
 
@@ -27,31 +33,33 @@ Follow these steps when tasked with addressing PR review feedback:
 
 > [!WARNING]
 > **DO NOT IMPLEMENT CHANGES PREMATURELY**
-> Do **NOT** modify any files in the workspace (source code, tests, etc.) during Step 1. Only write proposed fixes and draft replies to the JSON file and launch the dashboard. Modifying files before the user approves them defeats the purpose of interactive reviews and causes git tree status issues on the dashboard.
+> Do **NOT** modify any files in the workspace (source code, tests, etc.) during Phase 1. Only write proposed fixes and draft replies to the JSON file and launch the dashboard. Modifying files before the user approves them defeats the purpose of interactive reviews and causes git tree status issues on the dashboard.
 
 
 ### Step 0: Pre-Flight Workspace & Branch Check
 
 Before analyzing PR feedback or launching the dashboard:
 1. **Verify Workspace State**: Run `git status` in the target project directory to verify active branch and uncommitted changes.
-2. **Handle Active Changes**: If there are uncommitted changes, inform the user or commit/stash them if appropriate, to avoid workspace confusion.
+2. **Handle Active Changes**: If there are uncommitted changes, inform the user or commit/stash them if appropriate. Note that `launch_dashboard.py` will reject execution if tracked workspace files contain uncommitted changes.
 
 ---
 
 ### Step 1: Analyze Comments and Launch Dashboard
 
+#### Phase 1: Analysis & Data Preparation (Read-Only Workspace Access)
 To allow the user to interactively review proposed fixes, draft replies, and provide feedback, run the interactive dashboard.
 
 1. **Fetch Comments**: Employ the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill to fetch the unresolved PR comments and CI/CD check failures in JSON format. Always use `env -u GITHUB_TOKEN` to prevent environment token overrides:
    `env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <path-to-target-workspace-directory>`
 
 2. **Propose Fixes and Draft Replies**: For each thread in the output:
-   - Inspect the target file (at the specified line if given, or the overall file if it is a file-level comment).
+   - Inspect the target file using read/view tools (`view_file`, `grep_search`, etc.). **Do NOT use file editing tools (`replace_file_content`, `write_to_file`, etc.) on workspace repository files.**
    - Formulate a concrete plan to address the feedback. Add this plan as a `proposedFix` field (string) to the thread object in the JSON. Provide enough detail to understand the solution details while keeping it concise and actionable.
    - Draft a succinct, professional reply describing what was done to fix the issue (following the `write-prose` skill). Add this as a `draftReply` field (string) to the thread object.
 
 3. **Write & Validate Data File**: Save the enriched JSON report to `pr_comments.json` in your conversation scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/pr_comments.json`). **Ensure this file is saved and valid JSON before calling the dashboard launcher.**
 
+#### Phase 2: Launch Dashboard & Interactive Review
 4. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
    `env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory>`
    Set a reasonable `WaitMsBeforeAsync` (e.g., `1000`) so the command runs in the background.

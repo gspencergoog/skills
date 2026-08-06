@@ -305,7 +305,14 @@ class TestDashboardMain(unittest.TestCase):
     @patch('sys.exit')
     def test_main_startup(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
         mock_exit.side_effect = self._raise_system_exit
-        mock_git.return_value = ".git"
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return ""
+            if cmd == "rev-parse --git-dir":
+                return ".git"
+            return ""
+        mock_git.side_effect = git_side_effect
         mock_server_inst = MagicMock()
         mock_server_inst.server_port = 12345
         mock_http_server.return_value = mock_server_inst
@@ -326,7 +333,14 @@ class TestDashboardMain(unittest.TestCase):
     @patch('time.sleep')
     def test_main_keyboard_interrupt(self, mock_sleep, mock_exit, mock_http_server, mock_git, mock_webbrowser):
         mock_exit.side_effect = self._raise_system_exit
-        mock_git.return_value = ".git"
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return ""
+            if cmd == "rev-parse --git-dir":
+                return ".git"
+            return ""
+        mock_git.side_effect = git_side_effect
         mock_server_inst = MagicMock()
         mock_server_inst.server_port = 12345
         mock_http_server.return_value = mock_server_inst
@@ -348,7 +362,14 @@ class TestDashboardMain(unittest.TestCase):
     @patch('sys.exit')
     def test_main_aborted_exit(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
         mock_exit.side_effect = self._raise_system_exit
-        mock_git.return_value = ".git"
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return ""
+            if cmd == "rev-parse --git-dir":
+                return ".git"
+            return ""
+        mock_git.side_effect = git_side_effect
         mock_server_inst = MagicMock()
         mock_server_inst.server_port = 12345
         mock_http_server.return_value = mock_server_inst
@@ -380,6 +401,77 @@ class TestDashboardMain(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             main()
         self.assertEqual(cm.exception.code, 1)
+
+    @patch('launch_dashboard.run_git')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.'])
+    @patch('sys.exit')
+    def test_main_dirty_workspace_rejection(self, mock_exit, mock_git):
+        mock_exit.side_effect = self._raise_system_exit
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return " M file.py"
+            return ""
+        mock_git.side_effect = git_side_effect
+
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 1)
+
+    @patch('launch_dashboard.webbrowser.open')
+    @patch('launch_dashboard.run_git')
+    @patch('http.server.ThreadingHTTPServer')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.', '--allow-dirty'])
+    @patch('sys.exit')
+    def test_main_allow_dirty_bypass(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
+        mock_exit.side_effect = self._raise_system_exit
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return " M file.py"
+            if cmd == "rev-parse --git-dir":
+                return ".git"
+            return ""
+        mock_git.side_effect = git_side_effect
+        mock_server_inst = MagicMock()
+        mock_server_inst.server_port = 12345
+        mock_http_server.return_value = mock_server_inst
+
+        with patch('launch_dashboard.server_should_shutdown', True):
+            from launch_dashboard import main
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
+
+class TestCanOpenLocalBrowser(unittest.TestCase):
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('sys.platform', 'darwin')
+    def test_can_open_local_browser_macos_local(self):
+        from launch_dashboard import can_open_local_browser
+        self.assertTrue(can_open_local_browser())
+
+    @patch.dict(os.environ, {'SSH_CLIENT': '192.168.1.1 1234 22'}, clear=True)
+    def test_can_open_local_browser_ssh_session(self):
+        from launch_dashboard import can_open_local_browser
+        self.assertFalse(can_open_local_browser())
+
+    @patch.dict(os.environ, {}, clear=True)
+    @patch('sys.platform', 'linux')
+    def test_can_open_local_browser_linux_no_display(self):
+        from launch_dashboard import can_open_local_browser
+        self.assertFalse(can_open_local_browser())
+
+    @patch.dict(os.environ, {'DISPLAY': ':0'}, clear=True)
+    @patch('sys.platform', 'linux')
+    def test_can_open_local_browser_linux_with_display(self):
+        from launch_dashboard import can_open_local_browser
+        self.assertTrue(can_open_local_browser())
+
+    @patch.dict(os.environ, {'JETSKI_HUB': '1'}, clear=True)
+    def test_can_open_local_browser_jetski_hub(self):
+        from launch_dashboard import can_open_local_browser
+        self.assertFalse(can_open_local_browser())
 
 if __name__ == '__main__':
     unittest.main()

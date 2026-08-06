@@ -291,6 +291,22 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({"error": message}).encode("utf-8"))
 
+def can_open_local_browser():
+    # 1. SSH session active -> browser will open on remote host, not local client
+    if any(k in os.environ for k in ("SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION")):
+        return False
+
+    # 2. Linux without graphical display server
+    if sys.platform.startswith("linux"):
+        if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+            return False
+
+    # 3. Known remote container / cloud environments
+    if any(k in os.environ for k in ("JETSKI_HUB", "CLOUDTOP_ENVIRONMENT")):
+        return False
+
+    return True
+
 def run_server(server):
     server.serve_forever()
 
@@ -301,6 +317,7 @@ def main():
     parser = argparse.ArgumentParser(description="Launch PR feedback dashboard.")
     parser.add_argument("--data-dir", default="~/.gemini/jetski/scratch", help="Directory to read/write comments and decisions.")
     parser.add_argument("--project-dir", default=".", help="Path to the target codebase/repository directory.")
+    parser.add_argument("--allow-dirty", action="store_true", help="Allow launching dashboard even if workspace has uncommitted changes to tracked files.")
     args = parser.parse_args()
     
     # Resolve path
@@ -325,6 +342,15 @@ def main():
     DashboardHandler.data_dir = resolved_data_dir
     DashboardHandler.project_dir = os.path.abspath(os.path.expanduser(args.project_dir))
     
+    # Pre-flight check: Ensure workspace files are clean of premature edits
+    if not args.allow_dirty:
+        status_porcelain = run_git(["status", "--porcelain", "-uno"], DashboardHandler.project_dir)
+        if status_porcelain:
+            print("Error: Tracked workspace files have uncommitted changes.", file=sys.stderr)
+            print("You MUST NOT modify workspace files before reviewing proposed fixes on the dashboard.", file=sys.stderr)
+            print("Please revert workspace changes and launch the dashboard first.", file=sys.stderr)
+            sys.exit(1)
+    
     # Resolve git_dir (robust against worktrees)
     raw_git_dir = run_git(["rev-parse", "--git-dir"], DashboardHandler.project_dir)
     if raw_git_dir:
@@ -341,10 +367,16 @@ def main():
     
     url = f"http://localhost:{port}/"
     print(f"Starting dashboard on {url}", flush=True)
-    print("Waiting for user decisions in the browser...", flush=True)
     
-    # Open browser
-    webbrowser.open(url)
+    # Open browser if running locally, otherwise print instructions for remote/SSH
+    if can_open_local_browser():
+        print("Opening browser...", flush=True)
+        webbrowser.open(url)
+    else:
+        print("[Remote/SSH session detected] Skipping automatic browser launch.", flush=True)
+        print(f"Please open {url} in your local browser (or via SSH port forwarding).", flush=True)
+        
+    print("Waiting for user decisions in the browser...", flush=True)
     
     # Monitor shutdown flag
     try:

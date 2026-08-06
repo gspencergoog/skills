@@ -28,7 +28,7 @@ Analyze the differences between the current branch and the main branch and const
    - Write the description to your temporary scratch area (`<appDataDir>/brain/<conversation-id>/scratch/`) as a Markdown file.
    - If the PR already exists, update the PR body using the GitHub CLI command:
      `env -u GITHUB_TOKEN gh pr edit --body-file <file>`
-   - To use hashtag notation (e.g. "#42") in a PR description when it isn't intended to be a PR or Issue reference, quote it with backticks so that it doesn't get incorrectly linkified.
+   - Avoid hashtag notation when not intending to reference a GitHub issue or PR (for example, "Step #1" or "UAX #31"), because GitHub auto-links these to unrelated issues or PRs. Either reword to omit the hashtag (e.g., "Step 1") or enclose the hashtag in backticks (e.g., "UAX `#31`").
 
 ## PR Title (Squash Commit Message)
 
@@ -55,4 +55,5 @@ The title should follow the same rules as for the [conventional-commits](../comm
 - Include references to issues that the PR addresses or resolves.
    - If the issue is completely fixed, write "Resolves <issue_number>", which will close the issue when the PR is submitted.
    - If the issue is only partially resolved, use "Addresses <issue_number>" instead.
+- Avoid using hashtag notation for non-issue/PR references (e.g., "Step #1" or "UAX #31") as GitHub will auto-link them to unrelated issues or PRs. Reword without the hashtag (e.g., "Step 1") or put backticks around the hashtagged number (e.g., "UAX `#31`").
 - Don't describe the changes in hyperbolic language (e.g. "..is a fantastic improvement that the world will rejoice!") or use marketing terms. This is meant to be a factual description of the changes.
