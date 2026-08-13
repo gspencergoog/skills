@@ -69,7 +69,7 @@ def wait_for_git_changes(head_path, index_path, check_shutdown):
             return True
     return False
 
-def check_git_state(project_dir, expected_branch, expected_repo):
+def check_git_state(project_dir, expected_branch, expected_repo, head_ref_oid=None):
     cwd = os.path.abspath(os.path.expanduser(project_dir))
     
     # 1. Check if it's a git repo and resolve toplevel path
@@ -86,16 +86,33 @@ def check_git_state(project_dir, expected_branch, expected_repo):
         # Might be detached HEAD, get OID
         active_branch = run_git(["rev-parse", "--short", "HEAD"], cwd)
         
-    is_correct_branch = (active_branch == expected_branch)
+    is_correct_branch = bool(expected_branch) and (active_branch == expected_branch)
     
     # 3. Check dirty
     status_porcelain = run_git(["status", "--porcelain", "-uno"], cwd)
     is_dirty = len(status_porcelain) > 0
     
     # 4. Check unpushed commits
-    cherry_out = run_git(["cherry", "-v"], cwd)
-    has_unpushed = len(cherry_out) > 0
-    unpushed_commits = [line for line in cherry_out.splitlines() if line]
+    unpushed_commits = []
+    has_unpushed = False
+    if head_ref_oid:
+        current_sha = run_git(["rev-parse", "HEAD"], cwd)
+        if current_sha and current_sha != head_ref_oid:
+            log_out = run_git(["log", f"{head_ref_oid}..HEAD", "--oneline"], cwd)
+            if log_out:
+                unpushed_commits = [line for line in log_out.splitlines() if line]
+                has_unpushed = len(unpushed_commits) > 0
+            else:
+                cherry_out = run_git(["cherry", "-v"], cwd)
+                has_unpushed = len(cherry_out) > 0
+                unpushed_commits = [line for line in cherry_out.splitlines() if line]
+        else:
+            has_unpushed = False
+            unpushed_commits = []
+    else:
+        cherry_out = run_git(["cherry", "-v"], cwd)
+        has_unpushed = len(cherry_out) > 0
+        unpushed_commits = [line for line in cherry_out.splitlines() if line]
     
     # 5. Check repository URL
     active_repo = ""
@@ -116,7 +133,7 @@ def check_git_state(project_dir, expected_branch, expected_repo):
                 if repo.endswith(".git"):
                     repo = repo[:-4]
                 active_repo = f"{owner}/{repo}"
-                if active_repo.lower() == expected_repo.lower():
+                if expected_repo and active_repo.lower() == expected_repo.lower():
                     is_correct_repo = True
                     break
                     
@@ -168,9 +185,39 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     with open(comments_path, "r", encoding="utf-8") as f:
                         report_data = json.load(f)
                     
+                    # Merge proposals.json overlay if present
+                    proposals_path = os.path.join(self.data_dir, "proposals.json")
+                    if os.path.exists(proposals_path):
+                        try:
+                            with open(proposals_path, "r", encoding="utf-8") as pf:
+                                proposals_data = json.load(pf)
+                            proposals_map = {}
+                            if isinstance(proposals_data, dict):
+                                if "proposals" in proposals_data and isinstance(proposals_data["proposals"], dict):
+                                    proposals_map = proposals_data["proposals"]
+                                else:
+                                    proposals_map = proposals_data
+                            elif isinstance(proposals_data, list):
+                                for item in proposals_data:
+                                    if isinstance(item, dict) and "threadId" in item:
+                                        proposals_map[item["threadId"]] = item
+
+                            for thread in report_data.get("threads", []):
+                                tid = thread.get("id")
+                                if tid and tid in proposals_map:
+                                    proposal = proposals_map[tid]
+                                    if isinstance(proposal, dict):
+                                        if "proposedFix" in proposal:
+                                            thread["proposedFix"] = proposal["proposedFix"]
+                                        if "draftReply" in proposal:
+                                            thread["draftReply"] = proposal["draftReply"]
+                        except Exception:
+                            pass
+
                     expected_branch = report_data.get("headRefName", "")
                     expected_repo = report_data.get("repo", "")
-                    git_state = check_git_state(self.project_dir, expected_branch, expected_repo)
+                    head_ref_oid = report_data.get("headRefOid", "")
+                    git_state = check_git_state(self.project_dir, expected_branch, expected_repo, head_ref_oid)
                     
                     report_data["gitState"] = git_state
                     
@@ -193,18 +240,25 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             # Read expected state from pr_comments.json
             expected_branch = ""
             expected_repo = ""
+            head_ref_oid = ""
             comments_path = os.path.join(self.data_dir, "pr_comments.json")
             if os.path.exists(comments_path):
                 try:
                     with open(comments_path, "r", encoding="utf-8") as f:
                         report_data = json.load(f)
-                    expected_branch = report_data.get("headRefName", "")
+                    expected_branch = report_data.get("headRefName") or report_data.get("pr", {}).get("headRef") or report_data.get("pr", {}).get("headRefName", "")
+                    head_ref_oid = report_data.get("headRefOid", "")
                     expected_repo = report_data.get("repo", "")
+                    if not expected_repo and isinstance(report_data.get("pr"), dict):
+                        pr_url = report_data["pr"].get("url", "")
+                        m = re.search(r'github\.com/([^/]+/[^/]+)/pull', pr_url)
+                        if m:
+                            expected_repo = m.group(1)
                 except Exception:
                     pass
 
             # Initial state send
-            git_state = check_git_state(self.project_dir, expected_branch, expected_repo)
+            git_state = check_git_state(self.project_dir, expected_branch, expected_repo, head_ref_oid)
             try:
                 self.wfile.write(f"data: {json.dumps(git_state)}\n\n".encode("utf-8"))
                 self.wfile.flush()
@@ -227,7 +281,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                     if has_changes:
                         # Debounce/settling period for filesystem updates
                         time.sleep(0.25)
-                        git_state = check_git_state(self.project_dir, expected_branch, expected_repo)
+                        git_state = check_git_state(self.project_dir, expected_branch, expected_repo, head_ref_oid)
                         self.wfile.write(f"data: {json.dumps(git_state)}\n\n".encode("utf-8"))
                         self.wfile.flush()
             except (ConnectionResetError, BrokenPipeError):
@@ -259,6 +313,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "success"}).encode("utf-8"))
+                self.wfile.flush()
                 
                 exit_status = 0
                 server_should_shutdown = True
@@ -271,6 +326,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "aborted"}).encode("utf-8"))
+            self.wfile.flush()
             
             exit_status = 1
             server_should_shutdown = True

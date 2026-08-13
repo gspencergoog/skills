@@ -15,15 +15,13 @@ This skill fetches and analyzes the description and review comments of a GitHub 
 
 When investigating a PR or needing information from a PR and its comments:
 
-1. **Fetch and Analyze PR Data**: Run the analyzer script with `env -u GITHUB_TOKEN` (to bypass dummy token injection) to fetch the PR description and unresolved comments in JSON format:
+1. **Fetch and Save PR Data**: Run the analyzer script with `env -u GITHUB_TOKEN` (to bypass dummy token injection) to fetch the PR description and comments directly into your conversation scratch directory:
    ```bash
-   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <path-to-target-workspace-directory>
+   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --output <appDataDir>/brain/<conversation-id>/scratch/pr_comments.json --dir <path-to-target-workspace-directory>
    ```
 
-2. **Save to Scratch**: Save the resulting JSON output to a file named `pr_comments.json` in your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/pr_comments.json`).
-
-3. **Interpret the Results**:
-   - The JSON contains `prDescription` (the PR description) and `threads` (the unresolved comments).
+2. **Interpret the Results**:
+   - The generated `pr_comments.json` contains `prDescription` (the PR description), `threads` (the unresolved comments), `headRefName`, `headRefOid`, and `checks`.
    - Use `prDescription` to understand the PR context and implementation details.
    - Use `threads` to list outstanding review comments and suggestions.
 

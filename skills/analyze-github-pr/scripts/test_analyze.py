@@ -148,6 +148,7 @@ class TestAnalyzeComments(unittest.TestCase):
         mock_fetch_pr.return_value = (
             "PR description",
             "feature-branch",
+            "oid123",
             "main",
             [
                 {
@@ -178,7 +179,7 @@ class TestAnalyzeComments(unittest.TestCase):
     @patch('os.chdir')
     @patch('argparse.ArgumentParser.parse_args')
     def test_main_json_success(self, mock_parse_args, mock_chdir, mock_exists, mock_analyze):
-        mock_parse_args.return_value = MagicMock(json=True, all=False, dir=".")
+        mock_parse_args.return_value = MagicMock(json=True, all=False, dir=".", output=None)
         mock_analyze.return_value = {
             "repo": "owner/repo",
             "pr": 123,
@@ -237,6 +238,7 @@ class TestAnalyzeComments(unittest.TestCase):
         mock_fetch_pr.return_value = (
             "PR description",
             "feature-branch",
+            "oid123",
             "main",
             [
                 {
@@ -266,7 +268,7 @@ class TestAnalyzeComments(unittest.TestCase):
     @patch('os.chdir')
     @patch('argparse.ArgumentParser.parse_args')
     def test_main_human_output(self, mock_parse_args, mock_chdir, mock_exists, mock_analyze):
-        mock_parse_args.return_value = MagicMock(json=False, all=True, dir=".")
+        mock_parse_args.return_value = MagicMock(json=False, all=True, dir=".", output=None)
         mock_analyze.return_value = {
             "repo": "owner/repo",
             "pr": 123,
@@ -334,6 +336,7 @@ class TestAnalyzeComments(unittest.TestCase):
                     "pullRequest": {
                         "body": "PR Body",
                         "headRefName": "feature",
+                        "headRefOid": "commit_sha_123",
                         "baseRefName": "main",
                         "reviewThreads": {
                             "nodes": [
@@ -353,9 +356,10 @@ class TestAnalyzeComments(unittest.TestCase):
             }
         })
         from analyze_comments import fetch_pr_data
-        body, head, base, threads = fetch_pr_data("owner", "repo", 123)
+        body, head, oid, base, threads = fetch_pr_data("owner", "repo", 123)
         self.assertEqual(body, "PR Body")
         self.assertEqual(head, "feature")
+        self.assertEqual(oid, "commit_sha_123")
         self.assertEqual(base, "main")
         self.assertEqual(len(threads), 1)
         self.assertEqual(threads[0]["id"], "thread_1")
@@ -428,6 +432,7 @@ class TestAnalyzeComments(unittest.TestCase):
         mock_fetch_pr.return_value = (
             "PR description",
             "feature-branch",
+            "oid123",
             "main",
             [
                 {
@@ -507,6 +512,26 @@ class TestAnalyzeComments(unittest.TestCase):
         from analyze_comments import parse_diff_hunk_right_ref
         self.assertEqual(parse_diff_hunk_right_ref(None), [])
         self.assertEqual(parse_diff_hunk_right_ref(""), [])
+
+    @patch('analyze_comments.analyze')
+    @patch('os.path.exists', return_value=True)
+    @patch('os.chdir')
+    @patch('argparse.ArgumentParser.parse_args')
+    def test_main_output_file(self, mock_parse_args, mock_chdir, mock_exists, mock_analyze):
+        mock_analyze.return_value = {
+            "repo": "owner/repo",
+            "pr": 123,
+            "headRefName": "feature",
+            "headRefOid": "sha123",
+            "threads": []
+        }
+        mock_parse_args.return_value = MagicMock(dir=".", output="/tmp/test_out/comments.json", json=False, all=False)
+        with patch('builtins.open', mock_open()) as mock_file, patch('os.makedirs') as mock_makedirs, patch('builtins.print') as mock_print:
+            from analyze_comments import main
+            main()
+            mock_makedirs.assert_called_with("/tmp/test_out", exist_ok=True)
+            mock_file.assert_called_with("/tmp/test_out/comments.json", "w", encoding="utf-8")
+            mock_print.assert_called_with("Saved PR analysis to /tmp/test_out/comments.json")
 
 if __name__ == '__main__':
     unittest.main()

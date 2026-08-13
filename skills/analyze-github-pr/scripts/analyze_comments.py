@@ -65,6 +65,7 @@ def fetch_pr_data(owner, repo, pr_number):
         pullRequest(number: $pr) {
           body
           headRefName
+          headRefOid
           baseRefName
           reviewThreads(first: 100) {
             nodes {
@@ -98,7 +99,7 @@ def fetch_pr_data(owner, repo, pr_number):
             seen.add(node["id"])
             unique_nodes.append(node)
             
-    return pr_data.get("body", ""), pr_data.get("headRefName", ""), pr_data.get("baseRefName", ""), unique_nodes
+    return pr_data.get("body", ""), pr_data.get("headRefName", ""), pr_data.get("headRefOid", ""), pr_data.get("baseRefName", ""), unique_nodes
 
 
 def parse_suggestion(body):
@@ -297,7 +298,7 @@ def fetch_failed_checks_logs(pr_number):
 def analyze(include_all=False):
     owner, repo = get_repo_info()
     pr_number = get_pr_number()
-    pr_description, head_ref_name, base_ref_name, threads = fetch_pr_data(owner, repo, pr_number)
+    pr_description, head_ref_name, head_ref_oid, base_ref_name, threads = fetch_pr_data(owner, repo, pr_number)
     modified = get_modified_lines(base_ref_name)
     
     output_threads = []
@@ -359,6 +360,7 @@ def analyze(include_all=False):
         "pr": pr_number,
         "prDescription": pr_description,
         "headRefName": head_ref_name,
+        "headRefOid": head_ref_oid,
         "baseRefName": base_ref_name,
         "threads": output_threads,
         "checks": failed_checks
@@ -367,6 +369,7 @@ def analyze(include_all=False):
 def main():
     parser = argparse.ArgumentParser(description="Analyze PR review comments.")
     parser.add_argument("--json", action="store_true", help="Output raw JSON.")
+    parser.add_argument("-o", "--output", help="Write JSON report to specified file path.")
     parser.add_argument("--all", action="store_true", help="Include resolved and hidden/minimized threads.")
     parser.add_argument("--dir", default=".", help="Directory to run git/gh commands from.")
     args = parser.parse_args()
@@ -379,9 +382,18 @@ def main():
     
     try:
         report = analyze(include_all=args.all)
+        if args.output:
+            out_path = os.path.abspath(os.path.expanduser(args.output))
+            parent = os.path.dirname(out_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, indent=2)
+            if not args.json:
+                print(f"Saved PR analysis to {out_path}")
         if args.json:
             print(json.dumps(report, indent=2))
-        else:
+        elif not args.output:
             print(f"Repo: {report['repo']}, PR: #{report['pr']}")
             print("="*80)
             print("PR Description:")

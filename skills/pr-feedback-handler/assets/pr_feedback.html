@@ -639,23 +639,24 @@
         const hiddenBadge = thread.isHidden ? '<span class="badge outdated">Hidden/Minimized</span>' : '';
         
         let localStatusBadge = '';
-        if (thread.localStatus.startsWith('Addressed')) {
+        const localStatus = thread.localStatus || '';
+        if (localStatus.startsWith('Addressed')) {
           localStatusBadge = `<span class="badge status-addressed">Addressed (Local)</span>`;
           decisions[thread.id].approved = true; // Auto check if addressed
-        } else if (thread.localStatus.startsWith('Modified')) {
+        } else if (localStatus.startsWith('Modified')) {
           localStatusBadge = `<span class="badge status-modified">Modified Locally</span>`;
           decisions[thread.id].approved = true;
         } else {
           localStatusBadge = `<span class="badge">Unaddressed</span>`;
         }
 
-        const commentsHtml = thread.comments.map(c => `
+        const commentsHtml = (thread.comments || []).map(c => `
           <div class="comment-bubble">
             <div class="comment-meta">
-              <span class="comment-author">@${c.author}</span>
-              <span>${new Date(c.createdAt).toLocaleString()}</span>
+              <span class="comment-author">@${c.author || 'unknown'}</span>
+              <span>${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
             </div>
-            <div class="comment-content">${parseMarkdown(c.body)}</div>
+            <div class="comment-content">${parseMarkdown(c.body || '')}</div>
           </div>
         `).join('');
         
@@ -1118,11 +1119,11 @@
         warnings.push(`<strong>Error:</strong> ${gitState.error || 'Project directory is not a git repository.'}`);
         blockSave = true;
       } else {
-        if (!gitState.isCorrectRepo) {
+        if (gitState.expectedRepo && !gitState.isCorrectRepo) {
           warnings.push(`<strong>Repository Mismatch:</strong> Expected repository <code>${gitState.expectedRepo}</code>, but local remote points to <code>${gitState.activeRepo || 'none'}</code>.`);
           blockSave = true;
         }
-        if (!gitState.isCorrectBranch) {
+        if (gitState.expectedBranch && !gitState.isCorrectBranch) {
           warnings.push(`<strong>Branch Warning:</strong> Active branch is <code>${gitState.activeBranch}</code>, expected <code>${gitState.expectedBranch}</code>. Run <code>gh pr checkout ${feedbackData ? feedbackData.pr : ''}</code> if needed.`);
         }
         if (gitState.isDirty) {

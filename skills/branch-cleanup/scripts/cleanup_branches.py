@@ -37,8 +37,11 @@ def get_branches(path):
         parts = line.split('|')
         if len(parts) < 4:
             continue
+        name = parts[0]
+        if name.startswith('heads/'):
+            name = name[6:]
         branches.append({
-            'name': parts[0],
+            'name': name,
             'upstream': parts[1],
             'track': parts[2],
             'worktree': parts[3]

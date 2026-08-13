@@ -100,6 +100,88 @@ class TestLaunchDashboard(unittest.TestCase):
         self.assertTrue(res["isWorktree"])
         self.assertEqual(res["activeBranch"], "branch-wrong")
 
+    @patch('launch_dashboard.run_git')
+    def test_check_git_state_empty_remotes_list(self, mock_git):
+        def side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "rev-parse --show-toplevel":
+                return "~/code/project"
+            elif cmd == "symbolic-ref --short HEAD":
+                return "branch-x"
+            elif cmd == "status --porcelain -uno":
+                return ""
+            elif cmd == "cherry -v":
+                return ""
+            elif cmd == "remote":
+                return ""
+            elif cmd == "remote get-url upstream":
+                return "git@github.com:owner/repo.git"
+            elif cmd == "rev-parse --git-dir":
+                return ".git"
+            elif cmd == "rev-parse --git-common-dir":
+                return ".git"
+            return ""
+
+        mock_git.side_effect = side_effect
+        res = check_git_state(".", "branch-x", "owner/repo")
+        self.assertTrue(res["isCorrectRepo"])
+
+    @patch('launch_dashboard.run_git')
+    def test_check_git_state_head_ref_oid_matching(self, mock_git):
+        def side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "rev-parse --show-toplevel":
+                return "~/code/project"
+            elif cmd == "symbolic-ref --short HEAD":
+                return "branch-x"
+            elif cmd == "status --porcelain -uno":
+                return ""
+            elif cmd == "rev-parse HEAD":
+                return "sha_exact_match"
+            elif cmd == "remote get-url upstream":
+                return "git@github.com:owner/repo.git"
+            elif cmd == "rev-parse --git-dir":
+                return ".git"
+            elif cmd == "rev-parse --git-common-dir":
+                return ".git"
+            return ""
+
+        mock_git.side_effect = side_effect
+        res = check_git_state(".", "branch-x", "owner/repo", head_ref_oid="sha_exact_match")
+        self.assertTrue(res["isGit"])
+        self.assertTrue(res["isCorrectBranch"])
+        self.assertFalse(res["hasUnpushed"])
+        self.assertEqual(res["unpushedCommits"], [])
+
+    @patch('launch_dashboard.run_git')
+    def test_check_git_state_head_ref_oid_unpushed_commits(self, mock_git):
+        def side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "rev-parse --show-toplevel":
+                return "~/code/project"
+            elif cmd == "symbolic-ref --short HEAD":
+                return "branch-x"
+            elif cmd == "status --porcelain -uno":
+                return ""
+            elif cmd == "rev-parse HEAD":
+                return "sha_local_new"
+            elif cmd == "log sha_remote_old..HEAD --oneline":
+                return "1111111 Commit 1\n2222222 Commit 2"
+            elif cmd == "remote get-url upstream":
+                return "git@github.com:owner/repo.git"
+            elif cmd == "rev-parse --git-dir":
+                return ".git"
+            elif cmd == "rev-parse --git-common-dir":
+                return ".git"
+            return ""
+
+        mock_git.side_effect = side_effect
+        res = check_git_state(".", "branch-x", "owner/repo", head_ref_oid="sha_remote_old")
+        self.assertTrue(res["isGit"])
+        self.assertTrue(res["isCorrectBranch"])
+        self.assertTrue(res["hasUnpushed"])
+        self.assertEqual(len(res["unpushedCommits"]), 2)
+
     @patch('select.kqueue')
     @patch('select.kevent')
     @patch('os.open')
@@ -203,6 +285,112 @@ class TestDashboardServerIntegration(unittest.TestCase):
         self.assertEqual(response.status, 200)
         data = json.loads(response.read().decode('utf-8'))
         self.assertEqual(data["repo"], "owner/repo")
+
+    def test_get_api_comments_with_proposals_overlay(self):
+        # Write temporary proposals.json in data_dir
+        proposals_path = os.path.join(self.data_dir, "proposals.json")
+        try:
+            # Overwrite comments with a thread
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": [
+                        {"id": "t1", "path": "lib/foo.dart", "proposedFix": "", "draftReply": ""}
+                    ]
+                }, f)
+            with open(proposals_path, "w") as f:
+                json.dump({
+                    "t1": {
+                        "proposedFix": "Custom fix proposal",
+                        "draftReply": "Custom draft reply"
+                    }
+                }, f)
+            
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            response = urllib.request.urlopen(url)
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(len(data["threads"]), 1)
+            self.assertEqual(data["threads"][0]["proposedFix"], "Custom fix proposal")
+            self.assertEqual(data["threads"][0]["draftReply"], "Custom draft reply")
+        finally:
+            if os.path.exists(proposals_path):
+                os.remove(proposals_path)
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": []
+                }, f)
+
+    def test_get_api_comments_with_proposals_list_format(self):
+        proposals_path = os.path.join(self.data_dir, "proposals.json")
+        try:
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": [{"id": "t1", "path": "lib/foo.dart"}]
+                }, f)
+            with open(proposals_path, "w") as f:
+                json.dump([
+                    {"threadId": "t1", "proposedFix": "List fix", "draftReply": "List reply"}
+                ], f)
+            
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            response = urllib.request.urlopen(url)
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(data["threads"][0]["proposedFix"], "List fix")
+            self.assertEqual(data["threads"][0]["draftReply"], "List reply")
+        finally:
+            if os.path.exists(proposals_path):
+                os.remove(proposals_path)
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": []
+                }, f)
+
+    def test_get_api_comments_with_nested_proposals(self):
+        proposals_path = os.path.join(self.data_dir, "proposals.json")
+        try:
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": [{"id": "t1", "path": "lib/foo.dart"}]
+                }, f)
+            with open(proposals_path, "w") as f:
+                json.dump({
+                    "proposals": {
+                        "t1": {"proposedFix": "Nested fix", "draftReply": "Nested reply"}
+                    }
+                }, f)
+            
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            response = urllib.request.urlopen(url)
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(data["threads"][0]["proposedFix"], "Nested fix")
+            self.assertEqual(data["threads"][0]["draftReply"], "Nested reply")
+        finally:
+            if os.path.exists(proposals_path):
+                os.remove(proposals_path)
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": []
+                }, f)
 
     def test_post_api_save(self):
         url = f"http://127.0.0.1:{self.port}/api/save"
