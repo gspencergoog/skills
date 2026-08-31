@@ -1,0 +1,19 @@
+{
+  "name": "cognitive-complexity-ts",
+  "version": "1.0.0",
+  "description": "Cognitive Complexity analyzer for TypeScript and JavaScript",
+  "main": "dist/cli.js",
+  "bin": {
+    "cognitive-complexity-ts": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/test/visitor.test.js"
+  },
+  "dependencies": {
+    "typescript": "^5.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}

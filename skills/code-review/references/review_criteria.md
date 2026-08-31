@@ -26,7 +26,7 @@ Identify performance bottlenecks and optimize for efficiency.
 ### 4. Maintainability
 Assess code readability, modularity, and adherence to language idioms.
 - **Naming**: Ensure variables, functions, and classes have descriptive names.
-- **Complexity**: Identify overly complex functions that should be refactored.
+- **Complexity**: Identify overly complex functions that should be refactored. Use the [cognitive-complexity](../../cognitive-complexity/SKILL.md) skill to inspect functions exceeding the threshold score of 15 and suggest structural refactorings (such as Guard Clauses, Early Returns, or Extract Method).
 - **Code duplication**: Look for opportunities to reuse code.
 - **Style**: Adhere to specified style guides. Violations should be noted.
 - **Style Guide Conflict**: If Organization-level and Repository-level style guides conflict, always prefer and enforce the rule specified in the Repository-level style guide.

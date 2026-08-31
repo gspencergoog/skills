@@ -53,6 +53,11 @@ If the proposal introduces new APIs or modifies existing ones, use the
 [api-review](../api-review/SKILL.md)
 skill to verify the API design.
 
+### Maintainability & Complexity Standards
+Define explicit code health standards and maintainability metrics for the proposed design. Reference the
+[cognitive-complexity](../cognitive-complexity/SKILL.md)
+skill when specifying limits on architectural branching and function complexity (e.g., standard threshold $\le 15$).
+
 ### Apply natural writing style
 Follow the rules in the
 [write-prose](../write-prose/SKILL.md)

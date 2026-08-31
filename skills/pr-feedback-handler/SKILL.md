@@ -110,6 +110,7 @@ Once the dashboard review completes:
 3. **Execute Approved Fixes**: For each item in `decisions` where `approved: true` and `action: "accept"`:
    - Apply the suggestion or implement the fix in the target file.
    - If `agentInstructions` is populated, prioritize those instructions over your original `proposedFix`.
+   - When refactoring code in response to readability, maintainability, or "simplify this" feedback, run the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill before and after edits to confirm cognitive complexity was reduced.
    - If `action: "decline"` or `action: "clarify"`, skip code changes for that thread.
 
 4. **Add Regression Tests**: When fixing any reviewer-reported bug or logic flaw, add targeted unit tests to verify the fix and prevent future regressions.

@@ -7,3 +7,11 @@ __pycache__/
 *.pyc
 *.pyo
 .coverage*
+.agents/
+node_modules/
+dist/
+.build/
+.gradle/
+.kotlin/
+*.profdata
+coverage/

@@ -61,6 +61,10 @@ Execute on each branch/worktree in the stack:
 5. **Audit Test Quality**:
    - Refer to [test_quality_audit.md](references/test_quality_audit.md) for quality dimensions (hermaticity, false positives, assertion precision, timing hygiene).
    - Ensure every bug fix introduced during the conversation has a dedicated, failing-before-fix regression test.
+6. **Cognitive Complexity Audit**:
+   - Run the [cognitive-complexity](../cognitive-complexity/SKILL.md) analyzer on all modified or newly added source files to check for maintainability hotspots:
+     `python3 <skillsDir>/cognitive-complexity/scripts/cognitive_complexity.py <modified_files> --threshold 15 --verbose`
+   - If any new or modified functions exceed the threshold (score > 15), refactor them (e.g., using Extract Method or Guard Clauses) to reduce cognitive complexity before proceeding to review.
 
 ---
 

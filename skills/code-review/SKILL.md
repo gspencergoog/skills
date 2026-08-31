@@ -53,7 +53,7 @@ Generate review comments focusing on the following criteria:
 
 - **Correctness**: Verify functionality, handle edge cases, check API usage.
 - **Efficiency**: Identify bottlenecks, redundant calculations.
-- **Maintainability**: Assess readability, adherence to style guides.
+- **Maintainability**: Assess readability, adherence to style guides, and evaluate control flow complexity via the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill.
 - **Security**: Identify potential vulnerabilities.
 - **API Soundness**: If the changes modify public API surfaces, signatures, or configuration patterns (e.g. exported classes, functions, REST/RPC endpoints, package/module public exports), delegate the API review to a subagent running the [api-review](../api-review/SKILL.md) skill on the modified files, and integrate the findings into the final feedback report.
 
@@ -64,6 +64,7 @@ Generate review comments focusing on the following criteria:
 - Reference external standards where applicable:
   - For API design, refer to the canonical API design guidelines in the [api-review](../api-review/SKILL.md) skill.
   - For documentation, refer to the [code-documentation](../code-documentation/SKILL.md) skill.
+  - For code complexity and maintainability standards, refer to the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill.
 - **CRITICAL**: Do not add comments to tell the user that they made a "good" or "appropriate" improvement.
 
 ### Step 4: Critique and Refine (Review the Review)
