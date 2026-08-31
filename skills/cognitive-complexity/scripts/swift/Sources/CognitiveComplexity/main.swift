@@ -105,13 +105,19 @@ func analyzeTarget(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [F
     if isDir.boolValue {
         let files = collectSwiftFiles(dir: url, excludes: options.excludes)
         for f in files {
-            if let sourceCode = try? String(contentsOf: f, encoding: .utf8) {
+            do {
+                let sourceCode = try String(contentsOf: f, encoding: .utf8)
                 fileResults.append(analyzer.analyzeSource(sourceCode, filePath: f.path))
+            } catch {
+                fputs("Error reading \(f.path): \(error.localizedDescription)\n", stderr)
             }
         }
     } else {
-        if let sourceCode = try? String(contentsOf: url, encoding: .utf8) {
+        do {
+            let sourceCode = try String(contentsOf: url, encoding: .utf8)
             fileResults.append(analyzer.analyzeSource(sourceCode, filePath: url.path))
+        } catch {
+            fputs("Error reading \(url.path): \(error.localizedDescription)\n", stderr)
         }
     }
     return fileResults

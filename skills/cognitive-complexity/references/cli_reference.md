@@ -34,6 +34,9 @@ java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]
 | `-h` | `--help` | Display help message and options. | N/A |
 | `-V` | `--version` | Display version information. | N/A |
 
+> [!TIP]
+> When piping short code snippets or expressions via standard input that lack function declarations or keywords, specify `--lang <language>` to select the appropriate parser.
+
 ---
 
 ## 3. Output Formats

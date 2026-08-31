@@ -358,4 +358,20 @@ class _FunctionComplexityVisitor extends RecursiveAstVisitor<void> {
     }
     super.visitFunctionExpressionInvocation(node);
   }
+
+  @override
+  void visitBreakStatement(BreakStatement node) {
+    if (node.label != null) {
+      _addIncrement(node, 'labeled_break', 1, false, 'labeled break jump');
+    }
+    super.visitBreakStatement(node);
+  }
+
+  @override
+  void visitContinueStatement(ContinueStatement node) {
+    if (node.label != null) {
+      _addIncrement(node, 'labeled_continue', 1, false, 'labeled continue jump');
+    }
+    super.visitContinueStatement(node);
+  }
 }
