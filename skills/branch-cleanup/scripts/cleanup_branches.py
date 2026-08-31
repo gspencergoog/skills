@@ -192,8 +192,10 @@ def main():
             else:
                 parts = upstream.split('/', 1)
                 if len(parts) == 2:
-                    remote = parts[0]
-                    remote_branch = parts[1]
+                    rem_name, rem_bname = parts[0], parts[1]
+                    if rem_bname not in [args.main_branch, 'main', 'master']:
+                        remote = rem_name
+                        remote_branch = rem_bname
                     
         to_delete.append({
             'local': name,

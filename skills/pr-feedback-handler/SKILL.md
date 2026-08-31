@@ -1,6 +1,6 @@
 ---
 name: pr-feedback-handler
-description: Interactively handles GitHub PR review feedback by launching a review dashboard before applying any workspace changes. Use when tasked with addressing PR comments.
+description: Interactively handles GitHub PR review feedback by launching a review dashboard or generating a triage report before applying any workspace changes. Use when tasked with addressing PR comments.
 ---
 
 # PR Feedback Handler Skill
@@ -9,9 +9,9 @@ description: Interactively handles GitHub PR review feedback by launching a revi
 > **MANDATORY DASHBOARD WORKFLOW & TOOL RESTRICTIONS**
 > - You MUST NOT modify repository code files (`replace_file_content`, `write_to_file`, etc.) during the analysis phase.
 > - During Phase 1, you may ONLY use read/view tools to inspect code and `write_to_file` to write your proposed fixes to `<scratch>/proposals.json`.
-> - You MUST execute `launch_dashboard.py` and wait for user approval on the dashboard before making any code modifications.
+> - You MUST execute `launch_dashboard.py` (or generate an artifact report in headless/artifact mode) and wait for user approval before making any code modifications.
 
-This skill guides the process of retrieving, analyzing, implementing, and resolving PR review comments using an interactive browser-based dashboard.
+This skill guides the process of retrieving, analyzing, empirically verifying, implementing, and resolving PR review comments.
 
 > [!IMPORTANT]
 > **WRITING GUIDELINES**
@@ -19,8 +19,7 @@ This skill guides the process of retrieving, analyzing, implementing, and resolv
 
 > [!IMPORTANT]
 > **CRITICAL RULE: USER APPROVAL REQUIRED**
-> Before performing any action that modifies the remote state (making changes public), you **MUST** get explicit user approval. This applies at any step in the process:
->
+> Before performing any action that modifies the remote state (making changes public), you **MUST** get explicit user approval:
 > 1. **Pushing Code**: Request approval before running `git push` or making remote updates to the PR branch.
 > 2. **Replying to Threads**: Present your draft reply or clarifying question to the user and obtain their approval before posting it.
 > 3. **Resolving Threads**: Request approval before marking any review thread as resolved on GitHub.
@@ -35,29 +34,44 @@ Follow these steps when tasked with addressing PR review feedback:
 > **DO NOT IMPLEMENT CHANGES PREMATURELY**
 > Do **NOT** modify any files in the workspace (source code, tests, etc.) during Phase 1. Only write proposed fixes and draft replies to `<scratch>/proposals.json` and launch the dashboard. Modifying files before the user approves them defeats the purpose of interactive reviews and causes git tree status issues on the dashboard.
 
+---
 
-### Step 0: Pre-Flight Workspace & Branch Check
+### Step 0: Pre-Flight Workspace, Branch & CI Check
 
 Before analyzing PR feedback or launching the dashboard:
-1. **Verify Workspace State**: Run `git status` in the target project directory to verify active branch and uncommitted changes.
-2. **Handle Active Changes**: If there are uncommitted changes, inform the user or commit/stash them if appropriate. Note that `launch_dashboard.py` will reject execution if tracked workspace files contain uncommitted changes.
+1. **Verify Workspace State & Branch Sync**: Run `git status` in the target project directory. Verify active branch matches the PR HEAD branch and there are no uncommitted changes.
+2. **Check for Active/Pending CI Runs**:
+   - Inspect the `pendingChecks` list from `analyze_comments.py`.
+   - If active checks are running, prompt the user via `ask_question` to determine whether to proceed immediately with triage or wait for CI completion.
 
 ---
 
-### Step 1: Analyze Comments and Launch Dashboard
+### Step 1: Analyze Comments, Empirical Verification & Proposals
 
-#### Phase 1: Analysis & Proposals Preparation (Read-Only Workspace Access)
-To allow the user to interactively review proposed fixes, draft replies, and provide feedback, run the interactive dashboard.
+#### Phase 1: Analysis & Empirical Verification (Read-Only Workspace Access)
 
 1. **Fetch and Save Comments**: Run `analyze_comments.py` with `--output` to save the full PR metadata report to `pr_comments.json` in your scratch directory. Always use `env -u GITHUB_TOKEN` to prevent environment token overrides:
-   `env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>`
+   ```bash
+   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
+   ```
 
-2. **Formulate Proposed Fixes & Draft Replies**: For each unresolved thread in the report:
-   - Inspect the target file using read/view tools (`view_file`, `grep_search`, etc.). **Do NOT use file editing tools (`replace_file_content`, `write_to_file`, etc.) on workspace repository files.**
+2. **Empirical Verification Gate**:
+   - **Do NOT blindly trust reviewer comments**: Automated bots and reviewers may propose changes based on incorrect assumptions, hallucinations, or obsolete code context.
+   - For every comment/suggestion:
+     - View the code context in the current local repository.
+     - If the comment reports a bug or test failure, verify if the behavior actually reproduces.
+     - Evaluate if the suggested modification could introduce regressions or break invariants.
+   - **Categorize Each Feedback Item**:
+     - `🔥 Urgent`: Critical bug, security issue, or broken test.
+     - `👍 Solid`: Valid improvement, correct fix, or helpful refactor.
+     - `🤷 Meh`: Minor stylistic nit or preference with neutral impact.
+     - `👎 Disagree`: Factually incorrect, based on a hallucination, or introduces a bug.
+
+3. **Formulate Proposed Fixes & Draft Replies**: For each unresolved thread in the report:
    - Formulate a concrete plan to address the feedback (`proposedFix`).
-   - Draft a succinct, professional reply describing what was done to fix the issue (following the `write-prose` skill) (`draftReply`).
+   - Draft a succinct, professional reply (following the `write-prose` skill) describing what was done or explaining why a suggestion was declined (`draftReply`).
 
-3. **Write Proposals File**: Save your proposals mapping to `proposals.json` in your conversation scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/proposals.json`):
+4. **Write Proposals File**: Save your proposals mapping to `proposals.json` in your conversation scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/proposals.json`):
    ```json
    {
      "<thread_id_1>": {
@@ -65,24 +79,27 @@ To allow the user to interactively review proposed fixes, draft replies, and pro
        "draftReply": "Added null check to prevent NPE as suggested."
      },
      "<thread_id_2>": {
-       "proposedFix": "Extract repeated helper into utility function.",
-       "draftReply": "Extracted helper into utils."
+       "proposedFix": "Decline change; the existing loop invariant guarantees non-emptiness.",
+       "draftReply": "The caller guarantees this collection is non-empty before entry, so extra guard is unnecessary."
      }
    }
    ```
 
 #### Phase 2: Launch Dashboard & Interactive Review
-4. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
-   `env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory>`
-   Set a reasonable `WaitMsBeforeAsync` (e.g., `1000`) so the command runs in the background.
 
-5. **Wait for Completion**: Stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user, and block until they either click "Save & Apply Plan" or "Abort". Once they do, the background task will complete, and you will receive a notification with the command's exit status.
+5. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
+   ```bash
+   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory> --mode auto
+   ```
+   *Note*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`).
+
+6. **Wait for Completion**: Stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user (when local), and block until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status.
 
 ---
 
-### Step 2: Implement Approved Fixes
+### Step 2: Implement Approved Fixes & Add Regression Tests
 
-Once the background task completes, check the result:
+Once the dashboard review completes:
 
 1. **Verify Exit Status**:
    - If the task exited with status `0` (success), proceed to implement the fixes.
@@ -91,30 +108,37 @@ Once the background task completes, check the result:
 2. **Read the Plan**: Read `feedback_state.json` from your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/feedback_state.json`).
 
 3. **Execute Approved Fixes**: For each item in `decisions` where `approved: true` and `action: "accept"`:
-   - Apply the suggestion or implement the fix in the target file (at the specified line if given, or in the file overall).
-   - If `agentInstructions` is populated, prioritize those instructions over your original `proposedFix` when implementing.
+   - Apply the suggestion or implement the fix in the target file.
+   - If `agentInstructions` is populated, prioritize those instructions over your original `proposedFix`.
    - If `action: "decline"` or `action: "clarify"`, skip code changes for that thread.
 
-4. **Verify and Commit**: Delegate local verification and committing to the `commit-changes` skill. Refer to its instructions to format, test, and commit the changes locally.
+4. **Add Regression Tests**: When fixing any reviewer-reported bug or logic flaw, add targeted unit tests to verify the fix and prevent future regressions.
 
-5. **Request Approval to Push**: Show the commit details to the user and obtain explicit approval before pushing the changes to the remote branch.
+5. **Verify and Commit**: Delegate local verification and committing to the `commit-changes` skill. Format, lint, run tests, and commit the changes locally.
 
 ---
 
-### Step 3: Respond and Resolve on GitHub
+### Step 3: Respond, Resolve on GitHub & Completion Menu
 
-Once the approved code changes are successfully pushed:
+Once the approved code changes are verified and committed:
 
-1. **Submit Replies and Resolve Threads in Bulk**:
-   - Run the helper script pointing to the JSON decisions file to post all replies and mark resolved in a single call:
-     `python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json`
-   - If any thread updates fail, the script will print a detailed failure report listing which threads failed and their specific error messages, exiting with a non-zero status. Verify the errors, make any necessary adjustments, and re-run if needed.
+1. **Interactive Next Steps Menu**: Use `ask_question` to ask the user how they would like to proceed:
+   - **Option 1**: "(Recommended) Push changes and update/resolve review threads on GitHub."
+   - **Option 2**: "Push changes to remote only (do not resolve threads yet)."
+   - **Option 3**: "Keep changes local for manual review."
 
+2. **Submit Replies and Resolve Threads in Bulk**:
+   - If approved to resolve on GitHub, run the bulk thread updater:
+     ```bash
+     python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json
+     ```
+   - If any thread updates fail, review the printed failure report, make adjustments, and re-run if needed.
 
 ---
 
 ## Bundled Resources
 
-- **`scripts/update_thread.py`**: Sends replies to and/or resolves a specific PR review thread ID.
-- **`scripts/launch_dashboard.py`**: Standalone dashboard launcher that starts a local server and opens the browser, blocking until saved or aborted.
-- **`assets/pr_feedback.html`**: HTML dashboard template used by the launcher.
+- **`scripts/update_thread.py`**: Bulk posts replies to and resolves approved PR review threads on GitHub.
+- **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, remote SSH/Cloud detection, and markdown artifact export.
+- **`assets/pr_feedback.html`**: Interactive dark-themed web dashboard with tabs for inline comments, top-level reviews, conversation comments, CI failures (with check annotations), and active checks.
+

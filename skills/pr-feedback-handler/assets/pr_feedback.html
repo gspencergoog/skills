@@ -527,12 +527,21 @@
   </div>
 
   <main>
-    <div style="display: flex; gap: 16px; margin-bottom: 24px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
+    <div style="display: flex; gap: 12px; margin-bottom: 24px; border-bottom: 1px solid var(--border-color); padding-bottom: 8px; flex-wrap: wrap;">
       <button id="tab-comments" class="tab-btn active" onclick="switchTab('comments')">
         Review Comments (<span id="comments-count">0</span>)
       </button>
+      <button id="tab-reviews" class="tab-btn" onclick="switchTab('reviews')">
+        Reviews (<span id="reviews-count">0</span>)
+      </button>
+      <button id="tab-general" class="tab-btn" onclick="switchTab('general')">
+        Timeline Comments (<span id="general-comments-count">0</span>)
+      </button>
       <button id="tab-checks" class="tab-btn" onclick="switchTab('checks')">
         CI/CD Failures (<span id="checks-count">0</span>)
+      </button>
+      <button id="tab-pending" class="tab-btn" onclick="switchTab('pending')">
+        Active CI (<span id="pending-count">0</span>)
       </button>
     </div>
 
@@ -540,8 +549,20 @@
       <div class="empty-state">Loading feedback threads...</div>
     </div>
 
+    <div id="content-reviews" class="tab-content">
+      <div class="empty-state">Loading reviews...</div>
+    </div>
+
+    <div id="content-general" class="tab-content">
+      <div class="empty-state">Loading timeline comments...</div>
+    </div>
+
     <div id="content-checks" class="tab-content">
       <div class="empty-state">Loading check runs...</div>
+    </div>
+
+    <div id="content-pending" class="tab-content">
+      <div class="empty-state">Loading pending checks...</div>
     </div>
   </main>
 
@@ -598,10 +619,16 @@
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
         
         document.getElementById('comments-count').textContent = (feedbackData.threads || []).length;
+        document.getElementById('reviews-count').textContent = (feedbackData.reviews || []).length;
+        document.getElementById('general-comments-count').textContent = (feedbackData.comments || []).length;
         document.getElementById('checks-count').textContent = (feedbackData.checks || []).length;
+        document.getElementById('pending-count').textContent = (feedbackData.pendingChecks || []).length;
         
         renderThreads(feedbackData.threads);
+        renderReviews(feedbackData.reviews);
+        renderGeneralComments(feedbackData.comments);
         renderChecks(feedbackData.checks);
+        renderPendingChecks(feedbackData.pendingChecks);
       } catch (err) {
         document.getElementById('content-comments').innerHTML = `
           <div class="empty-state" style="border-color: var(--danger-color); color: var(--danger-color);">
@@ -625,6 +652,7 @@
         decisions[thread.id] = {
           approved: false,
           action: 'accept', // default
+          rating: 'solid',
           reply: thread.draftReply || (thread.suggestion ? 'Applied suggestion.' : 'Fixed.'),
           resolve: true,
           agentInstructions: ''
@@ -730,6 +758,26 @@
             ${proposedFixHtml}
             
             <div class="action-panel">
+              <div class="action-row" style="margin-bottom: 10px;">
+                <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">ASSESSMENT:</span>
+                <label class="action-option">
+                  <input type="radio" name="rating-${thread.id}" value="urgent" onchange="updateRating('${thread.id}', 'urgent')">
+                  🔥 Urgent
+                </label>
+                <label class="action-option">
+                  <input type="radio" name="rating-${thread.id}" value="solid" checked onchange="updateRating('${thread.id}', 'solid')">
+                  👍 Solid
+                </label>
+                <label class="action-option">
+                  <input type="radio" name="rating-${thread.id}" value="meh" onchange="updateRating('${thread.id}', 'meh')">
+                  🤷 Meh
+                </label>
+                <label class="action-option">
+                  <input type="radio" name="rating-${thread.id}" value="disagree" onchange="updateRating('${thread.id}', 'disagree')">
+                  👎 Disagree
+                </label>
+              </div>
+
               <div class="action-row">
                 <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">DECISION:</span>
                 <label class="action-option">
@@ -794,6 +842,15 @@
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+    }
+
+    function updateRating(threadId, rating) {
+      decisions[threadId].rating = rating;
+      if (rating === 'disagree') {
+        updateAction(threadId, 'decline');
+        const rDecline = document.querySelector(`input[name="action-${threadId}"][value="decline"]`);
+        if (rDecline) rDecline.checked = true;
+      }
     }
 
     function updateAction(threadId, action) {
@@ -1155,6 +1212,83 @@
       }
     }
 
+    function renderReviews(reviews) {
+      const container = document.getElementById('content-reviews');
+      if (!reviews || reviews.length === 0) {
+        container.innerHTML = '<div class="empty-state">No top-level submitted reviews found.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      reviews.forEach(r => {
+        const card = document.createElement('div');
+        card.className = 'check-card';
+        const stateColor = r.state === 'APPROVED' ? 'var(--success-color)' : (r.state === 'CHANGES_REQUESTED' ? 'var(--danger-color)' : 'var(--warning-color)');
+        card.innerHTML = `
+          <div class="check-header">
+            <span style="font-weight: 600; color: ${stateColor};">
+              @${escapeHtml(r.author || 'ghost')}
+            </span>
+            <span class="badge" style="background-color: ${stateColor}; color: white; text-transform: uppercase;">${escapeHtml(r.state || 'COMMENTED')}</span>
+          </div>
+          <div class="check-body">
+            <div class="comment-content">${parseMarkdown(r.body || 'No summary comment provided.')}</div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderGeneralComments(comments) {
+      const container = document.getElementById('content-general');
+      if (!comments || comments.length === 0) {
+        container.innerHTML = '<div class="empty-state">No conversation timeline comments found.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      comments.forEach(c => {
+        const card = document.createElement('div');
+        card.className = 'check-card';
+        card.innerHTML = `
+          <div class="check-header">
+            <span style="font-weight: 600; color: #9cdcfe;">@${escapeHtml(c.author || 'ghost')}</span>
+            <span style="font-size: 0.8rem; color: var(--text-light);">${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
+          </div>
+          <div class="check-body">
+            <div class="comment-content">${parseMarkdown(c.body || '')}</div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderPendingChecks(pending) {
+      const container = document.getElementById('content-pending');
+      if (!pending || pending.length === 0) {
+        container.innerHTML = '<div class="empty-state">No active or pending checks running.</div>';
+        return;
+      }
+      container.innerHTML = '';
+      pending.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'check-card';
+        card.innerHTML = `
+          <div class="check-header">
+            <span style="font-weight: 600; color: var(--warning-color); display: flex; align-items: center; gap: 8px;">
+              ⏳ ${escapeHtml(p.name || 'Check')}
+            </span>
+            <span class="badge" style="background-color: var(--warning-color); color: black; text-transform: uppercase;">${escapeHtml(p.state || 'PENDING')}</span>
+          </div>
+          <div class="check-body">
+            <div style="font-size: 0.9rem; color: var(--text-light);">
+              <strong>Workflow:</strong> ${escapeHtml(p.workflow || 'N/A')} | 
+              <strong>Link:</strong> <a href="${escapeHtml(p.link)}" target="_blank" style="color: #9cdcfe; text-decoration: none;">View Run on GitHub</a>
+            </div>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
     function renderChecks(checks) {
       const container = document.getElementById('content-checks');
       if (!checks || checks.length === 0) {
@@ -1167,6 +1301,19 @@
       checks.forEach(check => {
         const card = document.createElement('div');
         card.className = 'check-card';
+
+        let annotationsHtml = '';
+        if (check.annotations && check.annotations.length > 0) {
+          const annItems = check.annotations.map(a => `<li>${escapeHtml(a)}</li>`).join('');
+          annotationsHtml = `
+            <div style="background-color: rgba(244, 67, 54, 0.08); border: 1px solid rgba(244, 67, 54, 0.3); border-radius: 4px; padding: 12px; margin-bottom: 12px;">
+              <strong style="color: #ff8888;">Annotations (${check.annotations.length}):</strong>
+              <ul style="margin: 6px 0 0 0; padding-left: 20px; font-size: 0.85rem; font-family: monospace;">
+                ${annItems}
+              </ul>
+            </div>
+          `;
+        }
         
         card.innerHTML = `
           <div class="check-header">
@@ -1183,6 +1330,7 @@
               <strong>Workflow:</strong> ${escapeHtml(check.workflow || 'N/A')} | 
               <strong>Link:</strong> <a href="${escapeHtml(check.link)}" target="_blank" style="color: #9cdcfe; text-decoration: none;">View on GitHub</a>
             </div>
+            ${annotationsHtml}
             <pre class="check-logs"><code>${escapeHtml(check.logs || 'No logs available.')}</code></pre>
           </div>
         `;

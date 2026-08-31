@@ -309,10 +309,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 with open(state_file_path, "w") as f:
                     json.dump(data, f, indent=2)
                     
+                response_bytes = json.dumps({"status": "success"}).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response_bytes)))
                 self.end_headers()
-                self.wfile.write(json.dumps({"status": "success"}).encode("utf-8"))
+                self.wfile.write(response_bytes)
                 self.wfile.flush()
                 
                 exit_status = 0
@@ -322,10 +324,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 self.send_error_json(500, f"Failed to save state: {str(e)}")
                 
         elif parsed_url.path == "/api/abort":
+            response_bytes = json.dumps({"status": "aborted"}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_bytes)))
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "aborted"}).encode("utf-8"))
+            self.wfile.write(response_bytes)
             self.wfile.flush()
             
             exit_status = 1
@@ -342,26 +346,152 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_error_json(self, status, message):
+        response_bytes = json.dumps({"error": message}).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response_bytes)))
         self.end_headers()
-        self.wfile.write(json.dumps({"error": message}).encode("utf-8"))
+        self.wfile.write(response_bytes)
 
-def can_open_local_browser():
+def is_remote_or_headless():
+    """Detects whether execution is in a remote or headless environment."""
     # 1. SSH session active -> browser will open on remote host, not local client
     if any(k in os.environ for k in ("SSH_CLIENT", "SSH_TTY", "SSH_CONNECTION")):
-        return False
+        return True
 
-    # 2. Linux without graphical display server
+    # 2. Known remote container / cloud environments
+    remote_keys = (
+        "JETSKI_HUB",
+        "JETSKI_REMOTE",
+        "CLOUDTOP_ENVIRONMENT",
+        "CODESPACES",
+        "GITPOD_WORKSPACE_ID",
+        "REMOTE_CONTAINERS",
+        "DEVPOD",
+    )
+    if any(os.environ.get(k) for k in remote_keys):
+        return True
+
+    # 3. Linux without graphical display server
     if sys.platform.startswith("linux"):
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-            return False
+            return True
 
-    # 3. Known remote container / cloud environments
-    if any(k in os.environ for k in ("JETSKI_HUB", "CLOUDTOP_ENVIRONMENT")):
-        return False
+    # 4. Explicit non-interactive / CI / headless flags
+    if os.environ.get("CI") == "true" or os.environ.get("HEADLESS") == "true":
+        return True
 
-    return True
+    return False
+
+def can_open_local_browser():
+    return not is_remote_or_headless()
+
+def generate_artifact_report(data_dir, project_dir):
+    comments_path = os.path.join(data_dir, "pr_comments.json")
+    with open(comments_path, "r", encoding="utf-8") as f:
+        report_data = json.load(f)
+
+    # Proposals overlay
+    proposals_path = os.path.join(data_dir, "proposals.json")
+    proposals_map = {}
+    if os.path.exists(proposals_path):
+        try:
+            with open(proposals_path, "r", encoding="utf-8") as pf:
+                pdata = json.load(pf)
+            if isinstance(pdata, dict):
+                proposals_map = pdata.get("proposals", pdata)
+            elif isinstance(pdata, list):
+                for item in pdata:
+                    if isinstance(item, dict) and "threadId" in item:
+                        proposals_map[item["threadId"]] = item
+        except Exception:
+            pass
+
+    expected_branch = report_data.get("headRefName", "")
+    expected_repo = report_data.get("repo", "")
+    head_ref_oid = report_data.get("headRefOid", "")
+    git_state = check_git_state(project_dir, expected_branch, expected_repo, head_ref_oid)
+
+    pr_num = report_data.get("pr", "N/A")
+    repo = report_data.get("repo", "N/A")
+    pr_url = report_data.get("prUrl") or f"https://github.com/{repo}/pull/{pr_num}"
+    sync_status = report_data.get("syncStatus", {})
+    sync_state = sync_status.get("syncState", "unknown")
+    sync_icon = "✅" if sync_status.get("isSynced") else "⚠️"
+
+    lines = []
+    lines.append(f"# PR Triage Report: #{pr_num} ({repo})")
+    lines.append("")
+    lines.append(f"**URL**: [{repo}#{pr_num}]({pr_url})")
+    lines.append(f"**Branch**: `{expected_branch}`")
+    lines.append(f"**Remote Commit**: `{head_ref_oid}`")
+    lines.append(f"**Sync Status**: `{sync_state}` {sync_icon}")
+    if sync_status.get("warning"):
+        lines.append(f"> [!WARNING]\n> {sync_status['warning']}\n")
+
+    threads = report_data.get("threads", [])
+    lines.append(f"## Unresolved Review Comments ({len(threads)})")
+    lines.append("")
+
+    if not threads:
+        lines.append("No unresolved review comments found. 🎉\n")
+    else:
+        for i, t in enumerate(threads):
+            tid = t.get("id", "")
+            prop = proposals_map.get(tid, {})
+            proposed_fix = prop.get("proposedFix") or t.get("proposedFix", "")
+            draft_reply = prop.get("draftReply") or t.get("draftReply", "")
+
+            lines.append(f"### Comment #{i+1} (Thread `{tid}`): `{t.get('path')}` (Line {t.get('line') or t.get('originalLine') or 'File'})")
+            lines.append(f"- **Local Status**: `{t.get('localStatus', 'Pending review')}`")
+            if proposed_fix:
+                lines.append(f"- **Proposed Fix**: {proposed_fix}")
+            if draft_reply:
+                lines.append(f"- **Draft Reply**: {draft_reply}")
+
+            for c in t.get("comments", []):
+                lines.append(f"\n> **@{c.get('author')}** ({c.get('createdAt')}):")
+                lines.append(f"> {c.get('body', '').replace(chr(10), chr(10) + '> ')}")
+            lines.append("\n---\n")
+
+    reviews = report_data.get("reviews", [])
+    if reviews:
+        lines.append(f"## Top-Level Reviews ({len(reviews)})\n")
+        for r in reviews:
+            lines.append(f"- **@{r.get('author')}** ({r.get('state')}): {r.get('body')}")
+        lines.append("")
+
+    comments = report_data.get("comments", [])
+    if comments:
+        lines.append(f"## Conversation Comments ({len(comments)})\n")
+        for c in comments:
+            lines.append(f"- **@{c.get('author')}** ({c.get('createdAt')}): {c.get('body')}")
+        lines.append("")
+
+    checks = report_data.get("checks", [])
+    lines.append(f"## Failed Status Checks ({len(checks)})\n")
+    if not checks:
+        lines.append("All checks passing! ✅\n")
+    else:
+        for c in checks:
+            lines.append(f"### ❌ {c.get('name')}")
+            lines.append(f"Link: {c.get('link')}")
+            lines.append("```text")
+            lines.append(c.get("logs", "No logs available."))
+            lines.append("```\n")
+
+    pending = report_data.get("pendingChecks", [])
+    if pending:
+        lines.append(f"## Active/Pending Checks ({len(pending)}) ⏳\n")
+        for p in pending:
+            lines.append(f"- ⏳ **{p.get('name')}**: [{p.get('link')}]({p.get('link')})")
+        lines.append("")
+
+    artifact_content = "\n".join(lines)
+    artifact_path = os.path.join(data_dir, "pr_triage_report.md")
+    with open(artifact_path, "w", encoding="utf-8") as f:
+        f.write(artifact_content)
+    return artifact_path
 
 def run_server(server):
     server.serve_forever()
@@ -374,6 +504,7 @@ def main():
     parser.add_argument("--data-dir", default="~/.gemini/jetski/scratch", help="Directory to read/write comments and decisions.")
     parser.add_argument("--project-dir", default=".", help="Path to the target codebase/repository directory.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launching dashboard even if workspace has uncommitted changes to tracked files.")
+    parser.add_argument("--mode", choices=["auto", "web", "artifact"], default="auto", help="Execution mode: auto (default), web, or artifact.")
     args = parser.parse_args()
     
     # Resolve path
@@ -394,6 +525,12 @@ def main():
         print(f"Error: Failed to parse '{comments_path}' as valid JSON: {e}", file=sys.stderr)
         sys.exit(1)
     
+    # Artifact Mode Check
+    if args.mode == "artifact":
+        report_file = generate_artifact_report(resolved_data_dir, args.project_dir)
+        print(f"Generated PR triage report artifact at: {report_file}", flush=True)
+        sys.exit(0)
+
     # Pass to handler
     DashboardHandler.data_dir = resolved_data_dir
     DashboardHandler.project_dir = os.path.abspath(os.path.expanduser(args.project_dir))
@@ -424,8 +561,8 @@ def main():
     url = f"http://localhost:{port}/"
     print(f"Starting dashboard on {url}", flush=True)
     
-    # Open browser if running locally, otherwise print instructions for remote/SSH
-    if can_open_local_browser():
+    # Open browser if running locally and mode != artifact
+    if can_open_local_browser() and args.mode != "artifact":
         print("Opening browser...", flush=True)
         webbrowser.open(url)
     else:

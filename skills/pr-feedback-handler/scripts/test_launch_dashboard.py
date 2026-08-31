@@ -272,6 +272,11 @@ class TestDashboardServerIntegration(unittest.TestCase):
 
     def setUp(self):
         importlib.reload(launch_dashboard)
+        launch_dashboard.server_should_shutdown = False
+        launch_dashboard.exit_status = 0
+        from launch_dashboard import DashboardHandler
+        DashboardHandler.data_dir = self.data_dir
+        DashboardHandler.project_dir = os.path.abspath(".")
 
     def test_get_root_html(self):
         url = f"http://127.0.0.1:{self.port}/"
@@ -636,30 +641,101 @@ class TestCanOpenLocalBrowser(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     @patch('sys.platform', 'darwin')
     def test_can_open_local_browser_macos_local(self):
-        from launch_dashboard import can_open_local_browser
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
         self.assertTrue(can_open_local_browser())
+        self.assertFalse(is_remote_or_headless())
 
     @patch.dict(os.environ, {'SSH_CLIENT': '192.168.1.1 1234 22'}, clear=True)
     def test_can_open_local_browser_ssh_session(self):
-        from launch_dashboard import can_open_local_browser
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
         self.assertFalse(can_open_local_browser())
+        self.assertTrue(is_remote_or_headless())
 
     @patch.dict(os.environ, {}, clear=True)
     @patch('sys.platform', 'linux')
     def test_can_open_local_browser_linux_no_display(self):
-        from launch_dashboard import can_open_local_browser
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
         self.assertFalse(can_open_local_browser())
+        self.assertTrue(is_remote_or_headless())
 
     @patch.dict(os.environ, {'DISPLAY': ':0'}, clear=True)
     @patch('sys.platform', 'linux')
     def test_can_open_local_browser_linux_with_display(self):
-        from launch_dashboard import can_open_local_browser
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
         self.assertTrue(can_open_local_browser())
+        self.assertFalse(is_remote_or_headless())
 
     @patch.dict(os.environ, {'JETSKI_HUB': '1'}, clear=True)
     def test_can_open_local_browser_jetski_hub(self):
-        from launch_dashboard import can_open_local_browser
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
         self.assertFalse(can_open_local_browser())
+        self.assertTrue(is_remote_or_headless())
+
+    @patch.dict(os.environ, {'CI': 'true'}, clear=True)
+    def test_can_open_local_browser_ci(self):
+        from launch_dashboard import can_open_local_browser, is_remote_or_headless
+        self.assertFalse(can_open_local_browser())
+        self.assertTrue(is_remote_or_headless())
+
+class TestArtifactMode(unittest.TestCase):
+    def setUp(self):
+        self.data_dir = os.path.abspath("temp_artifact_test_dir")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.comments_file = os.path.join(self.data_dir, "pr_comments.json")
+        with open(self.comments_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "repo": "owner/repo",
+                "pr": 123,
+                "headRefName": "main",
+                "headRefOid": "sha123",
+                "syncStatus": {"isSynced": True, "syncState": "in_sync", "warning": None},
+                "threads": [
+                    {
+                        "id": "t1",
+                        "path": "lib/foo.dart",
+                        "line": 10,
+                        "localStatus": "Pending review",
+                        "comments": [{"author": "reviewer", "createdAt": "2026-08-31", "body": "nit"}]
+                    }
+                ],
+                "reviews": [{"author": "r1", "state": "APPROVED", "body": "LGTM"}],
+                "comments": [{"author": "c1", "createdAt": "2026-08-31", "body": "Comment"}],
+                "checks": [{"name": "build", "link": "http://", "logs": "err"}],
+                "pendingChecks": [{"name": "lint", "link": "http://"}]
+            }, f)
+
+    def tearDown(self):
+        if os.path.exists(self.comments_file):
+            os.remove(self.comments_file)
+        art_path = os.path.join(self.data_dir, "pr_triage_report.md")
+        if os.path.exists(art_path):
+            os.remove(art_path)
+        if os.path.exists(self.data_dir):
+            os.rmdir(self.data_dir)
+
+    def test_generate_artifact_report(self):
+        from launch_dashboard import generate_artifact_report
+        art_path = generate_artifact_report(self.data_dir, ".")
+        self.assertTrue(os.path.exists(art_path))
+        with open(art_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("PR Triage Report", content)
+        self.assertIn("Unresolved Review Comments", content)
+        self.assertIn("Top-Level Reviews", content)
+        self.assertIn("Active/Pending Checks", content)
+
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_artifact_test_dir', '--mode', 'artifact'])
+    @patch('sys.exit')
+    def test_main_artifact_mode(self, mock_exit):
+        def _exit(code=0):
+            raise SystemExit(code)
+        mock_exit.side_effect = _exit
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 0)
+        art_path = os.path.join(self.data_dir, "pr_triage_report.md")
+        self.assertTrue(os.path.exists(art_path))
 
 if __name__ == '__main__':
     unittest.main()
