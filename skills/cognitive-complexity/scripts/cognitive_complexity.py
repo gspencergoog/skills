@@ -70,7 +70,9 @@ def run_python_engine(source_or_path: str, is_stdin: bool, threshold: int, verbo
 
 
 def run_typescript_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
-    ts_cli = SCRIPT_DIR / "typescript" / "dist" / "src" / "cli.js"
+    ts_cli = SCRIPT_DIR / "typescript" / "dist" / "cli.js"
+    if not ts_cli.exists():
+        ts_cli = SCRIPT_DIR / "typescript" / "dist" / "src" / "cli.js"
     return _run_subprocess_engine(["node", str(ts_cli)], source_or_path, is_stdin, threshold, verbose, sort_key, "typescript")
 
 
@@ -80,7 +82,9 @@ def run_dart_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose
 
 
 def run_swift_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
-    binary = SCRIPT_DIR / "swift" / ".build" / "release" / "CognitiveComplexity"
+    binary = SCRIPT_DIR / "swift" / "CognitiveComplexity"
+    if not binary.exists():
+        binary = SCRIPT_DIR / "swift" / ".build" / "release" / "CognitiveComplexity"
     if not binary.exists():
         binary = SCRIPT_DIR / "swift" / ".build" / "debug" / "CognitiveComplexity"
 
@@ -94,9 +98,13 @@ def run_swift_engine(source_or_path: str, is_stdin: bool, threshold: int, verbos
 
 def run_kotlin_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
     kt_dir = SCRIPT_DIR / "kotlin"
-    jar_path = kt_dir / "build" / "libs" / "cognitive-complexity-kt-all.jar"
+    jar_path = kt_dir / "cognitive-complexity-kt.jar"
+    if not jar_path.exists():
+        jar_path = kt_dir / "build" / "libs" / "cognitive-complexity-kt-all.jar"
     if not jar_path.exists():
         jar_path = kt_dir / "build" / "libs" / "cognitive-complexity-kt.jar"
+    if not jar_path.exists():
+        jar_path = kt_dir / "build" / "libs" / "cognitive-complexity-kt-1.0.0.jar"
 
     if jar_path.exists():
         cmd = ["java", "-jar", str(jar_path)]

@@ -14,7 +14,7 @@ python3 scripts/cognitive_complexity.py [OPTIONS] [PATH]
 python3 scripts/python/cognitive_complexity.py [OPTIONS] [PATH]
 node scripts/typescript/dist/cli.js [OPTIONS] [PATH]
 dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [PATH]
-swift run --package-path scripts/swift CognitiveComplexity [OPTIONS] [PATH]
+scripts/swift/CognitiveComplexity [OPTIONS] [PATH]
 java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]
 ```
 

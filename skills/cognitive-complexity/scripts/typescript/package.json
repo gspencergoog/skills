@@ -7,13 +7,14 @@
     "cognitive-complexity-ts": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "esbuild src/cli.ts --bundle --platform=node --target=node18 --outfile=dist/cli.js",
     "test": "node --test dist/test/visitor.test.js"
   },
   "dependencies": {
     "typescript": "^5.4.0"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0"
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.25.0"
   }
 }

@@ -1,6 +1,13 @@
 ---
 name: cognitive-complexity
-description: Calculate Cognitive Complexity for source code across multiple programming languages (Python, TypeScript, JavaScript, Dart, Swift, and Kotlin) according to the SonarSource standard. Use this skill whenever asked to: (1) determine, measure, or evaluate the cognitive complexity of code, files, or directories, (2) identify high-complexity functions or code hotspots for refactoring, (3) inspect complexity breakdowns with line-by-line increments, or (4) assess maintainability and understandability metrics.
+description: >-
+  Calculate Cognitive Complexity for source code across multiple programming
+  languages (Python, TypeScript, JavaScript, Dart, Swift, and Kotlin) according
+  to the SonarSource standard. Use this skill whenever asked to: (1) determine,
+  measure, or evaluate the cognitive complexity of code, files, or directories,
+  (2) identify high-complexity functions or code hotspots for refactoring, (3)
+  inspect complexity breakdowns with line-by-line increments, or (4) assess
+  maintainability and understandability metrics.
 ---
 
 # Cognitive Complexity Skill
@@ -63,13 +70,13 @@ Each language also provides a standalone CLI with an identical argument contract
 python3 scripts/python/cognitive_complexity.py [OPTIONS] [PATH]
 
 # TypeScript Engine
-node scripts/typescript/dist/src/cli.js [OPTIONS] [PATH]
+node scripts/typescript/dist/cli.js [OPTIONS] [PATH]
 
 # Dart Engine
 dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [PATH]
 
 # Swift Engine
-scripts/swift/.build/release/CognitiveComplexity [OPTIONS] [PATH]
+scripts/swift/CognitiveComplexity [OPTIONS] [PATH]
 
 # Kotlin Engine
 java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]

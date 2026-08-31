@@ -62,6 +62,58 @@ Body text.
         self.assertIn("key_extra", metadata)
         self.assertIn("Body Title", body)
 
+    def test_unquoted_colon_in_description_fails(self):
+        content = """---
+name: test-skill
+description: Calculate complexity. Use this skill whenever asked to: (1) do something.
+---
+# Body
+"""
+        metadata, body, err = parse_yaml_frontmatter(content)
+        self.assertIsNone(metadata)
+        self.assertIn("unquoted string contains ': '", err)
+
+    def test_quoted_colon_in_description_passes(self):
+        content = """---
+name: test-skill
+description: "Calculate complexity. Use this skill whenever asked to: (1) do something."
+---
+# Body
+"""
+        metadata, body, err = parse_yaml_frontmatter(content)
+        self.assertIsNone(err)
+        self.assertIsNotNone(metadata)
+        self.assertEqual(
+            metadata.get("description"),
+            "Calculate complexity. Use this skill whenever asked to: (1) do something.",
+        )
+
+    def test_block_scalar_colon_in_description_passes(self):
+        content = """---
+name: test-skill
+description: >-
+  Calculate complexity. Use this skill whenever asked to: (1) do something.
+---
+# Body
+"""
+        metadata, body, err = parse_yaml_frontmatter(content)
+        self.assertIsNone(err)
+        self.assertIsNotNone(metadata)
+        self.assertIn("asked to: (1)", metadata.get("description"))
+
+    def test_nested_mapping_metadata_passes(self):
+        content = """---
+name: test-skill
+metadata:
+  category: DevOps
+description: Valid description.
+---
+# Body
+"""
+        metadata, body, err = parse_yaml_frontmatter(content)
+        self.assertIsNone(err)
+        self.assertIsNotNone(metadata)
+
 
 class TestValidateSkillFile(unittest.TestCase):
     def setUp(self):

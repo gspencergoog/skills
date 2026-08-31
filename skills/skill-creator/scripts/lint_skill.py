@@ -61,7 +61,7 @@ class ValidationIssue:
         return f"[{prefix}] {location}: {self.message}"
 
 
-def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, str]], str, Optional[str]]:
+def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
     """
     Parses YAML frontmatter enclosed by '---' markers.
     Returns (frontmatter_dict, markdown_body, parse_error_message).
@@ -76,12 +76,51 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, str]], str,
     raw_yaml = parts[1]
     body = parts[2]
 
-    metadata: Dict[str, str] = {}
+    # 1. Use PyYAML if available
+    try:
+        import yaml
+        try:
+            parsed = yaml.safe_load(raw_yaml)
+            if parsed is None:
+                return {}, body, None
+            if not isinstance(parsed, dict):
+                return None, body, "Frontmatter must be a YAML dictionary mapping."
+            result: Dict[str, Any] = {}
+            for k, v in parsed.items():
+                if isinstance(v, (str, int, float, bool)):
+                    result[str(k)] = str(v)
+                else:
+                    result[str(k)] = v
+            return result, body, None
+        except yaml.YAMLError as e:
+            return None, body, f"Invalid YAML in frontmatter: {e}"
+    except ImportError:
+        pass
+
+    # 2. Strict built-in zero-dependency YAML parser
+    metadata: Dict[str, Any] = {}
     current_key: Optional[str] = None
     current_val_lines: List[str] = []
+    is_block_scalar = False
+    is_quoted = False
+    is_nested = False
+
+    def finish_key() -> Optional[str]:
+        nonlocal current_key, current_val_lines, is_block_scalar, is_quoted, is_nested
+        if not current_key:
+            return None
+        val = "\n".join(current_val_lines).strip()
+        if not is_block_scalar and not is_quoted and not is_nested:
+            if re.search(r":\s", val):
+                return (
+                    f"Invalid YAML syntax in field '{current_key}': unquoted string contains ': '. "
+                    "Strings containing colons must be enclosed in quotes ('...' or \"...\") "
+                    "or formatted as a block scalar ('>-' or '|-')."
+                )
+        metadata[current_key] = val
+        return None
 
     for line in raw_yaml.splitlines():
-        # Skip empty lines or comments in YAML block
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -89,22 +128,53 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, str]], str,
         # Check for new key at root level (not indented)
         key_match = re.match(r"^([a-zA-Z0-9_-]+)\s*:\s*(.*)$", line)
         if key_match and not line.startswith(" ") and not line.startswith("\t"):
-            if current_key:
-                metadata[current_key] = "\n".join(current_val_lines).strip()
+            err = finish_key()
+            if err:
+                return None, body, err
+
             current_key = key_match.group(1)
             val_part = key_match.group(2).strip()
-            current_val_lines = [val_part] if val_part else []
+            is_block_scalar = val_part in (">-", ">", "|-", "|")
+            is_quoted = (val_part.startswith('"') and val_part.endswith('"') and len(val_part) >= 2) or (
+                val_part.startswith("'") and val_part.endswith("'") and len(val_part) >= 2
+            )
+            is_nested = (val_part == "")
+
+            if not is_block_scalar and not is_quoted and val_part != "":
+                if re.search(r":\s", val_part):
+                    return (
+                        None,
+                        body,
+                        f"Invalid YAML syntax in field '{current_key}': unquoted string contains ': '. "
+                        "Strings containing colons must be enclosed in quotes ('...' or \"...\") "
+                        "or formatted as a block scalar ('>-' or '|-').",
+                    )
+
+            current_val_lines = [val_part] if (val_part and not is_block_scalar) else []
         elif current_key is not None:
-            # Continuation of multi-line key value
+            if line.startswith(" ") or line.startswith("\t"):
+                if stripped.startswith("- ") or re.match(r"^[a-zA-Z0-9_-]+\s*:", stripped):
+                    if is_nested:
+                        pass
+                    elif not is_block_scalar and not is_quoted:
+                        if re.search(r":\s", stripped):
+                            return (
+                                None,
+                                body,
+                                f"Invalid YAML syntax in field '{current_key}': unquoted multiline string contains ': '. "
+                                "Use block scalar ('>-' or '|-') or quotes.",
+                            )
             current_val_lines.append(line.strip())
 
-    if current_key:
-        metadata[current_key] = "\n".join(current_val_lines).strip()
+    err = finish_key()
+    if err:
+        return None, body, err
 
     # Clean quotes from values if present
-    for k, v in metadata.items():
-        if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
-            metadata[k] = v[1:-1].strip()
+    for k, v in list(metadata.items()):
+        if isinstance(v, str):
+            if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                metadata[k] = v[1:-1].strip()
 
     return metadata, body, None
 
