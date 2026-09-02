@@ -7,15 +7,15 @@ This document describes the command-line interface arguments, options, output fo
 ## 1. Synopsis
 
 ```bash
-# Top-level polyglot orchestrator
-python3 scripts/cognitive_complexity.py [OPTIONS] [PATH]
+# Top-level polyglot orchestrator (supports multiple files and/or directories)
+python3 scripts/cognitive_complexity.py [OPTIONS] [TARGETS...]
 
 # Language-specific engines
-python3 scripts/python/cognitive_complexity.py [OPTIONS] [PATH]
-node scripts/typescript/dist/cli.js [OPTIONS] [PATH]
-dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [PATH]
-scripts/swift/CognitiveComplexity [OPTIONS] [PATH]
-java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]
+python3 scripts/python/cognitive_complexity.py [OPTIONS] [TARGETS...]
+node scripts/typescript/dist/cli.js [OPTIONS] [TARGETS...]
+dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [TARGETS...]
+scripts/swift/CognitiveComplexity [OPTIONS] [TARGETS...]
+java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [TARGETS...]
 ```
 
 ---
@@ -24,7 +24,7 @@ java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]
 
 | Option / Flag | Long Form | Description | Default |
 | :--- | :--- | :--- | :--- |
-| `[PATH]` | N/A | Path to a file or directory. If omitted or `-`, reads from standard input (`stdin`). | `-` |
+| `[TARGETS...]` | N/A | One or more paths to files or directories to analyze. If omitted or `-`, reads from standard input (`stdin`). | `-` |
 | `-l` | `--lang <LANG>` | Override language detection (`python`, `typescript`, `dart`, `swift`, `kotlin`). | `auto` |
 | `-f` | `--format <FORMAT>` | Output format: `text`, `json`, `table`, `summary`. | `text` |
 | `-t` | `--threshold <INT>` | Flag functions exceeding this cognitive complexity score. | `15` |

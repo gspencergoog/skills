@@ -5,18 +5,18 @@ struct CliOptions {
     var threshold = 15
     var verbose = false
     var sortKey = "complexity"
-    var pathArg = "-"
+    var pathArgs: [String] = []
     var excludes: [String] = []
 }
 
 func printHelp() {
     print("""
-Usage: CognitiveComplexity [OPTIONS] [PATH]
+Usage: CognitiveComplexity [OPTIONS] [PATH...]
 
 Calculate Cognitive Complexity for Swift code according to SonarSource standard.
 
 Arguments:
-  [PATH]                     Path to file or directory. If omitted or "-", reads from stdin.
+  [PATH...]                  One or more paths to files or directories. If omitted or "-", reads from stdin.
 
 Options:
   -f, --format <FORMAT>      Output format: text (default), json, table, summary
@@ -55,9 +55,12 @@ func parseCliOptions(_ args: [String]) -> CliOptions {
             print("CognitiveComplexity 1.0.0")
             exit(0)
         } else if !arg.hasPrefix("-") {
-            options.pathArg = arg
+            options.pathArgs.append(arg)
         }
         i += 1
+    }
+    if options.pathArgs.isEmpty {
+        options.pathArgs = ["-"]
     }
     return options
 }
@@ -84,40 +87,55 @@ func collectSwiftFiles(dir: URL, excludes: [String]) -> [URL] {
     return files
 }
 
-func analyzeTarget(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [FileComplexity] {
+func analyzeTargets(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [FileComplexity] {
     var fileResults: [FileComplexity] = []
+    var seenPaths: Set<String> = []
 
-    if options.pathArg == "-" {
-        let data = FileHandle.standardInput.readDataToEndOfFile()
-        if let sourceCode = String(data: data, encoding: .utf8) {
-            fileResults.append(analyzer.analyzeSource(sourceCode, filePath: "<stdin>"))
-        }
-        return fileResults
-    }
-
-    let url = URL(fileURLWithPath: options.pathArg)
-    var isDir: ObjCBool = false
-    if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
-        fputs("Error: Path does not exist: \(options.pathArg)\n", stderr)
-        exit(2)
-    }
-
-    if isDir.boolValue {
-        let files = collectSwiftFiles(dir: url, excludes: options.excludes)
-        for f in files {
-            do {
-                let sourceCode = try String(contentsOf: f, encoding: .utf8)
-                fileResults.append(analyzer.analyzeSource(sourceCode, filePath: f.path))
-            } catch {
-                fputs("Error reading \(f.path): \(error.localizedDescription)\n", stderr)
+    for pathArg in options.pathArgs {
+        if pathArg == "-" {
+            if !seenPaths.contains("<stdin>") {
+                let data = FileHandle.standardInput.readDataToEndOfFile()
+                if let sourceCode = String(data: data, encoding: .utf8) {
+                    fileResults.append(analyzer.analyzeSource(sourceCode, filePath: "<stdin>"))
+                    seenPaths.insert("<stdin>")
+                }
             }
+            continue
         }
-    } else {
-        do {
-            let sourceCode = try String(contentsOf: url, encoding: .utf8)
-            fileResults.append(analyzer.analyzeSource(sourceCode, filePath: url.path))
-        } catch {
-            fputs("Error reading \(url.path): \(error.localizedDescription)\n", stderr)
+
+        let url = URL(fileURLWithPath: pathArg).standardizedFileURL
+        var isDir: ObjCBool = false
+        if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+            fputs("Error: Path does not exist: \(pathArg)\n", stderr)
+            continue
+        }
+
+        if isDir.boolValue {
+            let files = collectSwiftFiles(dir: url, excludes: options.excludes)
+            for f in files {
+                let canonical = f.standardizedFileURL.path
+                if seenPaths.contains(canonical) {
+                    continue
+                }
+                seenPaths.insert(canonical)
+                do {
+                    let sourceCode = try String(contentsOf: f, encoding: .utf8)
+                    fileResults.append(analyzer.analyzeSource(sourceCode, filePath: f.path))
+                } catch {
+                    fputs("Error reading \(f.path): \(error.localizedDescription)\n", stderr)
+                }
+            }
+        } else {
+            let canonical = url.path
+            if !seenPaths.contains(canonical) {
+                seenPaths.insert(canonical)
+                do {
+                    let sourceCode = try String(contentsOf: url, encoding: .utf8)
+                    fileResults.append(analyzer.analyzeSource(sourceCode, filePath: url.path))
+                } catch {
+                    fputs("Error reading \(url.path): \(error.localizedDescription)\n", stderr)
+                }
+            }
         }
     }
     return fileResults
@@ -211,7 +229,7 @@ func main() {
     let args = Array(CommandLine.arguments.dropFirst())
     let options = parseCliOptions(args)
     let analyzer = SwiftComplexityAnalyzer(threshold: options.threshold)
-    var fileResults = analyzeTarget(options: options, analyzer: analyzer)
+    var fileResults = analyzeTargets(options: options, analyzer: analyzer)
 
     sortSwiftFunctions(&fileResults, sortKey: options.sortKey)
     let report = buildSwiftReport(fileResults, threshold: options.threshold)

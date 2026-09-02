@@ -453,10 +453,15 @@ def analyze_paths(
 ) -> ComplexityReport:
     analyzer = PythonComplexityAnalyzer(threshold=threshold)
     file_results: List[FileComplexity] = []
+    seen_paths: Set[str] = set()
 
-    for path_str in paths:
+    target_paths = list(paths) if paths else ["-"]
+
+    for path_str in target_paths:
         if path_str == "-" or not path_str:
-            file_results.append(analyzer.analyze_source(sys.stdin.read(), file_path="<stdin>"))
+            if "<stdin>" not in seen_paths:
+                file_results.append(analyzer.analyze_source(sys.stdin.read(), file_path="<stdin>"))
+                seen_paths.add("<stdin>")
             continue
 
         p = Path(path_str)
@@ -465,6 +470,10 @@ def analyze_paths(
             continue
 
         for py_file in _collect_python_files(p, exclude_patterns):
+            resolved_key = str(py_file.resolve())
+            if resolved_key in seen_paths:
+                continue
+            seen_paths.add(resolved_key)
             try:
                 content = py_file.read_text(encoding="utf-8")
                 file_results.append(analyzer.analyze_source(content, file_path=str(py_file)))
@@ -497,7 +506,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Calculate Cognitive Complexity for Python code according to SonarSource standard."
     )
-    parser.add_argument("path", nargs="?", default="-", help="Path to analyze (default: stdin).")
+    parser.add_argument("paths", nargs="*", default=["-"], help="Paths to analyze (files or directories, default: stdin).")
     parser.add_argument("-f", "--format", choices=["text", "json", "table", "summary"], default="text", help="Output format.")
     parser.add_argument("-t", "--threshold", type=int, default=15, help="Threshold for flagging complexity.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed breakdown.")
@@ -508,7 +517,7 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        report = analyze_paths(paths=[args.path], threshold=args.threshold, sort_key=args.sort, exclude_patterns=args.exclude)
+        report = analyze_paths(paths=args.paths, threshold=args.threshold, sort_key=args.sort, exclude_patterns=args.exclude)
     except Exception as e:
         print(f"Error during analysis: {e}", file=sys.stderr)
         return 2

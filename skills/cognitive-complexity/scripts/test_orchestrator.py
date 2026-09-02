@@ -77,7 +77,7 @@ class TestOrchestrator(unittest.TestCase):
     def test_full_skill_codebase_scan_integration(self) -> None:
         """Integration test: scans the entire cognitive-complexity skill scripts directory."""
         res = subprocess.run(
-            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(SCRIPT_DIR)],
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "200", str(SCRIPT_DIR)],
             text=True,
             capture_output=True,
         )
@@ -96,6 +96,60 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("typescript", lang_str)
         self.assertIn("dart", lang_str)
         self.assertIn("swift", lang_str)
+
+    def test_multiple_files_same_language(self) -> None:
+        py1 = SCRIPT_DIR / "python" / "cognitive_complexity.py"
+        py2 = SCRIPT_DIR / "python" / "test_cognitive_complexity.py"
+        res = subprocess.run(
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(py1), str(py2)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+        data = json.loads(res.stdout)
+        self.assertEqual(data["summary"]["total_files"], 2)
+        paths = [f["path"] for f in data["files"]]
+        self.assertIn(str(py1), paths)
+        self.assertIn(str(py2), paths)
+
+    def test_multiple_files_different_languages(self) -> None:
+        py_file = SCRIPT_DIR / "python" / "cognitive_complexity.py"
+        dart_file = SCRIPT_DIR / "dart" / "lib" / "src" / "visitor.dart"
+        res = subprocess.run(
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(py_file), str(dart_file)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+        data = json.loads(res.stdout)
+        self.assertEqual(data["summary"]["total_files"], 2)
+        self.assertIn("python", data["language"])
+        self.assertIn("dart", data["language"])
+
+    def test_multiple_targets_mixed_file_and_directory(self) -> None:
+        py_file = SCRIPT_DIR / "python" / "cognitive_complexity.py"
+        dart_dir = SCRIPT_DIR / "dart" / "lib"
+        res = subprocess.run(
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(py_file), str(dart_dir)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+        data = json.loads(res.stdout)
+        self.assertGreaterEqual(data["summary"]["total_files"], 3)
+
+    def test_deduplication_across_targets(self) -> None:
+        py_file = SCRIPT_DIR / "python" / "cognitive_complexity.py"
+        py_dir = SCRIPT_DIR / "python"
+        res = subprocess.run(
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(py_file), str(py_dir)],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+        data = json.loads(res.stdout)
+        paths = [f["path"] for f in data["files"]]
+        self.assertEqual(len(paths), len(set(paths)), "Duplicate file entries found in report")
 
 
 if __name__ == "__main__":

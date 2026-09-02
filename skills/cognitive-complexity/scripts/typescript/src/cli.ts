@@ -9,7 +9,7 @@ interface CliOptions {
   threshold: number;
   verbose: boolean;
   sortKey: string;
-  pathArg: string;
+  pathArgs: string[];
   excludes: string[];
 }
 
@@ -18,7 +18,7 @@ function parseArgs(args: string[]): CliOptions {
   let threshold = 15;
   let verbose = false;
   let sortKey = "complexity";
-  let pathArg = "-";
+  const pathArgs: string[] = [];
   const excludes: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -40,20 +40,24 @@ function parseArgs(args: string[]): CliOptions {
       console.log("cognitive-complexity-ts 1.0.0");
       process.exit(0);
     } else if (!arg.startsWith("-")) {
-      pathArg = arg;
+      pathArgs.push(arg);
     }
   }
 
-  return { format, threshold, verbose, sortKey, pathArg, excludes };
+  if (pathArgs.length === 0) {
+    pathArgs.push("-");
+  }
+
+  return { format, threshold, verbose, sortKey, pathArgs, excludes };
 }
 
 function printHelp(): void {
-  console.log(`Usage: cognitive-complexity-ts [OPTIONS] [PATH]
+  console.log(`Usage: cognitive-complexity-ts [OPTIONS] [PATH...]
 
 Calculate Cognitive Complexity for TypeScript/JavaScript code according to SonarSource standard.
 
 Arguments:
-  [PATH]                     Path to file or directory. If omitted or "-", reads from stdin.
+  [PATH...]                  One or more paths to files or directories. If omitted or "-", reads from stdin.
 
 Options:
   -f, --format <FORMAT>      Output format: text (default), json, table, summary
@@ -88,33 +92,47 @@ function collectFiles(dir: string, excludes: string[]): string[] {
   return results;
 }
 
-function analyzeTarget(options: CliOptions, analyzer: TypeScriptComplexityAnalyzer): FileComplexity[] {
+function analyzeTargets(options: CliOptions, analyzer: TypeScriptComplexityAnalyzer): FileComplexity[] {
   const fileResults: FileComplexity[] = [];
+  const seenPaths = new Set<string>();
 
-  if (options.pathArg === "-" || !options.pathArg) {
-    const sourceCode = fs.readFileSync(0, "utf-8");
-    fileResults.push(analyzer.analyzeSource(sourceCode, "<stdin>"));
-    return fileResults;
-  }
+  for (const targetPath of options.pathArgs) {
+    if (targetPath === "-" || !targetPath) {
+      if (!seenPaths.has("<stdin>")) {
+        const sourceCode = fs.readFileSync(0, "utf-8");
+        fileResults.push(analyzer.analyzeSource(sourceCode, "<stdin>"));
+        seenPaths.add("<stdin>");
+      }
+      continue;
+    }
 
-  const targetPath = options.pathArg;
-  if (!fs.existsSync(targetPath)) {
-    console.error(`Error: Path does not exist: ${targetPath}`);
-    process.exit(2);
-  }
+    if (!fs.existsSync(targetPath)) {
+      console.error(`Error: Path does not exist: ${targetPath}`);
+      continue;
+    }
 
-  const stat = fs.statSync(targetPath);
-  if (stat.isFile()) {
-    const sourceCode = fs.readFileSync(targetPath, "utf-8");
-    fileResults.push(analyzer.analyzeSource(sourceCode, targetPath));
-  } else if (stat.isDirectory()) {
-    const files = collectFiles(targetPath, options.excludes);
-    for (const file of files) {
-      try {
-        const sourceCode = fs.readFileSync(file, "utf-8");
-        fileResults.push(analyzer.analyzeSource(sourceCode, file));
-      } catch (e: any) {
-        console.error(`Error reading ${file}: ${e.message}`);
+    const realTarget = fs.realpathSync(targetPath);
+    const stat = fs.statSync(targetPath);
+    if (stat.isFile()) {
+      if (!seenPaths.has(realTarget)) {
+        seenPaths.add(realTarget);
+        const sourceCode = fs.readFileSync(targetPath, "utf-8");
+        fileResults.push(analyzer.analyzeSource(sourceCode, targetPath));
+      }
+    } else if (stat.isDirectory()) {
+      const files = collectFiles(targetPath, options.excludes);
+      for (const file of files) {
+        const realFile = fs.realpathSync(file);
+        if (seenPaths.has(realFile)) {
+          continue;
+        }
+        seenPaths.add(realFile);
+        try {
+          const sourceCode = fs.readFileSync(file, "utf-8");
+          fileResults.push(analyzer.analyzeSource(sourceCode, file));
+        } catch (e: any) {
+          console.error(`Error reading ${file}: ${e.message}`);
+        }
       }
     }
   }
@@ -206,7 +224,7 @@ function renderReport(report: ComplexityReport, format: string, verbose: boolean
 function main() {
   const options = parseArgs(process.argv.slice(2));
   const analyzer = new TypeScriptComplexityAnalyzer(options.threshold);
-  const fileResults = analyzeTarget(options, analyzer);
+  const fileResults = analyzeTargets(options, analyzer);
 
   sortFunctions(fileResults, options.sortKey);
   const report = buildReport(fileResults, options.threshold);

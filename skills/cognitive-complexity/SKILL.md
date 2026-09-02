@@ -45,16 +45,19 @@ For a detailed theoretical explanation of the rules, see [SonarSource Rules Refe
 
 ### 3.1. Unified Multi-Language CLI
 
-The top-level orchestrator automatically detects the language from the file extension or directory contents:
+The top-level orchestrator automatically detects the language from file extensions or directory contents and supports analyzing one or multiple files and directories:
 
 ```bash
 # Analyze a single file
 python3 scripts/cognitive_complexity.py path/to/file.py
 
+# Analyze multiple files and/or directories
+python3 scripts/cognitive_complexity.py path/to/file1.py src/utils/ path/to/file2.ts
+
 # Analyze standard input
 cat snippet.ts | python3 scripts/cognitive_complexity.py --lang typescript -
 
-# Analyze a directory recursively with verbose line-by-line breakdown
+# Analyze directories recursively with verbose line-by-line breakdown
 python3 scripts/cognitive_complexity.py path/to/project/ --threshold 15 --verbose
 
 # Emit machine-readable JSON for downstream parsing
@@ -63,23 +66,23 @@ python3 scripts/cognitive_complexity.py path/to/project/ -f json
 
 ### 3.2. Language-Specific Engines
 
-Each language also provides a standalone CLI with an identical argument contract:
+Each language also provides a standalone CLI with an identical argument contract supporting multiple targets:
 
 ```bash
 # Python Engine
-python3 scripts/python/cognitive_complexity.py [OPTIONS] [PATH]
+python3 scripts/python/cognitive_complexity.py [OPTIONS] [TARGETS...]
 
 # TypeScript Engine
-node scripts/typescript/dist/cli.js [OPTIONS] [PATH]
+node scripts/typescript/dist/cli.js [OPTIONS] [TARGETS...]
 
 # Dart Engine
-dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [PATH]
+dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [TARGETS...]
 
 # Swift Engine
-scripts/swift/CognitiveComplexity [OPTIONS] [PATH]
+scripts/swift/CognitiveComplexity [OPTIONS] [TARGETS...]
 
 # Kotlin Engine
-java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [PATH]
+java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [TARGETS...]
 ```
 
 For complete argument specifications, formatting options, and exit codes, see [CLI Reference](references/cli_reference.md).

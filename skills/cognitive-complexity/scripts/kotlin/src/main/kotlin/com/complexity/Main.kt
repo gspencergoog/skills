@@ -9,7 +9,7 @@ fun main(args: Array<String>) {
     var threshold = 15
     var verbose = false
     var sortKey = "complexity"
-    var pathArg = "-"
+    val pathArgs = mutableListOf<String>()
     val excludes = mutableListOf<String>()
 
     var i = 0
@@ -21,12 +21,12 @@ fun main(args: Array<String>) {
             "-s", "--sort" -> { i++; if (i < args.size) sortKey = args[i] }
             "-e", "--exclude" -> { i++; if (i < args.size) excludes.add(args[i]) }
             "-h", "--help" -> {
-                println("""Usage: cognitive-complexity-kt [OPTIONS] [PATH]
+                println("""Usage: cognitive-complexity-kt [OPTIONS] [PATH...]
 
 Calculate Cognitive Complexity for Kotlin code according to SonarSource standard.
 
 Arguments:
-  [PATH]                     Path to file or directory. If omitted or "-", reads from stdin.
+  [PATH...]                  One or more paths to files or directories. If omitted or "-", reads from stdin.
 
 Options:
   -f, --format <FORMAT>      Output format: text (default), json, table, summary
@@ -44,36 +44,54 @@ Options:
             }
             else -> {
                 if (!arg.startsWith("-")) {
-                    pathArg = arg
+                    pathArgs.add(arg)
                 }
             }
         }
         i++
     }
 
+    if (pathArgs.isEmpty()) {
+        pathArgs.add("-")
+    }
+
     val analyzer = KotlinComplexityAnalyzer(threshold = threshold)
     val fileResults = mutableListOf<FileComplexity>()
+    val seenPaths = mutableSetOf<String>()
 
-    if (pathArg == "-") {
-        val sourceCode = System.`in`.bufferedReader().readText()
-        fileResults.add(analyzer.analyzeSource(sourceCode, "<stdin>"))
-    } else {
-        val target = File(pathArg)
-        if (!target.exists()) {
-            System.err.println("Error: Path does not exist: $pathArg")
-            exitProcess(2)
-        }
+    for (pathArg in pathArgs) {
+        if (pathArg == "-") {
+            if (!seenPaths.contains("<stdin>")) {
+                val sourceCode = System.`in`.bufferedReader().readText()
+                fileResults.add(analyzer.analyzeSource(sourceCode, "<stdin>"))
+                seenPaths.add("<stdin>")
+            }
+        } else {
+            val target = File(pathArg)
+            if (!target.exists()) {
+                System.err.println("Error: Path does not exist: $pathArg")
+                continue
+            }
 
-        if (target.isFile) {
-            val sourceCode = target.readText()
-            fileResults.add(analyzer.analyzeSource(sourceCode, target.path))
-        } else if (target.isDirectory) {
-            target.walkTopDown().filter { it.isFile && (it.extension == "kt" || it.extension == "kts") }.forEach { file ->
-                try {
-                    val sourceCode = file.readText()
-                    fileResults.add(analyzer.analyzeSource(sourceCode, file.path))
-                } catch (e: Exception) {
-                    System.err.println("Error reading ${file.path}: ${e.message}")
+            if (target.isFile) {
+                val canonical = target.canonicalPath
+                if (!seenPaths.contains(canonical)) {
+                    seenPaths.add(canonical)
+                    val sourceCode = target.readText()
+                    fileResults.add(analyzer.analyzeSource(sourceCode, target.path))
+                }
+            } else if (target.isDirectory) {
+                target.walkTopDown().filter { it.isFile && (it.extension == "kt" || it.extension == "kts") }.forEach { file ->
+                    val canonical = file.canonicalPath
+                    if (!seenPaths.contains(canonical)) {
+                        seenPaths.add(canonical)
+                        try {
+                            val sourceCode = file.readText()
+                            fileResults.add(analyzer.analyzeSource(sourceCode, file.path))
+                        } catch (e: Exception) {
+                            System.err.println("Error reading ${file.path}: ${e.message}")
+                        }
+                    }
                 }
             }
         }

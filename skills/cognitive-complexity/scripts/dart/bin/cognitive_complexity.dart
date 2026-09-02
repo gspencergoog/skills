@@ -31,33 +31,50 @@ ArgParser _createParser() {
         abbr: 'V', negatable: false, help: 'Show version information.');
 }
 
-Future<List<FileComplexity>> _analyzeTarget(
-    String pathArg, DartComplexityAnalyzer analyzer) async {
+Future<List<FileComplexity>> _analyzeTargets(
+    List<String> pathArgs, DartComplexityAnalyzer analyzer) async {
   final fileResults = <FileComplexity>[];
+  final seenPaths = <String>{};
 
-  if (pathArg == '-') {
-    final sourceCode = await stdin.transform(utf8.decoder).join();
-    fileResults.add(analyzer.analyzeSource(sourceCode, filePath: '<stdin>'));
-    return fileResults;
-  }
+  final targets = pathArgs.isEmpty ? ['-'] : pathArgs;
 
-  final type = FileSystemEntity.typeSync(pathArg);
-  if (type == FileSystemEntityType.notFound) {
-    stderr.writeln('Error: Path does not exist: $pathArg');
-    exit(2);
-  }
+  for (final pathArg in targets) {
+    if (pathArg == '-') {
+      if (!seenPaths.contains('<stdin>')) {
+        final sourceCode = await stdin.transform(utf8.decoder).join();
+        fileResults.add(analyzer.analyzeSource(sourceCode, filePath: '<stdin>'));
+        seenPaths.add('<stdin>');
+      }
+      continue;
+    }
 
-  if (type == FileSystemEntityType.file) {
-    final file = File(pathArg);
-    fileResults.add(analyzer.analyzeSource(file.readAsStringSync(), filePath: pathArg));
-  } else if (type == FileSystemEntityType.directory) {
-    final dir = Directory(pathArg);
-    for (final entity in dir.listSync(recursive: true, followLinks: false)) {
-      if (entity is File && entity.path.endsWith('.dart') && !entity.path.contains('.dart_tool')) {
-        try {
-          fileResults.add(analyzer.analyzeSource(entity.readAsStringSync(), filePath: entity.path));
-        } catch (e) {
-          stderr.writeln('Error reading ${entity.path}: $e');
+    final type = FileSystemEntity.typeSync(pathArg);
+    if (type == FileSystemEntityType.notFound) {
+      stderr.writeln('Error: Path does not exist: $pathArg');
+      continue;
+    }
+
+    if (type == FileSystemEntityType.file) {
+      final file = File(pathArg);
+      final canonical = file.resolveSymbolicLinksSync();
+      if (!seenPaths.contains(canonical)) {
+        seenPaths.add(canonical);
+        fileResults.add(analyzer.analyzeSource(file.readAsStringSync(), filePath: pathArg));
+      }
+    } else if (type == FileSystemEntityType.directory) {
+      final dir = Directory(pathArg);
+      for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+        if (entity is File && entity.path.endsWith('.dart') && !entity.path.contains('.dart_tool')) {
+          final canonical = entity.resolveSymbolicLinksSync();
+          if (seenPaths.contains(canonical)) {
+            continue;
+          }
+          seenPaths.add(canonical);
+          try {
+            fileResults.add(analyzer.analyzeSource(entity.readAsStringSync(), filePath: entity.path));
+          } catch (e) {
+            stderr.writeln('Error reading ${entity.path}: $e');
+          }
         }
       }
     }
@@ -156,7 +173,7 @@ Future<void> main(List<String> arguments) async {
   }
 
   if (args['help'] as bool) {
-    stdout.writeln('Usage: cognitive_complexity [OPTIONS] [PATH]\nCalculate Cognitive Complexity for Dart code according to SonarSource standard.\n\n${parser.usage}');
+    stdout.writeln('Usage: cognitive_complexity [OPTIONS] [PATH...]\nCalculate Cognitive Complexity for Dart code according to SonarSource standard.\n\n${parser.usage}');
     exit(0);
   }
 
@@ -169,10 +186,10 @@ Future<void> main(List<String> arguments) async {
   final format = args['format'] as String;
   final verbose = args['verbose'] as bool;
   final sortKey = args['sort'] as String;
-  final pathArg = args.rest.isNotEmpty ? args.rest.first : '-';
+  final pathArgs = args.rest.isNotEmpty ? args.rest : ['-'];
 
   final analyzer = DartComplexityAnalyzer(threshold: threshold);
-  final fileResults = await _analyzeTarget(pathArg, analyzer);
+  final fileResults = await _analyzeTargets(pathArgs, analyzer);
 
   _sortResults(fileResults, sortKey);
   final report = _buildReport(fileResults, threshold);

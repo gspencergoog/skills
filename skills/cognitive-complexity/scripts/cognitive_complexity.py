@@ -213,23 +213,73 @@ def _analyze_directory(dir_path: Path, lang: str, threshold: int, verbose: bool,
 
 
 def analyze(
-    path_arg: str,
+    paths_arg: Sequence[str] | str = "-",
     lang: str = "auto",
     threshold: int = 15,
     verbose: bool = False,
     sort_key: str = "complexity",
     exclude_patterns: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    if path_arg == "-" or not path_arg:
+    if isinstance(paths_arg, (str, Path)):
+        raw_targets = [str(paths_arg)]
+    else:
+        raw_targets = [str(p) for p in paths_arg]
+
+    if not raw_targets or raw_targets == ["-"] or (len(raw_targets) == 1 and raw_targets[0] == "-"):
         return _analyze_stdin(lang, threshold, verbose, sort_key)
 
-    p = Path(path_arg)
-    if not p.exists():
-        raise FileNotFoundError(f"Path does not exist: {path_arg}")
+    all_files: List[Dict[str, Any]] = []
+    seen_file_paths: Set[str] = set()
+    languages_detected: Set[str] = set()
 
-    if p.is_file():
-        return _analyze_file(p, lang, threshold, verbose, sort_key)
-    return _analyze_directory(p, lang, threshold, verbose, sort_key)
+    for target_str in raw_targets:
+        if target_str == "-":
+            stdin_report = _analyze_stdin(lang, threshold, verbose, sort_key)
+            for f in stdin_report.get("files", []):
+                all_files.append(f)
+            if stdin_report.get("language"):
+                languages_detected.add(stdin_report["language"])
+            continue
+
+        p = Path(target_str)
+        if not p.exists():
+            raise FileNotFoundError(f"Path does not exist: {target_str}")
+
+        if p.is_file():
+            rep = _analyze_file(p, lang, threshold, verbose, sort_key)
+            for f in rep.get("files", []):
+                f_path = str(Path(f.get("path", "")).resolve())
+                if f_path not in seen_file_paths:
+                    seen_file_paths.add(f_path)
+                    all_files.append(f)
+            if rep.get("language"):
+                languages_detected.add(rep["language"])
+        elif p.is_dir():
+            rep = _analyze_directory(p, lang, threshold, verbose, sort_key)
+            for f in rep.get("files", []):
+                f_path = str(Path(f.get("path", "")).resolve())
+                if f_path not in seen_file_paths:
+                    seen_file_paths.add(f_path)
+                    all_files.append(f)
+            if rep.get("language"):
+                for sub_l in rep["language"].split(", "):
+                    if sub_l and sub_l != "multi-language":
+                        languages_detected.add(sub_l)
+
+    for f in all_files:
+        funcs = f.get("functions", [])
+        if sort_key == "complexity":
+            funcs.sort(key=lambda x: x.get("complexity", 0), reverse=True)
+        elif sort_key == "name":
+            funcs.sort(key=lambda x: x.get("name", ""))
+        elif sort_key == "line":
+            funcs.sort(key=lambda x: x.get("line_number", 0))
+
+    if sort_key == "file":
+        all_files.sort(key=lambda x: x.get("path", ""))
+
+    lang_label = ", ".join(sorted(languages_detected)) if languages_detected else ("python" if lang == "auto" else lang)
+    return _build_engine_report(lang_label, all_files, threshold)
 
 
 def format_text(report: Dict[str, Any], verbose: bool = False) -> str:
@@ -274,10 +324,10 @@ def main() -> int:
         description="Unified Multi-Language Cognitive Complexity Analyzer (Python, TypeScript, Dart, Swift, Kotlin)."
     )
     parser.add_argument(
-        "path",
-        nargs="?",
-        default="-",
-        help="Path to file or directory. If omitted or '-', reads from stdin.",
+        "paths",
+        nargs="*",
+        default=["-"],
+        help="One or more paths to files or directories. If omitted or '-', reads from stdin.",
     )
     parser.add_argument(
         "-l",
@@ -330,7 +380,7 @@ def main() -> int:
 
     try:
         report = analyze(
-            path_arg=args.path,
+            paths_arg=args.paths,
             lang=args.lang,
             threshold=args.threshold,
             verbose=args.verbose,
