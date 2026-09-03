@@ -1,31 +1,37 @@
 ---
 name: unix-cli-best-practices
-description: Safe, portable, and efficient command-line patterns for macOS/BSD Unix tools (grep, find, sed, awk, xargs, mdfind, pbcopy, open) and modern alternatives (ripgrep, fd). Covers common shell scripting and one-liner use cases including fast searching, text processing, codebase navigation, and parallel execution.
+description: >-
+  Safe, portable, and efficient command-line patterns for macOS/BSD Unix tools
+  (grep, find, sed, awk, xargs, mdfind, pbcopy, open), modern alternatives
+  (rg, fd), and structured JSON processing with jq. Covers common shell
+  scripting and one-liner use cases including fast searching, text processing,
+  codebase navigation, parallel execution, and JSON manipulation.
 ---
 
 # Unix CLI best practices
 
-This guide provides efficient, safe, and portable techniques for manipulating text and finding files from the command line on macOS. By default, macOS uses BSD-derived UNIX utilities (`grep`, `find`, `sed`, `awk`) which have subtle differences from their GNU/Linux counterparts.
+This guide provides efficient, safe, and portable techniques for manipulating text, querying structured data, and finding files from the command line on macOS. By default, macOS uses BSD-derived UNIX utilities (`grep`, `find`, `sed`, `awk`) which have subtle differences from their GNU/Linux counterparts.
 
-When possible, use high-performance replacements (`ripgrep` and `fd`) which respect `.gitignore` rules by default and offer more ergonomic interfaces.
+When possible, use high-performance replacements (`ripgrep` and `fd`) which respect `.gitignore` rules by default and offer more ergonomic interfaces. For structured JSON data, use `jq` instead of line-oriented text tools.
 
 ## Modern high-performance alternatives
 
 Use these tools instead of standard BSD utilities for local codebase operations.
 
-### ripgrep (`rg`)
+### Ripgrep (`rg`)
 
-Use `ripgrep` (`rg`) as the preferred tool for searching text. It is faster than standard `grep` and respects `.gitignore` rules by default.
+Use Ripgrep (the `rg` command) as the preferred tool for searching text. It is faster than standard `grep` and respects `.gitignore` rules by default.
 
 Common use cases:
-* Run `rg 'search_term'` to recursively search the current directory.
-* Run `rg -S 'term'` to search case-insensitively unless the query contains uppercase letters. Use `rg -i 'term'` for strict case-insensitivity.
-* Run `rg -g '*.ts' -g '!*.spec.ts' 'term'` to search `.ts` files while excluding `.spec.ts` files.
-* Run `rg -v 'ignore_me'` to print lines that do not match the pattern.
-* Run `rg -l 'term'` to list only the names of matching files. Combine with `rg -0` for null-terminated output suitable for `xargs`.
-* Run `rg -F 'foo()'` to treat the search pattern as a fixed string rather than a regular expression.
-* Run `rg -w 'const'` to match whole words only.
-* Run `rg -C 2 'term'` to show two lines of surrounding context. Use `rg -B 2` for preceding context or `rg -A 2` for succeeding context.
+
+- Run `rg 'search_term'` to recursively search the current directory.
+- Run `rg -S 'term'` to search case-insensitively unless the query contains uppercase letters. Use `rg -i 'term'` for strict case-insensitivity.
+- Run `rg -g '*.ts' -g '!*.spec.ts' 'term'` to search `.ts` files while excluding `.spec.ts` files.
+- Run `rg -v 'ignore_me'` to print lines that do not match the pattern.
+- Run `rg -l 'term'` to list only the names of matching files. Combine with `rg -0` for null-terminated output suitable for `xargs`.
+- Run `rg -F 'foo()'` to treat the search pattern as a fixed string rather than a regular expression.
+- Run `rg -w 'const'` to match whole words only.
+- Run `rg -C 2 'term'` to show two lines of surrounding context. Use `rg -B 2` for preceding context or `rg -A 2` for succeeding context.
 
 Refer to `rg --help` for the complete options list.
 
@@ -34,14 +40,15 @@ Refer to `rg --help` for the complete options list.
 Use `fd` as the preferred tool for traversing the filesystem and finding files. It is faster than standard `find` and respects `.gitignore` rules by default.
 
 Common use cases:
-* Run `fd 'pattern'` to find files matching the regex pattern anywhere in their path.
-* Run `fd -e py -e txt` to filter results by file extensions.
-* Run `fd -t d 'docs'` to find directories. Use `fd -t f` for files and `fd -t l` for symbolic links.
-* Run `fd -H` to include hidden files, or `fd -I` to include ignored files (such as `node_modules`). Combine as `fd -HI` to search all files.
-* Run `fd -p 'src/assets'` to match the pattern against the full path instead of just the filename.
-* Run `fd -e log -x rm` to execute a command on each matching file individually. Use `-X` (e.g., `fd -e log -X rm`) to run the command once with all matching files as arguments.
-* Run `fd -a 'pattern'` to return absolute paths instead of relative paths.
-* Run `fd -E 'pattern'` (or `--exclude`) to exclude files or directories matching the pattern from the search (e.g. `fd -E node_modules`). Excluding a directory prevents `fd` from traversing it entirely:
+
+- Run `fd 'pattern'` to find files matching the regex pattern anywhere in their path.
+- Run `fd -e py -e txt` to filter results by file extensions.
+- Run `fd -t d 'docs'` to find directories. Use `fd -t f` for files and `fd -t l` for symbolic links.
+- Run `fd -H` to include hidden files, or `fd -I` to include ignored files (such as `node_modules`). Combine as `fd -HI` to search all files.
+- Run `fd -p 'src/assets'` to match the pattern against the full path instead of just the filename.
+- Run `fd -e log -x rm` to execute a command on each matching file individually. Use `-X` (e.g., `fd -e log -X rm`) to run the command once with all matching files as arguments.
+- Run `fd -a 'pattern'` to return absolute paths instead of relative paths.
+- Run `fd -E 'pattern'` (or `--exclude`) to exclude files or directories matching the pattern from the search (e.g. `fd -E node_modules`). Excluding a directory prevents `fd` from traversing it entirely:
   ```bash
   # Slow: traverses node_modules, then filters output
   fd -I -e ts | grep -v "node_modules"
@@ -51,6 +58,102 @@ Common use cases:
   ```
 
 Refer to `fd --help` for the complete options list.
+
+## Structured data processing with jq
+
+Use `jq` for parsing, filtering, transforming, and formatting JSON data from files or command output. Do not parse JSON using `grep`, `sed`, or `awk`, because line-oriented tools cannot reliably handle nested keys, multi-line values, or escaped characters.
+
+### Common extraction and formatting flags
+
+- `-r` (`--raw-output`): Emits unquoted strings for direct assignment to shell variables or pipeline arguments.
+- `-c` (`--compact-output`): Formats each JSON object onto a single line, suitable for JSON Lines (NDJSON) and streaming logs.
+- `-e` (`--exit-status`): Sets the exit status to `1` if the filter yields `false` or `null`, enabling direct use in shell `if` statements.
+- `-s` (`--slurp`): Reads multiple JSON inputs or lines into a single top-level JSON array before applying filters.
+- `--arg` and `--argjson`: Safely passes shell variables into filters to prevent quoting bugs and injection.
+
+### Practical use cases
+
+- **Extract a raw value for a shell variable**:
+
+  ```bash
+  # Extracts an unquoted string suitable for shell variables
+  VERSION=$(jq -r '.version' package.json)
+  ```
+
+- **Filter array elements with `select`**:
+
+  ```bash
+  # Filter objects matching a boolean or status condition
+  docker inspect container_list.json | jq '.[] | select(.State.Running == true) | .Name'
+
+  # Filter objects containing a substring
+  jq '.plugins[] | select(.name | contains("git"))' plugins.json
+  ```
+
+- **Safely pass shell variables into queries**:
+
+  ```bash
+  # Pass string and numeric variables without shell escaping issues
+  ENV_NAME="production"
+  PORT_NUM=8080
+  jq --arg env "$ENV_NAME" --argjson port "$PORT_NUM" \
+    '.environments[$env].port = $port' config.json
+  ```
+
+- **Reshape and project JSON objects**:
+
+  ```bash
+  # Extract specific fields into a new object structure
+  jq '.users[] | {userId: .id, userEmail: .contact.email}' users.json
+
+  # Reshape an array of objects using map
+  jq '.items | map({id: .id, title: .name, active: .is_active})' data.json
+  ```
+
+- **Handle missing keys and fallback values safely**:
+
+  ```bash
+  # Use ? to ignore missing paths and // to provide a default fallback
+  jq '.items[]?.author?.name // "Anonymous"' catalog.json
+  ```
+
+- **Export JSON array to tab-separated values (TSV)**:
+
+  ```bash
+  # Output tab-separated rows for processing with awk, cut, or while read
+  jq -r '.data[] | [.id, .name, .status] | @tsv' input.json
+  ```
+
+- **Convert key-value pairs to shell environment format**:
+
+  ```bash
+  # Convert a flat JSON object into KEY=VALUE lines
+  jq -r 'to_entries[] | "\(.key)=\(.value)"' env.json
+  ```
+
+- **Merge two JSON configuration files**:
+
+  ```bash
+  # Recursively merge objects (second file values override first file values)
+  jq -s '.[0] * .[1]' defaults.json overrides.json
+  ```
+
+- **Update a JSON file safely**:
+
+  ```bash
+  # Write to a temporary file first because jq does not edit in-place
+  jq '.version = "2.0.0"' package.json > package.json.tmp && mv package.json.tmp package.json
+  ```
+
+- **Process and transform JSON Lines (NDJSON) streams**:
+
+  ```bash
+  # Filter an NDJSON log file and format a summary
+  jq -r 'select(.level == "error") | "[\(.timestamp)] \(.message)"' app.log.jsonl
+
+  # Convert a standard JSON array into single-line NDJSON records
+  jq -c '.[]' large_array.json > events.jsonl
+  ```
 
 ## Built-in tools for macOS and BSD
 
@@ -69,14 +172,16 @@ grep -R --exclude-dir=node_modules --exclude-dir=.git "pattern" .
 ```
 
 Common `grep` flags:
-* `-r` or `-R` to search recursively. `-R` follows symbolic links, while `-r` does not.
-* `-I` to ignore binary files for faster execution and clean output.
-* `--exclude="*.min.js"` to ignore files matching a specific glob.
-* `--include="*.dart"` to search only files matching a specific glob.
-* `-l` to print only the names of files containing matches.
-* `-Z` to print a null character after each filename, which is useful when piping to `xargs -0`.
+
+- `-r` or `-R` to search recursively. `-R` follows symbolic links, while `-r` does not.
+- `-I` to ignore binary files for faster execution and clean output.
+- `--exclude="*.min.js"` to ignore files matching a specific glob.
+- `--include="*.dart"` to search only files matching a specific glob.
+- `-l` to print only the names of files containing matches.
+- `-Z` to print a null character after each filename, which is useful when piping to `xargs -0`.
 
 Example of safely deleting files containing a specific string:
+
 ```bash
 grep -rlZ -I --exclude-dir=node_modules "DEPRECATED_API" . | xargs -0 rm
 ```
@@ -96,6 +201,7 @@ sed -i '.bak' 's/oldName/newName/g' filename.txt
 ```
 
 Use the `-E` option to enable extended regular expressions, avoiding the need to escape parentheses and plus signs:
+
 ```bash
 sed -E 's/(foo|bar)+/baz/g' file.txt
 ```
@@ -105,19 +211,20 @@ sed -E 's/(foo|bar)+/baz/g' file.txt
 Use `awk` for line-by-line data extraction and text processing.
 
 Common use cases:
-* Print specific columns from space-separated input:
+
+- Print specific columns from space-separated input:
   ```bash
   ls -l | awk '{print $1, $3}'
   ```
-* Find and print duplicate lines in a file without sorting them first:
+- Find and print duplicate lines in a file without sorting them first:
   ```bash
   awk '!seen[$0]++' filename.txt
   ```
-* Filter lines based on column values (for example, printing lines where the third column is greater than 100):
+- Filter lines based on column values (for example, printing lines where the third column is greater than 100):
   ```bash
   awk '$3 > 100' data.txt
   ```
-* Find lines matching a pattern and print their line number (`NR`) along with the content:
+- Find lines matching a pattern and print their line number (`NR`) along with the content:
   ```bash
   awk '/Error/ {print NR, $0}' server.log
   ```
@@ -139,7 +246,7 @@ fd -e log -0 | xargs -0 rm
 
 Common use cases for `xargs` (where native `fd -x` is not applicable):
 
-* **Processing input from non-file commands** (e.g., `git`, `docker`):
+- **Processing input from non-file commands** (e.g., `git`, `docker`):
   ```bash
   # Delete all local git branches that have been merged
   git branch --merged | grep -v '^*' | xargs git branch -d
@@ -147,12 +254,12 @@ Common use cases for `xargs` (where native `fd -x` is not applicable):
   # Stop all running Docker containers
   docker ps -q | xargs docker stop
   ```
-* **Interactive confirmation before execution (`-p`)**:
+- **Interactive confirmation before execution (`-p`)**:
   ```bash
   # Prompts for confirmation (y/n) before deleting files
   fd -e log -0 | xargs -0 -p rm
   ```
-* **Parallel processing of arbitrary input lists** (e.g., network requests):
+- **Parallel processing of arbitrary input lists** (e.g., network requests):
   ```bash
   # Run up to 4 curl processes in parallel to download URLs
   cat urls.txt | xargs -n 1 -P 4 curl -O
@@ -162,7 +269,7 @@ Common use cases for `xargs` (where native `fd -x` is not applicable):
 
 Use macOS-specific utilities to interact with operating system features:
 
-* Use `mdfind` to query the macOS Spotlight index for fast, global file and content searches without scanning the disk:
+- Use `mdfind` to query the macOS Spotlight index for fast, global file and content searches without scanning the disk:
   ```bash
   # Search by filename
   mdfind -name "project_spec"
@@ -170,7 +277,7 @@ Use macOS-specific utilities to interact with operating system features:
   # Search by text content within files
   mdfind "kMDItemTextContent == 'TODO: Refactor'"
   ```
-* Use `pbcopy` and `pbpaste` to interact with the system clipboard:
+- Use `pbcopy` and `pbpaste` to interact with the system clipboard:
   ```bash
   # Copy file content to the clipboard
   cat ssh_key.pub | pbcopy
@@ -178,7 +285,7 @@ Use macOS-specific utilities to interact with operating system features:
   # Paste clipboard content to a file
   pbpaste > new_file.txt
   ```
-* Use `open` to open files, directories, or URLs with their default applications:
+- Use `open` to open files, directories, or URLs with their default applications:
   ```bash
   # Open the current directory in Finder
   open .
