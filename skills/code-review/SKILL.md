@@ -88,10 +88,15 @@ Combine the refined comments into a final output.
 - **Generate file summaries**: For reviews with multiple files, include a list of changed files with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - When writing file paths, write them as Markdown links.
 - Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. For long review artifacts or RFC reviews, run `write-prose`'s `analyze_prose.py` script to audit readability metrics.
+- **Save as Artifact**: Write the synthesized review to `review_results.md` in the artifact directory using `write_to_file`. Do not emit the full review directly into the chat response.
 
 ## Output Format
 
-The final synthesized review MUST be written to a Markdown file in the conversation's artifact directory (e.g., `review_results.md` in `<appDataDir>/brain/<conversation-id>/`) and also displayed to the user.
+The final synthesized review MUST be created as an artifact file using the `write_to_file` tool in the conversation's artifact directory (e.g., `review_results.md`) with `UserFacing: true`.
+
+- **Do NOT** print the full review comments or dump the complete review markdown in the chat message response.
+- In the final chat response, provide only a clickable markdown link to the created artifact file and an overview.
+- If executing within a subagent, ensure the artifact file is written using `write_to_file` before completing and returning the artifact link to the caller.
 
 The review file should contain:
 1. The high-level summary paragraph.
