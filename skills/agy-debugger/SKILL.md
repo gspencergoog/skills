@@ -59,6 +59,7 @@ When asked to disable or uninstall the debugger, perform these steps:
 ### 3. Start the debugger
 
 When asked to start or launch the debugger:
+
 1. Check if `.agents/hooks.json` is configured. If not, perform the installation steps first.
 2. Start the server in the background (which will automatically open the browser UI):
    ```bash

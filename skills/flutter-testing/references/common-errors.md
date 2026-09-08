@@ -1,6 +1,7 @@
 # Common Testing Errors
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Layout Errors](#layout-errors)
 - [Widget Lifecycle Errors](#widget-lifecycle-errors)
@@ -12,7 +13,7 @@
 - [Debugging Tips](#debugging-tips)
 - [Prevention](#prevention)
 
----
+______________________________________________________________________
 
 ## Overview
 
@@ -23,6 +24,7 @@ This guide covers frequently encountered Flutter testing errors and their soluti
 ### 'A RenderFlex overflowed...'
 
 **Error Message:**
+
 ```
 The following assertion was thrown during layout:
 A RenderFlex overflowed by 1146 pixels on the right.
@@ -69,6 +71,7 @@ Row(
 ### 'Vertical viewport was given unbounded height'
 
 **Error Message:**
+
 ```
 Vertical viewport was given unbounded height.
 Viewports expand in the scrolling direction to fill their container.
@@ -126,6 +129,7 @@ Column(
 ### 'An InputDecorator...cannot have an unbounded width'
 
 **Error Message:**
+
 ```
 An InputDecorator, which is typically created by a TextField, cannot have an unbounded width.
 This happens when the parent widget does not provide a finite width constraint.
@@ -157,6 +161,7 @@ Row(
 ### 'setState called during build'
 
 **Error Message:**
+
 ```
 setState() or markNeedsBuild() called during build.
 This Overlay widget cannot be marked as needing to build because the framework
@@ -209,6 +214,7 @@ Widget build(BuildContext context) {
 ### 'Incorrect use of ParentData widget'
 
 **Error Message:**
+
 ```
 The following assertion was thrown while looking for parent data:
 Incorrect use of ParentDataWidget.
@@ -220,12 +226,12 @@ listed above is not placed directly inside a compatible ancestor widget.
 
 **Common Solutions:**
 
-| Widget               | Expected Parent     | Solution                          |
-|---------------------|---------------------|-----------------------------------|
-| `Flexible`          | `Row`, `Column`, `Flex` | Ensure parent is Row/Column/Flex |
-| `Expanded`           | `Row`, `Column`, `Flex` | Ensure parent is Row/Column/Flex |
-| `Positioned`         | `Stack`              | Wrap in Stack                     |
-| `TableCell`          | `Table`              | Ensure parent is Table              |
+| Widget       | Expected Parent         | Solution                         |
+| ------------ | ----------------------- | -------------------------------- |
+| `Flexible`   | `Row`, `Column`, `Flex` | Ensure parent is Row/Column/Flex |
+| `Expanded`   | `Row`, `Column`, `Flex` | Ensure parent is Row/Column/Flex |
+| `Positioned` | `Stack`                 | Wrap in Stack                    |
+| `TableCell`  | `Table`                 | Ensure parent is Table           |
 
 ```dart
 // Problem
@@ -252,6 +258,7 @@ Column(
 ### 'WidgetTester.pumpWidget() called with a widget that doesn't include a MaterialApp'
 
 **Error Message:**
+
 ```
 WidgetTester.pumpWidget() called with a widget that doesn't include a MaterialApp.
 ```
@@ -279,6 +286,7 @@ testWidgets('test with MaterialApp', (tester) async {
 ### 'No Finder found'
 
 **Error Message:**
+
 ```
 No Finder found.
 Test failed: No elements found matching the finder.
@@ -326,6 +334,7 @@ testWidgets('correct finder', (tester) async {
 ### 'MissingPluginException'
 
 **Error Message:**
+
 ```
 MissingPluginException(No implementation found for method MethodName on channel channel.name)
 ```
@@ -368,6 +377,7 @@ void main() {
 ### 'TimeoutException'
 
 **Error Message:**
+
 ```
 TimeoutException after 0:00:05.000000: Test timed out after 5 seconds.
 ```
@@ -399,6 +409,7 @@ testWidgets('fix infinite settle', (tester) async {
 ### 'RangeError'
 
 **Error Message:**
+
 ```
 RangeError: Index out of range: index should be less than 5, but is 5
 ```

@@ -8,6 +8,7 @@ description: Clean up local and remote tracking git branches that have already b
 This skill provides a helper script to identify and delete merged git branches. It handles both standard merges and squash merges (using `git cherry` analysis), and safely deletes matching tracking branches from their respective remotes (e.g. `origin`).
 
 ## Core Features
+
 1. **Squash-Merge Detection**: Uses `git cherry` to check if a branch's changes exist in the main branch, even if the commit history was squashed.
 2. **Worktree Cleanup**: Automatically detects and deletes linked git worktrees associated with merged branches before deleting the branches.
 3. **Safety First**: Prevents removing the main worktree, and protects uncommitted work by aborting if a linked worktree has uncommitted changes.
@@ -29,6 +30,7 @@ python3 scripts/cleanup_branches.py --repo-dir /path/to/repo --delete
 ```
 
 ### Options:
+
 - `--repo-dir <path>`: Path to the target git repository (defaults to the current working directory).
 - `--main-branch <name>`: Name of the main/production branch to check against (defaults to `main`).
 - `--delete`: Executes the deletion of both local and tracking remote branches.

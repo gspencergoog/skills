@@ -1,6 +1,7 @@
 # Plugin Testing Guide
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [Test Types for Plugins](#test-types-for-plugins)
 - [Project Structure](#project-structure)
@@ -17,7 +18,7 @@
 - [Best Practices](#best-practices)
 - [CI/CD for Plugins](#cicd-for-plugins)
 
----
+______________________________________________________________________
 
 ## Overview
 
@@ -25,13 +26,13 @@ Flutter plugins require special testing strategies because they include native c
 
 ## Test Types for Plugins
 
-| Type           | Tests                      | Runs On         | Purpose                           |
-|----------------|---------------------------|------------------|-----------------------------------|
-| Dart Unit      | Single classes/functions  | Dart VM        | Test Dart code in isolation       |
-| Dart Widget     | UI components             | Test environment | Test widget behavior              |
-| Dart Integration | Dart + Native bridge     | Device/Emulator | Test full plugin functionality    |
-| Native Unit     | Native code              | Native test env | Test native code in isolation     |
-| Native UI       | Native UI + Flutter UI  | Device/Emulator | Test native UI interactions       |
+| Type             | Tests                    | Runs On          | Purpose                        |
+| ---------------- | ------------------------ | ---------------- | ------------------------------ |
+| Dart Unit        | Single classes/functions | Dart VM          | Test Dart code in isolation    |
+| Dart Widget      | UI components            | Test environment | Test widget behavior           |
+| Dart Integration | Dart + Native bridge     | Device/Emulator  | Test full plugin functionality |
+| Native Unit      | Native code              | Native test env  | Test native code in isolation  |
+| Native UI        | Native UI + Flutter UI   | Device/Emulator  | Test native UI interactions    |
 
 ## Project Structure
 

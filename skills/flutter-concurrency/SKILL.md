@@ -1,42 +1,49 @@
 ---
-name: "flutter-concurrency"
-description: "Execute long-running, CPU-bound tasks (like parsing large JSON payloads) in a background isolate in Flutter, handling Web fallbacks and integrating safely with state management while avoiding resource leaks."
+name: flutter-concurrency
+description: Execute long-running, CPU-bound tasks (like parsing large JSON payloads) in a background isolate in Flutter, handling Web fallbacks and integrating safely with state management while avoiding resource leaks.
 ---
+
 # Flutter Concurrency and Data Management
 
 ## Goal
+
 Implements advanced Flutter data handling, including background JSON serialization using Isolates, asynchronous state management, and platform-aware concurrency to ensure jank-free 60fps+ UI rendering. Assumes a standard Flutter environment (Dart 2.19+) with access to `dart:convert`, `dart:isolate`, and standard state management paradigms.
 
 ## Decision Logic
+
 Use the following decision tree to determine the correct serialization and concurrency approach before writing code:
 
 1. **Serialization Strategy:**
-   * *Condition:* Is the JSON model simple, flat, and rarely changed?
-     * *Action:* Use **Manual Serialization** (`dart:convert`).
-   * *Condition:* Is the JSON model complex, nested, or part of a large-scale application?
-     * *Action:* Use **Code Generation** (`json_serializable` and `build_runner`).
+   - *Condition:* Is the JSON model simple, flat, and rarely changed?
+     - *Action:* Use **Manual Serialization** (`dart:convert`).
+   - *Condition:* Is the JSON model complex, nested, or part of a large-scale application?
+     - *Action:* Use **Code Generation** (`json_serializable` and `build_runner`).
 2. **Concurrency Strategy:**
-   * *Condition:* Is the data payload small and parsing takes < 16ms?
-     * *Action:* Run on the **Main UI Isolate** using standard `async`/`await`.
-   * *Condition:* Is the data payload large (e.g., > 1MB JSON) or computationally expensive?
-     * *Action:* Offload to a **Background Isolate** using `Isolate.run()`.
-   * *Condition:* Does the background task require continuous, two-way communication over time?
-     * *Action:* Implement a **Long-lived Isolate** using `ReceivePort` and `SendPort`.
-   * *Condition:* Is the target platform Web?
-     * *Action:* Use `compute()` as a fallback, as standard `dart:isolate` threading is not supported on Flutter Web.
+   - *Condition:* Is the data payload small and parsing takes < 16ms?
+     - *Action:* Run on the **Main UI Isolate** using standard `async`/`await`.
+   - *Condition:* Is the data payload large (e.g., > 1MB JSON) or computationally expensive?
+     - *Action:* Offload to a **Background Isolate** using `Isolate.run()`.
+   - *Condition:* Does the background task require continuous, two-way communication over time?
+     - *Action:* Implement a **Long-lived Isolate** using `ReceivePort` and `SendPort`.
+   - *Condition:* Is the target platform Web?
+     - *Action:* Use `compute()` as a fallback, as standard `dart:isolate` threading is not supported on Flutter Web.
 
 ## Instructions
 
 ### 1. Determine Environment and Payload Context
+
 **STOP AND ASK THE USER:**
-* "Are you targeting Flutter Web, Mobile, or Desktop?"
-* "What is the expected size and complexity of the JSON payload?"
-* "Do you prefer manual JSON serialization or code generation (`json_serializable`)?"
+
+- "Are you targeting Flutter Web, Mobile, or Desktop?"
+- "What is the expected size and complexity of the JSON payload?"
+- "Do you prefer manual JSON serialization or code generation (`json_serializable`)?"
 
 ### 2. Implement JSON Serialization Models
+
 Based on the user's preference, implement the data models.
 
 **Option A: Manual Serialization**
+
 ```dart
 import 'dart:convert';
 
@@ -56,6 +63,7 @@ class User {
 
 **Option B: Code Generation (`json_serializable`)**
 Ensure `json_annotation` is in `dependencies`, and `build_runner` / `json_serializable` are in `dev_dependencies`.
+
 ```dart
 import 'package:json_annotation/json_annotation.dart';
 
@@ -74,13 +82,16 @@ class User {
   Map<String, dynamic> toJson() => _$UserToJson(this);
 }
 ```
+
 *Validate-and-Fix:* Instruct the user to run `dart run build_runner build --delete-conflicting-outputs` to generate the `*.g.dart` file.
 
 ### 3. Implement Background Parsing (Isolates)
+
 To prevent UI jank, offload heavy JSON parsing to a background isolate.
 
 **Option A: Short-lived Isolate (Dart 2.19+)**
 Use `Isolate.run()` for one-off heavy computations, ensuring a `kIsWeb` check for web compatibility.
+
 ```dart
 import 'dart:convert';
 import 'dart:isolate';
@@ -114,6 +125,7 @@ Future<List<User>> fetchAndParseUsers() async {
 
 **Option B: Long-lived Isolate (Continuous Data Stream)**
 Wrap long-lived isolate logic in a clean, reusable class (`BackgroundWorker`) that manages ports and ensures they are closed cleanly to prevent resource leaks.
+
 ```dart
 import 'dart:isolate';
 
@@ -190,6 +202,7 @@ class BackgroundWorker {
 ```
 
 ### 4. Integrate with UI State Management
+
 Bind the asynchronous isolate computation to the UI using `FutureBuilder` to ensure the main thread remains responsive.
 
 ```dart
@@ -244,8 +257,9 @@ class _UserListScreenState extends State<UserListScreen> {
 ```
 
 ## Constraints
-* **No UI in Isolates:** Never attempt to access `dart:ui`, `rootBundle`, or manipulate Flutter Widgets inside a spawned isolate. Isolates do not share memory with the main thread.
-* **Web Platform Limitations:** `dart:isolate` is not supported on Flutter Web. If targeting Web, you must perform a `kIsWeb` check and fall back to synchronous execution (or use `compute()` from `package:flutter/foundation.dart` which internally handles web fallback by running on the main thread) to prevent runtime crashes.
-* **Immutable Messages:** When passing data between isolates via `SendPort`, prefer passing immutable objects (like Strings or unmodifiable byte data) to avoid deep-copy performance overhead.
-* **State Immutability:** Always treat `Widget` properties as immutable. Use `StatefulWidget` and `setState` (or a state management package) to trigger rebuilds when asynchronous data resolves.
-* **Reflection:** Do not use `dart:mirrors` for JSON serialization. Flutter disables runtime reflection to enable aggressive tree-shaking and AOT compilation. Always use manual parsing or code generation.
+
+- **No UI in Isolates:** Never attempt to access `dart:ui`, `rootBundle`, or manipulate Flutter Widgets inside a spawned isolate. Isolates do not share memory with the main thread.
+- **Web Platform Limitations:** `dart:isolate` is not supported on Flutter Web. If targeting Web, you must perform a `kIsWeb` check and fall back to synchronous execution (or use `compute()` from `package:flutter/foundation.dart` which internally handles web fallback by running on the main thread) to prevent runtime crashes.
+- **Immutable Messages:** When passing data between isolates via `SendPort`, prefer passing immutable objects (like Strings or unmodifiable byte data) to avoid deep-copy performance overhead.
+- **State Immutability:** Always treat `Widget` properties as immutable. Use `StatefulWidget` and `setState` (or a state management package) to trigger rebuilds when asynchronous data resolves.
+- **Reflection:** Do not use `dart:mirrors` for JSON serialization. Flutter disables runtime reflection to enable aggressive tree-shaking and AOT compilation. Always use manual parsing or code generation.

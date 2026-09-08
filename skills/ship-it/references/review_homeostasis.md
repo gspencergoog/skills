@@ -8,11 +8,12 @@ Use this guide during Phase 3 of the `ship-it` workflow to execute iterative API
 
 To prevent context window bloat and maintain fresh perspectives, perform review passes using **isolated background subagents** (`invoke_subagent` tool with `research-google` or `self` role, specifying `"Workspace": "inherit"` to inspect current working tree state).
 
----
+______________________________________________________________________
 
 ## 2. Execution Procedure
 
 ### Step 1: Launch API Review Subagent
+
 Invoke a subagent to execute the `api-review` skill on the target files or modified git diff.
 
 ```json
@@ -29,12 +30,14 @@ Invoke a subagent to execute the `api-review` skill on the target files or modif
 ```
 
 ### Step 2: Implement API Mitigations
+
 - Review findings returned by the API Review subagent across `HIGH`, `MEDIUM`, and `LOW` severities.
 - Apply code changes to fix identified issues.
 - Run static analyzer / linter and unit tests to confirm no regressions.
 - Create a git commit (e.g. `refactor(api): apply API review mitigations`).
 
 ### Step 3: Launch Code Review Subagent Loop
+
 Invoke a subagent to execute the `code-review` skill on the working directory or branch diff.
 
 ```json
@@ -51,6 +54,7 @@ Invoke a subagent to execute the `code-review` skill on the working directory or
 ```
 
 ### Step 4: Iterative Fix, Oscillation Check & Commit Loop
+
 1. Parse findings from the subagent response (`HIGH`, `MEDIUM`, and `LOW`).
 2. **Oscillation Detection**:
    - Maintain a list of files and line ranges modified in previous review iterations of the conversation.
@@ -62,7 +66,7 @@ Invoke a subagent to execute the `code-review` skill on the working directory or
 6. If findings were addressed, launch another subagent pass to re-audit.
 7. **Homeostasis Reached**: Stop looping when a review pass yields zero findings (or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`.**
 
----
+______________________________________________________________________
 
 ## 3. Stopping Criteria & Safeguards
 

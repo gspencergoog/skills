@@ -1,6 +1,7 @@
 # Integration Testing Guide
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [When to Write Integration Tests](#when-to-write-integration-tests)
 - [Setup](#setup)
@@ -17,7 +18,7 @@
 - [Debugging Integration Tests](#debugging-integration-tests)
 - [CI/CD Integration](#cicd-integration)
 
----
+______________________________________________________________________
 
 ## Overview
 

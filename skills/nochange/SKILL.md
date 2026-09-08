@@ -1,6 +1,6 @@
 ---
 name: nochange
-description: |
+description: |-
   Provide commentary, explanations, code analysis, or answers without making any modifications to the codebase or executing commands. Use when the user explicitly requests "/nochange", "nochange", or asks to explain/review code without editing.
 ---
 

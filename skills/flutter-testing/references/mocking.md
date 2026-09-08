@@ -1,6 +1,7 @@
 # Mocking Guide
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [When to Mock](#when-to-mock)
 - [Using Mockito](#using-mockito)
@@ -14,7 +15,7 @@
 - [Best Practices](#best-practices)
 - [Common Patterns](#common-patterns)
 
----
+______________________________________________________________________
 
 ## Overview
 

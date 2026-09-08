@@ -1,7 +1,6 @@
 ---
 name: dart-modern-features
 description: Guidelines for using modern Dart features (v3.0 - v3.10) to reduce boilerplate, improve type safety, and increase readability. Trigger this skill when writing or refactoring Dart/Flutter code to apply modern paradigms including Records, Pattern Matching, Switch Expressions, Class Modifiers, Extension Types, Digit Separators, Wildcards, Null-Aware Elements, and Dot Shorthands.
-
 ---
 
 # Dart Modern Features Guidelines

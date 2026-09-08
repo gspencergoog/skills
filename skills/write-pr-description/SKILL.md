@@ -18,11 +18,13 @@ Analyze the differences between the current branch and the main branch and const
 ## Workflow
 
 1. **Analyze Changes**:
+
    - Start by inspecting high-level change scope and line counts using `git diff --stat main...HEAD` (or target base branch).
    - Evaluate specific differences using `sem diff` (via the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill) or focused grouped or per-file diffs (`git diff main...HEAD -- <path>`). Avoid dumping large, unfiltered `git diff` outputs all at once, but do look at all the diffs.
    - If the `git diff` is empty or unclear, do not make up features. Only describe what is present in the provided code.
 
 2. **Construct Description**:
+
    - Draft a well-written pull request description following the guidelines and mandatory structure below.
    - Follow the Two-Pass Drafting Protocol in [`write-prose`](../write-prose/SKILL.md) to audit the draft for banned words, fluff, and sentence length before saving.
    - Write the description to your temporary scratch area (`<appDataDir>/brain/<conversation-id>/scratch/`) as a Markdown file.
@@ -53,7 +55,7 @@ The title should follow the same rules as for the [conventional-commits](../comm
 - Avoid recency bias: look at the entire change anew when composing the description, since the reader doesn't generally care what order things happened in.
 - Do not include conversational filler (e.g., "Here is the PR description...").
 - Include references to issues that the PR addresses or resolves.
-   - If the issue is completely fixed, write "Resolves <issue_number>", which will close the issue when the PR is submitted.
-   - If the issue is only partially resolved, use "Addresses <issue_number>" instead.
+  - If the issue is completely fixed, write "Resolves \<issue_number>", which will close the issue when the PR is submitted.
+  - If the issue is only partially resolved, use "Addresses \<issue_number>" instead.
 - Avoid using hashtag notation for non-issue/PR references (e.g., "Step #1" or "UAX #31") as GitHub will auto-link them to unrelated issues or PRs. Reword without the hashtag (e.g., "Step 1") or put backticks around the hashtagged number (e.g., "UAX `#31`").
 - Don't describe the changes in hyperbolic language (e.g. "..is a fantastic improvement that the world will rejoice!") or use marketing terms. This is meant to be a factual description of the changes.

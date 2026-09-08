@@ -1,29 +1,34 @@
 ---
-name: "flutter-architecture"
-description: "Implement the Flutter team's recommended app architecture (MVVM, unidirectional data flow, repositories, view models, and dependency injection with provider) when structuring new apps or refactoring features."
+name: flutter-architecture
+description: Implement the Flutter team's recommended app architecture (MVVM, unidirectional data flow, repositories, view models, and dependency injection with provider) when structuring new apps or refactoring features.
 ---
+
 # Flutter App Architecture Implementation
 
 ## Goal
+
 Implement a scalable, maintainable Flutter application architecture using the MVVM pattern, unidirectional data flow, and strict separation of concerns across UI, Domain, and Data layers. Use `provider` for dependency injection and `ListenableBuilder` for reactive UI updates.
 
 ## Decision Logic
+
 Before implementing a feature, evaluate the architectural requirements using the following logic:
-1. **Data Source:** 
-   * If interacting with an external API -> Create a Remote Service.
-   * If interacting with local storage (SQL/Key-Value) -> Create a Local Service.
+
+1. **Data Source:**
+   - If interacting with an external API -> Create a Remote Service.
+   - If interacting with local storage (SQL/Key-Value) -> Create a Local Service.
 2. **Business Logic Complexity:**
-   * If the feature requires merging data from multiple repositories or contains highly complex, reusable logic -> Implement a **Domain Layer** (UseCases).
-   * If the feature is standard CRUD or simple data presentation -> Skip the Domain Layer; the ViewModel communicates directly with the Repository.
+   - If the feature requires merging data from multiple repositories or contains highly complex, reusable logic -> Implement a **Domain Layer** (UseCases).
+   - If the feature is standard CRUD or simple data presentation -> Skip the Domain Layer; the ViewModel communicates directly with the Repository.
 
 ## Instructions
 
 1. **Analyze Feature Requirements**
-   Evaluate the requested feature to determine the necessary data models, services, and UI state. 
+   Evaluate the requested feature to determine the necessary data models, services, and UI state.
    **STOP AND ASK THE USER:** "Please provide the specific data models, API endpoints, or local storage requirements for this feature, and confirm if complex business logic requires a dedicated Domain (UseCase) layer."
 
 2. **Implement the Data Layer: Services**
    Create a stateless service class to wrap the external API or local storage. This class must not contain business logic or state.
+
    ```dart
    class SharedPreferencesService {
      static const String _kDarkMode = 'darkMode';
@@ -42,6 +47,7 @@ Before implementing a feature, evaluate the architectural requirements using the
 
 3. **Implement the Data Layer: Repositories**
    Create a repository to act as the single source of truth. The repository consumes the service, handles errors using `Result` objects (see the [Result and Command Reference Guide](references/result_command.md)), and exposes domain models or streams.
+
    ```dart
    class ThemeRepository {
      ThemeRepository(this._service);
@@ -74,6 +80,7 @@ Before implementing a feature, evaluate the architectural requirements using the
 
 4. **Implement the UI Layer: ViewModels**
    Create a `ChangeNotifier` to manage UI state. Use the Command pattern (see the [Result and Command Reference Guide](references/result_command.md)) to handle user interactions and asynchronous repository calls.
+
    ```dart
    class ThemeSwitchViewModel extends ChangeNotifier {
      ThemeSwitchViewModel(this._themeRepository) {
@@ -109,6 +116,7 @@ Before implementing a feature, evaluate the architectural requirements using the
 
 5. **Implement the UI Layer: Views**
    Create a `StatelessWidget` that observes the ViewModel using `ListenableBuilder`. The View must contain zero business logic.
+
    ```dart
    class ThemeSwitch extends StatelessWidget {
      const ThemeSwitch({super.key, required this.viewmodel});
@@ -144,6 +152,7 @@ Before implementing a feature, evaluate the architectural requirements using the
 
 6. **Wire Dependencies**
    Inject the dependencies at the application or route level using constructor injection or a dependency injection framework like `provider`.
+
    ```dart
    void main() {
      runApp(
@@ -158,10 +167,11 @@ Before implementing a feature, evaluate the architectural requirements using the
    Review the generated implementation against the constraints. Ensure that data flows strictly downwards (Repository -> ViewModel -> View) and events flow strictly upwards (View -> ViewModel -> Repository). If a View contains data mutation logic, extract it to the ViewModel. If a ViewModel directly accesses an API, extract it to a Service and route it through a Repository.
 
 ## Constraints
-* **No Logic in Views:** Views must only contain layout logic, simple conditional rendering based on ViewModel state, and routing.
-* **Unidirectional Data Flow:** Data must only flow from the Data Layer to the UI Layer. UI events must trigger ViewModel commands.
-* **Single Source of Truth:** Repositories are the only classes permitted to mutate application data.
-* **Service Isolation:** ViewModels must never interact directly with Services. They must communicate exclusively through Repositories (or UseCases).
-* **Stateless Services:** Service classes must not hold any state. Their sole responsibility is wrapping external APIs or local storage mechanisms.
-* **Immutable Models:** Domain models passed from Repositories to ViewModels must be immutable.
-* **Error Handling:** Repositories must catch exceptions from Services and return explicit `Result` (Ok/Error) objects to the ViewModels.
+
+- **No Logic in Views:** Views must only contain layout logic, simple conditional rendering based on ViewModel state, and routing.
+- **Unidirectional Data Flow:** Data must only flow from the Data Layer to the UI Layer. UI events must trigger ViewModel commands.
+- **Single Source of Truth:** Repositories are the only classes permitted to mutate application data.
+- **Service Isolation:** ViewModels must never interact directly with Services. They must communicate exclusively through Repositories (or UseCases).
+- **Stateless Services:** Service classes must not hold any state. Their sole responsibility is wrapping external APIs or local storage mechanisms.
+- **Immutable Models:** Domain models passed from Repositories to ViewModels must be immutable.
+- **Error Handling:** Repositories must catch exceptions from Services and return explicit `Result` (Ok/Error) objects to the ViewModels.

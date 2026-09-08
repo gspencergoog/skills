@@ -23,10 +23,10 @@ This skill provides comprehensive guidelines for documenting code, prioritizing 
 
 Follow this general structure for documentation comments across languages:
 
-1.  **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
-2.  **Blank Line**: Follow the summary with a blank line.
-3.  **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
-4.  **Annotations**: Place doc comments **before** any metadata annotations.
+1. **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
+2. **Blank Line**: Follow the summary with a blank line.
+3. **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
+4. **Annotations**: Place doc comments **before** any metadata annotations.
 
 ## 3. Writing Guidelines
 
@@ -58,10 +58,10 @@ Ensure implementation comments (`//`) are accurate, relevant, factual, and provi
 
 Use this checklist to verify your documentation:
 
-1.  [ ] **Summary**: Ensure every public member starts with a one-sentence summary ending in a period.
-2.  [ ] **Brevity**: Remove "This class..." or "This function..." fluff.
-3.  [ ] **Completeness**: Document strict constraints (e.g., "must not be null") and exceptions.
-4.  [ ] **Examples**: Consider adding a code sample for complex widgets or methods.
+1. [ ] **Summary**: Ensure every public member starts with a one-sentence summary ending in a period.
+2. [ ] **Brevity**: Remove "This class..." or "This function..." fluff.
+3. [ ] **Completeness**: Document strict constraints (e.g., "must not be null") and exceptions.
+4. [ ] **Examples**: Consider adding a code sample for complex widgets or methods.
 
 ## 6. Language Specific Instructions
 

@@ -1,6 +1,6 @@
 ---
 name: sem-semantic-info
-description: "Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes."
+description: 'Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes.'
 ---
 
 # `sem` Semantic Info Skill
@@ -10,11 +10,13 @@ This skill provides instructions on how to use `sem`, a semantic version control
 ## Capabilities & Limitations (What `sem` Does Well and Does Not Do)
 
 ### What `sem` Does Well
+
 - **Local Codebase Navigation:** Builds a precise semantic dependency graph of all classes, functions, methods, and properties defined within the local repository.
 - **Structural Diffs & History:** Shows added, modified, renamed, or deleted entities across commits without formatting or whitespace noise.
 - **Internal Impact Analysis:** Tracing the transitive impact (`sem impact`) or callers/callees (`sem graph`) of local entities across the workspace.
 
 ### What `sem` Does Not Do (Important Limitations)
+
 - **External Dependencies:** `sem` only indexes entities defined within the local repository's source files. It **does not** parse or track external packages or transitive library dependencies (e.g., from `pubspec.yaml`, `node_modules`, `Cargo.toml`, etc.).
 - **External Impact Analysis:** Running `sem impact` on an external type or class (e.g., `DartType` or `ClassElement` from an external package) will fail with `error: Entity '...' not found`.
 - **Workflow for External Packages:** If tasked with evaluating how an external package is used across a codebase, **do not start with `sem`**. Use standard `grep` or `rg` to find `import` statements and locate local wrapper classes or helper functions. Once local wrapper entities are identified, use `sem impact` on those local entities to trace their usage across the codebase.
@@ -25,6 +27,7 @@ Many `sem` commands require an `<entity_name>`. You can discover the exact names
 
 1. **List entities in a file or directory:**
    Use `sem entities [PATH]` to see all parsed functions, classes, and types in a specific file or directory.
+
    ```bash
    sem entities src/utils.ts
 
@@ -51,6 +54,7 @@ The `sem` tool provides several subcommands for semantic codebase analysis. For 
 - **[sem entities](references/commands.md#7-list-entities-sem-entities)**: List all entities parsed within a file or directory.
 
 ## Best Practices
+
 - **JSON Output for Processing**: Always use `--format json` when you need to parse the output programmatically.
 - **File Extensions**: Use `--file-exts .ts .js` to filter large codebases.
 - **Handling Ambiguity**: If multiple entities have the same name (e.g., a `setup` function in multiple test files), use `--file <FILE>` or `--entity-id <ENTITY_ID>` to disambiguate:

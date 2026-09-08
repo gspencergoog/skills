@@ -2,19 +2,19 @@
 
 This guide provides concrete matrices and **one-shot reference examples** demonstrating how the same technical concept is adapted across 5 distinct audiences.
 
----
+______________________________________________________________________
 
 ## 1. Audience Matrix & Rule Adaptations
 
-| Audience | Primary Goal | Voice / Person | Verb & Tense Style | Structural Focus | Excluded Meta- & Agent Context |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Peer Engineers** | PR descriptions, commit logs, code reviews | Factual / Impersonal | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*). | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps. | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
-| **API Consumers** | Library docs, docstrings, SDK references | Third-person neutral | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample. | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs. |
-| **End Users / Devs** | Tutorials, user guides, setup docs | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step. | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result. | Omit internal project planning terminology, turn references, execution steps. |
-| **Leadership / RFCs** | System designs, RFCs, technical proposals | Objective / Analytical | Present tense; decision-first layout. | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting. |
-| **AI Agents / LLMs** | System prompts, agent skills, tool directives | Imperative / Unambiguous | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives. | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples. | Keep directives clear; define domain terms explicitly. |
+| Audience              | Primary Goal                                  | Voice / Person               | Verb & Tense Style                                                                                   | Structural Focus                                                                                    | Excluded Meta- & Agent Context                                                              |
+| :-------------------- | :-------------------------------------------- | :--------------------------- | :--------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
+| **Peer Engineers**    | PR descriptions, commit logs, code reviews    | Factual / Impersonal         | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*).      | Summary $\\rightarrow$ Logic Changes $\\rightarrow$ Impact $\\rightarrow$ Testing Steps.            | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
+| **API Consumers**     | Library docs, docstrings, SDK references      | Third-person neutral         | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\\rightarrow$ Parameter Prose $\\rightarrow$ Usage Code Sample.                 | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs.        |
+| **End Users / Devs**  | Tutorials, user guides, setup docs            | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step.                                | Prerequisites $\\rightarrow$ Numbered Steps $\\rightarrow$ Expected Result.                         | Omit internal project planning terminology, turn references, execution steps.               |
+| **Leadership / RFCs** | System designs, RFCs, technical proposals     | Objective / Analytical       | Present tense; decision-first layout.                                                                | Executive Summary $\\rightarrow$ Proposal $\\rightarrow$ Trade-offs Table $\\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting.                           |
+| **AI Agents / LLMs**  | System prompts, agent skills, tool directives | Imperative / Unambiguous     | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives.                    | Role Anchor $\\rightarrow$ XML Delimiters $\\rightarrow$ Guardrails $\\rightarrow$ Examples.        | Keep directives clear; define domain terms explicitly.                                      |
 
----
+______________________________________________________________________
 
 ## 2. One-Shot Reference Examples (Same Topic, 5 Audiences)
 
@@ -36,11 +36,11 @@ Adds automatic HTTP retry logic with exponential backoff to `HttpClient` to prev
 * Verified that HTTP 4xx errors fail immediately without retrying.
 ```
 
----
+______________________________________________________________________
 
 ### Example B: API Consumers (Docstrings / API Reference)
 
-```dart
+````dart
 /// Sends an HTTP request and retries transient failures using exponential backoff.
 ///
 /// Retries up to [HttpClientConfig.maxRetries] times when encountering HTTP 502,
@@ -52,13 +52,13 @@ Adds automatic HTTP retry logic with exponential backoff to `HttpClient` to prev
 /// final response = await client.send(request);
 /// ```
 Future<HttpResponse> send(HttpRequest request);
-```
+````
 
----
+______________________________________________________________________
 
 ### Example C: End Users / Developers (User Guide / Setup Doc)
 
-```markdown
+````markdown
 ## Configuring Automatic Retries
 
 You can configure the client to retry failed requests automatically when temporary network errors occur.
@@ -70,10 +70,11 @@ You can configure the client to retry failed requests automatically when tempora
 network:
   max_retries: 3
   initial_delay_ms: 200
-```
+````
 
 3. Save the file and restart your application service.
-```
+
+````
 
 ---
 
@@ -94,13 +95,13 @@ We propose introducing exponential backoff retries to the core HTTP client. This
 
 ## Migration & Risk
 This change is non-breaking. Default retry values (3 attempts, 200ms initial delay) apply automatically without configuration changes.
-```
+````
 
----
+______________________________________________________________________
 
 ### Example E: AI Agents / LLMs (System Prompt Directive)
 
-```markdown
+````markdown
 <role>
 You are an expert networking engineer assisting with HTTP client resilience.
 </role>
@@ -115,4 +116,4 @@ When configuring retry logic, enforce exponential backoff using these parameters
 <output_format>
 Return client configuration as a YAML block formatted inside ```yaml code fences.
 </output_format>
-```
+````

@@ -23,29 +23,29 @@ Unit, integration, and end-to-end tests should have distinct purposes:
 
 Minimize the use of mocks. AI tools and developers often over-rely on mocks, which leads to fragile tests that pass even when integration points are broken. Use the most appropriate testing double:
 
-| Double type        | Purpose                                                         | Verification style      | Review standard                                                           |
-| :----------------- | :-------------------------------------------------------------- | :---------------------- | :------------------------------------------------------------------------ |
-| **Fake**  | Lightweight, working implementation (e.g., in-memory database). | State verification      | Preferred. Minimizes external dependencies without mock setup.            |
-| **Stub**  | Returns hardcoded responses to specific calls.                  | State verification      | Good for controlling specific test inputs.                                |
-| **Mock**  | Verifies specific method interactions and call counts.          | Behavioral verification | Limit to 3-4 per test. Only mock I/O boundaries.                          |
-| **Spy**   | Wraps a real object to record calls while executing real logic. | Hybrid verification     | Avoid unless verifying interactions with immutable third-party libraries. |
-| **Dummy** | Empty object passed to satisfy type signatures.                 | None                    | Preferred for clean setup when the dependency is unused.                  |
+| Double type | Purpose                                                         | Verification style      | Review standard                                                           |
+| :---------- | :-------------------------------------------------------------- | :---------------------- | :------------------------------------------------------------------------ |
+| **Fake**    | Lightweight, working implementation (e.g., in-memory database). | State verification      | Preferred. Minimizes external dependencies without mock setup.            |
+| **Stub**    | Returns hardcoded responses to specific calls.                  | State verification      | Good for controlling specific test inputs.                                |
+| **Mock**    | Verifies specific method interactions and call counts.          | Behavioral verification | Limit to 3-4 per test. Only mock I/O boundaries.                          |
+| **Spy**     | Wraps a real object to record calls while executing real logic. | Hybrid verification     | Avoid unless verifying interactions with immutable third-party libraries. |
+| **Dummy**   | Empty object passed to satisfy type signatures.                 | None                    | Preferred for clean setup when the dependency is unused.                  |
 
 ## Test smells
 
 Flag test smells (poor testing practices) during code reviews. Unaddressed smells cause test suites to become flaky, slow, and hard to maintain.
 
-| Smell classification   | Specific anti-pattern | Diagnostic indicator                                                            | Impact                                                  |
-| :--------------------- | :-------------------- | :------------------------------------------------------------------------------ | :------------------------------------------------------ |
-| **Structural**     | Mystery Guest         | Relies on external files, databases, or configuration not declared in the test. | Environment-dependent failures, cannot run in parallel. |
-| **Structural**     | Eager Test            | Verifies multiple distinct functional concepts in a single test block.          | Hard to diagnose failures.                              |
-| **Behavioral**     | Assertion Roulette    | Multiple assertions in a test block without custom failure messages.            | First failure halts execution, hiding other failures.   |
-| **Behavioral**     | For Testers Only      | Modifying production code API solely to make it testable.                       | Compromised production API design.                      |
-| **Maintenance**    | Sleepy Test           | Using hardcoded delays or sleep statements.                                     | Slow execution, race conditions.                        |
-| **Maintenance**    | Sensitive Equality    | Assertions that fail on minor, irrelevant formatting changes.                   | Fragile tests that break on minor edits.                |
-| **Maintenance**    | Dead Test             | Tests with missing or trivial assertions.                                       | False confidence in test coverage.                      |
-| **Organizational** | Test Maverick         | Fails to follow project testing conventions.                                    | Readability and onboarding issues.                      |
-| **Organizational** | General Fixture       | Setup code loads unrelated data models and tables.                              | Slow execution, database flakiness.                     |
+| Smell classification | Specific anti-pattern | Diagnostic indicator                                                            | Impact                                                  |
+| :------------------- | :-------------------- | :------------------------------------------------------------------------------ | :------------------------------------------------------ |
+| **Structural**       | Mystery Guest         | Relies on external files, databases, or configuration not declared in the test. | Environment-dependent failures, cannot run in parallel. |
+| **Structural**       | Eager Test            | Verifies multiple distinct functional concepts in a single test block.          | Hard to diagnose failures.                              |
+| **Behavioral**       | Assertion Roulette    | Multiple assertions in a test block without custom failure messages.            | First failure halts execution, hiding other failures.   |
+| **Behavioral**       | For Testers Only      | Modifying production code API solely to make it testable.                       | Compromised production API design.                      |
+| **Maintenance**      | Sleepy Test           | Using hardcoded delays or sleep statements.                                     | Slow execution, race conditions.                        |
+| **Maintenance**      | Sensitive Equality    | Assertions that fail on minor, irrelevant formatting changes.                   | Fragile tests that break on minor edits.                |
+| **Maintenance**      | Dead Test             | Tests with missing or trivial assertions.                                       | False confidence in test coverage.                      |
+| **Organizational**   | Test Maverick         | Fails to follow project testing conventions.                                    | Readability and onboarding issues.                      |
+| **Organizational**   | General Fixture       | Setup code loads unrelated data models and tables.                              | Slow execution, database flakiness.                     |
 
 ## SDK contracts, web UI, and dynamic waits
 
@@ -72,14 +72,14 @@ To avoid manual mocking and flaky behavior, consider deterministic verification 
 
 Use the following checklist and questions to evaluate test files:
 
-| Target                                | Self-reflection question                                          | Intended check                                                       |
-| :------------------------------------ | :---------------------------------------------------------------- | :------------------------------------------------------------------- |
+| Target                     | Self-reflection question                                          | Intended check                                                       |
+| :------------------------- | :---------------------------------------------------------------- | :------------------------------------------------------------------- |
 | **Functional correctness** | Does the test confirm acceptance criteria and cover edge cases?   | Identifies missing Happy Path or Failure Path scenarios.             |
-| **Refactoring integrity**    | Would the test still pass if the internal implementation changed? | Identifies tests tightly coupled to specific implementation details. |
-| **Failure predictability**   | If a bug were deliberately introduced, would this test fail?      | Identifies weak assertions or dead tests.                            |
-| **Boundary security**            | Are inputs validated and permission boundaries asserted?          | Identifies missing security validation.                              |
-| **Concurrency safety**           | Does the test execute safely in a parallel thread environment?    | Identifies race conditions and deadlocks.                            |
-| **State isolation**          | Does the test clean up mutations to avoid leaking state?          | Identifies flaky tests that fail when run concurrently.              |
+| **Refactoring integrity**  | Would the test still pass if the internal implementation changed? | Identifies tests tightly coupled to specific implementation details. |
+| **Failure predictability** | If a bug were deliberately introduced, would this test fail?      | Identifies weak assertions or dead tests.                            |
+| **Boundary security**      | Are inputs validated and permission boundaries asserted?          | Identifies missing security validation.                              |
+| **Concurrency safety**     | Does the test execute safely in a parallel thread environment?    | Identifies race conditions and deadlocks.                            |
+| **State isolation**        | Does the test clean up mutations to avoid leaking state?          | Identifies flaky tests that fail when run concurrently.              |
 
 ### Open-ended questions
 
@@ -91,4 +91,3 @@ Ask yourself these questions during code review:
 - "What changes would improve the readability and maintainability of this test structure?"
 - "What testing strategy do you recommend for high-risk safety requirements?"
 - "As a skeptical engineer, where will the tests pass when they shouldn't?"
-

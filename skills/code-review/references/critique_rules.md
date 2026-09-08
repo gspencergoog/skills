@@ -5,6 +5,7 @@ This reference document provides guidelines for reviewing and filtering generate
 ## Filtering Guidelines
 
 A comment should be **dropped** if it meets any of the following conditions:
+
 - It is not on a line that was actually changed (lines starting with `+` or `-` in the diff).
 - It is merely informational, explaining what the code does.
 - It is complimentary (e.g., "Good job", "Nice fix").
@@ -12,6 +13,7 @@ A comment should be **dropped** if it meets any of the following conditions:
 - It is out of bounds for the line range allowed by the SCM API.
 
 A comment should be **kept** or **modified** if:
+
 - It identifies a real issue or bug.
 - Its content can be made more concise or actionable.
 - Its severity can be adjusted to better match the guidelines.
@@ -31,6 +33,7 @@ Ensure severity levels are applied consistently:
 ## Code Suggestion Quality
 
 When reviewing code suggestions within comments, ensure:
+
 - They are accurately anchored to the lines they intend to replace.
 - They preserve the indentation and spacing of the original code.
 - They are compilable or syntactically correct for the language.

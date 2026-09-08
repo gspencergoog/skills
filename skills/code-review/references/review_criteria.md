@@ -11,6 +11,7 @@ New or modified code should be tested with tests that cover the modified code. F
 ### 2. Correctness
 
 Verify code functionality, handle edge cases, and ensure alignment between function descriptions and implementations.
+
 - **Logic errors**: Check for flawed logic or incorrect algorithms.
 - **Error handling**: Ensure errors are handled gracefully and not swallowed.
 - **Race conditions**: Look for potential concurrency issues.
@@ -18,13 +19,17 @@ Verify code functionality, handle edge cases, and ensure alignment between funct
 - **API usage**: Ensure APIs are used correctly and efficiently.
 
 ### 3. Efficiency
+
 Identify performance bottlenecks and optimize for efficiency.
+
 - Avoid unnecessary loops, iterations, or calculations.
 - Watch for memory leaks or inefficient data structures.
 - Avoid excessive logging in performance-critical paths.
 
 ### 4. Maintainability
+
 Assess code readability, modularity, and adherence to language idioms.
+
 - **Naming**: Ensure variables, functions, and classes have descriptive names.
 - **Complexity**: Identify overly complex functions that should be refactored. Use the [cognitive-complexity](../../cognitive-complexity/SKILL.md) skill to inspect functions exceeding the threshold score of 15 and suggest structural refactorings (such as Guard Clauses, Early Returns, or Extract Method).
 - **Code duplication**: Look for opportunities to reuse code.
@@ -32,7 +37,9 @@ Assess code readability, modularity, and adherence to language idioms.
 - **Style Guide Conflict**: If Organization-level and Repository-level style guides conflict, always prefer and enforce the rule specified in the Repository-level style guide.
 
 ### 5. Security
+
 Identify potential vulnerabilities.
+
 - Insecure storage of sensitive data.
 - Injection attacks (SQL, command, etc.).
 - Insufficient access controls or validation.
@@ -40,6 +47,7 @@ Identify potential vulnerabilities.
 ### 6. API Soundness
 
 If changes alter public APIs or configuration surfaces:
+
 - **Contract Integrity**: Ensure interfaces are clear, decoupled from implementation details, and statically typed.
 - **Explicit Configuration**: Prevent stateful globals, singletons, registries, or environment variables for configuring packages. Ensure dependencies are explicitly parameter-injected.
 - **KISS/YAGNI**: Avoid over-generalizing or building speculative future-proof features.

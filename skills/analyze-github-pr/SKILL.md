@@ -16,15 +16,19 @@ This skill fetches and analyzes the description and review comments of a GitHub 
 When investigating a PR or needing information from a PR and its comments:
 
 1. **Fetch and Save PR Data**: Run the analyzer script with `env -u GITHUB_TOKEN` (to bypass dummy token injection) to fetch the PR description, reviews, comments, and CI diagnostics into your conversation scratch directory:
+
    ```bash
    env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --output <appDataDir>/brain/<conversation-id>/scratch/pr_comments.json --dir <path-to-target-workspace-directory>
    ```
+
    *Note*: To target a specific PR number or GitHub PR URL explicitly, pass `--pr <number|url>`:
+
    ```bash
    env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --pr <pr-number-or-url> --output <appDataDir>/brain/<conversation-id>/scratch/pr_comments.json --dir <path-to-target-workspace-directory>
    ```
 
 2. **Interpret the Results**:
+
    - The generated `pr_comments.json` contains:
      - `prDescription`: The PR description text.
      - `threads`: Outstanding inline review threads and suggestions.
@@ -37,4 +41,3 @@ When investigating a PR or needing information from a PR and its comments:
 ## Bundled Resources
 
 - **`scripts/analyze_comments.py`**: Queries GitHub GraphQL API for PR description, comments (inline and timeline), and submitted reviews; inspects failed check logs and annotations; evaluates local git sync state; and prints or outputs a structured JSON report.
-

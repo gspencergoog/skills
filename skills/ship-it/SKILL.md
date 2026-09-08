@@ -1,13 +1,13 @@
 ---
 name: ship-it
-description: "Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation, CHANGELOG, and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling."
+description: 'Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation, CHANGELOG, and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling.'
 ---
 
 # Ship-It: End-to-End Code Preparation & PR Shipping Workflow
 
 This skill guides agents through a rigorous, multi-step checklist before code is shipped out for peer review. It ensures high quality, high test coverage, clean public APIs, well-structured PR segmentation, comprehensive code documentation, up-to-date project documentation (README/CHANGELOG/design docs), and post-PR creation draft tracking.
 
----
+______________________________________________________________________
 
 ## Procedural Workflow Summary
 
@@ -19,7 +19,7 @@ Execute these 5 phases sequentially:
 4. **Phase 4: Per-Branch Documentation Sync & PR Description** (Code docs via `code-documentation` skill, README/CHANGELOG/design doc updates via `write-prose` skill, and PR description)
 5. **Phase 5: Post-PR Creation Draft Tracking & Feedback Handling** (Prompt user to submit Draft PR, schedule CI/comment checks, handle feedback, and mark ready for review)
 
----
+______________________________________________________________________
 
 ## Phase 1: PR Segmentation & Stacking Analysis
 
@@ -38,7 +38,7 @@ Execute these 5 phases sequentially:
    - Present the proposed stacking plan to the user using the `grill-me` skill for alignment before executing worktree creation.
 4. **If single PR is sufficient**: Proceed directly to Phase 2 on the current branch.
 
----
+______________________________________________________________________
 
 ## Phase 2: Per-Branch Static Analysis & Test Audit
 
@@ -66,7 +66,7 @@ Execute on each branch/worktree in the stack:
      `python3 <skillsDir>/cognitive-complexity/scripts/cognitive_complexity.py <modified_files> --threshold 15 --verbose`
    - If any new or modified functions exceed the threshold (score > 15), refactor them (e.g., using Extract Method or Guard Clauses) to reduce cognitive complexity before proceeding to review.
 
----
+______________________________________________________________________
 
 ## Phase 3: Per-Branch Review Homeostasis Loop
 
@@ -87,7 +87,7 @@ Execute iterative review passes on the current branch/worktree:
    - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, use `ask_question` to ask the user how to resolve the conflicting recommendations.
    - **Homeostasis Reached**: Stop looping when a review pass yields zero findings across all severity levels (or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`** before proceeding to Phase 4 (Documentation Sync).
 
----
+______________________________________________________________________
 
 ## Phase 4: Per-Branch Documentation Sync & PR Description
 
@@ -112,7 +112,7 @@ Execute iterative review passes on the current branch/worktree:
    - Output a concise summary to the user outlining coverage stats, review loop iterations completed, and stacking structure.
    - Automatically run the `write-pr-description` skill (which orchestrates with the `write-prose` skill) to generate the PR title and description artifact for submission.
 
----
+______________________________________________________________________
 
 ## Phase 5: Post-PR Creation Draft Tracking & Feedback Handling
 

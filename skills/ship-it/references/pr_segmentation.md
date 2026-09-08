@@ -13,7 +13,7 @@ Before evaluating diff scope, check working tree cleanliness:
      - Option 2: Include uncommitted working tree changes in the diff scope calculation.
      - Option 3: Stash uncommitted changes (`git stash`) before proceeding.
 
----
+______________________________________________________________________
 
 ## 2. When to Segment a Change
 
@@ -26,7 +26,7 @@ Segment a branch into multiple stacked PRs if any of the following conditions ar
    - Foundation/utility infrastructure vs. feature usage.
 3. **Reviewer Specialization**: Different components require domain experts (e.g. backend schema change vs frontend widget change).
 
----
+______________________________________________________________________
 
 ## 3. Generating a PR Stacking Plan Artifact
 
@@ -61,7 +61,7 @@ Briefly summarize the total change and why segmentation is recommended.
 Provide exact bash commands for creating dedicated worktrees for each stacked branch when approved.
 ```
 
----
+______________________________________________________________________
 
 ## 4. Creating Stacked Worktrees
 

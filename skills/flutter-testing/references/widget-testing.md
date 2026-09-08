@@ -1,6 +1,7 @@
 # Widget Testing Guide
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [When to Write Widget Tests](#when-to-write-widget-tests)
 - [Test Structure](#test-structure)
@@ -18,7 +19,7 @@
 - [Best Practices](#best-practices)
 - [Common Patterns](#common-patterns)
 
----
+______________________________________________________________________
 
 ## Overview
 

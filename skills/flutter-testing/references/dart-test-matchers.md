@@ -1,21 +1,20 @@
-
 # Dart Test Matcher Best Practices
 
 This guide focuses on `package:test` matchers and enforcing best practices for cleaner, more readable tests.
 
 ## Workflow
 
-1.  **Search**: Use the grep commands below to identify candidates.
-2.  **Analyze**: Check if the code violates the best practices defined below.
-3.  **Apply**: Refactor the code to use the recommended matchers.
-4.  **Verify**: Run tests (`dart test`) to ensure no regressions.
+1. **Search**: Use the grep commands below to identify candidates.
+2. **Analyze**: Check if the code violates the best practices defined below.
+3. **Apply**: Refactor the code to use the recommended matchers.
+4. **Verify**: Run tests (`dart test`) to ensure no regressions.
 
 ### Search Strategies
 
--   `.length`: `grep -r "\.length,\s*equals\(" test/`
--   Boolean properties:
-    `grep -rE "expect\(.*\.(is(Empty|NotEmpty)),\s*(isTrue|true|isFalse|false)" test/`
--   Manual loops: `grep -r "for (var .* in .*)" test/` (manual review required)
+- `.length`: `grep -r "\.length,\s*equals\(" test/`
+- Boolean properties:
+  `grep -rE "expect\(.*\.(is(Empty|NotEmpty)),\s*(isTrue|true|isFalse|false)" test/`
+- Manual loops: `grep -r "for (var .* in .*)" test/` (manual review required)
 
 ## Best Practice Patterns
 
@@ -68,8 +67,8 @@ expect(obj, isA<MyType>()
 
 ## Constraints
 
--   **Verify Types**: Ensure subject is strictly `Iterable`/`Map` before
-    applying collection matchers. Some custom classes (e.g. `PriorityQueue`)
-    may have `.length` but don't implement `Iterable`.
--   **Consider package:checks**: While this guide focuses on `package:test` matchers, consider integrating with the modern `package:checks` assertion library if declarative, highly readable assertions are desired. When migrating or writing new assertions with `package:checks`, refer to the workspace's [matcher-to-checks](../../matcher-to-checks/SKILL.md) skill.
--   **Preserve Behavior**: Ensure refactorings do not change strictness.
+- **Verify Types**: Ensure subject is strictly `Iterable`/`Map` before
+  applying collection matchers. Some custom classes (e.g. `PriorityQueue`)
+  may have `.length` but don't implement `Iterable`.
+- **Consider package:checks**: While this guide focuses on `package:test` matchers, consider integrating with the modern `package:checks` assertion library if declarative, highly readable assertions are desired. When migrating or writing new assertions with `package:checks`, refer to the workspace's [matcher-to-checks](../../matcher-to-checks/SKILL.md) skill.
+- **Preserve Behavior**: Ensure refactorings do not change strictness.

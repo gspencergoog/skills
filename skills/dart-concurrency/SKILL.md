@@ -1,7 +1,6 @@
 ---
 name: dart-concurrency
 description: A specialized workflow for preventing, diagnosing, and remediating asynchronous anomalies in Dart and Flutter. Trigger this skill when encountering UI freezes, jank, laggy performance, event loop starvation, race conditions, shared state corruption, isolate deadlocks, test timeouts (Futures, Streams, FakeAsync, pumpAndSettle), or static analysis lints (unawaited_futures, discarded_futures, use_build_context_synchronously).
-
 ---
 
 # Dart Concurrency Anomalies Workflow

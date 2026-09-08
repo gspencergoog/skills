@@ -1,7 +1,6 @@
 ---
 name: dart-cli-app-best-practices
 description: Best practices for creating high-quality, executable Dart CLI applications, covering entrypoint structure, exit code handling, and recommended packages. Trigger this skill when creating new Dart CLI apps, refactoring bin entrypoints, writing executable shell scripts in Dart for Linux/macOS, reviewing CLI code quality, or implementing error handling and exit code logic.
-
 ---
 
 # Dart CLI Application Best Practices
@@ -9,9 +8,11 @@ description: Best practices for creating high-quality, executable Dart CLI appli
 ## 1. Best Practices
 
 ### Entrypoint Structure (`bin/`)
+
 Keep the contents of your entrypoint file (e.g., `bin/my_app.dart`) minimal. This improves testability by decoupling logic from the process runner.
 
 **DO:**
+
 ```dart
 // bin/my_app.dart
 import 'package:my_app/src/entry_point.dart';
@@ -22,15 +23,18 @@ Future<void> main(List<String> arguments) async {
 ```
 
 **DON'T:**
--   Put complex logic directly in `bin/my_app.dart`.
--   Define classes or heavy functions in the entrypoint.
+
+- Put complex logic directly in `bin/my_app.dart`.
+- Define classes or heavy functions in the entrypoint.
 
 ### Executable Scripts
+
 For CLI tools intended to be run directly on Linux and Mac, add a shebang and ensure the file is executable.
 
 **DO:**
-1.  Add `#!/usr/bin/env dart` to the first line.
-2.  Run `chmod +x bin/my_script.dart` to make it executable.
+
+1. Add `#!/usr/bin/env dart` to the first line.
+2. Run `chmod +x bin/my_script.dart` to make it executable.
 
 ```dart
 #!/usr/bin/env dart
@@ -39,13 +43,15 @@ void main() => print('Ready to run!');
 ```
 
 ### Process Termination (`exitCode`)
+
 Properly handle process termination to allow for debugging and correct status reporting.
 
 **DO:**
--   Use the `exitCode` setter to report failure.
--   Allow `main` to complete naturally.
--   Use standard exit codes (sysexits) for clarity (e.g., `64` for bad usage, `78` for configuration errors).
-    -   See `package:io` `ExitCode` class or FreeBSD sysexits man page.
+
+- Use the `exitCode` setter to report failure.
+- Allow `main` to complete naturally.
+- Use standard exit codes (sysexits) for clarity (e.g., `64` for bad usage, `78` for configuration errors).
+  - See `package:io` `ExitCode` class or FreeBSD sysexits man page.
 
 ```dart
 import 'dart:io';
@@ -59,15 +65,18 @@ void main() {
 ```
 
 **AVOID:**
--   Calling `exit(code)` directly, as it terminates the VM immediately, preventing "pause on exit" debugging and `finally` blocks from running.
+
+- Calling `exit(code)` directly, as it terminates the VM immediately, preventing "pause on exit" debugging and `finally` blocks from running.
 
 ### Exception Handling
+
 Uncaught exceptions automatically set a non-zero exit code, but you should handle expected errors gracefully.
 
 > [!IMPORTANT]
 > Always write error messages, crash reports, and stack traces to `stderr` (using `stderr.writeln()`) rather than `stdout` (using `print()`). Writing errors to `stdout` is a CLI anti-pattern that pollutes shell pipes, making it difficult for users to chain commands and filter successful output.
 
 **Example:**
+
 ```dart
 import 'dart:io';
 
@@ -87,20 +96,20 @@ Future<void> main(List<String> arguments) async {
 
 Use these community-standard packages to solve common CLI problems:
 
-| Category | Recommended Package | Usage |
-| :--- | :--- | :--- |
-| **Stack Traces** | `package:stack_trace` | detailed, cleaner stack traces |
-| **Version Info** | `package:build_version` | automatic version injection |
-| **Arg Parsing** | `package:args` | standard flag/option parsing |
-| **CLI Generation** | `package:build_cli` | generate arg parsers from classes |
-| **Configuration** | `package:checked_yaml` | precise YAML parsing with line numbers |
-| **Configuration** | `package:json_serializable` | strongly typed config objects |
-| **Testing** | `package:test_process` | integration testing for CLI apps |
-| **Testing** | `package:test_descriptor` | file system fixtures for tests |
-| **Networking** | `package:http` | standard HTTP client (remember user-agent!) |
+| Category           | Recommended Package         | Usage                                       |
+| :----------------- | :-------------------------- | :------------------------------------------ |
+| **Stack Traces**   | `package:stack_trace`       | detailed, cleaner stack traces              |
+| **Version Info**   | `package:build_version`     | automatic version injection                 |
+| **Arg Parsing**    | `package:args`              | standard flag/option parsing                |
+| **CLI Generation** | `package:build_cli`         | generate arg parsers from classes           |
+| **Configuration**  | `package:checked_yaml`      | precise YAML parsing with line numbers      |
+| **Configuration**  | `package:json_serializable` | strongly typed config objects               |
+| **Testing**        | `package:test_process`      | integration testing for CLI apps            |
+| **Testing**        | `package:test_descriptor`   | file system fixtures for tests              |
+| **Networking**     | `package:http`              | standard HTTP client (remember user-agent!) |
 
 ## 4. Conventions
 
--   **File Caching**: Write cached files to `.dart_tool/[pkg_name]/`.
--   **User-Agent**: Always set a User-Agent header in HTTP requests, including version info.
--   **ANSI Output**: Use `package:io` for handling ANSI colors and styles.
+- **File Caching**: Write cached files to `.dart_tool/[pkg_name]/`.
+- **User-Agent**: Always set a User-Agent header in HTTP requests, including version info.
+- **ANSI Output**: Use `package:io` for handling ANSI colors and styles.

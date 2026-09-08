@@ -6,10 +6,10 @@ Use `///` (doc comments) for all public members to allow tools like `dartdoc` to
 
 ### Comments Format
 
-1.  **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
-2.  **Blank Line**: Follow the summary with a blank line.
-3.  **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
-4.  **Annotations**: Place doc comments **before** any metadata annotations (e.g., `@override`, `@Deprecated`).
+1. **Summary Sentence**: Start with a single-sentence summary on the first line, ending with a period.
+2. **Blank Line**: Follow the summary with a blank line.
+3. **Details**: Add paragraphs, code samples, or lists as needed to explain parameters, return values, exceptions, and behavior.
+4. **Annotations**: Place doc comments **before** any metadata annotations (e.g., `@override`, `@Deprecated`).
 
 ```dart
 /// A button that initiates a purchase flow.

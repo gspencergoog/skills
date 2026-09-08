@@ -1,6 +1,7 @@
 # Unit Testing Guide
 
 ## Table of Contents
+
 - [Overview](#overview)
 - [When to Write Unit Tests](#when-to-write-unit-tests)
 - [Test Structure](#test-structure)
@@ -14,7 +15,7 @@
 - [Common Pitfalls](#common-pitfalls)
 - [Running Tests](#running-tests)
 
----
+______________________________________________________________________
 
 ## Overview
 

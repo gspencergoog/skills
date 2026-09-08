@@ -2,7 +2,7 @@
 
 This document describes the command-line interface arguments, options, output formats, and exit codes for the Cognitive Complexity tools.
 
----
+______________________________________________________________________
 
 ## 1. Synopsis
 
@@ -18,31 +18,33 @@ scripts/swift/CognitiveComplexity [OPTIONS] [TARGETS...]
 java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [TARGETS...]
 ```
 
----
+______________________________________________________________________
 
 ## 2. Arguments & Options
 
-| Option / Flag | Long Form | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `[TARGETS...]` | N/A | One or more paths to files or directories to analyze. If omitted or `-`, reads from standard input (`stdin`). | `-` |
-| `-l` | `--lang <LANG>` | Override language detection (`python`, `typescript`, `dart`, `swift`, `kotlin`). | `auto` |
-| `-f` | `--format <FORMAT>` | Output format: `text`, `json`, `table`, `summary`. | `text` |
-| `-t` | `--threshold <INT>` | Flag functions exceeding this cognitive complexity score. | `15` |
-| `-v` | `--verbose` | Include line-by-line breakdown of increments and nesting penalties. | `false` |
-| `-s` | `--sort <KEY>` | Sort results by: `complexity`, `name`, `line`, `file`. | `complexity` |
-| `-e` | `--exclude <GLOB>` | Glob pattern to exclude during directory traversal. | `None` |
-| `-h` | `--help` | Display help message and options. | N/A |
-| `-V` | `--version` | Display version information. | N/A |
+| Option / Flag  | Long Form           | Description                                                                                                   | Default      |
+| :------------- | :------------------ | :------------------------------------------------------------------------------------------------------------ | :----------- |
+| `[TARGETS...]` | N/A                 | One or more paths to files or directories to analyze. If omitted or `-`, reads from standard input (`stdin`). | `-`          |
+| `-l`           | `--lang <LANG>`     | Override language detection (`python`, `typescript`, `dart`, `swift`, `kotlin`).                              | `auto`       |
+| `-f`           | `--format <FORMAT>` | Output format: `text`, `json`, `table`, `summary`.                                                            | `text`       |
+| `-t`           | `--threshold <INT>` | Flag functions exceeding this cognitive complexity score.                                                     | `15`         |
+| `-v`           | `--verbose`         | Include line-by-line breakdown of increments and nesting penalties.                                           | `false`      |
+| `-s`           | `--sort <KEY>`      | Sort results by: `complexity`, `name`, `line`, `file`.                                                        | `complexity` |
+| `-e`           | `--exclude <GLOB>`  | Glob pattern to exclude during directory traversal.                                                           | `None`       |
+| `-h`           | `--help`            | Display help message and options.                                                                             | N/A          |
+| `-V`           | `--version`         | Display version information.                                                                                  | N/A          |
 
 > [!TIP]
 > When piping short code snippets or expressions via standard input that lack function declarations or keywords, specify `--lang <language>` to select the appropriate parser.
 
----
+______________________________________________________________________
 
 ## 3. Output Formats
 
 ### 3.1. Text Format (`-f text`)
+
 Human-readable terminal summary with color indicators:
+
 ```
 File: src/calculator.py
   calculate_total (lines 12-45) -> Complexity: 14 [PASS]
@@ -56,7 +58,9 @@ Summary:
 ```
 
 ### 3.2. JSON Format (`-f json`)
+
 Machine-readable structured output:
+
 ```json
 {
   "version": "1.0.0",
@@ -107,12 +111,12 @@ Machine-readable structured output:
 }
 ```
 
----
+______________________________________________________________________
 
 ## 4. Exit Codes
 
-| Exit Code | Meaning |
-| :--- | :--- |
-| `0` | Success: Analysis completed and no functions exceeded the threshold. |
-| `1` | Warning: Analysis completed, but one or more functions exceeded the threshold (`--threshold`). |
-| `2` | Error: Parsing error, file not found, invalid syntax, or argument error. |
+| Exit Code | Meaning                                                                                        |
+| :-------- | :--------------------------------------------------------------------------------------------- |
+| `0`       | Success: Analysis completed and no functions exceeded the threshold.                           |
+| `1`       | Warning: Analysis completed, but one or more functions exceeded the threshold (`--threshold`). |
+| `2`       | Error: Parsing error, file not found, invalid syntax, or argument error.                       |

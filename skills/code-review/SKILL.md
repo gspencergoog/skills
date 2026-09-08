@@ -99,12 +99,14 @@ The final synthesized review MUST be created as an artifact file using the `writ
 - If executing within a subagent, ensure the artifact file is written using `write_to_file` before completing and returning the artifact link to the caller.
 
 The review file should contain:
+
 1. The high-level summary paragraph.
 2. File summaries (if applicable).
 3. The list of review comments, ordered by severity.
 4. A recommendations section summarizing key actionable feedback.
 
 Each review comment in the list should specify:
+
 - **File**: The path to the file.
 - **Line**: The line number (anchored to the diff).
 - **Severity**: `critical`, `high`, `medium`, or `low`.

@@ -3,6 +3,7 @@
 This reference guide provides the standard implementations of the `Result` and `Command` patterns, which are core utilities for error handling and asynchronous operations in the recommended Flutter architecture.
 
 ## Table of Contents
+
 - [Result Pattern](#result-pattern)
   - [Implementation](#result-implementation)
   - [Usage Guidelines](#result-usage-guidelines)
@@ -10,7 +11,7 @@ This reference guide provides the standard implementations of the `Result` and `
   - [Implementation](#command-implementation)
   - [Usage Guidelines](#command-usage-guidelines)
 
----
+______________________________________________________________________
 
 ## Result Pattern
 
@@ -53,10 +54,10 @@ class Error<T> extends Result<T> {
 
 ### Result Usage Guidelines
 
-* **Return from Repositories:** All repository methods that perform asynchronous work or can fail must return a `Future<Result<T>>` instead of throwing exceptions or returning nullable types.
-* **Handle in ViewModels:** ViewModels must inspect the `Result` using pattern matching or type checks (`is Ok` / `is Error`) to update the UI state accordingly.
+- **Return from Repositories:** All repository methods that perform asynchronous work or can fail must return a `Future<Result<T>>` instead of throwing exceptions or returning nullable types.
+- **Handle in ViewModels:** ViewModels must inspect the `Result` using pattern matching or type checks (`is Ok` / `is Error`) to update the UI state accordingly.
 
----
+______________________________________________________________________
 
 ## Command Pattern
 
@@ -163,5 +164,5 @@ class Command1<T, P> extends Command<T> {
 
 ### Command Usage Guidelines
 
-* **Declare in ViewModels:** Expose commands as `late final Command0` or `late final Command1` properties in the ViewModel.
-* **Bind to UI:** In the View, bind button press callbacks directly to the command's `execute` method, and use `command.running` to conditionally disable the button or show a progress indicator.
+- **Declare in ViewModels:** Expose commands as `late final Command0` or `late final Command1` properties in the ViewModel.
+- **Bind to UI:** In the View, bind button press callbacks directly to the command's `execute` method, and use `command.running` to conditionally disable the button or show a progress indicator.

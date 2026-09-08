@@ -16,38 +16,41 @@ This skill analyzes a GitHub Pull Request (PR), branch, or commit range to recom
 When asked to find or recommend reviewers for a PR or branch:
 
 1. **Locate the Repository**: Ensure you are in the target local git repository directory.
+
 2. **Execute the Recommender Script**: Run the bundled Python script to perform the historical git and metadata analysis. Choose the command that matches the context:
 
-   * **For a specific GitHub PR**:
+   - **For a specific GitHub PR**:
      ```bash
      python3 ~/code/cheats/agents/skills/pr-reviewer-recommendation/scripts/recommend_reviewers.py --pr <pr-number>
      ```
-   * **For a specific local/remote branch (comparing to default branch)**:
+   - **For a specific local/remote branch (comparing to default branch)**:
      ```bash
      python3 ~/code/cheats/agents/skills/pr-reviewer-recommendation/scripts/recommend_reviewers.py --branch <branch-name>
      ```
-   * **For a custom commit range (e.g. comparing two commits or tags)**:
+   - **For a custom commit range (e.g. comparing two commits or tags)**:
      ```bash
      python3 ~/code/cheats/agents/skills/pr-reviewer-recommendation/scripts/recommend_reviewers.py --compare <commit-range>
      ```
-   * **For the current active branch**:
+   - **For the current active branch**:
      ```bash
      python3 ~/code/cheats/agents/skills/pr-reviewer-recommendation/scripts/recommend_reviewers.py
      ```
 
 3. **Incorporate Related Skills**:
-   * If you need deeper understanding of the PR's purpose or discussion to refine suggestions (e.g. finding who commented on related issues), use the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill.
-   * To see precise semantic diffs and impact on structural entities, use the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill.
+
+   - If you need deeper understanding of the PR's purpose or discussion to refine suggestions (e.g. finding who commented on related issues), use the [analyze-github-pr](../analyze-github-pr/SKILL.md) skill.
+   - To see precise semantic diffs and impact on structural entities, use the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill.
 
 4. **Formulate the Recommendation**:
-   * **Primary suggestions**: Prioritize users who have directly authored or modified the changed files, ranked by commit count and recency (within the last 6 months).
-   * **Secondary suggestions**: Identify users who have modified surrounding files in the parent directories, or who are prominent contributors to that specific domain.
-   * **Format**: Present a clean markdown table showing the suggested reviewers, their match scores, historical commit count on those files, and contact info, followed by a copyable `gh pr edit` command to assign them, including the `-R` for the appropriate repo.
+
+   - **Primary suggestions**: Prioritize users who have directly authored or modified the changed files, ranked by commit count and recency (within the last 6 months).
+   - **Secondary suggestions**: Identify users who have modified surrounding files in the parent directories, or who are prominent contributors to that specific domain.
+   - **Format**: Present a clean markdown table showing the suggested reviewers, their match scores, historical commit count on those files, and contact info, followed by a copyable `gh pr edit` command to assign them, including the `-R` for the appropriate repo.
 
 5. **Assign Recommended Reviewers**:
-   * If analyzing a GitHub PR (i.e., when analyzing a specific `--pr`), use the `ask_question` tool to ask the user if they want you to execute the command to assign the recommended reviewers.
-   * Format the options as:
-     * `"(Recommended) Yes, assign the recommended reviewers to the PR"`
-     * `"No, I will assign them manually"`
-   * If the user selects the option to assign them, run the `gh pr edit <pr-number> --add-reviewer <reviewers> -R <repo>` command using the `run_command` tool.
 
+   - If analyzing a GitHub PR (i.e., when analyzing a specific `--pr`), use the `ask_question` tool to ask the user if they want you to execute the command to assign the recommended reviewers.
+   - Format the options as:
+     - `"(Recommended) Yes, assign the recommended reviewers to the PR"`
+     - `"No, I will assign them manually"`
+   - If the user selects the option to assign them, run the `gh pr edit <pr-number> --add-reviewer <reviewers> -R <repo>` command using the `run_command` tool.
