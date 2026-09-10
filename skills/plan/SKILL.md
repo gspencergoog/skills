@@ -87,16 +87,27 @@ The script verifies:
 
 Resolve any reported validation errors before proceeding.
 
-### 6. Independent Subagent Review (Anti-Contamination)
+### 6. Subagent Review Decision & Execution (Anti-Contamination)
 
-To prevent confirmation bias and context contamination from the generation steps, delegate an objective review of the draft plan to a separate subagent (e.g. `research` or `self`).
+To prevent confirmation bias and context contamination from the generation steps, you can delegate an objective review of the draft plan to an independent subagent (e.g. `research` or `self`).
 
-1. Invoke the subagent with the draft plan path, workspace path, and [plan_quality_checklist.md](references/plan_quality_checklist.md).
-2. The subagent inspects the plan against the actual repository files in an uncontaminated context, looking for:
-   - Missing edge cases or untested failure paths.
-   - Mismatches between plan test commands and actual repo scripts.
-   - Sequencing risks or circular dependencies between phases.
-3. Incorporate any valid critiques or gaps identified by the subagent into the plan artifact.
+1. **Ask User for Review Confirmation**: Always prompt the user using the `ask_question` tool before launching the subagent review:
+   - Ask whether to run an in-depth independent subagent review or proceed directly to presenting the plan.
+   - Provide options formatted as:
+     - `(Recommended) Yes, run an independent subagent review`
+     - `No, skip subagent review and proceed directly to presentation`
+   - If the user selects to skip, proceed directly to **Step 7**.
+2. **Assemble the Review Briefing Packet**: If the user approves running the subagent review, assemble a structured briefing packet. Never send a barebones prompt containing only paths—the reviewer must have enough context to judge intent, constraints, settled decisions, and non-goals:
+   - **Purpose & Core Goal**: The primary user request and definition of success.
+   - **User Constraints & Preferences**: Specific boundaries (e.g., zero new dependencies, backward compatibility, runtime targets).
+   - **Conversation Highlights & Prior Decisions**: Summary of settled design trade-offs and rejected alternatives to prevent re-litigating decisions.
+   - **Explicit Non-Goals**: Out-of-scope boundaries to prevent the reviewer from flagging missing features that were intentionally excluded.
+   - **Planner's Focus Areas / Doubts**: Specific questions or transitions where the planner wants targeted verification (e.g. concurrency, backward compatibility).
+   - **Reference Artifacts**: Links to prior discussion artifacts (e.g. brainstorming docs, RFCs, issues).
+   - **Plan Path & Workspace Root**: Paths to the draft plan artifact and target repository.
+3. **Invoke Subagent**: Format the prompt using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md).
+4. **Subagent Audit**: The subagent inspects the plan against the workspace files and the quality rubric, reporting on intent alignment, disk grounding, technical feasibility, and planner focus areas.
+5. **Incorporate Findings**: Resolve any blockers or gaps identified by the subagent in the plan artifact before presenting it to the user.
 
 ### 7. Present Plan & Await Approval
 
