@@ -30,11 +30,11 @@ ______________________________________________________________________
 
 1. **Schedule Monitoring Timer**:
    - Use the `schedule` tool to set a 5-minute timer (`DurationSeconds="300"`, `Prompt="Check draft PR status for CI failures and code review feedback"`).
-2. **Inspect Status on Expiry**:
-   - Run `gh pr checks` to check CI pipeline status.
+2. **CI Monitoring & Feedback Inspection**:
+   - Run `gh pr checks <PR> --watch --fail-fast` as a background task rather than repeatedly polling.
    - Run the `analyze-github-pr` script to fetch unresolved review comments in JSON format:
      ```bash
-     env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --json --dir <workspace-dir>
+     env -u GITHUB_TOKEN python3 <path-to-skills>/analyze-github-pr/scripts/analyze_comments.py --json --dir <workspace-dir>
      ```
 
 ______________________________________________________________________
@@ -63,7 +63,7 @@ If CI checks fail or review comments are found on the PR:
    - Push to remote branch: `git push`.
    - Use `pr-feedback-handler` helper scripts to submit thread replies and resolve threads:
      ```bash
-     python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/update_thread.py --file <feedback-state-json>
+     python3 <path-to-skills>/pr-feedback-handler/scripts/update_thread.py --file <feedback-state-json>
      ```
 
 4. **Mark PR Ready for Review**:

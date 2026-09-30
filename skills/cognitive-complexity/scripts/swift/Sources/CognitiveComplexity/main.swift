@@ -1,5 +1,11 @@
 import Foundation
 
+func logError(_ message: String) {
+    if let data = (message + "\n").data(using: .utf8) {
+        FileHandle.standardError.write(data)
+    }
+}
+
 struct CliOptions {
     var format = "text"
     var threshold = 15
@@ -106,7 +112,7 @@ func analyzeTargets(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [
         let url = URL(fileURLWithPath: pathArg).standardizedFileURL
         var isDir: ObjCBool = false
         if !FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
-            fputs("Error: Path does not exist: \(pathArg)\n", stderr)
+            logError("Error: Path does not exist: \(pathArg)")
             continue
         }
 
@@ -122,7 +128,7 @@ func analyzeTargets(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [
                     let sourceCode = try String(contentsOf: f, encoding: .utf8)
                     fileResults.append(analyzer.analyzeSource(sourceCode, filePath: f.path))
                 } catch {
-                    fputs("Error reading \(f.path): \(error.localizedDescription)\n", stderr)
+                    logError("Error reading \(f.path): \(error.localizedDescription)")
                 }
             }
         } else {
@@ -133,7 +139,7 @@ func analyzeTargets(options: CliOptions, analyzer: SwiftComplexityAnalyzer) -> [
                     let sourceCode = try String(contentsOf: url, encoding: .utf8)
                     fileResults.append(analyzer.analyzeSource(sourceCode, filePath: url.path))
                 } catch {
-                    fputs("Error reading \(url.path): \(error.localizedDescription)\n", stderr)
+                    logError("Error reading \(url.path): \(error.localizedDescription)")
                 }
             }
         }

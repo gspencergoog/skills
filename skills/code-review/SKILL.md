@@ -1,13 +1,13 @@
 ---
 name: code-review
-description: Performs a comprehensive, multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to ensure high-quality, actionable feedback. Use when you need to review code changes thoroughly.
+description: Performs a multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes or pull requests thoroughly.
 ---
 
-# Comprehensive Code Review
+# Code Review
 
-This skill provides a multi-step, iterative workflow for performing high-quality code reviews. It is designed to produce thorough, actionable, and well-formatted feedback while avoiding common pitfalls of AI-generated reviews (like "looks good" comments or commenting on unchanged lines).
+This skill provides a multi-step, iterative workflow for code reviews. It produces actionable, well-formatted feedback while avoiding common pitfalls of AI-generated reviews (like "looks good" comments or commenting on unchanged lines).
 
-You are an expert Senior Software Engineer specializing in code review and iterative development. Your task is to analyze the code changes in a GitHub pull request or local commit set and provide a comprehensive review. You are meticulous, collaborative, and strictly adhere to project standards.
+You are an expert Senior Software Engineer specializing in code review and iterative development. Your task is to analyze the code changes in a GitHub pull request or local commit set and provide a review. You are meticulous, collaborative, and strictly adhere to project standards.
 
 ## Core Principles
 
@@ -15,19 +15,28 @@ You are an expert Senior Software Engineer specializing in code review and itera
 - **Targeted Suggestions**: Limit suggestions to lines that are actually modified in the diff.
 - **Actionable Feedback**: Provide specific code suggestions whenever possible.
 - **Write Prose**: Follow the principles in the [write-prose](../write-prose/SKILL.md) skill for all written feedback.
-- **Leverage Specialized Skills**: Where specialized skills exist for the codebase, language, or framework (e.g., `angular-component`, `typescript-advanced-types`), use them for reference to ensure feedback aligns with best practices.
+- **Consult Domain Skills**: Where specialized skills exist for the codebase or language (e.g., `angular-component`, `typescript-advanced-types`), reference them for best practices.
 
 ## Workflow
 
-Follow these steps sequentially to perform a comprehensive review:
+Follow these steps sequentially to perform a review:
 
-### Step 1: Gather Changes
+### Step 1: Gather Changes and Prepare Workspace
 
-Before starting the review, gather the changes to be reviewed.
+Before starting the review, identify the changes and verify the target workspace.
 
 - **For GitHub Pull Requests**:
-  - Use `gh pr view` to read the title and description to understand the intent.
-  - Use `gh pr diff` to get the actual code changes.
+  - Use `gh pr view` to inspect the PR title, description, repository, and head branch.
+  - **Check Local Branch Presence**: Check if the PR branch exists locally with `git branch --list <branch>` or `git rev-parse --verify <branch>`.
+  - **Sync Remote PR to Temporary Directory**:
+    - If the PR is not part of the local branch(es) (missing locally or in another repository):
+      - Assume the PR branch must be synced to a local temporary directory to conduct the review.
+      - Create a dedicated temporary directory with a specific prefix: `pr_review_dir=$(mktemp -d -t pr-review-XXXXXX)`.
+      - Clone the repository into that directory. If a local checkout exists on disk, use `git clone --reference <path-to-local-repo> <repo-url> "$pr_review_dir"` to speed up the clone. Otherwise, use `gh repo clone <owner/repo> "$pr_review_dir"`.
+      - Check out the PR branch in the temporary directory: `cd "$pr_review_dir" && gh pr checkout <pr-number-or-url>`.
+      - Perform all subsequent review steps (inspecting diffs, reading context files, evaluating tests) within `$pr_review_dir`.
+      - Retain the directory path in `$pr_review_dir` for safe cleanup in Step 6.
+  - Use `gh pr diff` (or `git diff <base>...HEAD` in the checkout) to obtain the code changes.
   - _Reference: See the [gh-cli](../gh-cli/SKILL.md) skill for detailed usage._
 - **For Local Changes**:
   - Use `git status` to see modified files.
@@ -38,6 +47,7 @@ Before starting the review, gather the changes to be reviewed.
 ### Step 2: Context Enrichment
 
 Before reviewing the diffs, identify which additional files from the repository would be helpful to review for context.
+When reviewing a PR synced to a temporary directory, inspect the files directly in that temporary checkout.
 Consider:
 
 - Files that are imported or referenced.
@@ -88,7 +98,21 @@ Combine the refined comments into a final output.
 - **Generate file summaries**: For reviews with multiple files, include a list of changed files with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - When writing file paths, write them as Markdown links.
 - Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. For long review artifacts or RFC reviews, run `write-prose`'s `analyze_prose.py` script to audit readability metrics.
-- **Save as Artifact**: Write the synthesized review to `review_results.md` in the artifact directory using `write_to_file`. Do not emit the full review directly into the chat response.
+- **Save as Artifact**: Write the synthesized review to `review_results.md` in the conversation artifact directory using `write_to_file`. When working in a temporary directory, write the artifact to the conversation artifact directory (`<appDataDir>/brain/<conversation-id>/`), never into the temporary directory itself. Do not emit the full review directly into the chat response.
+
+### Step 6: Workspace Cleanup
+
+If a temporary directory was created for reviewing the PR:
+
+- If the shell working directory was changed to `$pr_review_dir`, return to the original working directory before deleting the checkout.
+- Verify the directory path is non-empty, exists, and matches the expected temporary prefix before removal:
+  ```bash
+  if [[ -n "${pr_review_dir:-}" && -d "$pr_review_dir" && "$pr_review_dir" == *"/pr-review-"* ]]; then
+    rm -rf "$pr_review_dir"
+  fi
+  ```
+- Confirm the directory is removed before concluding the task.
+- Run this cleanup step even if errors or early exits occur during the review.
 
 ## Output Format
 
@@ -97,6 +121,7 @@ The final synthesized review MUST be created as an artifact file using the `writ
 - **Do NOT** print the full review comments or dump the complete review markdown in the chat message response.
 - In the final chat response, provide only a clickable markdown link to the created artifact file and an overview.
 - If executing within a subagent, ensure the artifact file is written using `write_to_file` before completing and returning the artifact link to the caller.
+- Clean up any temporary directories created during the review before returning the final response.
 
 The review file should contain:
 

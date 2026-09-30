@@ -45,10 +45,15 @@ def detect_language_from_content(content: str) -> str:
 
 
 def run_python_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
-    sys.path.insert(0, str(SCRIPT_DIR / "python"))
-    from cognitive_complexity import PythonComplexityAnalyzer
-
-    analyzer = PythonComplexityAnalyzer(threshold=threshold)
+    import importlib.util
+    py_module_path = SCRIPT_DIR / "python" / "cognitive_complexity.py"
+    spec = importlib.util.spec_from_file_location("py_cognitive_complexity", py_module_path)
+    if not spec or not spec.loader:
+        return _build_engine_report("python", [], threshold)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    analyzer = mod.PythonComplexityAnalyzer(threshold=threshold)
     if is_stdin:
         file_comp = analyzer.analyze_source(source_or_path, file_path="<stdin>")
         files = [file_comp.to_dict()]
@@ -77,23 +82,53 @@ def run_typescript_engine(source_or_path: str, is_stdin: bool, threshold: int, v
 
 
 def run_dart_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
+    import shutil
     dart_cli = SCRIPT_DIR / "dart" / "bin" / "cognitive_complexity.dart"
-    return _run_subprocess_engine(["dart", "run", str(dart_cli)], source_or_path, is_stdin, threshold, verbose, sort_key, "dart")
+    dart_cmd = "dart"
+    if shutil.which("dart") is None:
+        dart_sdk = os.environ.get("DART_SDK")
+        if dart_sdk:
+            for candidate in [Path(dart_sdk) / "bin" / "dart", Path(dart_sdk) / "dart"]:
+                if candidate.is_file() and os.access(candidate, os.X_OK):
+                    dart_cmd = str(candidate)
+                    break
+        if dart_cmd == "dart":
+            flutter_root = os.environ.get("FLUTTER_ROOT")
+            if flutter_root:
+                for candidate in [
+                    Path(flutter_root) / "bin" / "dart",
+                    Path(flutter_root) / "bin" / "cache" / "dart-sdk" / "bin" / "dart",
+                ]:
+                    if candidate.is_file() and os.access(candidate, os.X_OK):
+                        dart_cmd = str(candidate)
+                        break
+    return _run_subprocess_engine([dart_cmd, "run", str(dart_cli)], source_or_path, is_stdin, threshold, verbose, sort_key, "dart")
 
 
 def run_swift_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
-    binary = SCRIPT_DIR / "swift" / "CognitiveComplexity"
-    if not binary.exists():
-        binary = SCRIPT_DIR / "swift" / ".build" / "release" / "CognitiveComplexity"
-    if not binary.exists():
-        binary = SCRIPT_DIR / "swift" / ".build" / "debug" / "CognitiveComplexity"
+    import platform
+    os_name = platform.system().lower()
+    arch = platform.machine().lower()
+    swift_dir = SCRIPT_DIR / "swift"
 
-    if binary.exists():
-        cmd = [str(binary)]
-    else:
-        cmd = ["swift", "run", "--package-path", str(SCRIPT_DIR / "swift"), "CognitiveComplexity"]
+    candidates = [
+        swift_dir / f"CognitiveComplexity-{os_name}-{arch}",
+        swift_dir / f"CognitiveComplexity-{os_name}",
+        swift_dir / "CognitiveComplexity",
+        swift_dir / ".build" / "release" / "CognitiveComplexity",
+        swift_dir / ".build" / f"{arch}-pc-linux-gnu" / "release" / "CognitiveComplexity",
+    ]
 
-    return _run_subprocess_engine(cmd, source_or_path, is_stdin, threshold, verbose, sort_key, "swift")
+    chosen_cmd = None
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            chosen_cmd = [str(candidate)]
+            break
+
+    if not chosen_cmd:
+        chosen_cmd = ["swift", "run", "--package-path", str(swift_dir), "CognitiveComplexity"]
+
+    return _run_subprocess_engine(chosen_cmd, source_or_path, is_stdin, threshold, verbose, sort_key, "swift")
 
 
 def run_kotlin_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
@@ -131,12 +166,15 @@ def _run_subprocess_engine(
     if verbose:
         cmd.append("-v")
 
-    if is_stdin:
-        cmd.append("-")
-        res = subprocess.run(cmd, input=source_or_path, text=True, capture_output=True)
-    else:
-        cmd.append(source_or_path)
-        res = subprocess.run(cmd, text=True, capture_output=True)
+    try:
+        if is_stdin:
+            cmd.append("-")
+            res = subprocess.run(cmd, input=source_or_path, text=True, capture_output=True)
+        else:
+            cmd.append(source_or_path)
+            res = subprocess.run(cmd, text=True, capture_output=True)
+    except OSError:
+        return _build_engine_report(language, [], threshold)
 
     if res.stdout:
         try:

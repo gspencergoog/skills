@@ -25,6 +25,7 @@ This skill guides the process of retrieving, analyzing, empirically verifying, i
 > 1. **Pushing Code**: Request approval before running `git push` or making remote updates to the PR branch.
 > 2. **Replying to Threads**: Present your draft reply or clarifying question to the user and obtain their approval before posting it.
 > 3. **Resolving Threads**: Request approval before marking any review thread as resolved on GitHub.
+> 4. **No Promising Future Work**: Never promise future work (e.g. follow-up PRs, future issues, later refactors) in review replies posted as the user. Reply strictly about what was actually implemented in the active PR.
 
 ______________________________________________________________________
 
@@ -56,7 +57,7 @@ ______________________________________________________________________
 1. **Fetch and Save Comments**: Run `analyze_comments.py` with `--output` to save the full PR metadata report to `pr_comments.json` in your scratch directory. Always use `env -u GITHUB_TOKEN` to prevent environment token overrides:
 
    ```bash
-   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
+   env -u GITHUB_TOKEN python3 <path-to-skills>/analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
    ```
 
 2. **Empirical Verification Gate**:
@@ -97,7 +98,7 @@ ______________________________________________________________________
 5. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
 
    ```bash
-   env -u GITHUB_TOKEN python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory> --mode auto
+   env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory> --mode auto
    ```
 
    *Note*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`).
@@ -144,7 +145,7 @@ Once the approved code changes are verified and committed:
 
    - If approved to resolve on GitHub, run the bulk thread updater:
      ```bash
-     python3 ~/.gemini/config/skills/pr-feedback-handler/scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json
+     python3 scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json
      ```
    - If any thread updates fail, review the printed failure report, make adjustments, and re-run if needed.
 

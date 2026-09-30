@@ -296,7 +296,7 @@ gh pr checks 123
 # Watch checks until they complete
 gh pr checks 123 --watch
 
-# Exit immediately on the first failed check during watch
+# Watch checks in the background with immediate exit on failure (recommended for agents)
 gh pr checks 123 --watch --fail-fast
 
 # Only show required checks
@@ -440,3 +440,5 @@ ______________________________________________________________________
      gh pr list --search "review:required" --json number --jq '.[].number' | \
        xargs -I {} gh pr edit {} --add-label needs-review
      ```
+5. **CI Monitoring in Agent Sessions**:
+   - Never repeatedly invoke `gh pr checks` in synchronous polling loops. Run `gh pr checks <PR> --watch --fail-fast` as a background task so the process blocks until completion or failure and notifies reactively upon exit.

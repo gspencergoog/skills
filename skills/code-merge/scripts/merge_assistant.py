@@ -37,6 +37,7 @@ def run_cmd(
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        errors="replace",
         env=full_env,
     )
     return res.returncode, res.stdout, res.stderr
@@ -604,7 +605,9 @@ class SemanticHazard:
 def _read_blob(repo: Path, ref: str, path_str: str) -> Optional[str]:
     """Reads file content at ref:path_str."""
     code, out, _ = run_cmd(["git", "cat-file", "-p", f"{ref}:{path_str}"], cwd=repo)
-    return out if code == 0 else None
+    if code != 0 or not out or "\x00" in out:
+        return None
+    return out
 
 
 def _compare_file_symbols(
@@ -916,7 +919,7 @@ def verify_merge_state(repo: Path) -> Tuple[bool, List[str]]:
         )
 
     code_rg, out_rg, _ = run_cmd(
-        ["git", "grep", "-n", "-E", "^(<<<<<<<|=======|>>>>>>>)"], cwd=repo
+        ["git", "grep", "-n", "-E", "^(<<<<<<< |=======$|>>>>>>> )"], cwd=repo
     )
     if code_rg == 0 and out_rg.strip():
         for line in out_rg.strip().splitlines()[:5]:

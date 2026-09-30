@@ -21,6 +21,7 @@ Analyze the differences between the current branch and the main branch and const
 
    - Start by inspecting high-level change scope and line counts using `git diff --stat main...HEAD` (or target base branch).
    - Evaluate specific differences using `sem diff` (via the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill) or focused grouped or per-file diffs (`git diff main...HEAD -- <path>`). Avoid dumping large, unfiltered `git diff` outputs all at once, but do look at all the diffs.
+   - Identify the primary entry points and high-leverage files (such as new algorithms, state transitions, or public API signatures) versus mechanical changes (such as renames, test boilerplate, or imports) to determine where reviewer attention is needed.
    - If the `git diff` is empty or unclear, do not make up features. Only describe what is present in the provided code.
 
 2. **Construct Description**:
@@ -45,15 +46,18 @@ The title should follow the same rules as for the [conventional-commits](../comm
 ## Mandatory Structure
 
 1. **## Summary**: A 1-2 sentence high-level overview of the goal of this PR.
-2. **## Changes**: A bulleted list of specific logic changes, refactors, or new files.
-3. **## Impact & Risks**: Highlight any breaking changes, database migrations, or performance side effects.
-4. **## Testing**: Provide a step-by-step list for the reviewer to verify the changes, and what testing related changes were made in the PR.
+2. **## Reviewer Focus**: (Omit for small or self-contained PRs) A small number of bulleted suggestions highlighting where the reviewer should concentrate their attention (e.g., primary entry points, subtle logic, public API contracts, or non-obvious design decisions). Mention which files can be safely skimmed if there is substantial boilerplate or generated code.
+3. **## Changes**: A bulleted list of specific logic changes, refactors, or new files.
+4. **## Impact & Risks**: Highlight any breaking changes, database migrations, or performance side effects.
+5. **## Testing**: Provide a step-by-step list for the reviewer to verify the changes, and what testing related changes were made in the PR.
 
 ## Constraints
 
 - Keep in mind that the description will be read by someone who hasn't seen the PR and isn't intimately familiar with the code.
 - Avoid recency bias: look at the entire change anew when composing the description, since the reader doesn't generally care what order things happened in.
 - Do not include conversational filler (e.g., "Here is the PR description...").
+- Keep `## Reviewer Focus` concise and minimal, pointing directly to files or symbols in backticks. Focus on *why* scrutiny is requested (e.g., edge cases, design tradeoffs) rather than repeating what changed.
+- Omit `## Reviewer Focus` entirely if the change is small or self-contained with no non-trivial logic.
 - Include references to issues that the PR addresses or resolves.
   - If the issue is completely fixed, write "Resolves \<issue_number>", which will close the issue when the PR is submitted.
   - If the issue is only partially resolved, use "Addresses \<issue_number>" instead.
