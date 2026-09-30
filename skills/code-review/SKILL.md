@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Performs a multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes or pull requests thoroughly.
+description: Performs a multi-step code review of pull requests or local code changes, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes or pull requests thoroughly. Supports --opus flag for cross-model Claude Opus 5.5 Max reviews.
 ---
 
 # Code Review
@@ -59,7 +59,32 @@ _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_re
 
 ### Step 3: Generate Initial Review
 
-Generate review comments focusing on the following criteria:
+Before analyzing the diff, determine the reviewer subagent based on invocation parameters:
+
+- **Reviewer Selection**:
+  - **Opus Review (`--opus`)**: If the user passed `--opus`, requested Claude, or asked for a cross-model review, delegate Steps 3 & 4 to `opus-code-reviewer` (pinned to Claude Opus 5.5 Max, drawing from `3p-daily` quota).
+    - _Quota Fallback_: If `opus-code-reviewer` fails due to 3P quota or capacity limits, report the issue to the user and fall back to `gemini-code-reviewer`.
+  - **Gemini Review (Default)**: By default, delegate Steps 3 & 4 to `gemini-code-reviewer` (pinned to Gemini 3.8 Flash High).
+
+- **Packaging the Subagent Prompt (Strict Invariants)**:
+  - **No Dummy Probes**: Never launch a subagent with a test or placeholder prompt (e.g. "Test if agent starts"). Always supply the full review payload directly in the initial `invoke_subagent` prompt.
+  - **Inline Diff Mandate**: Embed the complete unified diff collected in Step 1 directly inline inside the `Prompt` using ````diff ... ```` code blocks. Do not refer to scratch files on disk or defer diff delivery to a subsequent `send_message`. Supplying the diff inline gives the reviewer immediate, self-contained context without needing to hunt for files.
+  - **Explicit Workspace & Context Paths**: Explicitly specify the target workspace root directory (`$pr_review_dir` or local worktree path) and list the relevant context files identified in Step 2 (imports, interfaces, tests) so the reviewer can read them via `view_file` if needed.
+  - **Large Diffs**: For very large diffs (> 500 lines or > 10 files), partition the review by component or directory (see [splitting_reviews.md](references/splitting_reviews.md)), and supply each component's diff inline.
+
+- **Subagent Invocation Template**:
+  Invoke the chosen subagent via `invoke_subagent`:
+  ```json
+  {
+    "TypeName": "<opus-code-reviewer | gemini-code-reviewer>",
+    "Role": "Code Reviewer",
+    "Prompt": "Please conduct a deep code review of PR #<number> (<title>) following the `code-review` skill criteria.\n\n### Target Workspace\n- **Workspace Root**: `<absolute_path_to_pr_review_dir_or_worktree>`\n- **Base Ref**: `<base_branch_or_commit>`\n- **Head Ref**: `<head_branch_or_commit>`\n\n### Context & Key Reference Files\n<list of key imported files, parent classes, or test files identified in Step 2>\n\n### Modified Code Diff\n````diff\n<full_unified_diff>\n````\n\n### Review Mandate\nExecute Step 3 (Generate Initial Review) and Step 4 (Critique and Refine):\n1. Evaluate the modified lines against correctness, concurrency/failure modes, edge cases, maintainability, and security.\n2. Apply critique rules: comment only on modified lines (+/-), omit compliments, and provide compilable replacement snippets with matching indentation.\n3. Format your report strictly using the following `code-review` structure and send it via send_message:\n\n## Summary\n<1-2 paragraphs summarizing changes and verdict: Ready / Minor Revisions Needed / Critical Blockers>\n\n## Changed Files Summary\n- `<file_path>`: <past-tense summary: Added / Updated / Refactored ...>\n\n## Review Comments (Ordered by Severity)\nFor each finding, format exactly as:\n- **File**: `<path/to/file>`\n- **Line**: `<line_number>`\n- **Severity**: `<critical | high | medium | low>`\n- **Body**: `<explanation of the issue>`\n- **Suggestion**: (Optional drop-in code snippet)\n\n## Recommendations\n- <Key actionable feedback 1>\n- <Key actionable feedback 2>",
+    "Model": "inherit"
+  }
+  ```
+  _Note: Both subagents configure `disableModelSelection: true`, preserving their pinned models regardless of caller model._
+
+The reviewer subagent evaluates the changes against the following criteria:
 
 - **Correctness**: Verify functionality, handle edge cases, check API usage.
 - **Efficiency**: Identify bottlenecks, redundant calculations.
@@ -79,7 +104,7 @@ Generate review comments focusing on the following criteria:
 
 ### Step 4: Critique and Refine (Review the Review)
 
-Perform a self-critique pass on the generated comments.
+The reviewer subagent performs a self-critique pass on its generated comments before returning them:
 Filter out or modify comments based on the rules in [critique_rules.md](references/critique_rules.md).
 Ensure that:
 

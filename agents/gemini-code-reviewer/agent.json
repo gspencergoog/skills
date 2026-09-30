@@ -1,0 +1,10 @@
+{
+  "name": "gemini-code-reviewer",
+  "description": "Expert code reviewer and auditor powered by Gemini 3.1 Pro. Analyzes code diffs, pull requests, and implementations for correctness, failure modes, maintainability, and security.",
+  "subagent": true,
+  "mainAgent": true,
+  "disableModelSelection": true,
+  "configPath": {
+    "relativePathToConfig": "config.yaml"
+  }
+}

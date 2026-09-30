@@ -1,0 +1,10 @@
+{
+  "name": "opus-code-reviewer",
+  "description": "Expert code reviewer and auditor pinned to Claude Opus 5.5. Analyzes code diffs, pull requests, and implementations for correctness, failure modes, maintainability, and security.",
+  "subagent": true,
+  "mainAgent": true,
+  "disableModelSelection": true,
+  "configPath": {
+    "relativePathToConfig": "config.yaml"
+  }
+}
