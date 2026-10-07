@@ -5,7 +5,26 @@ import sys
 
 from utils import run_cmd
 
+AGENT_ATTRIBUTION_BADGE = (
+    "<sub><!-- agent-generated --><kbd>🤖 Agent-generated</kbd></sub>"
+)
+
+
+def append_agent_attribution(text):
+    """Appends the agent-generated <kbd> badge footer if not already present."""
+    stripped = text.strip()
+    if not stripped:
+        return stripped
+    if (
+        "<!-- agent-generated -->" in stripped
+        or "<kbd>🤖 Agent-generated</kbd>" in stripped
+    ):
+        return stripped
+    return f"{stripped}\n\n{AGENT_ATTRIBUTION_BADGE}"
+
+
 def reply_to_thread(thread_id, body):
+    body = append_agent_attribution(body)
     query = """
     mutation($threadId: ID!, $body: String!) {
       addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $threadId, body: $body }) {

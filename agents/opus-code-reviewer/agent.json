@@ -1,6 +1,6 @@
 {
   "name": "opus-code-reviewer",
-  "description": "Expert code reviewer and auditor pinned to Claude Opus 5.5. Analyzes code diffs, pull requests, and implementations for correctness, failure modes, maintainability, and security.",
+  "description": "Expert code and technical-document reviewer pinned to Claude Opus 5.5. Analyzes code diffs, pull requests, and implementations for correctness, failure modes, maintainability, and security, and reviews specifications, design docs, and blueprints for structure, correctness, completeness, consistency, and downstream impact.",
   "subagent": true,
   "mainAgent": true,
   "disableModelSelection": true,

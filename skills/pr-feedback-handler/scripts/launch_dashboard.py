@@ -162,6 +162,8 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
     data_dir = os.path.expanduser("~/.gemini/jetski/scratch")
     project_dir = "."
     git_dir = None
+    proposals_file = None
+    url_file = None
 
     def log_message(self, format, *args):
         # Suppress logging to keep stdout clean
@@ -186,7 +188,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                         report_data = json.load(f)
                     
                     # Merge proposals.json overlay if present
-                    proposals_path = os.path.join(self.data_dir, "proposals.json")
+                    proposals_path = self.proposals_file if self.proposals_file else os.path.join(self.data_dir, "proposals.json")
                     if os.path.exists(proposals_path):
                         try:
                             with open(proposals_path, "r", encoding="utf-8") as pf:
@@ -211,6 +213,12 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                                             thread["proposedFix"] = proposal["proposedFix"]
                                         if "draftReply" in proposal:
                                             thread["draftReply"] = proposal["draftReply"]
+                                        if "action" in proposal:
+                                            thread["action"] = proposal["action"]
+                                        if "assessment" in proposal:
+                                            thread["rating"] = proposal["assessment"]
+                                        elif "rating" in proposal:
+                                            thread["rating"] = proposal["rating"]
                         except Exception:
                             pass
 
@@ -496,6 +504,72 @@ def generate_artifact_report(data_dir, project_dir):
 def run_server(server):
     server.serve_forever()
 
+def synthesize_auto_approved_state(data_dir, proposals_file=None):
+    comments_path = os.path.join(data_dir, "pr_comments.json")
+    if not os.path.exists(comments_path):
+        raise FileNotFoundError(f"PR comments data file not found at '{comments_path}'.")
+
+    with open(comments_path, "r", encoding="utf-8") as f:
+        report_data = json.load(f)
+
+    proposals_path = proposals_file if proposals_file else os.path.join(data_dir, "proposals.json")
+    proposals_map = {}
+    if os.path.exists(proposals_path):
+        try:
+            with open(proposals_path, "r", encoding="utf-8") as pf:
+                proposals_data = json.load(pf)
+            if isinstance(proposals_data, dict):
+                if "proposals" in proposals_data and isinstance(proposals_data["proposals"], dict):
+                    proposals_map = proposals_data["proposals"]
+                else:
+                    proposals_map = proposals_data
+            elif isinstance(proposals_data, list):
+                for item in proposals_data:
+                    if isinstance(item, dict) and "threadId" in item:
+                        proposals_map[item["threadId"]] = item
+        except Exception as e:
+            print(f"Warning: Failed to parse '{proposals_path}': {e}", file=sys.stderr)
+
+    decisions = []
+    for thread in report_data.get("threads", []):
+        tid = thread.get("id")
+        if not tid:
+            continue
+
+        proposal = proposals_map.get(tid, {}) if isinstance(proposals_map, dict) else {}
+        if not isinstance(proposal, dict):
+            proposal = {}
+
+        action = proposal.get("action") or thread.get("action") or "accept"
+        rating = proposal.get("assessment") or proposal.get("rating") or thread.get("rating") or "solid"
+
+        fallback_reply = "Applied suggestion." if thread.get("suggestion") else "Fixed."
+        reply = proposal.get("draftReply") or proposal.get("reply") or thread.get("draftReply") or fallback_reply
+
+        default_resolve = action in ("accept", "decline")
+        resolve = proposal.get("resolve", default_resolve)
+        agent_instructions = proposal.get("agentInstructions") or proposal.get("instructions") or ""
+
+        decisions.append({
+            "threadId": tid,
+            "approved": True,
+            "action": action,
+            "rating": rating,
+            "reply": reply,
+            "resolve": resolve,
+            "agentInstructions": agent_instructions,
+        })
+
+    state_file_path = os.path.join(data_dir, "feedback_state.json")
+    payload = {
+        "exit_status": 0,
+        "decisions": decisions
+    }
+    with open(state_file_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+    return state_file_path, len(decisions)
+
 def main():
     global server_should_shutdown
     
@@ -504,12 +578,17 @@ def main():
     parser.add_argument("--data-dir", default="~/.gemini/jetski/scratch", help="Directory to read/write comments and decisions.")
     parser.add_argument("--project-dir", default=".", help="Path to the target codebase/repository directory.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launching dashboard even if workspace has uncommitted changes to tracked files.")
-    parser.add_argument("--mode", choices=["auto", "web", "artifact"], default="auto", help="Execution mode: auto (default), web, or artifact.")
+    parser.add_argument("--mode", choices=["auto", "web", "artifact", "auto-approve"], default="auto", help="Execution mode: auto (default), web, artifact, or auto-approve.")
+    parser.add_argument("--auto-approve", action="store_true", help="Automatically approve all proposed fixes and draft replies, writing feedback_state.json without launching the dashboard server.")
+    parser.add_argument("--proposals-file", default=None, help="Path to proposals.json overlay file (defaults to <data-dir>/proposals.json).")
+    parser.add_argument("--url-file", default=None, help="Path to write active dashboard URL to (defaults to <data-dir>/dashboard_url.txt).")
     args = parser.parse_args()
     
     # Resolve path
     resolved_data_dir = os.path.abspath(os.path.expanduser(args.data_dir))
     os.makedirs(resolved_data_dir, exist_ok=True)
+    resolved_proposals_file = os.path.abspath(os.path.expanduser(args.proposals_file)) if args.proposals_file else None
+    resolved_url_file = os.path.abspath(os.path.expanduser(args.url_file)) if args.url_file else os.path.join(resolved_data_dir, "dashboard_url.txt")
     
     # Pre-flight check: Ensure pr_comments.json exists and is valid JSON
     comments_path = os.path.join(resolved_data_dir, "pr_comments.json")
@@ -531,9 +610,25 @@ def main():
         print(f"Generated PR triage report artifact at: {report_file}", flush=True)
         sys.exit(0)
 
+    # Auto-Approve Mode Check
+    if args.auto_approve or args.mode == "auto-approve":
+        # Pre-flight check: Ensure workspace files are clean of premature edits
+        if not args.allow_dirty:
+            status_porcelain = run_git(["status", "--porcelain", "-uno"], os.path.abspath(os.path.expanduser(args.project_dir)))
+            if status_porcelain:
+                print("Error: Tracked workspace files have uncommitted changes.", file=sys.stderr)
+                print("Please commit or revert workspace changes before running in auto-approve mode.", file=sys.stderr)
+                sys.exit(1)
+
+        state_file, count = synthesize_auto_approved_state(resolved_data_dir, resolved_proposals_file)
+        print(f"Auto-approved {count} review decision(s) and wrote: {state_file}", flush=True)
+        sys.exit(0)
+
     # Pass to handler
     DashboardHandler.data_dir = resolved_data_dir
     DashboardHandler.project_dir = os.path.abspath(os.path.expanduser(args.project_dir))
+    DashboardHandler.proposals_file = resolved_proposals_file
+    DashboardHandler.url_file = resolved_url_file
     
     # Pre-flight check: Ensure workspace files are clean of premature edits
     if not args.allow_dirty:
@@ -560,6 +655,14 @@ def main():
     
     url = f"http://localhost:{port}/"
     print(f"Starting dashboard on {url}", flush=True)
+    print(f"DASHBOARD_URL={url}", flush=True)
+    
+    if DashboardHandler.url_file:
+        try:
+            with open(DashboardHandler.url_file, "w", encoding="utf-8") as uf:
+                uf.write(url + "\n")
+        except Exception as e:
+            print(f"Warning: Failed to write URL to {DashboardHandler.url_file}: {e}", file=sys.stderr)
     
     # Open browser if running locally and mode != artifact
     if can_open_local_browser() and args.mode != "artifact":
@@ -578,9 +681,19 @@ def main():
     except KeyboardInterrupt:
         print("\nAborted by user (Ctrl+C)", flush=True)
         httpd.shutdown()
+        if DashboardHandler.url_file and os.path.exists(DashboardHandler.url_file):
+            try:
+                os.remove(DashboardHandler.url_file)
+            except Exception:
+                pass
         sys.exit(1)
         
     httpd.shutdown()
+    if DashboardHandler.url_file and os.path.exists(DashboardHandler.url_file):
+        try:
+            os.remove(DashboardHandler.url_file)
+        except Exception:
+            pass
     
     if exit_status == 0:
         print("Plan saved successfully.", flush=True)

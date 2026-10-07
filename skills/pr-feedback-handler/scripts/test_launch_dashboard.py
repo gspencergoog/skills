@@ -8,6 +8,7 @@ import urllib.request
 import threading
 import json
 import time
+import shutil
 
 import launch_dashboard
 from launch_dashboard import check_git_state
@@ -182,8 +183,13 @@ class TestLaunchDashboard(unittest.TestCase):
         self.assertTrue(res["hasUnpushed"])
         self.assertEqual(len(res["unpushedCommits"]), 2)
 
-    @patch('select.kqueue')
-    @patch('select.kevent')
+    @patch('select.kqueue', create=True)
+    @patch('select.kevent', create=True)
+    @patch('select.KQ_FILTER_VNODE', 1, create=True)
+    @patch('select.KQ_EV_ADD', 1, create=True)
+    @patch('select.KQ_EV_CLEAR', 1, create=True)
+    @patch('select.KQ_NOTE_WRITE', 1, create=True)
+    @patch('select.KQ_NOTE_ATTRIB', 1, create=True)
     @patch('os.open')
     @patch('os.close')
     @patch('os.path.exists')
@@ -260,15 +266,7 @@ class TestDashboardServerIntegration(unittest.TestCase):
         cls.httpd.server_close()
         cls.server_thread.join()
 
-        if os.path.exists(cls.comments_path):
-            os.remove(cls.comments_path)
-
-        save_path = os.path.join(cls.data_dir, "feedback_state.json")
-        if os.path.exists(save_path):
-            os.remove(save_path)
-
-        if os.path.exists(cls.data_dir):
-            os.rmdir(cls.data_dir)
+        shutil.rmtree(cls.data_dir, ignore_errors=True)
 
     def setUp(self):
         importlib.reload(launch_dashboard)
@@ -397,6 +395,80 @@ class TestDashboardServerIntegration(unittest.TestCase):
                     "threads": []
                 }, f)
 
+    def test_get_api_comments_with_proposals_file_override(self):
+        custom_proposals_path = os.path.join(self.data_dir, "custom_proposals.json")
+        try:
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": [{"id": "t1", "path": "lib/foo.dart"}]
+                }, f)
+            with open(custom_proposals_path, "w") as f:
+                json.dump({
+                    "t1": {"proposedFix": "Custom file fix", "draftReply": "Custom file reply"}
+                }, f)
+
+            self.httpd.RequestHandlerClass.proposals_file = custom_proposals_path
+
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            response = urllib.request.urlopen(url)
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(data["threads"][0]["proposedFix"], "Custom file fix")
+            self.assertEqual(data["threads"][0]["draftReply"], "Custom file reply")
+        finally:
+            self.httpd.RequestHandlerClass.proposals_file = None
+            if os.path.exists(custom_proposals_path):
+                os.remove(custom_proposals_path)
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": []
+                }, f)
+
+    def test_get_api_comments_with_action_and_assessment_overlay(self):
+        proposals_path = os.path.join(self.data_dir, "proposals.json")
+        try:
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": [{"id": "t1", "path": "lib/foo.dart"}]
+                }, f)
+            with open(proposals_path, "w") as f:
+                json.dump({
+                    "t1": {
+                        "proposedFix": "Decline fix",
+                        "draftReply": "Declining this.",
+                        "action": "decline",
+                        "assessment": "disagree"
+                    }
+                }, f)
+
+            url = f"http://127.0.0.1:{self.port}/api/comments"
+            response = urllib.request.urlopen(url)
+            self.assertEqual(response.status, 200)
+            data = json.loads(response.read().decode('utf-8'))
+            self.assertEqual(data["threads"][0]["proposedFix"], "Decline fix")
+            self.assertEqual(data["threads"][0]["draftReply"], "Declining this.")
+            self.assertEqual(data["threads"][0]["action"], "decline")
+            self.assertEqual(data["threads"][0]["rating"], "disagree")
+        finally:
+            if os.path.exists(proposals_path):
+                os.remove(proposals_path)
+            with open(self.comments_path, "w") as f:
+                json.dump({
+                    "repo": "owner/repo",
+                    "pr": 123,
+                    "headRefName": "main",
+                    "threads": []
+                }, f)
+
     def test_post_api_save(self):
         url = f"http://127.0.0.1:{self.port}/api/save"
         post_data = json.dumps({"decisions": {"thread_1": "resolved"}, "exit_status": 0}).encode('utf-8')
@@ -480,13 +552,7 @@ class TestDashboardMain(unittest.TestCase):
             json.dump({'repo': 'test/repo', 'pr': 123}, f)
 
     def tearDown(self):
-        if os.path.exists('temp_dashboard_test_data/pr_comments.json'):
-            os.remove('temp_dashboard_test_data/pr_comments.json')
-        if os.path.exists('temp_dashboard_test_data'):
-            try:
-                os.rmdir('temp_dashboard_test_data')
-            except Exception:
-                pass
+        shutil.rmtree('temp_dashboard_test_data', ignore_errors=True)
 
     def _raise_system_exit(self, code=0):
         raise SystemExit(code)
@@ -517,6 +583,36 @@ class TestDashboardMain(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
 
         mock_webbrowser.assert_called_once_with("http://localhost:12345/")
+
+    @patch('launch_dashboard.webbrowser.open')
+    @patch('launch_dashboard.run_git')
+    @patch('http.server.ThreadingHTTPServer')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_dashboard_test_data', '--project-dir', '.', '--url-file', 'temp_dashboard_test_data/my_url.txt'])
+    @patch('sys.exit')
+    def test_main_url_file_emission(self, mock_exit, mock_http_server, mock_git, mock_webbrowser):
+        mock_exit.side_effect = self._raise_system_exit
+        def git_side_effect(args, cwd):
+            cmd = " ".join(args)
+            if cmd == "status --porcelain -uno":
+                return ""
+            if cmd == "rev-parse --git-dir":
+                return ".git"
+            return ""
+        mock_git.side_effect = git_side_effect
+        mock_server_inst = MagicMock()
+        mock_server_inst.server_port = 54321
+        mock_http_server.return_value = mock_server_inst
+
+        url_file_path = os.path.abspath('temp_dashboard_test_data/my_url.txt')
+        # Ensure cleanup on shutdown removes the file, but during run it was written
+        with patch('launch_dashboard.server_should_shutdown', True):
+            from launch_dashboard import main
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
+
+        # After clean shutdown, url_file is removed
+        self.assertFalse(os.path.exists(url_file_path))
 
     @patch('launch_dashboard.webbrowser.open')
     @patch('launch_dashboard.run_git')
@@ -736,6 +832,136 @@ class TestArtifactMode(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
         art_path = os.path.join(self.data_dir, "pr_triage_report.md")
         self.assertTrue(os.path.exists(art_path))
+
+
+class TestAutoApproveMode(unittest.TestCase):
+    def setUp(self):
+        self.data_dir = os.path.abspath("temp_auto_approve_test_dir")
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.comments_file = os.path.join(self.data_dir, "pr_comments.json")
+        self.proposals_file = os.path.join(self.data_dir, "proposals.json")
+        self.state_file = os.path.join(self.data_dir, "feedback_state.json")
+
+        with open(self.comments_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "repo": "owner/repo",
+                "pr": 123,
+                "headRefName": "main",
+                "threads": [
+                    {
+                        "id": "t1",
+                        "path": "lib/foo.dart",
+                        "line": 10,
+                        "suggestion": "void foo() {}",
+                        "comments": [{"author": "reviewer", "body": "Please fix this."}]
+                    },
+                    {
+                        "id": "t2",
+                        "path": "lib/bar.dart",
+                        "line": 20,
+                        "comments": [{"author": "reviewer", "body": "Clarification needed."}]
+                    }
+                ]
+            }, f)
+
+    def tearDown(self):
+        shutil.rmtree(self.data_dir, ignore_errors=True)
+
+    def test_synthesize_auto_approved_state_basic(self):
+        from launch_dashboard import synthesize_auto_approved_state
+        state_file, count = synthesize_auto_approved_state(self.data_dir)
+        self.assertEqual(count, 2)
+        self.assertTrue(os.path.exists(state_file))
+
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        self.assertEqual(data["exit_status"], 0)
+        self.assertEqual(len(data["decisions"]), 2)
+        d1 = data["decisions"][0]
+        self.assertEqual(d1["threadId"], "t1")
+        self.assertTrue(d1["approved"])
+        self.assertEqual(d1["action"], "accept")
+        self.assertEqual(d1["reply"], "Applied suggestion.")
+        self.assertTrue(d1["resolve"])
+
+    def test_synthesize_auto_approved_state_with_proposals(self):
+        from launch_dashboard import synthesize_auto_approved_state
+        with open(self.proposals_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "t1": {
+                    "proposedFix": "Fixed foo",
+                    "draftReply": "Applied fix.",
+                    "action": "accept",
+                    "assessment": "solid"
+                },
+                "t2": {
+                    "proposedFix": "",
+                    "draftReply": "Could you clarify?",
+                    "action": "clarify",
+                    "assessment": "meh"
+                }
+            }, f)
+
+        state_file, count = synthesize_auto_approved_state(self.data_dir)
+        self.assertEqual(count, 2)
+
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        decisions_by_id = {d["threadId"]: d for d in data["decisions"]}
+        d1 = decisions_by_id["t1"]
+        self.assertTrue(d1["approved"])
+        self.assertEqual(d1["action"], "accept")
+        self.assertEqual(d1["reply"], "Applied fix.")
+        self.assertTrue(d1["resolve"])
+
+        d2 = decisions_by_id["t2"]
+        self.assertTrue(d2["approved"])
+        self.assertEqual(d2["action"], "clarify")
+        self.assertEqual(d2["reply"], "Could you clarify?")
+        self.assertFalse(d2["resolve"])
+
+    def test_synthesize_auto_approved_state_with_custom_proposals_file(self):
+        from launch_dashboard import synthesize_auto_approved_state
+        custom_prop = os.path.join(self.data_dir, "custom_prop.json")
+        with open(custom_prop, "w", encoding="utf-8") as f:
+            json.dump({
+                "t1": {
+                    "proposedFix": "Custom prop fix",
+                    "draftReply": "Custom reply.",
+                    "action": "decline",
+                    "assessment": "disagree"
+                }
+            }, f)
+
+        state_file, count = synthesize_auto_approved_state(self.data_dir, proposals_file=custom_prop)
+        self.assertEqual(count, 2)
+
+        with open(state_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        decisions_by_id = {d["threadId"]: d for d in data["decisions"]}
+        d1 = decisions_by_id["t1"]
+        self.assertEqual(d1["action"], "decline")
+        self.assertEqual(d1["reply"], "Custom reply.")
+        self.assertTrue(d1["resolve"])
+
+    @patch('launch_dashboard.run_git')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_auto_approve_test_dir', '--auto-approve'])
+    @patch('sys.exit')
+    def test_main_auto_approve_flag(self, mock_exit, mock_git):
+        def _exit(code=0):
+            raise SystemExit(code)
+        mock_exit.side_effect = _exit
+        mock_git.return_value = ""  # Clean workspace
+
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertTrue(os.path.exists(self.state_file))
+
 
 if __name__ == '__main__':
     unittest.main()

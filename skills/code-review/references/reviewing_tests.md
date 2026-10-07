@@ -64,7 +64,7 @@ Use a structured workflow for AI-assisted tests:
 1. **Behavioral specification**: Draft empty test blocks defining expectations before generating code.
 2. **AI generation**: Use AI to write boilerplate setup, mocks, and execution logic.
 3. **Human review**: Evaluate the assertions against business requirements. Ask if the tests would pass if a bug were introduced.
-4. **Mutation testing**: Run mutation tools (such as StrykerJS, mutmut, or pitest) to verify that tests catch changes to production code.
+4. **Mutation testing**: Run mutation tools (such as StrykerJS, mutmut, or pitest) to verify that tests catch changes to production code. Under `--verify`, the reviewer runs targeted single-line mutations directly in its reserved throwaway checkout per [verification.md](verification.md#mutation-testing) and reports surviving gaps at `Evidence: Executed`.
 
 To avoid manual mocking and flaky behavior, consider deterministic verification tools (like BitDive or Skyramp) that capture and replay database and network calls. Keep a centralized, repository-managed registry of regression test cases to train and update automated verification agents.
 

@@ -82,10 +82,10 @@ Execute iterative review passes on the current branch/worktree:
 2. **Code Review Iterative Loop**:
    - Refer to [review_homeostasis.md](references/review_homeostasis.md) for subagent prompt templates, oscillation handling rules, and homeostasis criteria.
    - Launch a subagent (`Workspace: "inherit"`) following the `code-review` skill on the working directory diff.
-   - Parse findings (`HIGH`, `MEDIUM`, and `LOW`).
+   - Parse findings (`critical`, `high`, `medium`, and `low`); Questions are answered, not fixed, and do not block homeostasis.
    - Apply fixes, run unit tests, and commit changes (`git commit -m "fix(review): address review comments"`).
    - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, use `ask_question` to ask the user how to resolve the conflicting recommendations.
-   - **Homeostasis Reached**: Stop looping when a review pass yields zero findings across all severity levels (or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`** before proceeding to Phase 4 (Documentation Sync).
+   - **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`/`high`/`medium`/`low` findings (Questions do not count, or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`** before proceeding to Phase 4 (Documentation Sync).
 
 ______________________________________________________________________
 

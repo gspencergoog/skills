@@ -13,6 +13,15 @@ class TestApiMutations(unittest.TestCase):
     def setUp(self):
         importlib.reload(update_thread)
 
+    def test_append_agent_attribution_idempotent(self):
+        self.assertEqual(update_thread.append_agent_attribution(""), "")
+        stamped = update_thread.append_agent_attribution("test reply")
+        self.assertEqual(
+            stamped,
+            f"test reply\n\n{update_thread.AGENT_ATTRIBUTION_BADGE}",
+        )
+        self.assertEqual(update_thread.append_agent_attribution(stamped), stamped)
+
     @patch('update_thread.run_cmd')
     def test_reply_to_thread_success(self, mock_run):
         mock_run.return_value = '{"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "comment_123", "body": "test reply"}}}}'
@@ -20,6 +29,11 @@ class TestApiMutations(unittest.TestCase):
         res = update_thread.reply_to_thread("thread_1", "test reply")
         self.assertEqual(res["id"], "comment_123")
         self.assertEqual(res["body"], "test reply")
+        called_cmd = mock_run.call_args[0][0]
+        self.assertIn(
+            f"body=test reply\n\n{update_thread.AGENT_ATTRIBUTION_BADGE}",
+            called_cmd,
+        )
 
     @patch('update_thread.run_cmd')
     def test_reply_to_thread_error(self, mock_run):

@@ -13,7 +13,15 @@ Consider splitting a review when:
 
 ## Strategies for Splitting
 
-### 1. By File or Component
+### 1. By Artifact Type
+
+Start from the classifier partitions (SKILL.md Step 1b): code files in one group, document files in another.
+
+- A mixed diff under 500 lines stays in one prompt, with the code mandate first and the Document Review Mandate second.
+- A large spec, design doc, or blueprint (over 500 changed lines) splits by top-level section. Give each part the document's section outline so the reviewer can check cross-references.
+- The downstream impact pass looks at the change as a whole, so the orchestrator runs it once during synthesis, not once per part.
+
+### 2. By File or Component
 
 The most common approach is to review files in logical groups:
 
@@ -21,13 +29,15 @@ The most common approach is to review files in logical groups:
 - **By Layer**: Review database changes first, then backend logic, then frontend UI, then tests. This helps build context sequentially.
 - **By File Type**: Review core logic files (.ts, .java, .go) separately from configuration files or documentation.
 
-### 2. By Concern or Perspective
+### 3. By Concern (`--panel`)
 
-You can also make multiple passes over the same set of changes focusing on different concerns:
+Splitting the same changes by concern is what `--panel` does: two reviewers get the full diff, each with its own lane. Lane A covers correctness, concurrency and failure modes, edge cases, tests, and the Implementer and Tester lenses. Lane B covers security, maintainability, efficiency, API soundness, and the Consumer and Operator lenses. The orchestrator assigns its seeded hypotheses by lane as well: correctness, state, and test hypotheses go to lane A; wiring, security, API, performance, and dependency hypotheses go to lane B. See SKILL.md Step 3, "Panel Review", for the lane blocks.
 
-- **Pass 1: Correctness and Architecture**: Focus solely on whether the code does what it is supposed to do and fits the overall design.
-- **Pass 2: Style and Maintainability**: Focus on readability, naming conventions, and adherence to style guides.
-- **Pass 3: Security and Performance**: Focus on potential vulnerabilities and optimization opportunities.
+When a split by component and `--panel` both apply, each partition gets its own A/B pair. State the total subagent count in chat before launching.
+
+### 4. Deletion-Heavy Diffs
+
+When a diff mostly deletes, moves, or consolidates files, seed hypotheses of the form "deleted symbol `X` is still referenced in the tree" and "deleted test coverage for `Y` does not exist elsewhere in `HEAD`", and assign them to lane A (or the single reviewer). The reviewer checks them with `rg` against `HEAD` and records disproved ones in `## Checked and Found Clean`.
 
 ## Tooling Support
 
@@ -38,9 +48,20 @@ This script can:
 
 - Read a diff from stdin or a file.
 - Extract a diff from a JSON file (useful if the diff is wrapped in JSON).
-- Split the diff into separate files per changed file in a specified output directory.
+- Pack per-file diffs (and split oversized files along hunk boundaries) into size-bounded chunk files (`diff_chunk_01.diff`, `diff_chunk_02.diff`, …) with `--grouped` so each chunk fits in a single `view_file` call ($\le 35\text{ KB}$ and $\le 700$ lines by default) and write a `manifest.json`.
+- Split the diff into separate files per changed file in a specified output directory (when `--grouped` is omitted).
 
-**Usage Example:**
+**Grouped Staging Example (Recommended for Subagent Prompts):**
+
+```bash
+diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)
+git diff main...HEAD | python3 <skills-directory>/code-review/scripts/split_diff.py \
+  --grouped --max-bytes 35000 --max-lines 700 --output-dir "$diff_dir"
+```
+
+When `split_diff.py --grouped` produces 1–3 chunks, you can pass all chunk paths to a single reviewer (or a single `--panel` A/B pair) so the reviewer reads each chunk via `view_file`. When it produces 4 or more chunks across distinct components, partition the chunks across multiple reviewer invocations by component or artifact type.
+
+**Per-File Split Example:**
 
 ```bash
 python3 <skills-directory>/code-review/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt

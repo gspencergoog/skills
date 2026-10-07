@@ -11,6 +11,7 @@ import split_diff
 from split_diff import (
     extract_diff_from_json,
     split_diff as split_diff_fn,
+    split_diff_grouped,
     main
 )
 
@@ -217,6 +218,126 @@ class TestSplitDiff(unittest.TestCase):
             printed_err = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
             self.assertIn("Error: Could not find diff in JSON data", printed_err)
             self.assertEqual(cm.exception.code, 1)
+
+    def test_split_diff_grouped_packs_small_files(self):
+        diff_content = (
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old1\n"
+            "+new1\n"
+            "diff --git a/b.py b/b.py\n"
+            "--- a/b.py\n"
+            "+++ b/b.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old2\n"
+            "+new2\n"
+        )
+        chunks = split_diff_grouped(
+            diff_content, self.test_dir, max_bytes=35000, max_lines=700
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["chunk_name"], "diff_chunk_01.diff")
+        self.assertEqual(chunks[0]["files"], ["a.py", "b.py"])
+        self.assertTrue(os.path.isfile(chunks[0]["chunk_file"]))
+
+        manifest_path = os.path.join(self.test_dir, "manifest.json")
+        self.assertTrue(os.path.isfile(manifest_path))
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        self.assertEqual(manifest["chunk_count"], 1)
+        self.assertEqual(manifest["chunks"][0]["files"], ["a.py", "b.py"])
+
+    def test_split_diff_grouped_splits_across_chunks_when_exceeding_limits(self):
+        diff_content = (
+            "diff --git a/a.py b/a.py\n"
+            "--- a/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "+line1\n"
+            "+line2\n"
+            "diff --git a/b.py b/b.py\n"
+            "--- a/b.py\n"
+            "+++ b/b.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "+line3\n"
+            "+line4\n"
+        )
+        chunks = split_diff_grouped(
+            diff_content, self.test_dir, max_bytes=35000, max_lines=8
+        )
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0]["files"], ["a.py"])
+        self.assertEqual(chunks[1]["files"], ["b.py"])
+
+    def test_split_diff_grouped_splits_oversized_single_file_by_hunks(self):
+        diff_content = (
+            "diff --git a/big.py b/big.py\n"
+            "--- a/big.py\n"
+            "+++ b/big.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            "+hunk1_a\n"
+            "+hunk1_b\n"
+            "+hunk1_c\n"
+            "@@ -20,3 +20,3 @@\n"
+            "+hunk2_a\n"
+            "+hunk2_b\n"
+            "+hunk2_c\n"
+        )
+        chunks = split_diff_grouped(
+            diff_content, self.test_dir, max_bytes=35000, max_lines=9
+        )
+        self.assertEqual(len(chunks), 2)
+        for chunk in chunks:
+            self.assertEqual(chunk["files"], ["big.py"])
+            with open(chunk["chunk_file"], "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertTrue(text.startswith("diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"))
+
+    def test_split_diff_grouped_splits_oversized_single_hunk_by_lines(self):
+        diff_content = (
+            "diff --git a/huge.py b/huge.py\n"
+            "--- a/huge.py\n"
+            "+++ b/huge.py\n"
+            "@@ -1,6 +1,6 @@\n"
+            "+line1\n"
+            "+line2\n"
+            "+line3\n"
+            "+line4\n"
+            "+line5\n"
+            "+line6\n"
+        )
+        chunks = split_diff_grouped(
+            diff_content, self.test_dir, max_bytes=35000, max_lines=7
+        )
+        self.assertGreaterEqual(len(chunks), 2)
+        for chunk in chunks:
+            self.assertLessEqual(chunk["lines"], 7)
+            with open(chunk["chunk_file"], "r", encoding="utf-8") as f:
+                text = f.read()
+            self.assertTrue(text.startswith("diff --git a/huge.py b/huge.py\n"))
+
+    @patch("sys.exit")
+    @patch("builtins.print")
+    def test_main_grouped(self, mock_print, mock_exit):
+        diff_content = (
+            "diff --git a/file1.py b/file1.py\n"
+            "--- a/file1.py\n"
+            "+++ b/file1.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "+new line\n"
+        )
+        mock_stdin = MagicMock()
+        mock_stdin.read.return_value = diff_content
+
+        test_args = ["split_diff.py", "--grouped", "--output-dir", self.test_dir]
+        with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
+            main()
+            printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
+            self.assertIn("Successfully split diff into 1 grouped chunk(s)", printed)
+            self.assertIn("diff_chunk_01.diff", printed)
+            mock_exit.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

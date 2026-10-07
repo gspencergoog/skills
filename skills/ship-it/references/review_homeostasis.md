@@ -4,7 +4,7 @@ Use this guide during Phase 3 of the `ship-it` workflow to execute iterative API
 
 ## 1. Concept of Review Homeostasis
 
-**Homeostasis** is reached when a code review pass returns **zero findings** (across `HIGH`, `MEDIUM`, and `LOW` severities), and all public APIs strictly conform to project standards.
+**Homeostasis** is reached when a code review pass returns **zero `critical`, `high`, `medium`, and `low` findings** (`Questions` do not count), and all public APIs strictly conform to project standards. Answer each Question once (in the commit message or PR description) and carry it no further.
 
 To prevent context window bloat and maintain fresh perspectives, perform review passes using **isolated background subagents** (`invoke_subagent` tool with `research-google` or `self` role, specifying `"Workspace": "inherit"` to inspect current working tree state).
 
@@ -55,7 +55,7 @@ Invoke a subagent to execute the `code-review` skill on the working directory or
 
 ### Step 4: Iterative Fix, Oscillation Check & Commit Loop
 
-1. Parse findings from the subagent response (`HIGH`, `MEDIUM`, and `LOW`).
+1. Parse findings from the subagent response (`critical`, `high`, `medium`, and `low`; `Questions` do not count toward homeostasis—answer each Question once in the commit or PR description).
 2. **Oscillation Detection**:
    - Maintain a list of files and line ranges modified in previous review iterations of the conversation.
    - If a finding (especially `LOW` severity) suggests modifying lines that were already edited in a previous pass, flag it as a potential **oscillation**.
@@ -63,14 +63,14 @@ Invoke a subagent to execute the `code-review` skill on the working directory or
 3. Apply agreed-upon fixes.
 4. Run static analyzer and unit test suite to verify fixes.
 5. Create git commit (e.g. `fix(review): address code review feedback - pass N`).
-6. If findings were addressed, launch another subagent pass to re-audit.
-7. **Homeostasis Reached**: Stop looping when a review pass yields zero findings (or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`.**
+6. If findings were addressed, launch another subagent pass to re-audit. Pass the previous pass's `Checked and Found Clean` lines in the next subagent prompt as already-ruled-out hypotheses so the reviewer does not re-litigate disproved claims unless the new diff touches the cited lines.
+7. **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`, `high`, `medium`, and `low` findings (`Questions` excluded, or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`.**
 
 ______________________________________________________________________
 
 ## 3. Stopping Criteria & Safeguards
 
-- **Homeostasis Condition**: 0 findings reported across all severity levels (`HIGH`, `MEDIUM`, and `LOW`).
+- **Homeostasis Condition**: 0 `critical`, `high`, `medium`, and `low` findings reported (`Questions` excluded).
 - **Subagent Cleanup**: Explicitly call `manage_subagents` (`Action: 'kill_all'`) when review loops complete to ensure no background subagent processes remain active.
 - **Oscillation Intervention**: `ask_question` prompt triggered whenever a review recommendation conflicts with code modified in a previous loop pass.
 - **Max Iterations Cap**: Maximum 5 review loops per phase. If issues persist after 5 loops, terminate subagents (`manage_subagents` with `'kill_all'`), pause, and present remaining items to the user via `ask_question`.

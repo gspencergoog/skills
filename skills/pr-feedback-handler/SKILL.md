@@ -6,11 +6,12 @@ description: Interactively handles GitHub PR review feedback by launching a revi
 # PR Feedback Handler Skill
 
 > [!CAUTION]
-> **MANDATORY DASHBOARD WORKFLOW & TOOL RESTRICTIONS**
+> **MANDATORY REVIEW WORKFLOW & TOOL RESTRICTIONS**
 >
 > - You MUST NOT modify repository code files (`replace_file_content`, `write_to_file`, etc.) during the analysis phase.
-> - During Phase 1, you may ONLY use read/view tools to inspect code and `write_to_file` to write your proposed fixes to `<scratch>/proposals.json`.
-> - You MUST execute `launch_dashboard.py` (or generate an artifact report in headless/artifact mode) and wait for user approval before making any code modifications.
+> - During Phase 1, you may ONLY use read/view tools to inspect code and `scaffold_proposals.py` / `write_to_file` to write your proposed fixes to `<scratch>/proposals.json`.
+> - In interactive mode (default), you MUST execute `launch_dashboard.py` (or generate an artifact report in artifact mode) and wait for user approval before making any code modifications.
+> - In auto-approve mode (`--auto-approve` / `--auto`), you execute `launch_dashboard.py --auto-approve` to synthesize approved decisions directly, and the user's explicit invocation serves as pre-approval to implement, commit, push, and resolve review threads.
 
 This skill guides the process of retrieving, analyzing, empirically verifying, implementing, and resolving PR review comments.
 
@@ -19,13 +20,11 @@ This skill guides the process of retrieving, analyzing, empirically verifying, i
 > When drafting replies, explanations, or any prose, refer to the [write-prose](../write-prose/SKILL.md) skill to ensure clarity, accuracy, and tone.
 
 > [!IMPORTANT]
-> **CRITICAL RULE: USER APPROVAL REQUIRED**
-> Before performing any action that modifies the remote state (making changes public), you **MUST** get explicit user approval:
+> **USER APPROVAL & AUTO-APPROVE MODE**
 >
-> 1. **Pushing Code**: Request approval before running `git push` or making remote updates to the PR branch.
-> 2. **Replying to Threads**: Present your draft reply or clarifying question to the user and obtain their approval before posting it.
-> 3. **Resolving Threads**: Request approval before marking any review thread as resolved on GitHub.
-> 4. **No Promising Future Work**: Never promise future work (e.g. follow-up PRs, future issues, later refactors) in review replies posted as the user. Reply strictly about what was actually implemented in the active PR.
+> 1. **Interactive Mode (Default)**: Before modifying remote state (pushing code, replying to threads, or resolving threads), you **MUST** obtain explicit user approval. Present your draft replies and request confirmation before running `git push` or `update_thread.py`.
+> 2. **Auto-Approve Mode (`--auto-approve` / `--auto`)**: When the user explicitly invokes `/pr-feedback-handler --auto-approve` (or `--auto`), the interactive dashboard is bypassed, proposals are automatically synthesized as approved decisions, fixes are committed, and the branch and resolved threads are pushed directly to GitHub.
+> 3. **No Promising Future Work**: Never promise future work (e.g. follow-up PRs, future issues, later refactors) in review replies posted as the user. Reply strictly about what was actually implemented in the active PR.
 
 ______________________________________________________________________
 
@@ -57,7 +56,13 @@ ______________________________________________________________________
 1. **Fetch and Save Comments**: Run `analyze_comments.py` with `--output` to save the full PR metadata report to `pr_comments.json` in your scratch directory. Always use `env -u GITHUB_TOKEN` to prevent environment token overrides:
 
    ```bash
-   env -u GITHUB_TOKEN python3 <path-to-skills>/analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
+   env -u GITHUB_TOKEN python3 ../analyze-github-pr/scripts/analyze_comments.py --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
+   ```
+
+   *Note*: When working in a fork or cloned checkout where git remotes may default to the fork, pass `--pr <pr-number-or-url>` explicitly to query the upstream PR:
+
+   ```bash
+   env -u GITHUB_TOKEN python3 ../analyze-github-pr/scripts/analyze_comments.py --pr <pr-number-or-url> --output <conversation-scratch-directory>/pr_comments.json --dir <path-to-target-workspace-directory>
    ```
 
 2. **Empirical Verification Gate**:
@@ -73,43 +78,68 @@ ______________________________________________________________________
      - `🤷 Meh`: Minor stylistic nit or preference with neutral impact.
      - `👎 Disagree`: Factually incorrect, based on a hallucination, or introduces a bug.
 
-3. **Formulate Proposed Fixes & Draft Replies**: For each unresolved thread in the report:
+3. **Scaffold Proposals Template**: Run `scaffold_proposals.py` to generate a pre-populated `proposals.json` template with all unresolved thread IDs (GraphQL `PRRT_...` node IDs) and review snippets:
 
-   - Formulate a concrete plan to address the feedback (`proposedFix`).
-   - Draft a succinct, professional reply (following the `write-prose` skill) describing what was done or explaining why a suggestion was declined (`draftReply`).
+   ```bash
+   python3 scripts/scaffold_proposals.py --data-dir <conversation-scratch-directory>
+   ```
 
-4. **Write Proposals File**: Save your proposals mapping to `proposals.json` in your conversation scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/proposals.json`):
+   The script prints a compact summary table of unresolved threads to `stdout` and writes `<conversation-scratch-directory>/proposals.json`.
+
+4. **Populate Proposals File**: Edit `<conversation-scratch-directory>/proposals.json` to formulate a concrete technical fix (`proposedFix`) and draft reply (`draftReply`), adjusting `action` (`accept`, `decline`, `clarify`) or `assessment` (`urgent`, `solid`, `meh`, `disagree`) as appropriate:
 
    ```json
    {
-     "<thread_id_1>": {
-       "proposedFix": "Add null check before accessing property.",
-       "draftReply": "Added null check to prevent NPE as suggested."
-     },
-     "<thread_id_2>": {
-       "proposedFix": "Decline change; the existing loop invariant guarantees non-emptiness.",
-       "draftReply": "The caller guarantees this collection is non-empty before entry, so extra guard is unnecessary."
+     "PRRT_kwDOP2Xf8s6oM9J4": {
+       "path": "docs/public/concepts/glossary.md",
+       "line": 161,
+       "author": "reviewer",
+       "summary": "Clarify function call context",
+       "proposedFix": "Clarify each function call context to specify who initiates the call and where execution takes place.",
+       "draftReply": "Clarified each function call context as requested.",
+       "action": "accept",
+       "assessment": "solid"
      }
    }
    ```
 
-#### Phase 2: Launch Dashboard & Interactive Review
+#### Phase 2: Launch Dashboard & Interactive Review (or Auto-Approve)
 
-5. **Launch Dashboard**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
+5. **Launch Dashboard or Auto-Approve**:
 
-   ```bash
-   env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py --project-dir <path-to-target-workspace-directory> --data-dir <conversation-scratch-directory> --mode auto
-   ```
+   - **Interactive Web Mode (Default)**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
 
-   *Note*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`).
+     ```bash
+     env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py \
+       --project-dir <path-to-target-workspace-directory> \
+       --data-dir <conversation-scratch-directory> \
+       --proposals-file <conversation-scratch-directory>/proposals.json \
+       --mode auto
+     ```
 
-6. **Wait for Completion**: Stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user (when local), and block until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status.
+     The server writes its bound URL to `<conversation-scratch-directory>/dashboard_url.txt` and outputs `DASHBOARD_URL=http://localhost:<port>/`. View `dashboard_url.txt` to find the exact URL to present to the user.
+
+   - **Auto-Approve Mode (Headless)**: When invoked with `--auto-approve` (e.g. `/pr-feedback-handler --auto-approve`), bypass the web server and browser completely:
+
+     ```bash
+     env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py \
+       --project-dir <path-to-target-workspace-directory> \
+       --data-dir <conversation-scratch-directory> \
+       --proposals-file <conversation-scratch-directory>/proposals.json \
+       --auto-approve
+     ```
+
+     This automatically synthesizes approved decisions from `proposals.json`, writes `<conversation-scratch-directory>/feedback_state.json`, and exits immediately with status `0`.
+
+   - *Artifact Mode*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`).
+
+6. **Wait for Completion (Interactive Mode Only)**: In interactive mode, stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user (when local), and block until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status. In auto-approve mode, this step is skipped.
 
 ______________________________________________________________________
 
 ### Step 2: Implement Approved Fixes & Add Regression Tests
 
-Once the dashboard review completes:
+Once the dashboard review completes (or auto-approved):
 
 1. **Verify Exit Status**:
 
@@ -131,28 +161,41 @@ Once the dashboard review completes:
 
 ______________________________________________________________________
 
-### Step 3: Respond, Resolve on GitHub & Completion Menu
+### Step 3: Respond, Resolve on GitHub & Completion
 
 Once the approved code changes are verified and committed:
 
-1. **Interactive Next Steps Menu**: Use `ask_question` to ask the user how they would like to proceed:
-
-   - **Option 1**: "(Recommended) Push changes and update/resolve review threads on GitHub."
-   - **Option 2**: "Push changes to remote only (do not resolve threads yet)."
-   - **Option 3**: "Keep changes local for manual review."
-
-2. **Submit Replies and Resolve Threads in Bulk**:
-
-   - If approved to resolve on GitHub, run the bulk thread updater:
+- **When `--auto-approve` was requested**:
+  The user's explicit `--auto-approve` command serves as pre-authorization. Skip the interactive menu and execute the remote updates directly:
+  1. Push the local branch to GitHub:
+     ```bash
+     git push origin <branch>
+     ```
+  2. Post replies and resolve review threads in bulk:
      ```bash
      python3 scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json
      ```
-   - If any thread updates fail, review the printed failure report, make adjustments, and re-run if needed.
+  3. Report a clear completion summary to the user with the commit hash, pushed branch, and links to the resolved threads.
+
+- **In Interactive Mode (Default)**:
+  1. **Interactive Next Steps Menu**: Use `ask_question` to ask the user how they would like to proceed:
+     - **Option 1**: "(Recommended) Push changes and update/resolve review threads on GitHub."
+     - **Option 2**: "Push changes to remote only (do not resolve threads yet)."
+     - **Option 3**: "Keep changes local for manual review."
+
+  2. **Submit Replies and Resolve Threads in Bulk**:
+     - If approved to resolve on GitHub, run the bulk thread updater:
+       ```bash
+       python3 scripts/update_thread.py --file <conversation-scratch-directory>/feedback_state.json
+       ```
+     - `update_thread.py` automatically appends `<sub><!-- agent-generated --><kbd>🤖 Agent-generated</kbd></sub>` to each posted reply; do not manually add this badge to `draftReply`.
+     - If any thread updates fail, review the printed failure report, make adjustments, and re-run if needed.
 
 ______________________________________________________________________
 
 ## Bundled Resources
 
+- **`scripts/scaffold_proposals.py`**: Generates pre-populated `proposals.json` templates from `pr_comments.json` with terminal summary output.
 - **`scripts/update_thread.py`**: Bulk posts replies to and resolves approved PR review threads on GitHub.
-- **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, remote SSH/Cloud detection, and markdown artifact export.
+- **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, remote SSH/Cloud detection, URL file emission, and markdown artifact export.
 - **`assets/pr_feedback.html`**: Interactive dark-themed web dashboard with tabs for inline comments, top-level reviews, conversation comments, CI failures (with check annotations), and active checks.
