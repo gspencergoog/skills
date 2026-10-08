@@ -1,16 +1,16 @@
 # Multi-Language AST Cognitive Complexity Mapping
 
-This document details how Abstract Syntax Tree (AST) nodes map to Cognitive Complexity increments and nesting rules across **Python**, **TypeScript**, **Dart**, **Swift**, and **Kotlin**.
+This document details how Abstract Syntax Tree (AST) nodes map to Cognitive Complexity increments and nesting rules across **Python**, **TypeScript**, **Dart**, **Swift**, **Kotlin**, and **C/C++**.
 
 ______________________________________________________________________
 
 ## 1. Python (`ast`)
 
-| AST Node Type      | Node Class                                | Increment (B1)           | Nesting Impact (B2) | Notes                                 |
-| :----------------- | :---------------------------------------- | :----------------------- | :------------------ | :------------------------------------ |
-| `if` statement     | `ast.If`                                  | `+1`                     | `+1`                | Increments nesting level for children |
-| `elif` branch      | `ast.If` (in orelse)                      | `+1`                     | `+0`                | Does not increase nesting over parent |
-| `else` branch      | `orelse` block                            | `+0`                     | `+0`                | No increment                          |
+| AST Node Type      | Node Class                                | Increment (B1)           | Nesting Impact (B2) | Notes                                  |
+| :----------------- | :---------------------------------------- | :----------------------- | :------------------ | :------------------------------------- |
+| `if` statement     | `ast.If`                                  | `+1`                     | `+1`                | Increments nesting level for children  |
+| `elif` branch      | `ast.If` (in orelse)                      | `+1`                     | `+0`                | Does not increase nesting over parent  |
+| `else` branch      | `orelse` block                            | `+1`                     | `+0`                | Hybrid increment; body at `nesting +1` |
 | Ternary expression | `ast.IfExp`                               | `+1`                     | `+1`                | `x if cond else y`                    |
 | `for` loop         | `ast.For`, `ast.AsyncFor`                 | `+1`                     | `+1`                | Loops increment nesting               |
 | `while` loop       | `ast.While`                               | `+1`                     | `+1`                | While loops increment nesting         |
@@ -30,8 +30,9 @@ ______________________________________________________________________
 | AST Node Type          | TypeScript `SyntaxKind`                                    | Increment (B1)           | Nesting Impact (B2) | Notes                              |
 | :--------------------- | :--------------------------------------------------------- | :----------------------- | :------------------ | :--------------------------------- |
 | `if` statement         | `ts.SyntaxKind.IfStatement`                                | `+1`                     | `+1`                | Increases nesting for body         |
-| `else if`              | `IfStatement` in `elseStatement`                           | `+1`                     | `+0`                | No extra nesting                   |
-| Ternary operator       | `ts.SyntaxKind.ConditionalExpression`                      | `+1`                     | `+1`                | `cond ? a : b`                     |
+| `else if`              | `IfStatement` in `elseStatement`                           | `+1`                     | `+0`                | No extra nesting                       |
+| `else` branch          | `elseStatement` (non-`IfStatement`)                        | `+1`                     | `+0`                | Hybrid increment; body at `nesting +1` |
+| Ternary operator       | `ts.SyntaxKind.ConditionalExpression`                      | `+1`                     | `+1`                | `cond ? a : b`                         |
 | `switch` statement     | `ts.SyntaxKind.SwitchStatement`                            | `+1`                     | `+1`                | Increases nesting                  |
 | `case` clause          | `ts.SyntaxKind.CaseClause`                                 | `+0`                     | `+0`                | Handled by switch                  |
 | `for` loops            | `ForStatement`, `ForInStatement`, `ForOfStatement`         | `+1`                     | `+1`                | Increases nesting                  |
@@ -48,8 +49,10 @@ ______________________________________________________________________
 
 | AST Node Type         | Dart Analyzer Class                                        | Increment (B1)           | Nesting Impact (B2) | Notes                               |
 | :-------------------- | :--------------------------------------------------------- | :----------------------- | :------------------ | :---------------------------------- |
-| `if` statement        | `IfStatement`                                              | `+1`                     | `+1`                | Increases nesting for body          |
-| Collection `if`       | `IfElement`                                                | `+1`                     | `+1`                | In list/set/map literals            |
+| `if` statement        | `IfStatement`                                              | `+1`                     | `+1`                | Increases nesting for body             |
+| `else if` branch      | `IfStatement` in `elseStatement`                           | `+1`                     | `+0`                | Hybrid increment; no nesting penalty   |
+| `else` branch         | `elseStatement` / `elseElement` (non-`If`)                 | `+1`                     | `+0`                | Hybrid increment; body at `nesting +1` |
+| Collection `if`       | `IfElement`                                                | `+1`                     | `+1`                | In list/set/map literals               |
 | Ternary expression    | `ConditionalExpression`                                    | `+1`                     | `+1`                | `cond ? a : b`                      |
 | `switch` statement    | `SwitchStatement`                                          | `+1`                     | `+1`                | Traditional switch                  |
 | `switch` expression   | `SwitchExpression`                                         | `+1`                     | `+1`                | Dart 3 switch expression            |
@@ -67,8 +70,10 @@ ______________________________________________________________________
 
 | AST Node Type        | SwiftSyntax Class                              | Increment (B1)           | Nesting Impact (B2) | Notes                           |
 | :------------------- | :--------------------------------------------- | :----------------------- | :------------------ | :------------------------------ |
-| `if` expression      | `IfExprSyntax`                                 | `+1`                     | `+1`                | Increases nesting               |
-| `guard` statement    | `GuardStmtSyntax`                              | `+1`                     | `+0`                | Guard clause (early exit idiom) |
+| `if` expression      | `IfExprSyntax`                                 | `+1`                     | `+1`                | Increases nesting                      |
+| `else if` branch     | `IfExprSyntax` in `elseBody`                   | `+1`                     | `+0`                | Hybrid increment; no nesting penalty   |
+| `else` branch        | `elseBody` (non-`IfExprSyntax`)                | `+1`                     | `+0`                | Hybrid increment; body at `nesting +1` |
+| `guard` statement    | `GuardStmtSyntax`                              | `+1`                     | `+0`                | Guard clause (early exit idiom)        |
 | Ternary operator     | `TernaryExprSyntax`                            | `+1`                     | `+1`                | `cond ? a : b`                  |
 | `switch` expression  | `SwitchExprSyntax`                             | `+1`                     | `+1`                | Switch statement/expression     |
 | `switch` case        | `SwitchCaseSyntax`                             | `+0` / `+1` with where   | `+0`                | `where` clause adds +1          |
@@ -85,8 +90,10 @@ ______________________________________________________________________
 
 | AST Node Type         | Kotlin PSI Class                                      | Increment (B1)             | Nesting Impact (B2) | Notes                            |
 | :-------------------- | :---------------------------------------------------- | :------------------------- | :------------------ | :------------------------------- |
-| `if` expression       | `KtIfExpression`                                      | `+1`                       | `+1`                | Increases nesting                |
-| `when` expression     | `KtWhenExpression`                                    | `+1`                       | `+1`                | Kotlin when expression           |
+| `if` expression       | `KtIfExpression`                                      | `+1`                       | `+1`                | Increases nesting                      |
+| `else if` branch      | `else if` clause                                      | `+1`                       | `+0`                | Hybrid increment; no nesting penalty   |
+| `else` branch         | `else` block (non-`else if`, non-`when` `else ->`)    | `+1`                       | `+0`                | Hybrid increment; body at `nesting +1` |
+| `when` expression     | `KtWhenExpression`                                    | `+1`                       | `+1`                | Kotlin when expression                 |
 | `when` entry          | `KtWhenEntry`                                         | `+0` / `+1` with condition | `+0`                | Multi-case branching             |
 | `for` loop            | `KtForExpression`                                     | `+1`                       | `+1`                | For loop                         |
 | `while` / `do..while` | `KtWhileExpression`, `KtDoWhileExpression`            | `+1`                       | `+1`                | Loops increment nesting          |
@@ -95,3 +102,22 @@ ______________________________________________________________________
 | Lambdas / local fn    | `KtLambdaExpression`, nested `KtNamedFunction`        | `+0`                       | `+1`                | Increases nesting for body       |
 | Labeled jumps         | `KtBreakExpression`, `KtContinueExpression` (labeled) | `+1`                       | `+0`                | `break@loop`                     |
 | Recursion             | `KtCallExpression` (self)                             | `+1`                       | `+0`                | Direct recursion                 |
+
+______________________________________________________________________
+
+## 6. C/C++ (`tree-sitter-cpp` & Optional `clang-tidy`)
+
+| AST Node Type            | `tree-sitter-cpp` Node Type                                  | Increment (B1)           | Nesting Impact (B2) | Notes                                                |
+| :----------------------- | :----------------------------------------------------------- | :----------------------- | :------------------ | :--------------------------------------------------- |
+| `if` / `if constexpr`    | `if_statement`                                               | `+1`                     | `+1`                | Increases nesting for consequence block              |
+| `else if` (`constexpr`)  | `if_statement` inside `else_clause`                          | `+1`                     | `+0`                | Hybrid increment; no nesting penalty                 |
+| `else` branch            | `else_clause` (without nested `if_statement`)                | `+1`                     | `+0`                | Hybrid increment; body visited at `nesting + 1`      |
+| Ternary expression       | `conditional_expression`                                     | `+1`                     | `+1`                | `cond ? a : b`                                       |
+| `switch` statement       | `switch_statement`                                           | `+1`                     | `+1`                | Single increment for entire `switch`                 |
+| `for` / range-based `for`| `for_statement`, `for_range_loop`                            | `+1`                     | `+1`                | Increases nesting for loop body                      |
+| `while` / `do..while`    | `while_statement`, `do_statement`                            | `+1`                     | `+1`                | Increases nesting for loop body                      |
+| `catch` block            | `catch_clause`                                               | `+1`                     | `+1`                | Increases nesting for catch body                     |
+| `goto` statement         | `goto_statement`                                             | `+1`                     | `+0`                | Flat jump increment (no nesting penalty)             |
+| Logical operators        | `binary_expression` (`&&`, `\|\|`, `and`, `or`)              | `+1` per sequence switch | `+0`                | `and`/`&&` and `or`/`\|\|` share canonical operators |
+| Lambda / local class fn  | `lambda_expression`, nested `function_definition`            | `+0`                     | `+1`                | Increases nesting for enclosed body                  |
+| Recursion                | `call_expression` (matching enclosing function name)         | `+1`                     | `+0`                | Direct recursive call                                |

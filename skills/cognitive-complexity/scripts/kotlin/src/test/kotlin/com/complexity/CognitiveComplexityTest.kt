@@ -109,7 +109,7 @@ class CognitiveComplexityTest {
                 }
             }
         """.trimIndent()
-        assertEquals(3, getComplexity(code, "elseIfChain"))
+        assertEquals(4, getComplexity(code, "elseIfChain"))
     }
 
     @Test

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unified Multi-Language Cognitive Complexity Analyzer & Orchestrator.
-Supports Python, TypeScript, Dart, Swift, and Kotlin according to SonarSource standard.
+Supports Python, TypeScript, Dart, Swift, Kotlin, and C/C++ according to SonarSource standard.
 """
 
 from __future__ import annotations
@@ -26,12 +26,23 @@ EXT_TO_LANG: Dict[str, str] = {
     ".swift": "swift",
     ".kt": "kotlin",
     ".kts": "kotlin",
+    ".c": "cpp",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".cxx": "cpp",
+    ".c++": "cpp",
+    ".h": "cpp",
+    ".hh": "cpp",
+    ".hpp": "cpp",
+    ".hxx": "cpp",
+    ".inc": "cpp",
 }
 
 
 def detect_language_from_content(content: str) -> str:
     """Heuristic detection of language from source code."""
     indicators = [
+        ("cpp", ("#include ", "std::", "template<", "template <", "constexpr ")),
         ("python", ("def ", "import ", "elif ")),
         ("swift", ("func ", "guard ", "->")),
         ("kotlin", ("fun ", "val ", "when (")),
@@ -153,6 +164,36 @@ def run_kotlin_engine(source_or_path: str, is_stdin: bool, threshold: int, verbo
     return _run_subprocess_engine(cmd, source_or_path, is_stdin, threshold, verbose, sort_key, "kotlin")
 
 
+def run_cpp_engine(source_or_path: str, is_stdin: bool, threshold: int, verbose: bool, sort_key: str) -> Dict[str, Any]:
+    import importlib.util
+    cpp_module_path = SCRIPT_DIR / "cpp" / "cognitive_complexity.py"
+    spec = importlib.util.spec_from_file_location("cpp_cognitive_complexity", cpp_module_path)
+    if not spec or not spec.loader:
+        return _build_engine_report("cpp", [], threshold)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    analyzer = mod.CppComplexityAnalyzer(threshold=threshold)
+    if is_stdin:
+        file_comp = analyzer.analyze_source(source_or_path, file_path="<stdin>")
+        files = [file_comp.to_dict()]
+    else:
+        p = Path(source_or_path)
+        files = []
+        if p.is_file():
+            content = p.read_text(encoding="utf-8", errors="replace")
+            files.append(analyzer.analyze_source(content, file_path=str(p)).to_dict())
+        elif p.is_dir():
+            for cpp_file in mod._collect_cpp_files(p, None):
+                try:
+                    content = cpp_file.read_text(encoding="utf-8", errors="replace")
+                    files.append(analyzer.analyze_source(content, file_path=str(cpp_file)).to_dict())
+                except Exception:
+                    pass
+
+    return _build_engine_report("cpp", files, threshold)
+
+
 def _run_subprocess_engine(
     cmd_base: List[str],
     source_or_path: str,
@@ -215,6 +256,8 @@ ENGINES: Dict[str, Callable[[str, bool, int, bool, str], Dict[str, Any]]] = {
     "dart": run_dart_engine,
     "swift": run_swift_engine,
     "kotlin": run_kotlin_engine,
+    "cpp": run_cpp_engine,
+    "c": run_cpp_engine,
 }
 
 
@@ -238,7 +281,7 @@ def _analyze_directory(dir_path: Path, lang: str, threshold: int, verbose: bool,
     all_files: List[Dict[str, Any]] = []
     languages_detected: Set[str] = set()
 
-    target_langs = [lang] if lang != "auto" else ["python", "typescript", "dart", "swift", "kotlin"]
+    target_langs = [lang] if lang != "auto" else ["python", "typescript", "dart", "swift", "kotlin", "cpp"]
 
     for l in target_langs:
         rep = _dispatch_engine(l, str(dir_path), False, threshold, verbose, sort_key)
@@ -359,7 +402,7 @@ def format_text(report: Dict[str, Any], verbose: bool = False) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Unified Multi-Language Cognitive Complexity Analyzer (Python, TypeScript, Dart, Swift, Kotlin)."
+        description="Unified Multi-Language Cognitive Complexity Analyzer (Python, TypeScript, Dart, Swift, Kotlin, C/C++)."
     )
     parser.add_argument(
         "paths",
@@ -371,7 +414,7 @@ def main() -> int:
         "-l",
         "--lang",
         default="auto",
-        choices=["auto", "python", "typescript", "javascript", "dart", "swift", "kotlin"],
+        choices=["auto", "python", "typescript", "javascript", "dart", "swift", "kotlin", "cpp", "c"],
         help="Language override (default: auto-detect).",
     )
     parser.add_argument(

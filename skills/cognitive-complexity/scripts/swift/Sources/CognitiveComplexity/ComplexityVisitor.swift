@@ -164,7 +164,14 @@ final class SingleFunctionVisitor: SyntaxVisitor {
         currentNesting -= 1
 
         if let elseBody = node.elseBody {
-            walk(elseBody)
+            if elseBody.is(IfExprSyntax.self) {
+                walk(elseBody)
+            } else {
+                addIncrement(node: elseBody, type: "else", baseIncrement: 1, nestingPenalty: false, reason: "else branch")
+                currentNesting += 1
+                walk(elseBody)
+                currentNesting -= 1
+            }
         }
 
         return .skipChildren

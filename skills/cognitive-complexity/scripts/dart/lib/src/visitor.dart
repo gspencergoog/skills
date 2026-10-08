@@ -11,18 +11,24 @@ class DartComplexityAnalyzer {
 
   const DartComplexityAnalyzer({this.threshold = 15});
 
-  FileComplexity analyzeSource(String sourceCode, {String filePath = '<stdin>'}) {
-    final parseResult = parseString(content: sourceCode, throwIfDiagnostics: false);
+  FileComplexity analyzeSource(String sourceCode,
+      {String filePath = '<stdin>'}) {
+    final parseResult =
+        parseString(content: sourceCode, throwIfDiagnostics: false);
     final unit = parseResult.unit;
     final lineInfo = parseResult.lineInfo;
 
-    final collector = _FunctionCollector(lineInfo: lineInfo, threshold: threshold);
+    final collector =
+        _FunctionCollector(lineInfo: lineInfo, threshold: threshold);
     unit.accept(collector);
 
     final functions = collector.functions;
-    final totalComplexity = functions.fold<int>(0, (sum, f) => sum + f.complexity);
-    final avgComplexity = functions.isNotEmpty ? totalComplexity / functions.length : 0.0;
-    final highestComplexity = functions.fold<int>(0, (max, f) => f.complexity > max ? f.complexity : max);
+    final totalComplexity =
+        functions.fold<int>(0, (sum, f) => sum + f.complexity);
+    final avgComplexity =
+        functions.isNotEmpty ? totalComplexity / functions.length : 0.0;
+    final highestComplexity = functions.fold<int>(
+        0, (max, f) => f.complexity > max ? f.complexity : max);
 
     return FileComplexity(
       path: filePath,
@@ -205,11 +211,11 @@ class _FunctionComplexityVisitor extends RecursiveAstVisitor<void> {
                 : '??';
 
         if (parentOp == null) {
-          _addIncrement(
-              unwrapped, 'bool_op_sequence', 1, false, 'boolean operator sequence ($opName)');
+          _addIncrement(unwrapped, 'bool_op_sequence', 1, false,
+              'boolean operator sequence ($opName)');
         } else if (parentOp != op) {
-          _addIncrement(
-              unwrapped, 'bool_op_switch', 1, false, 'boolean operator switch to ($opName)');
+          _addIncrement(unwrapped, 'bool_op_switch', 1, false,
+              'boolean operator switch to ($opName)');
         }
 
         _processBoolOps(unwrapped.leftOperand, op);
@@ -237,7 +243,17 @@ class _FunctionComplexityVisitor extends RecursiveAstVisitor<void> {
     node.thenStatement.accept(this);
     _currentNesting--;
 
-    node.elseStatement?.accept(this);
+    final elseStmt = node.elseStatement;
+    if (elseStmt != null) {
+      if (elseStmt is IfStatement) {
+        elseStmt.accept(this);
+      } else {
+        _addIncrement(elseStmt, 'else', 1, false, 'else branch');
+        _currentNesting++;
+        elseStmt.accept(this);
+        _currentNesting--;
+      }
+    }
   }
 
   @override
@@ -257,7 +273,17 @@ class _FunctionComplexityVisitor extends RecursiveAstVisitor<void> {
     node.thenElement.accept(this);
     _currentNesting--;
 
-    node.elseElement?.accept(this);
+    final elseElem = node.elseElement;
+    if (elseElem != null) {
+      if (elseElem is IfElement) {
+        elseElem.accept(this);
+      } else {
+        _addIncrement(elseElem, 'else_element', 1, false, 'else element');
+        _currentNesting++;
+        elseElem.accept(this);
+        _currentNesting--;
+      }
+    }
   }
 
   @override
@@ -370,7 +396,8 @@ class _FunctionComplexityVisitor extends RecursiveAstVisitor<void> {
   @override
   void visitContinueStatement(ContinueStatement node) {
     if (node.label != null) {
-      _addIncrement(node, 'labeled_continue', 1, false, 'labeled continue jump');
+      _addIncrement(
+          node, 'labeled_continue', 1, false, 'labeled continue jump');
     }
     super.visitContinueStatement(node);
   }

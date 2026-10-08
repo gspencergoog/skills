@@ -16,6 +16,7 @@ node scripts/typescript/dist/cli.js [OPTIONS] [TARGETS...]
 dart run scripts/dart/bin/cognitive_complexity.dart [OPTIONS] [TARGETS...]
 scripts/swift/CognitiveComplexity [OPTIONS] [TARGETS...]
 java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [TARGETS...]
+uv run scripts/cpp/cognitive_complexity.py [OPTIONS] [TARGETS...]
 ```
 
 ______________________________________________________________________
@@ -25,7 +26,7 @@ ______________________________________________________________________
 | Option / Flag  | Long Form           | Description                                                                                                   | Default      |
 | :------------- | :------------------ | :------------------------------------------------------------------------------------------------------------ | :----------- |
 | `[TARGETS...]` | N/A                 | One or more paths to files or directories to analyze. If omitted or `-`, reads from standard input (`stdin`). | `-`          |
-| `-l`           | `--lang <LANG>`     | Override language detection (`python`, `typescript`, `dart`, `swift`, `kotlin`).                              | `auto`       |
+| `-l`           | `--lang <LANG>`     | Override language detection (`python`, `typescript`, `dart`, `swift`, `kotlin`, `cpp`, `c`).                  | `auto`       |
 | `-f`           | `--format <FORMAT>` | Output format: `text`, `json`, `table`, `summary`.                                                            | `text`       |
 | `-t`           | `--threshold <INT>` | Flag functions exceeding this cognitive complexity score.                                                     | `15`         |
 | `-v`           | `--verbose`         | Include line-by-line breakdown of increments and nesting penalties.                                           | `false`      |

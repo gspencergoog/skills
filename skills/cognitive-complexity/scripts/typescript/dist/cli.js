@@ -210896,11 +210896,12 @@ var FunctionAstVisitor = class {
       this.addIncrement(node, "if", 1, nesting, "if statement");
     }
     this.processBoolOps(node.expression, void 0);
-    this.visit(node.thenStatement, isElseIf ? nesting : nesting + 1);
+    this.visit(node.thenStatement, nesting + 1);
     if (node.elseStatement) {
       if (ts.isIfStatement(node.elseStatement)) {
         this.visit(node.elseStatement, nesting);
       } else {
+        this.addIncrement(node.elseStatement, "else", 1, 0, "else statement");
         this.visit(node.elseStatement, nesting + 1);
       }
     }

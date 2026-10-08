@@ -102,7 +102,7 @@ function elseIfChain(x: number): string {
     return "other";
   }
 }`;
-  assert.strictEqual(getComplexity(code, "elseIfChain"), 3);
+  assert.strictEqual(getComplexity(code, "elseIfChain"), 4);
 });
 
 // TC08: 3-level nested loop -> 1 + 2 + 3 = 6

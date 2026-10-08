@@ -105,7 +105,7 @@ String elseIfChain(int x) {
   }
 }
 ''';
-      check(getComplexity(code, 'elseIfChain')).equals(3);
+      check(getComplexity(code, 'elseIfChain')).equals(4);
     });
 
     test('TC08: 3-level nested loop', () {
@@ -202,7 +202,7 @@ List<String> describeItems(List<int> items) {
   ];
 }
 ''';
-      check(getComplexity(code, 'describeItems')).equals(6);
+      check(getComplexity(code, 'describeItems')).equals(7);
     });
 
     test('TC15: SonarSource Appendix B', () {

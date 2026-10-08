@@ -84,9 +84,11 @@ class KotlinComplexityAnalyzer(val threshold: Int = 15) {
         var complexity = 0
         val breakdown = mutableListOf<ComplexityIncrement>()
         var currentNesting = 0
+        var tryDepth = 0
 
         fun addIncrement(lineNum: Int, type: String, baseInc: Int, nestingPenalty: Boolean, reason: String) {
-            val penalty = if (nestingPenalty) currentNesting else 0
+            val effectiveNesting = maxOf(0, currentNesting - 1 - tryDepth)
+            val penalty = if (nestingPenalty) effectiveNesting else 0
             val totalInc = baseInc + penalty
             complexity += totalInc
             val detail = "$reason (+$baseInc${if (penalty > 0) " + nesting $penalty" else ""} = +$totalInc)"
@@ -96,7 +98,7 @@ class KotlinComplexityAnalyzer(val threshold: Int = 15) {
                     column = 1,
                     type = type,
                     increment = totalInc,
-                    nesting = currentNesting,
+                    nesting = effectiveNesting,
                     reason = detail
                 )
             )
@@ -107,11 +109,17 @@ class KotlinComplexityAnalyzer(val threshold: Int = 15) {
             val line = rawLine.trim()
             if (line.startsWith("//") || line.startsWith("/*") || line.startsWith("*")) continue
 
-            // Check if / else if
+            if (line.matches(Regex("""^try\s*\{.*"""))) {
+                tryDepth++
+            }
+
+            // Check if / else if / bare else
             if (line.contains("else if") || line.contains("else  if")) {
                 addIncrement(lineNum, "else_if", 1, false, "else if branch")
             } else if (line.matches(Regex(""".*\bif\s*\(.*"""))) {
                 addIncrement(lineNum, "if", 1, true, "if expression")
+            } else if (line.matches(Regex("""^(\}\s*)?else\b(?!\s*(if\b|->)).*"""))) {
+                addIncrement(lineNum, "else", 1, false, "else branch")
             }
 
             // Check when expression
@@ -133,6 +141,9 @@ class KotlinComplexityAnalyzer(val threshold: Int = 15) {
             // Check catch
             if (line.matches(Regex(""".*\bcatch\s*\(.*"""))) {
                 addIncrement(lineNum, "catch", 1, true, "catch clause")
+                if (tryDepth > 0) {
+                    tryDepth--
+                }
             }
 
             // Check ternary / elvis ?:

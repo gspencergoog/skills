@@ -108,7 +108,7 @@ def bool_switch(a, b, c):
 """
         self.assertEqual(self._get_complexity(code, "bool_switch"), 3)
 
-    # TC07: elif chains -> 1 per branch, 0 nesting penalty
+    # TC07: elif chains and bare else -> 1 per branch, 0 nesting penalty
     def test_tc07_elif_chain(self) -> None:
         code = """
 def elif_chain(x):
@@ -121,7 +121,20 @@ def elif_chain(x):
     else:
         return "other"
 """
-        self.assertEqual(self._get_complexity(code, "elif_chain"), 3)
+        self.assertEqual(self._get_complexity(code, "elif_chain"), 4)
+
+    def test_bare_else_nesting(self) -> None:
+        code = """
+def else_with_nested_if(x, y):
+    if x > 0:
+        return x
+    else:
+        if y > 0:
+            return y
+        return 0
+"""
+        # if (+1) + else (+1, no nesting penalty) + nested if (+1 + nesting 1 = +2) = 4
+        self.assertEqual(self._get_complexity(code, "else_with_nested_if"), 4)
 
     # TC08: 3-level nested loop -> 1 + 2 + 3 = 6
     def test_tc08_triple_nested_loop(self) -> None:

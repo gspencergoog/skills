@@ -109,7 +109,7 @@ final class CognitiveComplexityTests: XCTestCase {
             }
         }
         """
-        XCTAssertEqual(getComplexity(code, "elseIfChain"), 3)
+        XCTAssertEqual(getComplexity(code, "elseIfChain"), 4)
     }
 
     // TC08: 3-level nested loop -> 1 + 2 + 3 = 6

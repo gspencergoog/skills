@@ -2,17 +2,17 @@
 name: cognitive-complexity
 description: >-
   Calculate Cognitive Complexity for source code across multiple programming
-  languages (Python, TypeScript, JavaScript, Dart, Swift, and Kotlin) according
-  to the SonarSource standard. Use this skill whenever asked to: (1) determine,
-  measure, or evaluate the cognitive complexity of code, files, or directories,
-  (2) identify high-complexity functions or code hotspots for refactoring, (3)
-  inspect complexity breakdowns with line-by-line increments, or (4) assess
-  maintainability and understandability metrics.
+  languages (Python, TypeScript, JavaScript, Dart, Swift, Kotlin, and C/C++)
+  according to the SonarSource standard. Use this skill whenever asked to: (1)
+  determine, measure, or evaluate the cognitive complexity of code, files, or
+  directories, (2) identify high-complexity functions or code hotspots for
+  refactoring, (3) inspect complexity breakdowns with line-by-line increments,
+  or (4) assess maintainability and understandability metrics.
 ---
 
 # Cognitive Complexity Skill
 
-This skill provides instructions and standalone CLI tools to calculate and audit the **Cognitive Complexity** of source code across **Python**, **TypeScript/JavaScript**, **Dart**, **Swift**, and **Kotlin** according to the official SonarSource standard.
+This skill provides instructions and standalone CLI tools to calculate and audit the **Cognitive Complexity** of source code across **Python**, **TypeScript/JavaScript**, **Dart**, **Swift**, **Kotlin**, and **C/C++** according to the official SonarSource standard.
 
 ______________________________________________________________________
 
@@ -84,6 +84,9 @@ scripts/swift/CognitiveComplexity [OPTIONS] [TARGETS...]
 
 # Kotlin Engine
 java -jar scripts/kotlin/cognitive-complexity-kt.jar [OPTIONS] [TARGETS...]
+
+# C/C++ Engine (via uv run or python3)
+uv run scripts/cpp/cognitive_complexity.py [OPTIONS] [TARGETS...]
 ```
 
 For complete argument specifications, formatting options, and exit codes, see [CLI Reference](references/cli_reference.md).

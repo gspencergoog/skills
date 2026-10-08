@@ -7,6 +7,7 @@ Tests stdin, files, auto-detection, and recursive scanning of the codebase.
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,57 @@ class TestOrchestrator(unittest.TestCase):
         data = json.loads(res.stdout)
         self.assertEqual(data["language"], "swift")
         self.assertGreater(data["summary"]["total_functions"], 0)
+
+    def test_cpp_stdin(self) -> None:
+        code = (
+            "#include <iostream>\n"
+            "int compute(int x) {\n"
+            "    if constexpr (sizeof(int) == 4) {\n"
+            "        return x;\n"
+            "    } else {\n"
+            "        return -x;\n"
+            "    }\n"
+            "}\n"
+        )
+        res = subprocess.run(
+            [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", "-"],
+            input=code,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+        data = json.loads(res.stdout)
+        self.assertEqual(data["language"], "cpp")
+        self.assertEqual(data["summary"]["total_functions"], 1)
+        self.assertEqual(data["files"][0]["functions"][0]["complexity"], 2)
+
+    def test_cpp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cpp_file = Path(tmpdir) / "sample.cc"
+            cpp_file.write_text(
+                "namespace demo {\n"
+                "int check(int a, int b) {\n"
+                "    if (a > 0 && b > 0) {\n"
+                "        return a + b;\n"
+                "    } else if (a == 0) {\n"
+                "        return b;\n"
+                "    } else {\n"
+                "        return 0;\n"
+                "    }\n"
+                "}\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            res = subprocess.run(
+                [sys.executable, str(ORCHESTRATOR), "-f", "json", "-t", "100", str(cpp_file)],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(res.returncode, 0, f"Error: {res.stderr}")
+            data = json.loads(res.stdout)
+            self.assertEqual(data["language"], "cpp")
+            self.assertEqual(data["summary"]["total_functions"], 1)
+            self.assertEqual(data["files"][0]["functions"][0]["complexity"], 4)
 
     def test_full_skill_codebase_scan_integration(self) -> None:
         """Integration test: scans the entire cognitive-complexity skill scripts directory."""

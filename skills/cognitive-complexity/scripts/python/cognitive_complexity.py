@@ -153,9 +153,14 @@ class FunctionComplexityVisitor(ast.NodeVisitor):
         if len(node.orelse) == 1 and isinstance(node.orelse[0], ast.If):
             self._in_elif = True
             self.visit(node.orelse[0])
-        else:
+        elif node.orelse:
+            self._add_increment(
+                node.orelse[0], "else", base_increment=1, nesting_penalty=False, reason="else branch"
+            )
+            self._current_nesting += 1
             for item in node.orelse:
                 self.visit(item)
+            self._current_nesting -= 1
 
     def visit_IfExp(self, node: ast.IfExp) -> None:
         self._add_increment(
