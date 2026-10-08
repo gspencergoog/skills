@@ -1,26 +1,26 @@
-# Audience & Voice Matrix (`audiences.md`)
+# Audience & voice matrix (`audiences.md`)
 
 This guide provides concrete matrices and **one-shot reference examples** demonstrating how the same technical concept is adapted across 5 distinct audiences.
 
 ______________________________________________________________________
 
-## 1. Audience Matrix & Rule Adaptations
+## 1. Audience matrix & rule adaptations
 
-| Audience              | Primary Goal                                  | Voice / Person               | Verb & Tense Style                                                                                   | Structural Focus                                                                                    | Excluded Meta- & Agent Context                                                              |
-| :-------------------- | :-------------------------------------------- | :--------------------------- | :--------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
-| **Peer Engineers**    | PR descriptions, commit logs, code reviews    | Factual / Impersonal         | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*).      | Summary $\\rightarrow$ Logic Changes $\\rightarrow$ Impact $\\rightarrow$ Testing Steps.            | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
-| **API Consumers**     | Library docs, docstrings, SDK references      | Third-person neutral         | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\\rightarrow$ Parameter Prose $\\rightarrow$ Usage Code Sample.                 | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs.        |
-| **End Users / Devs**  | Tutorials, user guides, setup docs            | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step.                                | Prerequisites $\\rightarrow$ Numbered Steps $\\rightarrow$ Expected Result.                         | Omit internal project planning terminology, turn references, execution steps.               |
-| **Leadership / RFCs** | System designs, RFCs, technical proposals     | Objective / Analytical       | Present tense; decision-first layout.                                                                | Executive Summary $\\rightarrow$ Proposal $\\rightarrow$ Trade-offs Table $\\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting.                           |
-| **AI Agents / LLMs**  | System prompts, agent skills, tool directives | Imperative / Unambiguous     | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives.                    | Role Anchor $\\rightarrow$ XML Delimiters $\\rightarrow$ Guardrails $\\rightarrow$ Examples.        | Keep directives clear; define domain terms explicitly.                                      |
+| Audience              | Primary Goal                                  | Voice / Person               | Verb & Tense Style                                                                                   | Structural Focus                                                                                 | Excluded Meta- & Agent Context                                                              |
+| :-------------------- | :-------------------------------------------- | :--------------------------- | :--------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
+| **Peer Engineers**    | PR descriptions, commit logs, code reviews    | Factual / Impersonal         | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*).      | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps.            | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
+| **API Consumers**     | Library docs, docstrings, SDK references      | Third-person neutral         | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample.                | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs.        |
+| **End Users / Devs**  | Tutorials, user guides, setup docs            | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step.                                | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result.                        | Omit internal project planning terminology, turn references, execution steps.               |
+| **Leadership / RFCs** | System designs, RFCs, technical proposals     | Objective / Analytical       | Present tense; decision-first layout.                                                                | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting.                           |
+| **AI Agents / LLMs**  | System prompts, agent skills, tool directives | Imperative / Unambiguous     | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives.                    | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples.        | Keep directives clear; define domain terms explicitly.                                      |
 
 ______________________________________________________________________
 
-## 2. One-Shot Reference Examples (Same Topic, 5 Audiences)
+## 2. One-shot reference examples (same topic, 5 audiences)
 
 **Scenario**: Adding exponential backoff retry logic to an HTTP network service client.
 
-### Example A: Peer Engineers (PR Description)
+### Example A: Peer engineers (PR description)
 
 ```markdown
 ## Summary
@@ -38,7 +38,7 @@ Adds automatic HTTP retry logic with exponential backoff to `HttpClient` to prev
 
 ______________________________________________________________________
 
-### Example B: API Consumers (Docstrings / API Reference)
+### Example B: API consumers (docstrings / API reference)
 
 ````dart
 /// Sends an HTTP request and retries transient failures using exponential backoff.
@@ -56,10 +56,10 @@ Future<HttpResponse> send(HttpRequest request);
 
 ______________________________________________________________________
 
-### Example C: End Users / Developers (User Guide / Setup Doc)
+### Example C: End users / developers (user guide / setup doc)
 
 ````markdown
-## Configuring Automatic Retries
+## Configuring automatic retries
 
 You can configure the client to retry failed requests automatically when temporary network errors occur.
 
@@ -70,36 +70,35 @@ You can configure the client to retry failed requests automatically when tempora
 network:
   max_retries: 3
   initial_delay_ms: 200
-````
+```
 
 3. Save the file and restart your application service.
-
 ````
 
----
+______________________________________________________________________
 
-### Example D: Leadership / RFCs (System Design / RFC)
+### Example D: Leadership / RFCs (system design / RFC)
 
 ```markdown
-# RFC: Network Client Resilience & Transient Failure Handling
+# RFC: Network client resilience & transient failure handling
 
-## Executive Summary
+## Executive summary
 We propose introducing exponential backoff retries to the core HTTP client. This will reduce user-facing network error spikes by an estimated 80% during transient cloud gateway dropouts.
 
-## Proposed Design & Trade-offs
+## Proposed design & trade-offs
 
 | Option | Implementation Cost | Latency Impact | Resilience |
 | :--- | :--- | :--- | :--- |
 | **1. No Retries (Current)** | Zero | 0ms added | Poor (Errors surface immediately) |
 | **2. Exponential Retries (Proposed)** | Low (2 days) | +200ms–1400ms on transient failures | High (Recovers from transient outages) |
 
-## Migration & Risk
+## Migration & risk
 This change is non-breaking. Default retry values (3 attempts, 200ms initial delay) apply automatically without configuration changes.
-````
+```
 
 ______________________________________________________________________
 
-### Example E: AI Agents / LLMs (System Prompt Directive)
+### Example E: AI agents / LLMs (system prompt directive)
 
 ````markdown
 <role>

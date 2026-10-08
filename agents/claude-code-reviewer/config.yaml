@@ -1,4 +1,4 @@
-# Claude Opus 5.5 Max Code Reviewer
+# Claude Code Reviewer
 # Pinned to Claude Opus 5.5 Max (MODEL_PLACEHOLDER_M371, opus-5.5-max)
 # disableModelSelection: true in agent.json ensures subagent invocations do not fall back to Gemini.
 

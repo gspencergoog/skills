@@ -9,12 +9,19 @@ Exits non-zero when coverage falls below the minimum, which defaults to 85.
 
 import os
 import sys
+import sysconfig
 import trace
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPTS = os.path.abspath(os.path.join(HERE, '..'))
 TARGET = os.path.join(SCRIPTS, 'cleanup_branches.py')
+
+# Ignore the standard library by its actual directories. `sys.prefix` is too
+# coarse: on a system Python it is `/usr`, which also swallows a checkout
+# under `/usr/local`, and the tracer then reports nothing at all.
+STDLIB_DIRS = sorted({sysconfig.get_paths()[key]
+                      for key in ('stdlib', 'platstdlib', 'purelib', 'platlib')})
 
 sys.path.insert(0, SCRIPTS)
 sys.path.insert(0, HERE)
@@ -60,8 +67,7 @@ def run_suite():
 
 
 def main():
-    tracer = trace.Trace(count=1, trace=0,
-                         ignoredirs=[sys.prefix, sys.exec_prefix])
+    tracer = trace.Trace(count=1, trace=0, ignoredirs=STDLIB_DIRS)
     result = tracer.runfunc(run_suite)
     counts = tracer.results().counts
 

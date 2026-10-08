@@ -1,0 +1,10 @@
+{
+  "name": "claude-code-reviewer",
+  "description": "Expert code and technical-document reviewer pinned to Claude. Analyzes code diffs, pull requests, and implementations for correctness, failure modes, maintainability, and security, and reviews specifications, design docs, and blueprints for structure, correctness, completeness, consistency, and downstream impact.",
+  "subagent": true,
+  "mainAgent": true,
+  "disableModelSelection": true,
+  "configPath": {
+    "relativePathToConfig": "config.yaml"
+  }
+}

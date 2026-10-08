@@ -1,5 +1,5 @@
-# Gemini 3.8 Flash High Code Reviewer
-# Pinned to Gemini 3.8 Flash High (MODEL_PLACEHOLDER_M318, gemini-3.8-flash-high)
+# Gemini 4 Argon (High) Code Reviewer
+# Pinned to Gemini 4 Argon (High) (MODEL_PLACEHOLDER_M286, gemini-launch-candidate-high)
 # disableModelSelection: true in agent.json ensures subagent invocations preserve the pinned model.
 
 coding_agent:
@@ -7,7 +7,7 @@ coding_agent:
 
 cascade_config:
   planner_config:
-    plan_model: MODEL_PLACEHOLDER_M318
+    plan_model: MODEL_PLACEHOLDER_M286
 
 
 prompt_section_customization:

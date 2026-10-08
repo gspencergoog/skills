@@ -1,0 +1,1422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PR Review Dashboard</title>
+  <style>
+    :root {
+      --bg-canvas: #0d1117;
+      --bg-panel: #161b22;
+      --bg-panel-hover: #21262d;
+      --bg-code: #0b0e14;
+      --border: #30363d;
+      --border-muted: #21262d;
+      --text-main: #c9d1d9;
+      --text-muted: #8b949e;
+      --text-bright: #f0f6fc;
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
+      --success-bg: rgba(46, 160, 67, 0.15);
+      --success-border: #2ea043;
+      --success-text: #3fb950;
+      --danger-bg: rgba(248, 81, 73, 0.15);
+      --danger-border: #f85149;
+      --danger-text: #ff7b72;
+      --warning-bg: rgba(210, 153, 34, 0.15);
+      --warning-border: #d29922;
+      --warning-text: #e3b341;
+      --purple-bg: rgba(163, 113, 247, 0.15);
+      --purple-border: #a371f7;
+      --purple-text: #d2a8ff;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-canvas);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      padding-bottom: 90px;
+    }
+
+    /* Header */
+    header {
+      background-color: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .header-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .pr-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: var(--text-bright);
+      text-decoration: none;
+    }
+
+    .pr-title:hover {
+      color: var(--accent);
+    }
+
+    .pr-meta {
+      display: flex;
+      gap: 16px;
+      font-size: 13px;
+      color: var(--text-muted);
+      align-items: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 500;
+      border: 1px solid var(--border);
+    }
+
+    .badge-open {
+      background-color: var(--success-bg);
+      border-color: var(--success-border);
+      color: var(--success-text);
+    }
+
+    /* Main Container */
+    .container {
+      max-width: 1200px;
+      margin: 24px auto;
+      padding: 0 16px;
+    }
+
+    /* Section Cards */
+    .section-card {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+
+    .section-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-bright);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    /* PR Description & Intent Alignment Card */
+    .description-card {
+      border-left: 3px solid var(--accent);
+    }
+
+    .description-header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .description-actions {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .reviewer-context-note {
+      font-size: 11px;
+      font-weight: normal;
+      color: var(--text-muted);
+      background: rgba(139, 148, 158, 0.12);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 12px;
+    }
+
+    .alignment-pill {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .align-matches {
+      background: rgba(46, 160, 67, 0.15);
+      color: #3fb950;
+      border: 1px solid rgba(46, 160, 67, 0.4);
+    }
+
+    .align-partial {
+      background: rgba(210, 153, 34, 0.15);
+      color: #d29922;
+      border: 1px solid rgba(210, 153, 34, 0.4);
+    }
+
+    .align-diverges {
+      background: rgba(248, 81, 73, 0.15);
+      color: #ff7b72;
+      border: 1px solid rgba(248, 81, 73, 0.4);
+    }
+
+    .align-unstated {
+      background: rgba(88, 166, 255, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(88, 166, 255, 0.4);
+    }
+
+    .markdown-rendered {
+      font-size: 14px;
+      line-height: 1.6;
+      color: var(--text-main);
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 16px 20px;
+    }
+
+    .markdown-rendered h1,
+    .markdown-rendered h2,
+    .markdown-rendered h3,
+    .markdown-rendered h4 {
+      color: var(--text-bright);
+      margin-top: 16px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .markdown-rendered h1:first-child,
+    .markdown-rendered h2:first-child,
+    .markdown-rendered h3:first-child {
+      margin-top: 0;
+    }
+
+    .markdown-rendered h2 {
+      font-size: 15px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+
+    .markdown-rendered h3 {
+      font-size: 14px;
+    }
+
+    .markdown-rendered p {
+      margin: 8px 0;
+    }
+
+    .markdown-rendered ul,
+    .markdown-rendered ol {
+      margin: 8px 0 8px 22px;
+    }
+
+    .markdown-rendered li {
+      margin: 4px 0;
+    }
+
+    .markdown-rendered code {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: rgba(110, 118, 129, 0.2);
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: var(--text-bright);
+    }
+
+    .markdown-rendered pre.code-box {
+      margin: 10px 0;
+      padding: 12px;
+      overflow-x: auto;
+    }
+
+    .markdown-rendered pre.code-box code {
+      background: none;
+      padding: 0;
+    }
+
+    .markdown-rendered blockquote {
+      border-left: 3px solid var(--border);
+      padding: 4px 12px;
+      color: var(--text-muted);
+      margin: 10px 0;
+    }
+
+    .markdown-rendered a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .markdown-rendered a:hover {
+      text-decoration: underline;
+    }
+
+    .md-callout {
+      border-left: 4px solid var(--border);
+      border-radius: 0 6px 6px 0;
+      padding: 10px 14px;
+      margin: 12px 0;
+      background: rgba(110, 118, 129, 0.08);
+    }
+
+    .md-callout-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+
+    .callout-warning {
+      border-left-color: #d29922;
+      background: rgba(210, 153, 34, 0.1);
+    }
+
+    .callout-warning .md-callout-title {
+      color: #d29922;
+    }
+
+    .callout-important {
+      border-left-color: #a371f7;
+      background: rgba(163, 113, 247, 0.1);
+    }
+
+    .callout-important .md-callout-title {
+      color: #a371f7;
+    }
+
+    .callout-note {
+      border-left-color: var(--accent);
+      background: rgba(88, 166, 255, 0.1);
+    }
+
+    .callout-note .md-callout-title {
+      color: var(--accent);
+    }
+
+    .callout-caution {
+      border-left-color: #ff7b72;
+      background: rgba(248, 81, 73, 0.1);
+    }
+
+    .callout-caution .md-callout-title {
+      color: #ff7b72;
+    }
+
+    .markdown-raw {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 14px 16px;
+      color: var(--text-main);
+    }
+
+    /* Verdict Radios */
+    .verdict-options {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .verdict-option {
+      flex: 1;
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 16px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      background: var(--bg-canvas);
+      transition: border-color 0.15s, background-color 0.15s;
+    }
+
+    .verdict-option:hover {
+      background-color: var(--bg-panel-hover);
+    }
+
+    .verdict-option input[type="radio"] {
+      margin-top: 3px;
+    }
+
+    .verdict-option.selected {
+      border-color: var(--accent);
+      background-color: rgba(88, 166, 255, 0.08);
+    }
+
+    .verdict-label {
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .verdict-desc {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    /* Textarea */
+    textarea.markdown-editor {
+      width: 100%;
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-bright);
+      padding: 12px;
+      font-family: inherit;
+      font-size: 13px;
+      resize: vertical;
+      min-height: 180px;
+      line-height: 1.5;
+    }
+
+    textarea.markdown-editor:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+
+    /* Filters Bar */
+    .filters-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    .filter-group {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .filter-btn {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .filter-btn.active {
+      background-color: var(--accent);
+      border-color: var(--accent);
+      color: #0d1117;
+      font-weight: 600;
+    }
+
+    /* Finding Card */
+    .finding-card {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 20px;
+      overflow: hidden;
+      transition: border-color 0.15s;
+    }
+
+    .finding-card.approved {
+      border-color: var(--success-border);
+      box-shadow: inset 3px 0 0 var(--success-border);
+    }
+
+    .finding-card.approved .finding-header {
+      background-color: rgba(46, 160, 67, 0.08);
+    }
+
+    .finding-header {
+      background-color: var(--bg-panel-hover);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .finding-location {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-bright);
+    }
+
+    .severity-pill {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .sev-critical { background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); }
+    .sev-high { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
+    .sev-medium { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
+    .sev-low { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid var(--accent); }
+
+    .hunk-pill {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .hunk-in { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+    .hunk-out { background: var(--purple-bg); color: var(--purple-text); border: 1px solid var(--purple-border); }
+
+    .approval-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .approve-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 12px 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      user-select: none;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border);
+      color: var(--text-bright);
+      transition: background-color 0.15s, border-color 0.15s;
+    }
+
+    .approve-toggle:hover {
+      border-color: var(--text-muted);
+    }
+
+    .approve-toggle input[type="checkbox"] {
+      width: 14px;
+      height: 14px;
+      margin: 0;
+      cursor: pointer;
+      accent-color: #ffffff;
+    }
+
+    .approve-toggle:focus-within {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .approve-toggle.checked {
+      background: #238636;
+      border-color: #2ea043;
+      color: #ffffff;
+    }
+
+    .approve-toggle.checked:hover {
+      background: #2ea043;
+    }
+
+    .file-link {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .file-link:hover {
+      color: var(--accent-hover);
+      text-decoration: underline;
+    }
+
+    .bulk-btn {
+      background: var(--bg-panel-hover);
+      border: 1px solid var(--border);
+      color: var(--text-bright);
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .bulk-btn:hover {
+      background-color: var(--border);
+    }
+
+    .meta-banner {
+      display: none;
+      margin: 12px auto 0;
+      max-width: 1200px;
+      padding: 10px 16px;
+      border: 1px solid var(--danger-border);
+      background: var(--danger-bg);
+      color: var(--danger-text);
+      border-radius: 6px;
+      font-size: 13px;
+    }
+
+    .btn-primary:disabled {
+      background-color: var(--bg-panel-hover);
+      color: var(--text-muted);
+      cursor: not-allowed;
+    }
+
+    .finding-body {
+      padding: 16px;
+    }
+
+    .finding-desc {
+      font-size: 13px;
+      color: var(--text-main);
+      margin-bottom: 12px;
+    }
+
+    /* Code Snippet Box */
+    .code-box {
+      background-color: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      color: var(--text-main);
+      white-space: pre;
+      overflow-x: auto;
+      margin-bottom: 14px;
+    }
+
+    .code-label {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    /* Comment Toolbar */
+    .comment-toolbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+
+    .btn-tool {
+      background: var(--bg-panel-hover);
+      border: 1px solid var(--border);
+      color: var(--text-bright);
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-tool:hover {
+      background-color: var(--border);
+    }
+
+    /* Sticky Footer Bar */
+    .footer-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background-color: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      z-index: 1000;
+      box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    .footer-stats {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .footer-stats strong {
+      color: var(--text-bright);
+    }
+
+    .footer-actions {
+      display: flex;
+      gap: 12px;
+    }
+
+    .btn-primary {
+      background-color: #238636;
+      border: 1px solid rgba(240, 246, 252, 0.1);
+      color: #ffffff;
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background-color 0.15s;
+    }
+
+    .btn-primary:hover {
+      background-color: #2ea043;
+    }
+
+    .btn-danger {
+      background-color: var(--bg-canvas);
+      border: 1px solid var(--border);
+      color: var(--danger-text);
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .btn-danger:hover {
+      background-color: var(--danger-bg);
+      border-color: var(--danger-border);
+    }
+
+    /* Empty state */
+    .empty-state {
+      text-align: center;
+      padding: 40px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="header-top">
+    <div>
+      <a id="pr-title-link" href="#" target="_blank" class="pr-title">Loading PR...</a>
+    </div>
+    <div>
+      <span class="badge badge-open" id="pr-state">OPEN</span>
+    </div>
+  </div>
+  <div class="pr-meta" id="pr-meta-line">
+    <span>Base: <code id="pr-base">-</code> &larr; Head: <code id="pr-head">-</code></span>
+    <span>Author: <strong id="pr-author">-</strong></span>
+    <span>Commit: <code id="pr-sha">-</code></span>
+  </div>
+</header>
+
+<div id="meta-banner" class="meta-banner" role="alert"></div>
+
+<div class="container">
+
+  <!-- Blind Diff Description & Intent Alignment Card (Reviewer Context Only) -->
+  <div class="section-card description-card" id="pr-description-card" style="display: none;">
+    <div class="section-title">
+      <div class="description-header-left">
+        <span>Blind Diff Description &amp; Intent Alignment</span>
+        <span class="alignment-pill" id="pr-alignment-badge"></span>
+        <span class="reviewer-context-note">Reviewer Context Only &mdash; Posted Only If Inserted Into Summary</span>
+      </div>
+      <div class="description-actions">
+        <button class="btn-tool" onclick="copyPrDescription(this)" title="Copy raw Markdown to clipboard">Copy Markdown</button>
+        <button class="btn-tool" onclick="insertDescriptionIntoSummary()" title="Append description to Review Summary textarea below">+ Insert into Review Summary</button>
+        <button class="btn-tool" id="toggle-desc-raw-btn" onclick="toggleDescriptionView(this)">Raw / Rendered</button>
+        <button class="btn-tool" id="toggle-desc-collapse-btn" onclick="toggleDescriptionCollapse(this)">Collapse</button>
+      </div>
+    </div>
+    <div id="pr-description-body">
+      <div id="pr-description-rendered" class="markdown-rendered"></div>
+      <pre id="pr-description-raw" class="markdown-raw" style="display: none;"></pre>
+    </div>
+  </div>
+
+  <!-- Top-Level Verdict Panel -->
+  <div class="section-card">
+    <div class="section-title">
+      <span>Top-Level Review Verdict</span>
+      <span style="font-size: 12px; font-weight: normal; color: var(--text-muted);" id="outside-diff-count-badge"></span>
+    </div>
+
+    <div class="verdict-options">
+      <label class="verdict-option selected" id="verdict-opt-comment">
+        <input type="radio" name="verdict" value="COMMENT" checked onchange="onVerdictChange('COMMENT')">
+        <div>
+          <div class="verdict-label">Comment</div>
+          <div class="verdict-desc">Submit general feedback without formal approval or blocking changes.</div>
+        </div>
+      </label>
+
+      <label class="verdict-option" id="verdict-opt-changes">
+        <input type="radio" name="verdict" value="REQUEST_CHANGES" onchange="onVerdictChange('REQUEST_CHANGES')">
+        <div>
+          <div class="verdict-label">Request Changes</div>
+          <div class="verdict-desc">Submit feedback that must be addressed before this pull request can be merged.</div>
+        </div>
+      </label>
+
+      <label class="verdict-option" id="verdict-opt-approve">
+        <input type="radio" name="verdict" value="APPROVE" onchange="onVerdictChange('APPROVE')">
+        <div>
+          <div class="verdict-label">Approve</div>
+          <div class="verdict-desc">Submit feedback and approve merging these changes.</div>
+        </div>
+      </label>
+    </div>
+
+    <div style="margin-top: 12px;">
+      <label for="review-summary-text" style="display: block; font-weight: 600; margin-bottom: 6px; color: var(--text-bright);">Review Summary Markdown</label>
+      <textarea id="review-summary-text" class="markdown-editor" rows="8" placeholder="Overall assessment and the reason for the verdict. Don't list individual issues; the inline comments carry them."></textarea>
+      <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
+        💡 Any approved observations located outside diff hunks will automatically be appended to this summary on submission.
+      </div>
+    </div>
+  </div>
+
+  <!-- Findings List -->
+  <div class="filters-bar">
+    <div class="filter-group">
+      <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">Status:</span>
+      <button class="filter-btn active" onclick="setFilter('status', 'all', this)">All</button>
+      <button class="filter-btn" onclick="setFilter('status', 'approved', this)">Approved</button>
+      <button class="filter-btn" onclick="setFilter('status', 'rejected', this)">Not approved</button>
+    </div>
+
+    <div class="filter-group">
+      <span style="font-size: 12px; color: var(--text-muted); font-weight: 600;">Diff Hunk:</span>
+      <button class="filter-btn active" onclick="setFilter('hunk', 'all', this)">All</button>
+      <button class="filter-btn" onclick="setFilter('hunk', 'in', this)">In Diff</button>
+      <button class="filter-btn" onclick="setFilter('hunk', 'out', this)">Outside Diff</button>
+    </div>
+
+    <div class="filter-group">
+      <button class="bulk-btn" onclick="approveAllShown()" title="Approve every finding that matches the current filters">Approve all shown</button>
+      <button class="bulk-btn" onclick="clearAllApprovals()" title="Uncheck every finding, including hidden ones">Clear all</button>
+    </div>
+  </div>
+
+  <div id="findings-container"></div>
+
+</div>
+
+<!-- Footer Action Bar -->
+<div class="footer-bar">
+  <div class="footer-stats" id="footer-stats">
+    Loading review stats...
+  </div>
+  <div class="footer-actions">
+    <button class="btn-danger" onclick="abortReview()">Abort Review</button>
+    <button class="btn-primary" id="submit-btn" onclick="submitReview()">Submit Review to GitHub</button>
+  </div>
+</div>
+
+<script>
+  // Initial data and session CSRF token injected by launcher
+  let reviewData = /* __INITIAL_DATA__ */ null;
+  const REVIEW_TOKEN = /* __REVIEW_TOKEN__ */ "";
+
+  let activeFilters = {
+    status: 'all',
+    hunk: 'all'
+  };
+
+  async function init() {
+    if (!reviewData) {
+      try {
+        const res = await fetch('/api/findings', {
+          headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
+        });
+        if (res.ok) {
+          reviewData = await res.json();
+        }
+      } catch (e) {
+        console.error("Failed to fetch /api/findings:", e);
+      }
+    }
+
+    if (!reviewData) {
+      document.getElementById('findings-container').innerHTML =
+        '<div class="empty-state">No review findings loaded. Check server connection.</div>';
+      return;
+    }
+
+    (reviewData.findings || []).forEach(f => { f._initial_comment = f.draft_comment || ''; });
+
+    renderPRMetadata();
+    renderPRDescription();
+    checkMetadata();
+    renderFindings();
+    updateFooterStats();
+  }
+
+  function prMeta() {
+    return reviewData.pr_metadata || reviewData.pr_meta || {};
+  }
+
+  // Safely formats inline Markdown after extracting inline code spans first.
+  function renderInlineMarkdown(text) {
+    if (!text) return '';
+    const codeSpans = [];
+    const withPlaceholders = String(text).replace(/`([^`]+)`/g, (_, code) => {
+      const idx = codeSpans.length;
+      codeSpans.push(`<code>${escapeHtml(code)}</code>`);
+      return `\u0000CODE_${idx}\u0000`;
+    });
+
+    let safe = escapeHtml(withPlaceholders);
+
+    // Markdown links restricted to http://, https://, or # anchors
+    safe = safe.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
+      if (/^(https?:\/\/|#)/i.test(url)) {
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      }
+      return match;
+    });
+
+    // Bold and italic
+    safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    safe = safe.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+
+    return safe.replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
+  }
+
+  // Converts Markdown into safe HTML (supports fenced code blocks, GitHub alert
+  // callouts > [!WARNING|IMPORTANT|NOTE|CAUTION], headings, lists, and paragraphs).
+  function renderMarkdownSafe(md) {
+    if (!md) return '';
+    const codeBlocks = [];
+    const normalized = String(md).replace(/\r\n/g, '\n');
+
+    // Step 1: Extract fenced code blocks before block-level line parsing.
+    const withoutFences = normalized.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+      const idx = codeBlocks.length;
+      const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : '';
+      codeBlocks.push(`<pre class="code-box"${langAttr}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+      return `\n\u0000FENCE_${idx}\u0000\n`;
+    });
+
+    // Step 2: Parse block-level structures on raw lines.
+    const lines = withoutFences.split('\n');
+    const htmlParts = [];
+    let i = 0;
+
+    while (i < lines.length) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        i++;
+        continue;
+      }
+
+      const fenceMatch = trimmed.match(/^\u0000FENCE_(\d+)\u0000$/);
+      if (fenceMatch) {
+        htmlParts.push(codeBlocks[Number(fenceMatch[1])] || '');
+        i++;
+        continue;
+      }
+
+      const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        htmlParts.push(`<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`);
+        i++;
+        continue;
+      }
+
+      if (/^\s*>\s?/.test(line)) {
+        const quoteLines = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
+          i++;
+        }
+        const firstLine = quoteLines[0] || '';
+        const alertMatch = firstLine.match(/^\[!(WARNING|IMPORTANT|NOTE|CAUTION)\]\s*(.*)$/i);
+        if (alertMatch) {
+          const kind = alertMatch[1].toLowerCase();
+          const titleText = alertMatch[1].toUpperCase();
+          const bodyLines = [];
+          if (alertMatch[2].trim()) bodyLines.push(alertMatch[2].trim());
+          for (let j = 1; j < quoteLines.length; j++) {
+            if (quoteLines[j].trim()) bodyLines.push(quoteLines[j].trim());
+          }
+          const bodyHtml = bodyLines.map(l => `<p>${renderInlineMarkdown(l)}</p>`).join('');
+          htmlParts.push(
+            `<div class="md-callout callout-${kind}">` +
+            `<div class="md-callout-title">${titleText}</div>` +
+            `${bodyHtml}</div>`
+          );
+        } else {
+          const quoteHtml = quoteLines
+            .filter(l => l.trim().length > 0)
+            .map(l => `<p>${renderInlineMarkdown(l)}</p>`)
+            .join('');
+          htmlParts.push(`<blockquote>${quoteHtml}</blockquote>`);
+        }
+        continue;
+      }
+
+      if (/^\s*[-*]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+          items.push(`<li>${renderInlineMarkdown(lines[i].replace(/^\s*[-*]\s+/, '').trim())}</li>`);
+          i++;
+        }
+        htmlParts.push(`<ul>${items.join('')}</ul>`);
+        continue;
+      }
+
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          items.push(`<li>${renderInlineMarkdown(lines[i].replace(/^\s*\d+\.\s+/, '').trim())}</li>`);
+          i++;
+        }
+        htmlParts.push(`<ol>${items.join('')}</ol>`);
+        continue;
+      }
+
+      const paraLines = [];
+      while (
+        i < lines.length &&
+        lines[i].trim() &&
+        !/^\u0000FENCE_\d+\u0000$/.test(lines[i].trim()) &&
+        !/^(#{1,4})\s+/.test(lines[i]) &&
+        !/^\s*>\s?/.test(lines[i]) &&
+        !/^\s*[-*]\s+/.test(lines[i]) &&
+        !/^\s*\d+\.\s+/.test(lines[i])
+      ) {
+        paraLines.push(renderInlineMarkdown(lines[i].trim()));
+        i++;
+      }
+      if (paraLines.length > 0) {
+        htmlParts.push(`<p>${paraLines.join('<br>')}</p>`);
+      }
+    }
+
+    return htmlParts.join('\n');
+  }
+
+  function renderPRDescription() {
+    const descObj = reviewData.pr_description || {};
+    const markdown = (descObj.markdown || '').trim();
+    const card = document.getElementById('pr-description-card');
+    if (!card) return;
+    if (!markdown) {
+      card.style.display = 'none';
+      return;
+    }
+
+    card.style.display = 'block';
+    const renderedEl = document.getElementById('pr-description-rendered');
+    const rawEl = document.getElementById('pr-description-raw');
+    renderedEl.innerHTML = renderMarkdownSafe(markdown);
+    rawEl.textContent = markdown;
+
+    const badge = document.getElementById('pr-alignment-badge');
+    const status = String(descObj.alignment || descObj.alignment_status || '').toUpperCase();
+    const badgeConfig = {
+      MATCHES: { label: 'Matches Stated Purpose', cls: 'align-matches' },
+      PARTIAL: { label: 'Partial Divergence', cls: 'align-partial' },
+      DIVERGES: { label: 'Diverges from Stated Purpose', cls: 'align-diverges' },
+      UNSTATED: { label: 'Unstated Scope', cls: 'align-unstated' },
+      UNSTATED_SCOPE: { label: 'Unstated Scope', cls: 'align-unstated' }
+    };
+    const cfg = badgeConfig[status];
+    if (cfg) {
+      badge.style.display = 'inline-block';
+      badge.className = `alignment-pill ${cfg.cls}`;
+      badge.textContent = cfg.label;
+    } else {
+      badge.style.display = 'none';
+      badge.textContent = '';
+    }
+  }
+
+  async function copyPrDescription(btn) {
+    const markdown = ((reviewData.pr_description || {}).markdown || '').trim();
+    if (!markdown) return;
+    try {
+      await navigator.clipboard.writeText(markdown);
+      const prev = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => { btn.textContent = prev; }, 1500);
+    } catch (e) {
+      alert('Failed to copy description to clipboard: ' + e);
+    }
+  }
+
+  function insertDescriptionIntoSummary() {
+    const markdown = ((reviewData.pr_description || {}).markdown || '').trim();
+    if (!markdown) return;
+    const editor = document.getElementById('review-summary-text');
+    const current = editor.value.trim();
+    editor.value = current ? `${current}\n\n${markdown}` : markdown;
+    fitEditor(editor);
+  }
+
+  function toggleDescriptionView(btn) {
+    const renderedEl = document.getElementById('pr-description-rendered');
+    const rawEl = document.getElementById('pr-description-raw');
+    const showingRaw = rawEl.style.display !== 'none';
+    rawEl.style.display = showingRaw ? 'none' : 'block';
+    renderedEl.style.display = showingRaw ? 'block' : 'none';
+    btn.textContent = showingRaw ? 'Raw / Rendered' : 'Rendered / Raw';
+  }
+
+  function toggleDescriptionCollapse(btn) {
+    const body = document.getElementById('pr-description-body');
+    const collapsed = body.style.display === 'none';
+    body.style.display = collapsed ? 'block' : 'none';
+    btn.textContent = collapsed ? 'Collapse' : 'Expand';
+  }
+
+  // Shows a banner and disables Submit when fields needed to post are missing.
+  function checkMetadata() {
+    const meta = prMeta();
+    const headSha = meta.head_sha || reviewData.head_sha;
+    const missing = ['pull_number', 'owner', 'repo']
+      .filter(k => !meta[k])
+      .concat(headSha ? [] : ['head_sha']);
+    const banner = document.getElementById('meta-banner');
+    const submitBtn = document.getElementById('submit-btn');
+    if (missing.length === 0) {
+      banner.style.display = 'none';
+      submitBtn.disabled = false;
+      return;
+    }
+    banner.textContent =
+      `PR metadata is missing: ${missing.join(', ')}. Submission is disabled. ` +
+      'Relaunch the dashboard with --meta-file <scratch>/pr_meta.json.';
+    banner.style.display = 'block';
+    submitBtn.disabled = true;
+  }
+
+  function renderPRMetadata() {
+    const meta = prMeta();
+    const titleLink = document.getElementById('pr-title-link');
+    titleLink.textContent = `#${meta.pull_number || ''} ${meta.title || 'Untitled PR'}`;
+    titleLink.href = meta.pr_url || '#';
+
+    document.getElementById('pr-state').textContent = meta.state || 'OPEN';
+    document.getElementById('pr-base').textContent = meta.base_ref || 'main';
+    document.getElementById('pr-head').textContent = meta.head_ref || '';
+    document.getElementById('pr-author').textContent = meta.author || '';
+    document.getElementById('pr-sha').textContent = (meta.head_sha || reviewData.head_sha || '').substring(0, 7);
+
+    // Initial review summary
+    const summary = reviewData.review_summary || {};
+    const overview = summary.overview || reviewData.summary_comment || '';
+    document.getElementById('review-summary-text').value = overview;
+    const initialVerdict = summary.verdict || reviewData.verdict;
+    if (initialVerdict) {
+      onVerdictChange(initialVerdict);
+      const radio = document.querySelector(`input[name="verdict"][value="${initialVerdict}"]`);
+      if (radio) radio.checked = true;
+    }
+  }
+
+  function onVerdictChange(val) {
+    document.querySelectorAll('.verdict-option').forEach(el => el.classList.remove('selected'));
+    if (val === 'COMMENT') document.getElementById('verdict-opt-comment').classList.add('selected');
+    if (val === 'REQUEST_CHANGES') document.getElementById('verdict-opt-changes').classList.add('selected');
+    if (val === 'APPROVE') document.getElementById('verdict-opt-approve').classList.add('selected');
+  }
+
+  function matchesFilters(finding) {
+    if (activeFilters.status === 'approved' && !finding.approved) return false;
+    if (activeFilters.status === 'rejected' && finding.approved) return false;
+    if (activeFilters.hunk === 'in' && !finding.is_diff_hunk) return false;
+    if (activeFilters.hunk === 'out' && finding.is_diff_hunk) return false;
+    return true;
+  }
+
+  function renderFindings() {
+    const container = document.getElementById('findings-container');
+    container.innerHTML = '';
+
+    const findings = reviewData.findings || [];
+    let visibleCount = 0;
+
+    findings.forEach((finding, index) => {
+      if (!matchesFilters(finding)) return;
+      visibleCount++;
+      const card = createFindingCard(finding, index);
+      container.appendChild(card);
+      fitEditor(card.querySelector('textarea'));
+    });
+
+    if (visibleCount === 0) {
+      container.innerHTML = '<div class="empty-state">No findings match the current filter selection.</div>';
+    }
+  }
+
+  // Grows a textarea to show its whole draft, up to 600px; the user can
+  // still drag it larger.
+  function fitEditor(textarea) {
+    if (!textarea) return;
+    if (textarea.scrollHeight > textarea.clientHeight) {
+      textarea.style.height = `${Math.min(textarea.scrollHeight + 4, 600)}px`;
+    }
+  }
+
+  // Returns a GitHub link to the finding's lines at the PR head commit, or
+  // null when the metadata needed to build it is missing.
+  function fileUrl(finding) {
+    const meta = prMeta();
+    const sha = meta.head_sha || reviewData.head_sha;
+    if (!meta.owner || !meta.repo || !sha || !finding.file_path) return null;
+    const path = String(finding.file_path).split('/').map(encodeURIComponent).join('/');
+    const start = Number(finding.line_start);
+    const end = Number(finding.line_end);
+    let anchor = '';
+    if (Number.isInteger(start) && start > 0) {
+      anchor = (Number.isInteger(end) && end > start) ? `#L${start}-L${end}` : `#L${start}`;
+    }
+    return `https://github.com/${encodeURIComponent(meta.owner)}/${encodeURIComponent(meta.repo)}` +
+      `/blob/${encodeURIComponent(sha)}/${path}${anchor}`;
+  }
+
+  function createFindingCard(finding, index) {
+    const card = document.createElement('div');
+    card.className = `finding-card ${finding.approved ? 'approved' : ''}`;
+    card.id = `finding-card-${index}`;
+
+    const sev = (finding.severity || 'medium').toLowerCase();
+    const sevClass = `sev-${escapeHtml(sev)}`;
+    const isInDiff = Boolean(finding.is_diff_hunk);
+    const hunkBadge = isInDiff
+      ? '<span class="hunk-pill hunk-in">IN DIFF</span>'
+      : '<span class="hunk-pill hunk-out" title="Will append to top-level review summary">OUTSIDE DIFF</span>';
+
+    const lineRange = finding.line_start === finding.line_end
+      ? `Line ${finding.line_start}`
+      : `Lines ${finding.line_start}-${finding.line_end}`;
+
+    const locationText = finding.line_end && finding.line_end !== finding.line_start
+      ? `${finding.file_path}:${finding.line_start}-${finding.line_end}`
+      : `${finding.file_path}:${finding.line_start}`;
+    const url = fileUrl(finding);
+    const location = url
+      ? `<a class="file-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open on GitHub at the PR head commit">${escapeHtml(locationText)}</a>`
+      : `<span>${escapeHtml(locationText)}</span>`;
+
+    card.innerHTML = `
+      <div class="finding-header">
+        <div class="finding-location">
+          ${location}
+          <span class="severity-pill ${sevClass}">${escapeHtml(finding.severity || 'MEDIUM')}</span>
+          ${hunkBadge}
+        </div>
+        <div class="approval-toggle">
+          <label class="approve-toggle ${finding.approved ? 'checked' : ''}" id="approve-toggle-${index}">
+            <input type="checkbox" ${finding.approved ? 'checked' : ''}
+                   onchange="setApproval(${index}, this.checked)">
+            Approved
+          </label>
+        </div>
+      </div>
+      <div class="finding-body">
+        ${finding.description ? `<div class="finding-desc"><strong>${escapeHtml(finding.description)}</strong></div>` : ''}
+
+        ${finding.original_code ? `
+          <div class="code-label">Original Code (${lineRange}):</div>
+          <div class="code-box">${escapeHtml(finding.original_code)}</div>
+        ` : ''}
+
+        <div class="comment-toolbar">
+          <label for="comment-editor-${index}" style="font-weight: 600; font-size: 12px; color: var(--text-bright);">Comment (posted as written):</label>
+          <div style="display: flex; gap: 6px;">
+            <button class="btn-tool" onclick="insertSuggestion(${index})">
+              <span>+ Insert \`\`\`suggestion</span>
+            </button>
+            <button class="btn-tool" onclick="resetComment(${index})">Reset</button>
+          </div>
+        </div>
+        <textarea id="comment-editor-${index}"
+                  class="markdown-editor"
+                  rows="10"
+                  oninput="onCommentChange(${index}, this.value)">${escapeHtml(finding.draft_comment || '')}</textarea>
+      </div>
+    `;
+
+    return card;
+  }
+
+  function setApproval(index, approved) {
+    reviewData.findings[index].approved = Boolean(approved);
+    if (activeFilters.status !== 'all') {
+      // The card may no longer match the status filter.
+      renderFindings();
+    } else {
+      const card = document.getElementById(`finding-card-${index}`);
+      const toggle = document.getElementById(`approve-toggle-${index}`);
+      if (card) card.classList.toggle('approved', Boolean(approved));
+      if (toggle) toggle.classList.toggle('checked', Boolean(approved));
+    }
+    updateFooterStats();
+  }
+
+  function approveAllShown() {
+    (reviewData.findings || []).forEach(f => {
+      if (matchesFilters(f)) f.approved = true;
+    });
+    renderFindings();
+    updateFooterStats();
+  }
+
+  function clearAllApprovals() {
+    (reviewData.findings || []).forEach(f => { f.approved = false; });
+    renderFindings();
+    updateFooterStats();
+  }
+
+  function onCommentChange(index, val) {
+    reviewData.findings[index].draft_comment = val;
+  }
+
+  function resetComment(index) {
+    const finding = reviewData.findings[index];
+    const editor = document.getElementById(`comment-editor-${index}`);
+    // Restore the draft as it was when the dashboard loaded.
+    finding.draft_comment = finding._initial_comment || '';
+    editor.value = finding.draft_comment;
+  }
+
+  function insertSuggestion(index) {
+    const finding = reviewData.findings[index];
+    const editor = document.getElementById(`comment-editor-${index}`);
+    const original = finding.original_code || finding.suggested_code || '// your replacement here';
+    const fence = `\`\`\`suggestion\n${original}\n\`\`\``;
+
+    const currentVal = editor.value;
+    if (currentVal.includes('```suggestion')) {
+      alert('A suggestion fence is already present in this comment.');
+      return;
+    }
+
+    if (currentVal.trim().length > 0) {
+      editor.value = currentVal.trim() + '\n\n' + fence;
+    } else {
+      editor.value = fence;
+    }
+    finding.draft_comment = editor.value;
+  }
+
+  function setFilter(type, value, btn) {
+    activeFilters[type] = value;
+    btn.parentElement.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    renderFindings();
+  }
+
+  function updateFooterStats() {
+    const findings = reviewData.findings || [];
+    const approved = findings.filter(f => f.approved);
+    const approvedInDiff = approved.filter(f => f.is_diff_hunk).length;
+    const approvedOutDiff = approved.filter(f => !f.is_diff_hunk).length;
+
+    document.getElementById('footer-stats').innerHTML =
+      `Total Findings: <strong>${findings.length}</strong> | ` +
+      `Approved: <strong>${approved.length}</strong> (` +
+      `<strong>${approvedInDiff}</strong> inline, ` +
+      `<strong>${approvedOutDiff}</strong> in summary)`;
+
+    document.getElementById('outside-diff-count-badge').textContent =
+      approvedOutDiff > 0 ? `(${approvedOutDiff} outside diff will append to summary)` : '';
+  }
+
+  async function submitReview() {
+    const verdictInput = document.querySelector('input[name="verdict"]:checked');
+    const verdict = verdictInput ? verdictInput.value : 'COMMENT';
+    const summaryText = document.getElementById('review-summary-text').value;
+
+    const meta = prMeta();
+    const payload = {
+      pull_number: meta.pull_number,
+      owner: meta.owner,
+      repo: meta.repo,
+      head_sha: meta.head_sha || reviewData.head_sha,
+      verdict: verdict,
+      summary_comment: summaryText,
+      findings: reviewData.findings.map(({ _initial_comment, ...rest }) => rest)
+    };
+
+    try {
+      const headers = { 'Content-Type': 'application/json' };
+      if (REVIEW_TOKEN) headers['X-Review-Token'] = REVIEW_TOKEN;
+      const res = await fetch('/api/save', {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        document.body.innerHTML = `
+          <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
+            <h1 style="color: #3fb950; margin-bottom: 16px;">✓ Review Submitted!</h1>
+            <p>Your review decisions have been saved. The background process is submitting the batch review to GitHub.</p>
+            <p style="color: #8b949e; margin-top: 16px;">You can now safely close this browser window.</p>
+          </div>
+        `;
+      } else {
+        alert('Failed to save review decisions: ' + await res.text());
+      }
+    } catch (e) {
+      alert('Error contacting review server: ' + e);
+    }
+  }
+
+  async function abortReview() {
+    if (!confirm('Are you sure you want to abort? No review will be posted to GitHub.')) return;
+    try {
+      await fetch('/api/abort', {
+        method: 'POST',
+        headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
+      });
+    } catch (e) {}
+    document.body.innerHTML = `
+      <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
+        <h1 style="color: #ff7b72; margin-bottom: 16px;">Review Aborted</h1>
+        <p>No changes or comments were posted to GitHub.</p>
+        <p style="color: #8b949e; margin-top: 16px;">You can safely close this window.</p>
+      </div>
+    `;
+  }
+
+  function escapeHtml(str) {
+    if (!str) return '';
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  window.addEventListener('DOMContentLoaded', init);
+</script>
+
+</body>
+</html>

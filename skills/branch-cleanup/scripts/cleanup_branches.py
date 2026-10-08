@@ -573,6 +573,29 @@ def _account_for_commit(path, commit, merged_prs, exclude_number):
     return None
 
 
+def _is_content_free_merge(path, commit, unresolved, have_merge_tree):
+    """True when `commit` is a merge that adds nothing beyond its parents.
+
+    Branches are routinely refreshed with a merge from the base after their
+    pull request lands, which puts a commit on the branch that no pull request
+    recorded. Such a merge carries no change of its own exactly when its tree
+    is what git produces by merging its parents automatically; a conflict
+    resolved by hand, or an edit folded into the merge, breaks that equality.
+    The merge only counts once every parent has itself been accounted for,
+    which `unresolved` tracks.
+    """
+    if not have_merge_tree:
+        return False
+    line = git_out(path, 'rev-list', '--parents', '-n', '1', commit)
+    parents = (line or '').split()[1:]
+    if len(parents) != 2 or any(p in unresolved for p in parents):
+        return False
+    tree = git_out(path, 'rev-parse', f'{commit}^{{tree}}')
+    _, out, _ = git(path, 'merge-tree', '--write-tree', parents[0], parents[1])
+    merged_tree = out.split('\n')[0].strip() if out else ''
+    return _is_oid(merged_tree) and merged_tree == tree
+
+
 def _classify_against_merged_pr(path, branch, tip, pr, merged_prs,
                                 have_merge_tree):
     """Classifies a branch whose own pull request was merged.
@@ -586,7 +609,11 @@ def _classify_against_merged_pr(path, branch, tip, pr, merged_prs,
     base = pr.get('baseRefName')
     merge_commit = (pr.get('mergeCommit') or {}).get('oid')
 
-    base_ref, _ = normalize_ref(path, base)
+    # GitHub names the base as a bare branch name. Resolving it the same way
+    # as an integration target picks the most advanced copy, so a local
+    # `main` that lags behind the remote it was merged into does not make
+    # the merge look as if it never happened.
+    base_ref, _ = resolve_target(path, base) if base else (None, None)
     if not base_ref or not merge_commit:
         return UNKNOWN, (f'pull request #{number} merged but its base or merge '
                          'commit is unavailable locally')
@@ -626,11 +653,21 @@ def _classify_against_merged_pr(path, branch, tip, pr, merged_prs,
         return SQUASHED, (f'pull request #{number} merged into {base}; '
                           f'local branch tip matches merged pull request head')
 
+    # Commits already in the base have landed by definition. Parents-first
+    # order lets a merge commit be judged after the commits it merges.
+    ahead = git_out(path, 'rev-list', '--topo-order', '--reverse',
+                    f'{head_oid}..{tip}', f'^{base_ref}')
+    commits = [c for c in (ahead or '').split('\n') if c.strip()]
+    remaining = set(commits)
+
     accounted, unaccounted = [], []
     for commit in commits:
         owner = _account_for_commit(path, commit, merged_prs, number)
         if owner:
             accounted.append(owner)
+            remaining.discard(commit)
+        elif _is_content_free_merge(path, commit, remaining, have_merge_tree):
+            remaining.discard(commit)
         else:
             unaccounted.append(commit)
 
@@ -640,6 +677,11 @@ def _classify_against_merged_pr(path, branch, tip, pr, merged_prs,
         return UNKNOWN, (f'pull request #{number} merged into {base}, but '
                          f'{len(unaccounted)} commit(s) are unaccounted for: '
                          f'{short}{more}')
+
+    if not accounted:
+        return SQUASHED, (f'pull request #{number} merged into {base}; '
+                          f'{len(commits)} ahead-commit(s) are merges of '
+                          f'{base} that add nothing')
 
     stack = ', '.join(f'#{n}' for n in sorted(set(accounted)))
     return SQUASHED, (f'pull request #{number} merged into {base}; '

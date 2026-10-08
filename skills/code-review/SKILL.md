@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Performs a multi-step review of pull requests, local changes, or whole local files, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Every finding carries an evidence tier and a consequence; severity is capped by evidence. Reviews code, and reviews documentation, normative specifications, design docs, RFCs, ADRs, and blueprints for structure, correctness, completeness, consistency, and downstream impact rather than wording. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes, pull requests, specs, or design docs thoroughly. Supports --opus (Claude Opus reviewer), --panel (two reviewers with split criteria), --verify (run tests and mutation checks in a throwaway checkout), --max (all three), and --challenge (send refuting evidence back to the reviewer and require a retraction).
+description: Performs a multi-step review of pull requests, local changes, or whole local files, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Every finding carries an evidence tier and a consequence; severity is capped by evidence. Reviews code, and reviews documentation, normative specifications, design docs, RFCs, ADRs, and blueprints for structure, correctness, completeness, consistency, and downstream impact rather than wording. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes, pull requests, specs, or design docs thoroughly. Supports --claude / --opus (Claude reviewer), --panel (two reviewers with split criteria), --verify (run tests and mutation checks in a throwaway checkout), --max (all three), and --challenge (send refuting evidence back to the reviewer and require a retraction).
 ---
 
 # Code Review
@@ -25,13 +25,13 @@ You are an expert Senior Software Engineer specializing in code review and in re
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
 | *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) | Baseline |
-| `--opus` | The single reviewer is Opus. Under `--panel`, reviewer B is Opus. | Uses 3P quota |
+| `--claude` (or `--opus`) | The single reviewer is `claude-code-reviewer`. Under `--panel`, reviewer B is `claude-code-reviewer`. | Uses 3P quota |
 | `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B), for code and documents | About 2× subagents |
 | `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in a per-reviewer throwaway checkout) for trusted changes | Test runtime and dependency installs |
-| `--max` | Same as `--opus --panel --verify` | All of the above |
+| `--max` | Same as `--claude --panel --verify` | All of the above |
 | `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra subagent turn per disputed reviewer |
 
-Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --opus` equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
+Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
 
 ## Workflow
 
@@ -105,9 +105,9 @@ _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_re
 Before analyzing the diff, determine the reviewer subagents based on the flags:
 
 - **Reviewer Selection**:
-  - **Gemini Review (Default)**: By default, delegate Steps 3 & 4 to one `gemini-code-reviewer` (pinned to Gemini 3.8 Flash High).
-  - **Opus Review (`--opus`)**: If the user passed `--opus`, requested Claude, or asked for a cross-model review, delegate Steps 3 & 4 to `opus-code-reviewer` (pinned to Claude Opus 5.5 Max, drawing from `3p-daily` quota).
-    - _Quota Fallback_: If `opus-code-reviewer` fails due to 3P quota or capacity limits, report the issue to the user and fall back to `gemini-code-reviewer`.
+  - **Gemini Review (Default)**: By default, delegate Steps 3 & 4 to one `gemini-code-reviewer` (pinned to Gemini 4 Argon High).
+  - **Claude Review (`--claude` / `--opus`)**: If the user passed `--claude` or `--opus`, requested Claude, or asked for a cross-model review, delegate Steps 3 & 4 to `claude-code-reviewer` (drawing from `3p-daily` quota).
+    - _Quota Fallback_: If `claude-code-reviewer` fails due to 3P quota or capacity limits, report the issue to the user and fall back to `gemini-code-reviewer`.
   - **Panel Review (`--panel`)**: Launch two reviewers in one `invoke_subagent` call, one per lane. See [Panel Review](#panel-review---panel) below.
 
 - **Packaging the Subagent Prompt (Strict Invariants)**:
@@ -123,7 +123,7 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - **Large Diffs**: For very large diffs (> 500 lines or > 10 files), either pass the grouped `diff_chunk_XX.diff` files from `split_diff.py --grouped` or partition the review across multiple subagents (see [splitting_reviews.md](references/splitting_reviews.md)).
 
 - **Subagent Invocation Template**:
-  Invoke the chosen subagent via `invoke_subagent` with `TypeName` set to the reviewer (`gemini-code-reviewer` or `opus-code-reviewer`), `Role` set to `Code Reviewer` (or `Code Reviewer A` / `Code Reviewer B` under `--panel`), `Model` set to `inherit`, and this `Prompt`. Include each optional block only when its condition holds:
+  Invoke the chosen subagent via `invoke_subagent` with `TypeName` set to the reviewer (`gemini-code-reviewer` or `claude-code-reviewer`), `Role` set to `Code Reviewer` (or `Code Reviewer A` / `Code Reviewer B` under `--panel`), `Model` set to `inherit`, and this `Prompt`. Include each optional block only when its condition holds:
 
   `````markdown
   Please conduct a deep review of PR #<number> (<title>) following the `code-review` skill criteria. Read `<skill-dir>/references/evidence.md` first and apply its evidence tiers, severity caps, and falsification pass.
@@ -257,7 +257,7 @@ Document files are evaluated with the four lenses and the rubrics in [reviewing_
 | Lane | Theme | Code criteria | Document lenses | Agent |
 | :--- | :--- | :--- | :--- | :--- |
 | **A** | Does it work, and can it be verified? | Correctness; concurrency and failure modes; edge cases; tests ([reviewing_tests.md](references/reviewing_tests.md)) | Implementer; Tester / Verifier | `gemini-code-reviewer` |
-| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness | Consumer; Operator / Adversary | `gemini-code-reviewer`, or `opus-code-reviewer` with `--opus` (same quota fallback as above) |
+| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness | Consumer; Operator / Adversary | `gemini-code-reviewer`, or `claude-code-reviewer` with `--claude` / `--opus` (same quota fallback as above) |
 
 Lane Assignment block for reviewer A (swap in lane B's lists for reviewer B):
 
@@ -297,7 +297,7 @@ Audit and combine the refined comments into the final output:
 - Prioritize high-severity issues (critical, high).
 - **Number findings and Questions**: Put every finding under a `### <ID>. <short claim>` heading: `C1`, `C2`… for critical, `H1`… for high, `M1`… for medium, `L1`… for low, so the user can say "fix H2 and M1" later. Wording findings sort last within `low`. Number Questions in `## Questions` as `### Q1. <question>` through `Q3` (keep at most 3, choosing the ones with the highest stated stakes in `Why`).
 - **Checked and Found Clean merge**: Take the union of disproved hypotheses from the reviewer(s), deduplicate, drop any line that lacks a tier or disproving evidence, and cap at 10 lines.
-- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), and end with the flags in effect (for example, "Flags: `--opus --panel --verify`") and any trust limit (for example, "`--verify` limited to tier 1: PR author is not a repo collaborator").
+- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), and end with the flags in effect (for example, "Flags: `--claude --panel --verify`") and any trust limit (for example, "`--verify` limited to tier 1: PR author is not a repo collaborator").
 - **Structural Assessment**: When the diff has document files, put the `## Structural Assessment` section right after the Summary.
 - **Generate file summaries**: For reviews with multiple files, include `## Changed Files Summary` with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.

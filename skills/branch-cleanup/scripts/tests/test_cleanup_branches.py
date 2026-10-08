@@ -608,6 +608,46 @@ class ForgeTest(TempRepoCase):
         self.assertEqual(verdict, cb.UNKNOWN)
         self.assertIn('not in main', evidence)
 
+    def test_merge_commit_is_checked_against_the_most_advanced_base(self):
+        """A stale local `main` must not hide a merge that landed upstream.
+
+        GitHub reports the base as the bare name `main`. In a fork checkout
+        that name also denotes a local branch, which typically lags behind
+        the upstream copy the pull request was actually merged into. The
+        forge pass has to resolve the base the way targets are resolved,
+        otherwise a branch that landed is reported as needing review.
+        """
+        if not self.have_merge_tree:
+            self.skipTest('git is older than 2.38')
+        upstream = self.repo('upstream')
+        fork = os.path.join(self.root, 'fork')
+        run(self.root, 'clone', '-q', upstream, fork)
+        run(fork, 'remote', 'add', 'upstream', upstream)
+
+        run(fork, 'checkout', '-q', '-b', 'feature')
+        commit(fork, 'a.txt', 'one\n')
+        tip = run(fork, 'rev-parse', 'HEAD')
+        run(fork, 'checkout', '-q', 'main')
+
+        # The squash merge happens on upstream only; the fork's local `main`
+        # and `origin/main` both predate it.
+        run(upstream, 'fetch', '-q', fork, 'feature:feature')
+        run(upstream, 'merge', '-q', '--squash', 'feature')
+        run(upstream, 'commit', '-q', '-m', 'feature (#12)')
+        merge_commit = run(upstream, 'rev-parse', 'main')
+        run(fork, 'fetch', '-q', 'upstream')
+        self.assertNotEqual(run(fork, 'rev-parse', 'main'), merge_commit)
+
+        index = {'feature': [{
+            'number': 12, 'state': 'MERGED', 'headRefName': 'feature',
+            'baseRefName': 'main', 'headRefOid': tip,
+            'mergeCommit': {'oid': merge_commit},
+        }]}
+        verdict, evidence = cb.classify_with_forge(fork, 'feature', tip,
+                                                   index, True)
+        self.assertEqual(verdict, cb.SQUASHED)
+        self.assertIn('#12', evidence)
+
     def test_stacked_branch_resolves_through_other_merged_requests(self):
         """A branch carrying a commit that landed under a sibling request.
 
@@ -673,6 +713,77 @@ class ForgeTest(TempRepoCase):
         }]}
         verdict, evidence = cb.classify_with_forge(self.path, 'feature', tip,
                                                    index, self.have_merge_tree)
+        self.assertEqual(verdict, cb.UNKNOWN)
+        self.assertIn('unaccounted for', evidence)
+
+    def _squash_then_refresh(self, resolve_conflict_by_hand=False):
+        """Builds a branch that was refreshed from main and then squashed.
+
+        The branch merges main (M) before its pull request lands, so the
+        merge base with main predates the squash commit. Main then squashes
+        the branch and edits the same file again, which makes the branch's
+        content conflict with main and defeats squash equivalence. Two
+        branch commits keep their patch ids distinct from the squash commit.
+        Only M stands between the recorded head and the tip. Returns
+        (recorded_head, tip, merge_commit).
+        """
+        run(self.path, 'checkout', '-q', '-b', 'feature')
+        commit(self.path, 'a.txt', 'one\n')
+        recorded_head = commit(self.path, 'a.txt', 'one\ntwo\n')
+
+        run(self.path, 'checkout', '-q', 'main')
+        commit(self.path, 'other.txt', 'other\n')
+
+        run(self.path, 'checkout', '-q', 'feature')
+        run(self.path, 'merge', '-q', '--no-edit', 'main')
+        if resolve_conflict_by_hand:
+            write(self.path, 'a.txt', 'one\ntwo, tweaked in the merge\n')
+            run(self.path, 'add', '-A')
+            run(self.path, 'commit', '-q', '--amend', '--no-edit')
+        tip = run(self.path, 'rev-parse', 'HEAD')
+
+        run(self.path, 'checkout', '-q', 'main')
+        run(self.path, 'merge', '-q', '--squash', 'feature')
+        run(self.path, 'commit', '-q', '-m', 'feature (#5)')
+        merge_commit = run(self.path, 'rev-parse', 'main')
+        commit(self.path, 'a.txt', 'one\ntwo\nthree, later on main\n')
+        return recorded_head, tip, merge_commit
+
+    def _index_for_refresh(self, recorded_head, merge_commit):
+        return {'feature': [{
+            'number': 5, 'state': 'MERGED', 'headRefName': 'feature',
+            'baseRefName': 'main', 'headRefOid': recorded_head,
+            'mergeCommit': {'oid': merge_commit},
+        }]}
+
+    def test_refresh_merge_from_the_base_adds_nothing(self):
+        """A post-merge `git merge main` must not keep the branch alive.
+
+        The merge commit is neither in the base nor recorded by any pull
+        request, yet it carries no change of its own: its tree is exactly
+        what merging its parents produces.
+        """
+        if not self.have_merge_tree:
+            self.skipTest('git is older than 2.38')
+        recorded_head, tip, merge_commit = self._squash_then_refresh()
+        self.assertFalse(cb._signal_squash_tree(
+            self.path, 'feature', 'refs/heads/main', True))
+
+        verdict, evidence = cb.classify_with_forge(
+            self.path, 'feature', tip,
+            self._index_for_refresh(recorded_head, merge_commit), True)
+        self.assertEqual(verdict, cb.SQUASHED)
+        self.assertIn('add nothing', evidence)
+
+    def test_merge_carrying_its_own_edits_needs_review(self):
+        if not self.have_merge_tree:
+            self.skipTest('git is older than 2.38')
+        recorded_head, tip, merge_commit = self._squash_then_refresh(
+            resolve_conflict_by_hand=True)
+
+        verdict, evidence = cb.classify_with_forge(
+            self.path, 'feature', tip,
+            self._index_for_refresh(recorded_head, merge_commit), True)
         self.assertEqual(verdict, cb.UNKNOWN)
         self.assertIn('unaccounted for', evidence)
 
