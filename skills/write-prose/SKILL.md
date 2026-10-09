@@ -18,6 +18,9 @@ description: Master prose writing and orchestration skill for creating clear, pl
 
 This skill is the central source of truth for clear, plain, accessible, and natural human writing across technical and non-technical documents.
 
+> [!NOTE]
+> Use American English instead of British (or other languages) unless otherwise instructed (e.g. avoid things like *flavour* and *behaviour*).
+
 ## Procedural workflow
 
 ### Step 1: Context & audience inference
