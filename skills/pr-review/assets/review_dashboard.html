@@ -483,6 +483,41 @@
     .sev-high { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
     .sev-medium { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
     .sev-low { background: rgba(88, 166, 255, 0.15); color: var(--accent); border: 1px solid var(--accent); }
+    .sev-question { background: rgba(56, 139, 253, 0.2); color: #58a6ff; border: 1px solid #388bfd; }
+
+    .evidence-pill {
+      font-size: 11px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .tier-executed { background: var(--success-bg); color: var(--success-text); border: 1px solid var(--success-border); }
+    .tier-read { background: rgba(56, 139, 253, 0.15); color: #58a6ff; border: 1px solid rgba(56, 139, 253, 0.4); }
+    .tier-fetched { background: rgba(57, 211, 83, 0.15); color: #39d353; border: 1px solid rgba(57, 211, 83, 0.4); }
+    .tier-deduction { background: var(--purple-bg); color: var(--purple-text); border: 1px solid var(--purple-border); }
+    .tier-speculation { background: var(--warning-bg); color: var(--warning-text); border: 1px solid var(--warning-border); }
+
+    .finding-why {
+      margin: 8px 0;
+      padding: 8px 12px;
+      background: rgba(110, 118, 129, 0.1);
+      border-left: 3px solid var(--accent);
+      border-radius: 0 4px 4px 0;
+      font-size: 13px;
+      color: var(--text-bright);
+    }
+
+    .finding-settle {
+      margin: 8px 0;
+      padding: 8px 12px;
+      background: rgba(56, 139, 253, 0.08);
+      border-left: 3px solid #388bfd;
+      border-radius: 0 4px 4px 0;
+      font-size: 13px;
+      color: var(--text-bright);
+    }
 
     .hunk-pill {
       font-size: 11px;
@@ -753,6 +788,24 @@
     </div>
   </div>
 
+  <!-- Checked and Found Clean & Structural Assessment Panel -->
+  <div class="section-card" id="clean-and-structural-card" style="display: none;">
+    <div id="checked-clean-section" style="display: none; margin-bottom: 12px;">
+      <div class="section-title" style="margin-bottom: 8px;">
+        <span>Checked and Found Clean</span>
+        <span style="font-size: 11px; font-weight: normal; color: var(--text-muted);">Verified edge cases and disproved hypotheses</span>
+      </div>
+      <ul id="checked-clean-list" style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-muted); line-height: 1.6;"></ul>
+    </div>
+
+    <div id="structural-assessment-section" style="display: none;">
+      <div class="section-title" style="margin-bottom: 8px;">
+        <span>Document Structural Assessment</span>
+      </div>
+      <div id="structural-assessment-table" style="font-size: 13px; color: var(--text-muted); line-height: 1.6;"></div>
+    </div>
+  </div>
+
   <!-- Top-Level Verdict Panel -->
   <div class="section-card">
     <div class="section-title">
@@ -866,6 +919,7 @@
 
     renderPRMetadata();
     renderPRDescription();
+    renderCleanAndStructural();
     checkMetadata();
     renderFindings();
     updateFooterStats();
@@ -1114,6 +1168,41 @@
     submitBtn.disabled = true;
   }
 
+  function renderCleanAndStructural() {
+    const summary = reviewData.review_summary || {};
+    const cleanList = summary.checked_clean || [];
+    const structural = summary.structural_assessment || {};
+
+    const cleanSection = document.getElementById('checked-clean-section');
+    const cleanUl = document.getElementById('checked-clean-list');
+    if (Array.isArray(cleanList) && cleanList.length > 0) {
+      cleanUl.innerHTML = cleanList.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      cleanSection.style.display = 'block';
+    } else {
+      cleanSection.style.display = 'none';
+    }
+
+    const structSection = document.getElementById('structural-assessment-section');
+    const structTable = document.getElementById('structural-assessment-table');
+    const structKeys = Object.keys(structural);
+    if (structKeys.length > 0) {
+      structTable.innerHTML = structKeys.map(k => {
+        const val = structural[k];
+        return `<div style="margin-bottom: 4px;"><strong>${escapeHtml(k.toUpperCase())}:</strong> ${escapeHtml(val)}</div>`;
+      }).join('');
+      structSection.style.display = 'block';
+    } else {
+      structSection.style.display = 'none';
+    }
+
+    const card = document.getElementById('clean-and-structural-card');
+    if ((Array.isArray(cleanList) && cleanList.length > 0) || structKeys.length > 0) {
+      card.style.display = 'block';
+    } else {
+      card.style.display = 'none';
+    }
+  }
+
   function renderPRMetadata() {
     const meta = prMeta();
     const titleLink = document.getElementById('pr-title-link');
@@ -1211,6 +1300,11 @@
       ? '<span class="hunk-pill hunk-in">IN DIFF</span>'
       : '<span class="hunk-pill hunk-out" title="Will append to top-level review summary">OUTSIDE DIFF</span>';
 
+    const tier = (finding.evidence_tier || '').toLowerCase();
+    const tierBadge = finding.evidence_tier
+      ? `<span class="evidence-pill tier-${escapeHtml(tier)}" title="${escapeHtml(finding.evidence_detail || '')}">${escapeHtml(finding.evidence_tier)}</span>`
+      : '';
+
     const lineRange = finding.line_start === finding.line_end
       ? `Line ${finding.line_start}`
       : `Lines ${finding.line_start}-${finding.line_end}`;
@@ -1228,6 +1322,7 @@
         <div class="finding-location">
           ${location}
           <span class="severity-pill ${sevClass}">${escapeHtml(finding.severity || 'MEDIUM')}</span>
+          ${tierBadge}
           ${hunkBadge}
         </div>
         <div class="approval-toggle">
@@ -1240,6 +1335,14 @@
       </div>
       <div class="finding-body">
         ${finding.description ? `<div class="finding-desc"><strong>${escapeHtml(finding.description)}</strong></div>` : ''}
+
+        ${finding.why ? `
+          <div class="finding-why"><strong>Impact:</strong> ${escapeHtml(finding.why)}</div>
+        ` : ''}
+
+        ${finding.to_settle ? `
+          <div class="finding-settle"><strong>To Settle:</strong> ${escapeHtml(finding.to_settle)}</div>
+        ` : ''}
 
         ${finding.original_code ? `
           <div class="code-label">Original Code (${lineRange}):</div>

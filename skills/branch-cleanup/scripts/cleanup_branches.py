@@ -1005,7 +1005,7 @@ def revalidate(path, plan):
 
 def archive_branch(path, name, oid, prefix):
     tag = f'{prefix}{name}'
-    code, _, err = git(path, 'tag', '-f', tag, oid)
+    code, _, err = git(path, '-c', 'tag.gpgsign=false', 'tag', '-f', tag, oid)
     if code != 0:
         print(f'Error: could not tag {tag}: {err.strip()}', file=sys.stderr)
         return False

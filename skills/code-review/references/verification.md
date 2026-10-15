@@ -47,13 +47,13 @@ With any flags, never run:
 Tier 2 runs code from the change. It runs only when the change is trusted:
 
 - **Local changes** and the user's own branches are trusted.
-- **PRs** are trusted when the author has write access to the repo. Look it up with:
+- **PRs** are trusted when the author has write access to the repo. Look it up with the PR's own `owner` and `repo` written out:
 
   ```bash
-  gh api repos/{owner}/{repo}/pulls/<n> --jq .author_association
+  gh api repos/<owner>/<repo>/pulls/<n> --jq .author_association
   ```
 
-  (`gh pr view --json` does not expose this field.) `OWNER`, `MEMBER`, or `COLLABORATOR` means trusted. `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`, or a failed lookup means untrusted.
+  Do not use `gh`'s `{owner}/{repo}` placeholders here: `gh api` fills them from the repository of the current directory (or `GH_REPO`), not from the PR under review, so a session running from another checkout would query the wrong repo's PR with the same number. (`gh pr view --json` does not expose this field.) `OWNER`, `MEMBER`, or `COLLABORATOR` means trusted. `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, `FIRST_TIMER`, `NONE`, or a failed lookup means untrusted.
 
 Untrusted PRs get tier 1 only, even with `--verify` or `--max`. No flag overrides this. The review Summary says: "`--verify` limited to tier 1: PR author is not a repo collaborator" (or "author lookup failed").
 
@@ -132,7 +132,7 @@ The orchestrator passes these rules to the reviewer in a Verification Mandate bl
 - Revert every mutation with `git restore <path>` before the next command and before reporting.
 - Stop any command that runs longer than 10 minutes, and report that it timed out.
 - A finding a command confirms gets `Evidence: Executed` (format below). A finding a test disproves is dropped and recorded in `## Checked and Found Clean`.
-- A scratch test that reproduces a bug goes in the finding's `Suggestion` as the proposed regression test.
+- A scratch test that reproduces a bug goes in the finding's `- **Repro test**:` field, in one fenced block. Never put it in `Suggestion`: the exporter posts a `Suggestion` as a committable GitHub suggestion anchored on the production lines, while a `Repro test` is posted as a plain code block.
 
 ## Orchestrator Clean Check
 

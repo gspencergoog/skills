@@ -260,6 +260,32 @@ class TestApplyReview(unittest.TestCase):
         self.assertEqual(comment["start_line"], 20)
         self.assertEqual(comment["line"], 25)
 
+    def test_build_review_payload_includes_question_severity(self):
+        decisions = {
+            "head_sha": "abc123456789",
+            "verdict": "COMMENT",
+            "summary_comment": "Review comments.",
+            "findings": [
+                {
+                    "id": "Q1",
+                    "file_path": "lib/config.dart",
+                    "line_start": 40,
+                    "line_end": 40,
+                    "side": "RIGHT",
+                    "severity": "question",
+                    "is_diff_hunk": True,
+                    "approved": True,
+                    "draft_comment": "**Question**: Does defaultTimeout apply to streaming calls?",
+                }
+            ],
+        }
+        payload = build_review_payload(decisions)
+        self.assertEqual(payload["event"], "COMMENT")
+        self.assertEqual(len(payload["comments"]), 1)
+        self.assertEqual(payload["comments"][0]["path"], "lib/config.dart")
+        self.assertEqual(payload["comments"][0]["line"], 40)
+        self.assertIn("defaultTimeout", payload["comments"][0]["body"])
+
 
 if __name__ == "__main__":
     unittest.main()

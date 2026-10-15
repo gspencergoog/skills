@@ -128,6 +128,31 @@
       color: #ffb74d;
       border: 1px solid rgba(255, 152, 0, 0.3);
     }
+
+    /* Read-only agent assessment tag (urgent / solid / meh / disagree). */
+    .badge.assessment-urgent {
+      background-color: rgba(244, 67, 54, 0.2);
+      color: #f44336;
+      border: 1px solid rgba(244, 67, 54, 0.3);
+    }
+
+    .badge.assessment-solid {
+      background-color: rgba(76, 175, 80, 0.2);
+      color: #8bc34a;
+      border: 1px solid rgba(76, 175, 80, 0.3);
+    }
+
+    .badge.assessment-meh {
+      background-color: var(--badge-bg);
+      color: var(--text-light);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .badge.assessment-disagree {
+      background-color: rgba(255, 152, 0, 0.2);
+      color: #ffb74d;
+      border: 1px solid rgba(255, 152, 0, 0.3);
+    }
     
     .thread-body {
       padding: 18px;
@@ -570,6 +595,59 @@
     let feedbackData = null;
     const decisions = {};
 
+    // Allowed decision values. Unknown values from a hand-edited
+    // proposals.json fall back to the first entry of each list.
+    const ACTIONS = ['accept', 'clarify', 'decline'];
+    const RATINGS = ['urgent', 'solid', 'meh', 'disagree'];
+    const RATING_LABELS = {
+      urgent: '🔥 Urgent',
+      solid: '👍 Solid',
+      meh: '🤷 Meh',
+      disagree: '👎 Disagree'
+    };
+    const CLARIFY_TEMPLATE = 'Could you clarify what you mean by...';
+    const DECLINE_TEMPLATE = 'Declining this because...';
+    const ACCEPT_TEMPLATES = ['Applied suggestion.', 'Fixed.'];
+
+    // Returns the reply the dashboard would insert for `action` when nothing
+    // better is available. For `accept`, an agent-drafted reply wins.
+    function stockReplyFor(thread, action) {
+      if (action === 'clarify') return CLARIFY_TEMPLATE;
+      if (action === 'decline') return DECLINE_TEMPLATE;
+      return thread.draftReply || (thread.suggestion ? ACCEPT_TEMPLATES[0] : ACCEPT_TEMPLATES[1]);
+    }
+
+    // True when `text` is empty or one of the dashboard's own templates,
+    // meaning neither the agent nor the user wrote it.
+    function isStockReply(text) {
+      const trimmed = (text || '').trim();
+      return trimmed === ''
+        || ACCEPT_TEMPLATES.includes(trimmed)
+        || trimmed === CLARIFY_TEMPLATE
+        || trimmed === DECLINE_TEMPLATE;
+    }
+
+    // Builds the initial decision for a thread from the proposal fields that
+    // launch_dashboard.py merges into /api/comments (action, rating, draftReply).
+    function initialDecision(thread) {
+      const action = ACTIONS.includes(thread.action) ? thread.action : ACTIONS[0];
+      const rating = RATINGS.includes(thread.rating) ? thread.rating : RATINGS[1];
+      return {
+        approved: false,
+        action: action,
+        rating: rating,
+        reply: thread.draftReply || stockReplyFor(thread, action),
+        resolve: action !== 'clarify',
+        agentInstructions: ''
+      };
+    }
+
+    // Read-only tag showing the agent's assessment of the comment. `rating`
+    // is already validated against RATINGS, so the label is a constant literal.
+    function assessmentBadgeHtml(rating) {
+      return `<span class="badge assessment-${rating}" title="Agent assessment of this comment">${RATING_LABELS[rating]}</span>`;
+    }
+
     function unescapeNewlines(text) {
       if (!text || typeof text !== 'string') return text || '';
       return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t');
@@ -648,15 +726,9 @@
       container.innerHTML = '';
       
       threads.forEach(thread => {
-        // Initialize default decision state
-        decisions[thread.id] = {
-          approved: false,
-          action: 'accept', // default
-          rating: 'solid',
-          reply: thread.draftReply || (thread.suggestion ? 'Applied suggestion.' : 'Fixed.'),
-          resolve: true,
-          agentInstructions: ''
-        };
+        // Seed decision state from the proposal fields merged by the server.
+        decisions[thread.id] = initialDecision(thread);
+        const d = decisions[thread.id];
         
         const card = document.createElement('div');
         card.className = 'thread-card';
@@ -743,6 +815,7 @@
               </button>
             </div>
             <div class="status-badge-container">
+              ${assessmentBadgeHtml(d.rating)}
               ${localStatusBadge}
               ${outdatedBadge}
               ${resolvedBadge}
@@ -758,45 +831,25 @@
             ${proposedFixHtml}
             
             <div class="action-panel">
-              <div class="action-row" style="margin-bottom: 10px;">
-                <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">ASSESSMENT:</span>
-                <label class="action-option">
-                  <input type="radio" name="rating-${thread.id}" value="urgent" onchange="updateRating('${thread.id}', 'urgent')">
-                  🔥 Urgent
-                </label>
-                <label class="action-option">
-                  <input type="radio" name="rating-${thread.id}" value="solid" checked onchange="updateRating('${thread.id}', 'solid')">
-                  👍 Solid
-                </label>
-                <label class="action-option">
-                  <input type="radio" name="rating-${thread.id}" value="meh" onchange="updateRating('${thread.id}', 'meh')">
-                  🤷 Meh
-                </label>
-                <label class="action-option">
-                  <input type="radio" name="rating-${thread.id}" value="disagree" onchange="updateRating('${thread.id}', 'disagree')">
-                  👎 Disagree
-                </label>
-              </div>
-
               <div class="action-row">
                 <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">DECISION:</span>
                 <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="accept" checked onchange="updateAction('${thread.id}', 'accept')">
+                  <input type="radio" name="action-${thread.id}" value="accept" ${d.action === 'accept' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'accept')">
                   Accept Fix
                 </label>
                 <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="clarify" onchange="updateAction('${thread.id}', 'clarify')">
+                  <input type="radio" name="action-${thread.id}" value="clarify" ${d.action === 'clarify' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'clarify')">
                   Request Clarification
                 </label>
                 <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="decline" onchange="updateAction('${thread.id}', 'decline')">
+                  <input type="radio" name="action-${thread.id}" value="decline" ${d.action === 'decline' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'decline')">
                   Decline/Ignore
                 </label>
               </div>
               
               <div class="reply-box">
                 <label for="reply-text-${thread.id}">Draft Reply Comment:</label>
-                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="4" oninput="updateReply('${thread.id}', this.value)">${decisions[thread.id].reply}</textarea>
+                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="4" oninput="updateReply('${thread.id}', this.value)">${d.reply}</textarea>
               </div>
 
               <div class="reply-box" style="margin-top: 12px;">
@@ -822,7 +875,7 @@
                   </span>
                 </button>
                 <label class="checkbox-option" style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-light);">
-                  <input type="checkbox" id="resolve-${thread.id}" checked onchange="updateResolve('${thread.id}', this.checked)" style="cursor: pointer;">
+                  <input type="checkbox" id="resolve-${thread.id}" ${d.resolve ? 'checked' : ''} onchange="updateResolve('${thread.id}', this.checked)" style="cursor: pointer;">
                   Mark thread resolved
                 </label>
               </div>
@@ -844,31 +897,22 @@
         .replace(/'/g, "&#039;");
     }
 
-    function updateRating(threadId, rating) {
-      decisions[threadId].rating = rating;
-      if (rating === 'disagree') {
-        updateAction(threadId, 'decline');
-        const rDecline = document.querySelector(`input[name="action-${threadId}"][value="decline"]`);
-        if (rDecline) rDecline.checked = true;
-      }
-    }
-
     function updateAction(threadId, action) {
       decisions[threadId].action = action;
       const replyArea = document.getElementById(`reply-text-${threadId}`);
       
-      // Suggest template text based on selected action
-      if (action === 'accept') {
+      // Only replace the reply when it is still one of our own templates (or
+      // empty). Agent-drafted replies and user edits are left alone.
+      if (isStockReply(replyArea.value)) {
         const thread = feedbackData.threads.find(t => t.id === threadId);
-        decisions[threadId].reply = thread.draftReply || (thread.suggestion ? 'Applied suggestion.' : 'Fixed.');
-      } else if (action === 'clarify') {
-        decisions[threadId].reply = 'Could you clarify what you mean by...';
+        decisions[threadId].reply = stockReplyFor(thread, action);
+        replyArea.value = decisions[threadId].reply;
+      }
+
+      if (action === 'clarify') {
         decisions[threadId].resolve = false; // default false for clarification
         document.getElementById(`resolve-${threadId}`).checked = false;
-      } else if (action === 'decline') {
-        decisions[threadId].reply = 'Declining this because...';
       }
-      replyArea.value = decisions[threadId].reply;
     }
 
     function updateReply(threadId, val) {
@@ -962,6 +1006,9 @@
               <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; margin-top: 0.25rem;">
                 <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
                   Action: <strong>${actionText}</strong>
+                </span>
+                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+                  Assessment: <strong>${RATING_LABELS[d.rating]}</strong>
                 </span>
                 <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
                   Resolve Thread: <strong>${d.resolve ? 'Yes' : 'No'}</strong>

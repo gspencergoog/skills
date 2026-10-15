@@ -457,6 +457,89 @@ console.log(out);
         self.assertIn("callout-warning", rendered)
         self.assertIn("<code>&lt;b&gt;code&lt;/b&gt;</code>", rendered)
 
+    def test_normalize_review_data_preserves_enriched_fields(self):
+        data = {
+            "pr_metadata": {
+                "owner": "octocat",
+                "repo": "hello-world",
+                "pull_number": 42,
+                "head_sha": "010d93e",
+            },
+            "review_summary": {
+                "overview": "Summary overview.",
+                "verdict": "REQUEST_CHANGES",
+                "checked_clean": ["Memory leak: Executed - clean"],
+                "structural_assessment": {"implementer": "Clean"},
+            },
+            "findings": [
+                {
+                    "id": "H1",
+                    "file_path": "src/parser.ts",
+                    "line_start": 10,
+                    "line_end": 12,
+                    "severity": "high",
+                    "evidence_tier": "Read",
+                    "evidence_detail": "parser.ts:10",
+                    "why": "Silent drop",
+                    "description": "Unawaited",
+                    "draft_comment": "Await this.",
+                }
+            ],
+        }
+        normalized, warnings = normalize_review_data(data)
+        summary = normalized["review_summary"]
+        self.assertEqual(summary["checked_clean"], ["Memory leak: Executed - clean"])
+        self.assertEqual(summary["structural_assessment"], {"implementer": "Clean"})
+        finding = normalized["findings"][0]
+        self.assertEqual(finding["evidence_tier"], "Read")
+        self.assertEqual(finding["why"], "Silent drop")
+
+    def test_normalize_review_data_does_not_duplicate_questions(self):
+        """Top-level `questions` survive the real two-pass path exactly once.
+
+        diff_parser.normalize_findings_payload runs first (Step 3.4), then
+        launch_dashboard.normalize_review_data runs it again. Without the
+        `questions` pop in diff_parser, the second pass re-collects them.
+        """
+        from diff_parser import normalize_findings_payload
+
+        raw = {
+            "pr_metadata": {
+                "owner": "octocat",
+                "repo": "hello-world",
+                "pull_number": 42,
+                "head_sha": "010d93e",
+            },
+            "review_summary": {
+                "overview": "Summary overview.",
+                "verdict": "REQUEST_CHANGES",
+            },
+            "findings": [
+                {
+                    "id": "H1",
+                    "file_path": "src/parser.ts",
+                    "line_start": 10,
+                    "line_end": 12,
+                    "severity": "high",
+                    "draft_comment": "Fix this.",
+                },
+            ],
+            "questions": [
+                {
+                    "id": "Q1",
+                    "file_path": "src/parser.ts",
+                    "line_start": 20,
+                    "line_end": 20,
+                    "severity": "question",
+                    "draft_comment": "**Question**: Is this needed?",
+                },
+            ],
+        }
+        pass1 = normalize_findings_payload(raw)
+        normalized, warnings = normalize_review_data(pass1)
+        self.assertEqual([f["id"] for f in normalized["findings"]], ["H1", "Q1"])
+        self.assertNotIn("questions", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

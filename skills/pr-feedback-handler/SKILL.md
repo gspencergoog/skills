@@ -86,7 +86,7 @@ ______________________________________________________________________
 
    The script prints a compact summary table of unresolved threads to `stdout` and writes `<conversation-scratch-directory>/proposals.json`.
 
-4. **Populate Proposals File**: Edit `<conversation-scratch-directory>/proposals.json` to formulate a concrete technical fix (`proposedFix`) and draft reply (`draftReply`), adjusting `action` (`accept`, `decline`, `clarify`) or `assessment` (`urgent`, `solid`, `meh`, `disagree`) as appropriate:
+4. **Populate Proposals File**: Edit `<conversation-scratch-directory>/proposals.json` to formulate a concrete technical fix (`proposedFix`) and draft reply (`draftReply`), adjusting `action` (`accept`, `decline`, `clarify`) or `assessment` (`urgent`, `solid`, `meh`, `disagree`) as appropriate. The dashboard pre-selects the DECISION radio from `action` and shows `assessment` as a read-only tag on each thread, so set both deliberately; a `disagree` assessment should normally pair with `action: "decline"`.
 
    ```json
    {

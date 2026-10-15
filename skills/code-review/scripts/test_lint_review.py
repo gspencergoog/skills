@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for lint_review.py."""
 
+import json
 import pathlib
 import tempfile
 import unittest
@@ -208,6 +209,344 @@ None.
             bad_path = pathlib.Path(tmp) / "bad.md"
             bad_path.write_text("## Review Comments\nSome unparsed text\n", encoding="utf-8")
             self.assertEqual(main([str(bad_path)]), 1)
+
+    def test_export_json_valid_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            clean_path = pathlib.Path(tmp) / "clean.md"
+            clean_path.write_text(CLEAN_REPORT, encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+
+            exit_code = main([str(clean_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(json_path.is_file())
+
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["review_summary"]["verdict"], "REQUEST_CHANGES")
+            self.assertEqual(len(data["findings"]), 2)
+
+            h1 = data["findings"][0]
+            self.assertEqual(h1["id"], "H1")
+            self.assertEqual(h1["severity"], "high")
+            self.assertEqual(h1["file_path"], "split_diff.py")
+            self.assertEqual(h1["line_start"], 50)
+            self.assertEqual(h1["line_end"], 50)
+            self.assertEqual(h1["evidence_tier"], "Executed")
+            self.assertIn("48,120 bytes", h1["evidence_detail"])
+            self.assertEqual(h1["description"], "`_fits_limits` measures code points instead of UTF-8 bytes")
+            self.assertIn("Multibyte diffs exceed", h1["why"])
+            self.assertIn("return _byte_len(text) <= max_bytes", h1["suggestion"])
+            self.assertIn("```suggestion", h1["draft_comment"])
+
+            self.assertEqual(len(data["questions"]), 1)
+            q1 = data["questions"][0]
+            self.assertEqual(q1["id"], "Q1")
+            self.assertEqual(q1["severity"], "question")
+            self.assertEqual(q1["file_path"], "split_diff.py")
+            self.assertEqual(q1["line_start"], 41)
+            self.assertEqual(q1["line_end"], 41)
+            self.assertEqual(q1["evidence_tier"], "Speculation")
+            self.assertIn("Check how `git diff`", q1["to_settle"])
+            self.assertIn("**Question**", q1["draft_comment"])
+
+            self.assertEqual(len(data["review_summary"]["checked_clean"]), 2)
+
+    def test_export_json_invalid_report_does_not_write_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_path = pathlib.Path(tmp) / "bad.md"
+            bad_path.write_text("## Review Comments\nSome unparsed text\n", encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+
+            exit_code = main([str(bad_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(json_path.exists())
+
+    def test_export_json_preserves_indentation(self):
+        report_text = """\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Indented suggestion
+- **File**: `example.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - file inspection
+- **Body**: Nested block needs indentation.
+- **Why**: Broken syntax.
+- **Suggestion**:
+```suggestion
+        if not items:
+            return []
+```
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_path = pathlib.Path(tmp) / "report.md"
+            doc_path.write_text(report_text, encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+            exit_code = main([str(doc_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 0)
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            sugg = data["findings"][0]["draft_comment"]
+            self.assertIn("```suggestion\n        if not items:\n            return []\n```", sugg)
+
+    def test_export_json_overview_strips_internal_process_lines(self):
+        report_text = """\
+## Summary
+Changes look solid.
+Citation audit: 4 checked, 0 dropped. Flags: `--max --claude`.
+`--verify` limited to tier 1: PR author is not a repo collaborator.
+1 disputed (1 withdrawn, 0 upheld).
+
+## Review Comments (Ordered by Severity)
+
+### L1. Minor typo
+- **File**: `doc.md`
+- **Line**: `1`
+- **Severity**: `low`
+- **Evidence**: `Read` - typo in title
+- **Body**: Fix typo.
+- **Why**: Better readability.
+- **Suggestion**: Fix word.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_path = pathlib.Path(tmp) / "report.md"
+            doc_path.write_text(report_text, encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+            exit_code = main([str(doc_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 0)
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["review_summary"]["overview"], "Changes look solid.")
+            self.assertEqual(data["review_summary"]["citation_audit"]["checked"], 4)
+            self.assertEqual(data["review_summary"]["flags"], ["--max", "--claude"])
+
+    def test_parse_verdict_word_boundaries(self):
+        from lint_review import _parse_verdict, Finding
+
+        # Contains 'already' (should not match 'ready') and 'no critical blockers'
+        text = "These changes are already tested. There are no critical blockers in the implementation."
+        # No high/critical findings -> should fall back to COMMENT because there is a medium finding
+        findings = [Finding(id="M1", severity="medium", fields={}, line=10)]
+        self.assertEqual(_parse_verdict(text, findings), "COMMENT")
+
+        # Explicit verdict label
+        text_ready = "Review complete. Verdict: Ready for merge."
+        self.assertEqual(_parse_verdict(text_ready, findings), "APPROVE")
+
+        text_blocker = "Review complete. Verdict: Critical blockers present."
+        self.assertEqual(_parse_verdict(text_blocker, []), "REQUEST_CHANGES")
+
+    def test_export_json_preserves_lead_in_text_before_fence(self):
+        report_text = """\
+## Summary
+Verdict: Ready.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Helper function
+- **File**: `helper.py`
+- **Line**: `15`
+- **Severity**: `medium`
+- **Evidence**: `Read` - missing helper
+- **Body**: Extract helper.
+- **Why**: Redundant code.
+- **Suggestion**: Replace with the following helper:
+```python
+def helper():
+    return 42
+```
+"""
+        data = self._export(report_text)
+        comment = data["findings"][0]["draft_comment"]
+        # Lead-in text precedes the block and does not remove committability.
+        self.assertIn(
+            "Replace with the following helper:\n\n```suggestion\ndef helper():\n    return 42\n```",
+            comment,
+        )
+
+    def _export(self, report_text: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_path = pathlib.Path(tmp) / "report.md"
+            doc_path.write_text(report_text, encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+            exit_code = main([str(doc_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 0)
+            return json.loads(json_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _finding_report(suggestion_block: str) -> str:
+        return f"""\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Example finding
+- **File**: `example.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - file inspection
+- **Body**: Something is off.
+- **Why**: It breaks.
+- **Suggestion**:{suggestion_block}
+"""
+
+    def test_export_json_indented_fence_keeps_relative_indentation(self):
+        # Fence opener at 4 spaces; body has a line shallower than the fence
+        # and a line deeper than it. Relative nesting must survive.
+        report_text = self._finding_report(
+            "\n    ```suggestion\n  if x:\n          y()\n    ```"
+        )
+        data = self._export(report_text)
+        self.assertEqual(data["findings"][0]["suggestion"], "if x:\n      y()")
+
+    def test_export_json_bare_fence_becomes_suggestion(self):
+        report_text = self._finding_report("\n```\nx = compute()\n```")
+        data = self._export(report_text)
+        self.assertIn("```suggestion\nx = compute()\n```", data["findings"][0]["draft_comment"])
+
+    def test_export_json_bare_fence_with_lead_in_becomes_suggestion(self):
+        report_text = self._finding_report(
+            " Use this instead:\n```\nif not items:\n    return []\n```"
+        )
+        data = self._export(report_text)
+        self.assertIn(
+            "Use this instead:\n\n```suggestion\nif not items:\n    return []\n```",
+            data["findings"][0]["draft_comment"],
+        )
+
+    def test_export_json_diff_fence_is_not_committable(self):
+        report_text = self._finding_report("\n```diff\n-    send()\n+    await send()\n```")
+        data = self._export(report_text)
+        comment = data["findings"][0]["draft_comment"]
+        self.assertIn("```diff\n-    send()\n+    await send()\n```", comment)
+        self.assertNotIn("```suggestion", comment)
+
+    def test_second_fence_under_suggestion_fails_lint(self):
+        # "Replace X with Y": the exporter cannot tell X from Y, so lint
+        # fails and the orchestrator rewrites the Suggestion as one block.
+        report_text = self._finding_report(
+            "\n```python\nold_call()\n```\nwith:\n```python\nnew_call()\n```"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            doc_path = pathlib.Path(tmp) / "report.md"
+            doc_path.write_text(report_text, encoding="utf-8")
+            json_path = pathlib.Path(tmp) / "output.json"
+            exit_code = main([str(doc_path), "--export-json", str(json_path)])
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(json_path.exists())
+        report = parse_report(report_text)
+        rules = {v.rule for v in check_report(report)}
+        self.assertIn("suggestion-single-fence", rules)
+
+    def test_export_json_prose_suggestion_is_not_fenced(self):
+        report_text = self._finding_report(
+            " Return the error to the caller instead of logging it."
+        )
+        data = self._export(report_text)
+        comment = data["findings"][0]["draft_comment"]
+        self.assertNotIn("```suggestion", comment)
+        self.assertIn("Return the error to the caller instead of logging it.", comment)
+
+    def test_clean_overview_keeps_prose_and_strips_process_sentences(self):
+        from lint_review import _clean_overview
+
+        cases = {
+            # "Flags:" inside prose is not a process sentence; the closing
+            # Verdict label is a process label and is stripped.
+            "Adds CLI parsing. New Flags: `--dry-run` and `--json` are wired into argparse. "
+            "Verdict: Minor Revisions Needed.":
+                "Adds CLI parsing. New Flags: `--dry-run` and `--json` are wired into argparse.",
+            # Nested parentheses inside the citation audit parenthetical.
+            "Refactors the parser. Citation audit: 3 checked, 1 dropped (H2 cited `parse()` "
+            "which does not exist). Flags: `--max`.":
+                "Refactors the parser.",
+            # Prose after the flags sentence survives; Verdict is stripped.
+            "Verdict: Ready. Flags: `--claude`. The remaining risk is the untested retry path.":
+                "The remaining risk is the untested retry path.",
+            # "none required" variant is stripped.
+            "Looks good. Citation audit: none required (no critical or high findings).":
+                "Looks good.",
+            # Two paragraphs are preserved as two paragraphs.
+            "First paragraph.\n\nSecond paragraph. Flags: `--fast`.":
+                "First paragraph.\n\nSecond paragraph.",
+            # One backtick span per flag, comma separated.
+            "Refactors X. Flags: `--json`, `--verify`.": "Refactors X.",
+            # One backtick span per flag, space separated.
+            "Refactors X. Flags: `--json` `--verify`.": "Refactors X.",
+            # Trailing parenthetical after the flag list.
+            "Refactors X. Flags: `--fast` (`--claude` ignored).": "Refactors X.",
+            # Prose after the trust-limit sentence survives.
+            "Refactors X. `--verify` limited to tier 1: PR author is not a repo collaborator. "
+            "The retry path remains untested.":
+                "Refactors X. The retry path remains untested.",
+            # A paragraph that starts with a process sentence keeps its prose
+            # as its own paragraph.
+            "First paragraph.\n\nCitation audit: 3 checked, 0 dropped. Second paragraph prose.":
+                "First paragraph.\n\nSecond paragraph prose.",
+            # A paragraph that is only process text disappears entirely.
+            "First paragraph.\n\nFlags: `--max`.\n\nThird paragraph.":
+                "First paragraph.\n\nThird paragraph.",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_clean_overview(raw), expected)
+
+    def test_parse_verdict_uses_last_label(self):
+        from lint_review import _parse_verdict
+
+        text = (
+            "Earlier passes reached verdict Ready, but H1 regresses the export path.\n"
+            "Verdict: Critical Blockers\n"
+        )
+        self.assertEqual(_parse_verdict(text, []), "REQUEST_CHANGES")
+
+    def test_export_json_repro_test_is_not_committable(self):
+        report_text = self._finding_report(
+            "\n```suggestion\n    await send()\n```\n"
+            "- **Repro test**: `tests/review_scratch_test_retry.py`\n"
+            "```python\ndef test_retry_increments_once():\n    assert retry(fail_once) == 1\n```"
+        )
+        data = self._export(report_text)
+        finding = data["findings"][0]
+        comment = finding["draft_comment"]
+        self.assertIn("```suggestion\n    await send()\n```", comment)
+        self.assertIn(
+            "**Repro test**: `tests/review_scratch_test_retry.py`\n\n"
+            "```python\ndef test_retry_increments_once():\n    assert retry(fail_once) == 1\n```",
+            comment,
+        )
+        self.assertEqual(comment.count("```suggestion"), 1)
+        self.assertEqual(
+            finding["repro_test"],
+            "def test_retry_increments_once():\n    assert retry(fail_once) == 1",
+        )
+        self.assertEqual(finding["suggestion"], "    await send()")
+
+    def test_export_json_repro_test_bare_fence_defaults_to_python(self):
+        report_text = self._finding_report(
+            " Fix it.\n- **Repro test**:\n```\nassert retry(fail_once) == 1\n```"
+        )
+        data = self._export(report_text)
+        self.assertIn(
+            "**Repro test**\n\n```python\nassert retry(fail_once) == 1\n```",
+            data["findings"][0]["draft_comment"],
+        )
+
+    def test_summary_keeps_paragraph_breaks(self):
+        report_text = """\
+## Summary
+First paragraph.
+
+Second paragraph.
+
+## Review Comments (Ordered by Severity)
+None.
+"""
+        data = self._export(report_text)
+        self.assertEqual(
+            data["review_summary"]["overview"], "First paragraph.\n\nSecond paragraph."
+        )
 
 
 if __name__ == "__main__":

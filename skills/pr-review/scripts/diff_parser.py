@@ -228,7 +228,10 @@ def extract_source_lines(
 
 
 def normalize_finding_entry(
-    raw: Dict[str, Any], index: int, force_out_of_diff: bool = False
+    raw: Dict[str, Any],
+    index: int,
+    force_out_of_diff: bool = False,
+    default_severity: str = "medium",
 ) -> Dict[str, Any]:
     """Normalizes a single finding dictionary from canonical or alias keys."""
     item = dict(raw)
@@ -257,7 +260,7 @@ def normalize_finding_entry(
     item["line_start"] = start_line
     item["line_end"] = end_line
     item["side"] = str(item.get("side") or "RIGHT").upper()
-    item["severity"] = str(item.get("severity") or "medium").lower()
+    item["severity"] = str(item.get("severity") or default_severity).lower()
     if "category" in item and item["category"]:
         item["category"] = str(item["category"]).lower()
     item["description"] = description
@@ -268,13 +271,19 @@ def normalize_finding_entry(
 
 
 def _collect_raw_findings_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Extracts and normalizes findings from canonical `findings` or alias lists."""
+    """Extracts and normalizes findings from canonical `findings` or alias lists.
+
+    Entries under the top-level `questions` list default to
+    `severity: "question"` so hand-written files match `lint_review.py`'s
+    export without having to repeat the severity on every entry.
+    """
     collected: List[Dict[str, Any]] = []
-    for key, out_of_diff in (
-        ("findings", False),
-        ("inline_findings", False),
-        ("general_findings", True),
-        ("comments", False),
+    for key, out_of_diff, default_severity in (
+        ("findings", False, "medium"),
+        ("inline_findings", False, "medium"),
+        ("general_findings", True, "medium"),
+        ("comments", False, "medium"),
+        ("questions", False, "question"),
     ):
         entries = data.get(key)
         if isinstance(entries, list):
@@ -282,7 +291,10 @@ def _collect_raw_findings_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if isinstance(raw, dict):
                     collected.append(
                         normalize_finding_entry(
-                            raw, len(collected) + 1, force_out_of_diff=out_of_diff
+                            raw,
+                            len(collected) + 1,
+                            force_out_of_diff=out_of_diff,
+                            default_severity=default_severity,
                         )
                     )
     return collected
@@ -303,15 +315,18 @@ def normalize_findings_payload(data: Any) -> Dict[str, Any]:
 
     normalized = dict(data)
     normalized["findings"] = _collect_raw_findings_list(normalized)
-    for alias_key in ("inline_findings", "general_findings", "comments"):
+    for alias_key in ("inline_findings", "general_findings", "comments", "questions"):
         normalized.pop(alias_key, None)
 
     raw_summary = normalized.get("review_summary")
+    if not isinstance(raw_summary, dict) and isinstance(normalized.get("summary"), dict):
+        raw_summary = normalized.get("summary")
+
     summary_dict = dict(raw_summary) if isinstance(raw_summary, dict) else {}
     overview = str(
         summary_dict.get("overview")
         or normalized.get("summary_comment")
-        or normalized.get("summary")
+        or (normalized.get("summary") if not isinstance(normalized.get("summary"), dict) else "")
         or normalized.get("overview")
         or ""
     ).strip()
@@ -319,7 +334,9 @@ def normalize_findings_payload(data: Any) -> Dict[str, Any]:
         summary_dict.get("verdict") or normalized.get("verdict") or "COMMENT"
     ).upper()
     if overview or "review_summary" in normalized or "summary" in normalized:
-        normalized["review_summary"] = {"overview": overview, "verdict": verdict}
+        summary_dict["overview"] = overview
+        summary_dict["verdict"] = verdict
+        normalized["review_summary"] = summary_dict
     normalized.pop("summary", None)
     return normalized
 

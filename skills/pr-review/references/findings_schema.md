@@ -22,7 +22,15 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
   },
   "review_summary": {
     "overview": "Adds empty-input handling to the parser. One async call is not awaited, so errors are lost.",
-    "verdict": "REQUEST_CHANGES"
+    "verdict": "REQUEST_CHANGES",
+    "checked_clean": [
+      "Memory leak in buffer allocation: Executed - valgrind clean",
+      "Race condition in worker shutdown: Deduction - locked by mutex"
+    ],
+    "structural_assessment": {
+      "implementer": "Clean interface definition",
+      "tester / verifier": "Missing integration test coverage"
+    }
   },
   "pr_description": {
     "markdown": "## Intent Alignment: Partial Divergence\n\n## Summary\nAdds empty-input handling to `src/parser.ts`...",
@@ -30,17 +38,35 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
   },
   "findings": [
     {
-      "id": "f1",
+      "id": "H1",
       "severity": "high",
       "category": "correctness",
       "file_path": "src/parser.ts",
       "line_start": 120,
       "line_end": 122,
       "side": "RIGHT",
+      "evidence_tier": "Read",
+      "evidence_detail": "src/parser.ts:121 - return Promise without await",
       "description": "The promise from resolveDynamicValue() is never awaited.",
-      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before they finish.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```",
+      "why": "Async functions report success before completion, dropping errors silently.",
+      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before they finish.\n\n**Impact**: Async functions report success before completion, dropping errors silently.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```",
       "is_diff_hunk": true,
       "original_code": "    resolveDynamicValue(fc);"
+    },
+    {
+      "id": "Q1",
+      "severity": "question",
+      "file_path": "src/config.ts",
+      "line_start": 45,
+      "line_end": 45,
+      "side": "RIGHT",
+      "evidence_tier": "Speculation",
+      "evidence_detail": "Unclear if default timeout applies to streaming RPCs",
+      "description": "Does defaultTimeout apply to long-lived streaming calls?",
+      "why": "If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.",
+      "to_settle": "Check grpc client timeout options in net/client.ts",
+      "draft_comment": "**Question**: Does defaultTimeout apply to long-lived streaming calls?\n\n**To Settle**: Check grpc client timeout options in net/client.ts",
+      "is_diff_hunk": true
     }
   ]
 }
@@ -51,16 +77,24 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
 | `pr_metadata` | agent, from `pr_meta.json` | Copy `review_engine.py --output-meta` output as is. The dashboard needs `owner`, `repo`, `pull_number`, `head_sha`, and `title` (plus optional `latest_head_sha` when new commits were pushed after Stage 1). Passing `--meta-file` to the launcher fills any missing fields. |
 | `review_summary.overview` | agent | 1-2 paragraphs: what the PR does, the assessment, and the verdict rationale. Don't list the findings. |
 | `review_summary.verdict` | agent | `COMMENT`, `REQUEST_CHANGES`, or `APPROVE`. The user can change it. |
+| `review_summary.checked_clean` | agent / `code-review` | Optional array of disproved hypotheses verified clean during review. |
+| `review_summary.structural_assessment` | agent / `code-review` | Optional dictionary keyed by the lowercased Structural Assessment labels that `lint_review.py --export-json` emits (`implementer`, `tester / verifier`, `consumer`, `operator / adversary`, `repo validators`, `downstream impact`, and `unchanged-file findings` when present). Any additional bold label in that section becomes a key the same way. |
 | `pr_description` | `--description-file` or agent | Reviewer-only PR description and intent alignment panel shown at the top of the dashboard (`{"markdown": "...", "alignment": "MATCHES\|PARTIAL\|DIVERGES\|UNSTATED"}`). Passing `--description-file <scratch>/pr_description.md` to `launch_dashboard.py` populates this automatically. `apply_review.py` never posts this field; its text is included in a review only if the user explicitly clicks **+ Insert into Review Summary**. |
-| `findings[].severity` | agent | `critical`, `high`, `medium`, or `low`. |
+| `findings[].severity` | agent | `critical`, `high`, `medium`, `low`, or `question`. |
 | `findings[].line_start`, `line_end` | agent | Lines in the new file (`side: RIGHT`) or the old file (`side: LEFT`). |
+| `findings[].evidence_tier` | agent / `code-review` | `Executed`, `Read`, `Fetched`, `Deduction`, or `Speculation`. |
+| `findings[].evidence_detail` | agent / `code-review` | Command output, citation location, or deductive trace. |
+| `findings[].why` | agent / `code-review` | Concrete consequence if shipped as-is. |
+| `findings[].suggestion` | `code-review` | Raw text of the finding's `Suggestion` block. Already folded into `draft_comment` (as a committable ```` ```suggestion ```` block unless it was a ```` ```diff ````/```` ```patch ```` fence); nothing downstream reads it on its own. |
+| `findings[].repro_test` | `code-review` | (`--verify` only) Raw text of the finding's `Repro test` block. Folded into `draft_comment` under a `**Repro test**` label as a plain code block, never as a committable suggestion. |
+| `findings[].to_settle` | agent / `code-review` | (Question findings only) Exact command, file, or symbol that settles the question. |
 | `findings[].description` | agent | One sentence naming the problem. |
 | `findings[].draft_comment` | agent | The full comment body: the problem and its effect first, then the fix or a suggestion block. If it doesn't contain `description`, the launcher prefixes `**{description}**`. |
 | `findings[].is_diff_hunk` | `diff_parser.py` | `true` for an inline comment. `false` means the comment goes under "Broader Context" in the summary. |
 | `findings[].original_code` | `diff_parser.py` | The source lines the finding covers, shown in the dashboard. |
 | `findings[].approved` | dashboard only | Don't write it. The launcher sets every finding to `false`, and the user checks the ones to post. |
 
-`diff_parser.py` and `launch_dashboard.py` also accept and normalize these legacy/alias names: `pr_meta` for `pr_metadata`, a top-level `head_sha`, top-level `summary_comment` / `summary` / `overview` and `verdict` for `review_summary`, a string value for `pr_description`, top-level `inline_findings` / `general_findings` / `comments` for `findings`, and per-finding `file` / `path` (`file_path`), `start_line` / `line` (`line_start`), `end_line` / `line` (`line_end`), `title` (`description`), and `body` / `comment_body` (`draft_comment`). Always use the canonical names in new files.
+`diff_parser.py` and `launch_dashboard.py` also accept and normalize these legacy/alias names: `pr_meta` for `pr_metadata`, a top-level `head_sha`, top-level `summary_comment` / `summary` / `overview` and `verdict` for `review_summary` (a dict-valued `summary` is treated as `review_summary`), a string value for `pr_description`, top-level `inline_findings` / `general_findings` / `comments` for `findings`, a top-level `questions` list (merged into `findings` and then removed; entries without a `severity` default to `"question"`), and per-finding `file` / `path` (`file_path`), `start_line` / `line` (`line_start`), `end_line` / `line` (`line_end`), `title` (`description`), and `body` / `comment_body` (`draft_comment`). Always use the canonical names in new files.
 
 ## `pr_coords.json`, `pr_stack.json`, and `pr_context.json`
 

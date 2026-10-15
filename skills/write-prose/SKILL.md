@@ -7,7 +7,7 @@ description: Master prose writing and orchestration skill for creating clear, pl
 
 > [!CAUTION]
 > **MANDATORY LINGUISTIC AUDIT**
-> Language models naturally default to pre-trained "AI-isms" (*delve, leverage, seamless, robust, pivotal, testament, not only... but also*), em-dash (`—`) punctuation, and formulaic inline-header lists (`- **Title**: body`). You MUST actively execute the two-pass drafting protocol below to audit and replace machine-generated fluff before producing final output.
+> Language models naturally default to pre-trained "AI-isms" (`delve`, `leverage`, `seamless`, `robust`, `pivotal`, `testament`, `not only... but also`), em-dash (`—`) punctuation, and formulaic inline-header lists (`- **Title**: body` or `1. **Title**: body`). Execute the two-pass drafting protocol below to audit and replace machine-generated fluff before producing final output.
 
 > [!IMPORTANT]
 > **WORKSPACE HYGIENE & FILE LOCATION RULES**
@@ -19,7 +19,7 @@ description: Master prose writing and orchestration skill for creating clear, pl
 This skill is the central source of truth for clear, plain, accessible, and natural human writing across technical and non-technical documents.
 
 > [!NOTE]
-> Use American English instead of British (or other languages) unless otherwise instructed (e.g. avoid things like *flavour* and *behaviour*).
+> Use American English instead of British (or other languages) unless otherwise instructed (e.g. avoid things like `flavour` and `behaviour`).
 
 ## Procedural workflow
 
@@ -35,8 +35,8 @@ Determine the target audience and document format:
 
 Evaluate reader knowledge and conceptual boundaries:
 
-- Strip external meta-task framing (such as plan phase numbers, task milestone labels, execution option names, or prompt scoping structures) unless the concept is explicitly defined *within* the document itself.
-- Ensure the document stands alone without assuming the reader has access to prompt history, conversation transcripts, or external planning documents.
+- Strip external meta-task framing such as plan phase numbers, milestone labels, or option names unless the document defines them.
+- Make sure the document stands alone without assuming access to prompt history, conversation transcripts, or external planning documents.
 
 > [!NOTE]
 > If the target audience or document context is ambiguous, use `ask_question` to clarify before drafting.
@@ -60,25 +60,28 @@ For specialized document types, delegate content gathering to domain skills whil
 
 Before writing, consult [references/standards.md](references/standards.md) to apply core principles from:
 
-- **ISO 24495-1:2023**: Ensure content is relevant, findable, understandable, and usable.
+- **ISO 24495-1:2023**: Make content relevant, findable, understandable, and usable.
 - **W3C Cognitive Accessibility (COGA)**: Use clear words, literal language, short text, separate steps, short critical paths, and no reliance on memory.
-- **Plain Writing Act**: Ensure immediate first-reading clarity using active voice and short sentences (15–20 words max).
-- **Simplified Technical English (STE / ASD-STE100)**: Use controlled vocabulary, explicit sequential steps, max 3 nouns per cluster, and warnings before actions.
+- **Plain Writing Act**: Achieve immediate first-reading clarity using active voice and short sentences (15–20 words max).
+- **Simplified Technical English (STE / ASD-STE100)**: Use one word per meaning, explicit sequential steps, max 3 nouns per cluster, and warnings before actions.
 
 #### Step 4: Two-pass drafting & anti-AI-ism self-correction
 
 Execute this mandatory two-pass procedure before finalizing output:
 
-1. **Pass 1 (Content draft)**: Draft the response focusing on technical accuracy, structure, and domain content.
-2. **Pass 2 (Linguistic inspection & rewrite)**:
-   - Scan the draft line-by-line against the positive replacement pairs in [references/standards.md](references/standards.md#61-positive-replacement-pairs-banned-words-mappings).
-   - Flag and replace banned verbs (*delve, leverage, foster, cultivate, maximize, democratize, resonate, encompass, bridge, underscore, highlight, ensure, align with*) and adverbs (*seamlessly, extensively*).
-   - Replace vague or promotional adjectives (*robust, seamless, pivotal, crucial, holistic, intuitive, comprehensive, frictionless, scalable, synergistic, premier, state-of-the-art*) with **specific physical or technical behaviors** (e.g. replace *"robust error handling"* with *"retries failed HTTP requests up to 3 times"*).
-   - Eliminate copula substitutions (*"serves as"* / *"stands as"* $\rightarrow$ *"is"*), dangling `-ing` commentary clauses (*", highlighting..."*, *", ensuring..."*), negative parallelism (*"not only... but also"*, *"not just about X; it is about Y"*), false ranges (*"from X to Y"*), rule-of-three padding, and formulaic *"Despite challenges..."* conclusions ([references/standards.md](references/standards.md#64-sentence-structure--tone-anti-ai-isms)).
+1. Draft the response in Pass 1 focusing on technical accuracy, structure, and domain content.
+2. Run `analyze_prose.py` on the draft in Pass 2 and rewrite any flagged violations before producing final output:
+   - Pipe inline or chat drafts to stdin (`python3 ./scripts/analyze_prose.py - <<'EOF' ... EOF`), or pass the file path when writing a file (`python3 ./scripts/analyze_prose.py <file>`).
+   - Replace banned AI filler verbs/adverbs (`delve`, `leverage`, `seamlessly`) and vague praise adjectives (`robust`, `seamless`, `pivotal`) with concrete technical behaviors.
+   - Replace archaic or formal words (`lieu`, `ergo`, `obviate`), light-verb nominalizations (`make a decision` $\rightarrow$ `decide`), and colloquial phrasal verbs (`spin up` $\rightarrow$ `start`) with plain verbs.
+   - Break up 4+ consecutive noun clusters, and use one consistent action verb per concept across the document.
+   - Keep sentence cognitive complexity low ($\text{PCC} \le 5$): avoid center-embedded clauses between subject and verb, long subject-verb distances ($\text{DD}_{\text{SV}} > 6$), pre-verbal delays ($> 8$ words), and stacked negations.
+   - Preserve epistemic modality hedges (`may`, `might`, `could`) when stating engineering uncertainty or root-cause hypotheses.
+   - Eliminate copula substitutions (`serves as`), dangling `-ing` commentary (`, highlighting...`), negative parallelism (`not only... but also`), and false ranges ([references/standards.md](references/standards.md#64-sentence-structure--tone-anti-ai-isms)).
    - Remove all em-dash (`—`) characters ([references/standards.md](references/standards.md#65-formatting-punctuation--integrity-anti-ai-isms)). Replace them with commas, parentheses, colons, or separate sentences.
-   - Eliminate overuse of inline-header lists (`- **Title**: body`) ([references/standards.md](references/standards.md#65-formatting-punctuation--integrity-anti-ai-isms)). Not every bullet item has to begin with a bold statement. Use plain prose paragraphs or unbolded bullet items unless defining a glossary or parameter list.
-   - Run the **Fresh Reader Test** ([references/standards.md](references/standards.md#8-standalone-readability--meta-context-isolation)) to verify conceptual and frame isolation. Remove undefined meta-task labels (plan tiers, phase numbers), ephemeral subagent IDs, conversation turn references, and absolute local system paths.
-3. **Output**: Present only the polished, post-audit prose.
+   - Eliminate overuse of inline-header lists in both unordered (`- **Title**: body`) and numbered (`1. **Title**: body`) lists ([references/standards.md](references/standards.md#65-formatting-punctuation--integrity-anti-ai-isms)). Use plain prose paragraphs or unbolded list items unless defining a glossary or parameter list.
+   - Run the **Fresh Reader Test** ([references/standards.md](references/standards.md#8-standalone-readability--meta-context-isolation)) to remove undefined meta-task labels, subagent IDs, turn references, and local paths.
+3. Present only the polished, post-audit prose.
 
 ______________________________________________________________________
 
@@ -86,24 +89,25 @@ ______________________________________________________________________
 
 When the user asks to review, audit, or critique an existing document, PR description, or prompt:
 
-1. **Run the statistical analyzer**:
-   Execute the analyzer script on the target file:
+1. Run the statistical and cognitive complexity analyzer on the target file or stdin (`-`):
 
    ```bash
-   python3 ./scripts/analyze_prose.py <path-to-file>
+   python3 ./scripts/analyze_prose.py <path-to-file | -> [--threshold 5] [--engine auto|stdlib|spacy]
    ```
 
-2. **Evaluate output metrics**:
+2. Inspect runtime capabilities and output metrics:
 
-   - Check total word count, sentence count, median sentence length, and paragraph stats.
-   - Note any sentences exceeding **25 words**, paragraphs exceeding **4 sentences**, **banned AI words or phrases**, **em-dash (`—`) characters**, **smart quotes**, or **overused inline-header lists** returned by the script.
+   - Check `summary.capabilities` to see which NLP backend ran (`stdlib` vs `spacy`) and whether optional packages (`wordfreq`, `spacy`, `en_core_web_sm`) were missing.
+   - When optional packages are missing, the script runs all first-party lexicon and stdlib syntactic checks and prints an `install_hint` command in `summary.capabilities`.
+   - Review word count, sentence count, median sentence length, paragraph stats, `median_sentence_complexity`, and `max_sentence_complexity`.
+   - Inspect all violation arrays under `violations`: `banned_ai_words_found`, `banned_ai_phrases_found`, `obscure_words_found`, `rare_domain_nouns_advisory`, `nominalizations_found`, `noun_clusters_found`, `phrasal_verbs_found`, `synonym_rotations_found`, `complex_sentences_found`, `em_dashes_found`, `smart_quotes_found`, `inline_header_list_overuse`, `sentences_exceeding_25_words`, and `paragraphs_exceeding_4_sentences`.
 
-3. **Generate audit report table**:
-   Output a clear feedback report detailing findings and concrete fixes:
+3. Output a clear feedback report table detailing findings and concrete fixes:
 
-   | Line / Location | Issue / Violation                 | Standard Violated         | Suggested Plain Language Fix                          |
-   | :-------------- | :-------------------------------- | :------------------------ | :---------------------------------------------------- |
-   | Line 12         | *"serves as a robust framework"*  | Anti-AI-ism / Copula Sub  | *"is a framework that retries HTTP requests"*         |
-   | Line 19         | Em-dash (`—`) clause splice       | Anti-AI-ism / Punctuation | Replace `—` with a comma or split into two sentences. |
-   | Lines 22–28     | Inline-header list on all bullets | Anti-AI-ism / List Style  | Remove bold lead-in titles or rewrite as prose.       |
-   | Line 34         | Sentence length (42 words)        | STE / Plain Language      | Split into two sentences ($\le 20$ words each).       |
+   | Line / Location | Issue / Violation                                     | Standard Violated         | Suggested Plain Language Fix                                   |
+   | :-------------- | :---------------------------------------------------- | :------------------------ | :------------------------------------------------------------- |
+   | Line 12         | *"serves as a robust framework"*                      | Anti-AI-ism / Copula Sub  | *"is a framework that retries HTTP requests"*                  |
+   | Line 15         | *"in lieu of"* / *"obviate"*                          | Lexical Familiarity (STE) | Replace with *"instead of"* and *"prevent"*.                   |
+   | Line 19         | Em-dash (`—`) clause splice                           | Anti-AI-ism / Punctuation | Replace `—` with a comma or split into two sentences.          |
+   | Lines 22–28     | Inline-header list on all bullets                     | Anti-AI-ism / List Style  | Remove bold lead-in titles or rewrite as prose.                |
+   | Line 34         | Sentence complexity $\text{PCC} = 8$ (center-embedded) | Syntactic Load (PCC > 5)  | Move the relative clause after the verb or split the sentence. |

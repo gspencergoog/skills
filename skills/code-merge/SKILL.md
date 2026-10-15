@@ -86,16 +86,16 @@ Escalate to the user **only** when branches have mutually exclusive architectura
 1. **Always Name Concrete Repos & Branches (Never Say "OURS" or "THEIRS")**:
    Users find abstract `OURS` / `THEIRS` labels disorienting. In all chat messages, `/grill-me` questions, and options, **always state the specific branch or repository name** (e.g., `v1_0` vs. `upstream/main`, or `main` vs. `feature/my-branch`). Confine `OURS`/`THEIRS` strictly to internal tool logic and diff flags.
 2. **No Raw Conflict Markers**: Never paste raw `<<<<<<<` blocks into chat.
-3. **Group by Root Cause**: Present at most 2–4 questions in a single `ask_question` call, grouping files by shared architectural cause (`tier4_clusters`).
-4. **Use the 3-Bullet Micro-Brief**:
-   - **Base**: 1 sentence on original behavior at the common ancestor.
-   - **Discrepancy**: 1 sentence contrasting `<target-branch>` intent vs. `<incoming-branch>` intent.
-   - **Blast Radius**: Number of affected files/callers.
+3. **Group by Root Cause & Use the Expansive `grill-me` Surface**: Group conflicting files by shared architectural cause (`tier4_clusters`). Present Tier 4 intent clashes using `render_a2ui` (`mode: "pane"` with side-by-side consequence cards named after the concrete branches, plus `moreInfo`, `defer`, and `notes` controls, always including `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` inline in chat so the user knows the side panel was updated and can open or focus it). Fall back to `ask_question` only when the `a2ui-pane` MCP server is unavailable.
+4. **Use the 3-Part Decision Brief**:
+   - **Base & Trigger**: 1 sentence on original behavior at the common ancestor and clickable `[file](file:///...)` links in chat.
+   - **Side-by-Side Branch Consequences**: Contrast `<target-branch>` intent vs. `<incoming-branch>` intent, including blast radius across files, schemas, and tests.
+   - **Recommended Default**: Pre-populate the synthesized resolution in `dataModel` (`/questions/qN/value`).
 5. **Provide Actionable Options Named with Concrete Branches + Deferral**:
    - `(Recommended) <Synthesized resolution naming specific branches with brief rationale>`
    - `<Keep <target-branch> (e.g. v1_0) design and adapt <incoming-branch> (e.g. main) callers>`
    - `<Adopt <incoming-branch> (e.g. main) design and migrate <target-branch> (e.g. v1_0) callers>`
-   - `Let's come back to this` (Triggers the `/grill-me` Parking Lot deferral flow).
+   - Include `"Explain further"` (`/questions/qN/moreInfo`) and `"Park for later"` (`/questions/qN/defer`).
 
 For detailed Tier 1–4 resolution recipes and `/grill-me` question templates, see [Conflict Resolution Strategies & Concise `/grill-me` Protocol](references/conflict_resolution_strategies.md).
 

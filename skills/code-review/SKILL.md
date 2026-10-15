@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Performs a multi-step review of pull requests, local changes, or whole local files, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Every finding carries an evidence tier and a consequence; severity is capped by evidence. Reviews code, and reviews documentation, normative specifications, design docs, RFCs, ADRs, and blueprints for structure, correctness, completeness, consistency, and downstream impact rather than wording. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes, pull requests, specs, or design docs thoroughly. Supports --claude / --opus (Claude reviewer), --panel (two reviewers with split criteria), --verify (run tests and mutation checks in a throwaway checkout), --max (all three), and --challenge (send refuting evidence back to the reviewer and require a retraction).
+description: Performs a multi-step review of pull requests, local changes, or whole local files, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Every finding carries an evidence tier and a consequence; severity is capped by evidence. Reviews code, and reviews documentation, normative specifications, design docs, RFCs, ADRs, and blueprints for structure, correctness, completeness, consistency, and downstream impact rather than wording. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes, pull requests, specs, or design docs thoroughly. Supports --fast (in-session scan without subagents), --json (structured review_results.json output), --claude / --opus (Claude reviewer), --panel (two reviewers with split criteria), --verify (run tests and mutation checks in a throwaway checkout), --max (all three), and --challenge (send refuting evidence back to the reviewer and require a retraction).
 ---
 
 # Code Review
@@ -25,13 +25,15 @@ You are an expert Senior Software Engineer specializing in code review and in re
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
 | *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) | Baseline |
+| `--fast` | Single-pass in-session review without subagents; tier 1 checks only | Minimal latency / no subagents |
+| `--json [<path>]` | Emits `review_results.json` via `lint_review.py --export-json`, to `<path>` when given, otherwise to `<artifact-dir>/review_results.json` | Same as underlying mode |
 | `--claude` (or `--opus`) | The single reviewer is `claude-code-reviewer`. Under `--panel`, reviewer B is `claude-code-reviewer`. | Uses 3P quota |
 | `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B), for code and documents | About 2× subagents |
 | `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in a per-reviewer throwaway checkout) for trusted changes | Test runtime and dependency installs |
 | `--max` | Same as `--claude --panel --verify` | All of the above |
 | `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra subagent turn per disputed reviewer |
 
-Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
+`--fast` is mutually exclusive with `--claude`, `--panel`, `--verify`, and `--challenge`. If specified together, `--fast` takes precedence and the other flags are dropped (running strictly in-session without subagents). Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
 
 ## Workflow
 
@@ -43,7 +45,7 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
 
 - **For GitHub Pull Requests**:
   - Use `gh pr view` to inspect the PR title, description, repository, and head branch.
-  - **Trust Check** (only needed with `--verify`): run `gh api repos/{owner}/{repo}/pulls/<n> --jq .author_association`. `OWNER`, `MEMBER`, or `COLLABORATOR` means trusted. Any other value, or a failed lookup, means untrusted: tier 2 is off, and no flag overrides that. See [verification.md](references/verification.md#trust-check).
+  - **Trust Check** (only needed with `--verify`): run `gh api repos/<owner>/<repo>/pulls/<n> --jq .author_association` with the PR's own `owner` and `repo` written out (do not use `gh`'s `{owner}/{repo}` placeholders, which resolve from the current directory). `OWNER`, `MEMBER`, or `COLLABORATOR` means trusted. Any other value, or a failed lookup, means untrusted: tier 2 is off, and no flag overrides that. See [verification.md](references/verification.md#trust-check).
   - **Check Local Branch Presence**: Check if the PR branch exists locally with `git branch --list <branch>` or `git rev-parse --verify <branch>`.
   - **Sync Remote PR to Temporary Directory**:
     - If the PR is not part of the local branch(es) (missing locally or in another repository):
@@ -90,6 +92,7 @@ Consider:
 - Parent classes or interfaces.
 - Related utility files.
 - Test files corresponding to changed files.
+- **For public API changes**: sibling methods in modified classes, parent interfaces or base classes, error types, and existing call sites across the repository to understand expected conventions.
 - **For document files**: the files each changed document links to, the files that link to it (search for its repo-relative path), the governing spec or schema, and the code or tests the document describes.
 
 Then run **tier 1 verification** yourself, so the reviewer can spend its effort on the review. Tier 1 is read-only and always on. It covers CI status and failed-job logs for PRs, analyzers and linters in check mode on the changed files, toolchain dry-run or task-graph queries, and repo doc validators for document files. Use only tools that are already installed. For in-place runs, compare `git status --porcelain` before and after. Collect the output for the reviewer prompt (cap inline output at 1 KB, failing lines first; if longer, write the full output to `$diff_dir/tier1.log`, creating `$diff_dir` with `mktemp -d -t pr-review-diffs-XXXXXX` if needed, and cite the path). Commands and rules are in [verification.md](references/verification.md#tier-1-commands).
@@ -105,6 +108,12 @@ _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_re
 Before analyzing the diff, determine the reviewer subagents based on the flags:
 
 - **Reviewer Selection**:
+  - **Fast In-Session Review (`--fast`)**: If the user passed `--fast`, do not spawn subagents. The primary agent conducts the entire review directly in the active session:
+    1. Read the unified diff (or diff chunks if large) and surrounding context files.
+    2. Run Tier 1 read-only checks (linters, static analyzers) if configured.
+    3. Evaluate changes directly against the review criteria (Correctness, Concurrency, Edge Cases, Maintainability, Security, API Soundness, or Document lenses).
+    4. Draft review findings adhering strictly to the `### <ID>. <short claim>` format with required `Evidence`, `Why`, and `Suggestion` fields.
+    5. Apply Step 4's self-critique truth filters ([critique_rules.md](references/critique_rules.md)) to the drafted findings, then proceed to Step 5 (Synthesis) without citation auditing or challenge loops.
   - **Gemini Review (Default)**: By default, delegate Steps 3 & 4 to one `gemini-code-reviewer` (pinned to Gemini 4 Argon High).
   - **Claude Review (`--claude` / `--opus`)**: If the user passed `--claude` or `--opus`, requested Claude, or asked for a cross-model review, delegate Steps 3 & 4 to `claude-code-reviewer` (drawing from `3p-daily` quota).
     - _Quota Fallback_: If `claude-code-reviewer` fails due to 3P quota or capacity limits, report the issue to the user and fall back to `gemini-code-reviewer`.
@@ -162,6 +171,13 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - Every document finding has a `Category`, a `Why`, and an `Evidence` field (`Read` or `Fetched`) quoting the text (both sides for an inconsistency). Findings without quoted evidence are dropped.
   - Run the downstream impact pass (at most 10 files outside this diff) and fill in the `## Structural Assessment` section. Each lens verdict names what you checked; a bare "no issues" is not a verdict.
 
+  ### API Review Mandate  (include only when diff modifies public APIs, signatures, endpoints, or configuration surfaces)
+  These code changes modify public API surfaces, signatures, exported symbols, endpoints, or configuration options.
+  - Read `<skill-dir>/references/reviewing_apis.md` first.
+  - Apply the Dual-Scope Model: inspect sibling methods and call sites for context, but report only findings anchored to modified lines (+/-).
+  - Evaluate contract integrity, minimal surface area (KISS/YAGNI), ergonomics (naming, CQS, least astonishment), explicit configuration, strict validation, and operational reliability.
+  - Do not demand refactoring untouched legacy code or changing existing conventions outside the diff.
+
   ### Lane Assignment  (include only under --panel; see "Panel Review")
   <lane A or lane B block>
 
@@ -176,7 +192,7 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   Send your report via send_message using this structure:
 
   ## Summary
-  <1-2 paragraphs summarizing changes and verdict: Ready / Minor Revisions Needed / Critical Blockers>
+  <1-2 paragraphs summarizing changes. End with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`.>
 
   ## Structural Assessment  (only when there are document files)
   - **Implementer**: <one-line verdict>
@@ -199,7 +215,8 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or line-cited trace>
   - **Body**: `<explanation of the defect>`
   - **Why**: `<concrete consequence if shipped as-is>`
-  - **Suggestion**: (Optional drop-in code snippet, replacement text, or specific question)
+  - **Suggestion**: (Optional drop-in code snippet, replacement text, or specific question. One fenced block at most; the exporter posts it as a committable GitHub suggestion unless the fence is ```` ```diff ```` or ```` ```patch ````. Never put a test or example here.)
+  - **Repro test**: (Optional, `--verify` only. The scratch test that reproduces the defect, in one fenced block. It is posted as a plain code block, never as a committable suggestion.)
 
   ## Questions
   At most 3 (`Q1…`); omit if none:
@@ -236,7 +253,7 @@ The reviewer subagent evaluates code changes against the following criteria:
 - **Efficiency**: Identify bottlenecks, redundant calculations.
 - **Maintainability**: Assess readability, adherence to style guides, and evaluate control flow complexity via the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill.
 - **Security**: Identify potential vulnerabilities.
-- **API Soundness**: If code files modify public API surfaces, signatures, or configuration patterns (e.g. exported classes, functions, REST/RPC endpoints, package/module public exports), also launch a subagent running the [api-review](../api-review/SKILL.md) skill on those files, in the same `invoke_subagent` call as the reviewers, and merge its findings in Step 5. Document files don't trigger this. Schema compatibility is covered by the spec rubric.
+- **API Soundness**: If code files modify public API surfaces, signatures, or configuration patterns (e.g. exported classes, functions, REST/RPC endpoints, package/module public exports), evaluate them against [reviewing_apis.md](references/reviewing_apis.md) and the canonical principles in [canonical_api_design.md](../api-review/references/canonical_api_design.md). Apply the Dual-Scope Model: inspect surrounding code for context, but anchor reported findings strictly to modified lines (+/-) without demanding refactoring of untouched legacy code. Document files don't trigger this. Schema compatibility is covered by the spec rubric.
 
 Document files are evaluated with the four lenses and the rubrics in [reviewing_documents.md](references/reviewing_documents.md).
 
@@ -245,7 +262,7 @@ Document files are evaluated with the four lenses and the rubrics in [reviewing_
 - Use the vetted criteria in [review_criteria.md](references/review_criteria.md) and the evidence tiers and falsification rules in [evidence.md](references/evidence.md).
 - For reviewing test code, refer directly to [reviewing_tests.md](references/reviewing_tests.md).
 - Reference external standards where applicable:
-  - For API design, refer to the canonical API design guidelines in the [api-review](../api-review/SKILL.md) skill.
+  - For API design, refer to [reviewing_apis.md](references/reviewing_apis.md) and the canonical API design guidelines in [canonical_api_design.md](../api-review/references/canonical_api_design.md).
   - For documentation, refer to the [code-documentation](../code-documentation/SKILL.md) skill.
   - For code complexity and maintainability standards, refer to the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill.
 - **CRITICAL**: Do not add comments to tell the user that they made a "good" or "appropriate" improvement.
@@ -257,7 +274,7 @@ Document files are evaluated with the four lenses and the rubrics in [reviewing_
 | Lane | Theme | Code criteria | Document lenses | Agent |
 | :--- | :--- | :--- | :--- | :--- |
 | **A** | Does it work, and can it be verified? | Correctness; concurrency and failure modes; edge cases; tests ([reviewing_tests.md](references/reviewing_tests.md)) | Implementer; Tester / Verifier | `gemini-code-reviewer` |
-| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness | Consumer; Operator / Adversary | `gemini-code-reviewer`, or `claude-code-reviewer` with `--claude` / `--opus` (same quota fallback as above) |
+| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness ([reviewing_apis.md](references/reviewing_apis.md)) | Consumer; Operator / Adversary | `gemini-code-reviewer`, or `claude-code-reviewer` with `--claude` / `--opus` (same quota fallback as above) |
 
 Lane Assignment block for reviewer A (swap in lane B's lists for reviewer B):
 
@@ -297,7 +314,7 @@ Audit and combine the refined comments into the final output:
 - Prioritize high-severity issues (critical, high).
 - **Number findings and Questions**: Put every finding under a `### <ID>. <short claim>` heading: `C1`, `C2`… for critical, `H1`… for high, `M1`… for medium, `L1`… for low, so the user can say "fix H2 and M1" later. Wording findings sort last within `low`. Number Questions in `## Questions` as `### Q1. <question>` through `Q3` (keep at most 3, choosing the ones with the highest stated stakes in `Why`).
 - **Checked and Found Clean merge**: Take the union of disproved hypotheses from the reviewer(s), deduplicate, drop any line that lacks a tier or disproving evidence, and cap at 10 lines.
-- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), and end with the flags in effect (for example, "Flags: `--claude --panel --verify`") and any trust limit (for example, "`--verify` limited to tier 1: PR author is not a repo collaborator").
+- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), the flags in effect (for example, "Flags: `--claude --panel --verify`"), and any trust limit (for example, "`--verify` limited to tier 1: PR author is not a repo collaborator"). End the Summary with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`; `lint_review.py --export-json` reads this label to set the exported verdict and falls back to finding severities when it is absent.
 - **Structural Assessment**: When the diff has document files, put the `## Structural Assessment` section right after the Summary.
 - **Generate file summaries**: For reviews with multiple files, include `## Changed Files Summary` with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
@@ -307,7 +324,11 @@ Audit and combine the refined comments into the final output:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md
   ```
-  If `lint_review.py` exits non-zero, fix the reported formatting or severity-cap violations in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. Do not emit the full review directly into the chat response.
+  If `--json` is specified, export `review_results.json` during the lint step. The export path is the one given with `--json <path>` when the caller named one (`pr-review` passes `<conversation-scratch-dir>/review_results.json`), otherwise `<artifact-dir>/review_results.json`:
+  ```bash
+  python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md --export-json <export-path>
+  ```
+  If `lint_review.py` exits non-zero, fix the reported formatting or severity-cap violations in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. Do not emit the full review directly into the chat response.
 
 ### Step 6: Workspace Cleanup
 
@@ -332,7 +353,7 @@ If any temporary directory was created for reviewing the PR, for `--verify` chec
 
 Send one short chat message, then **end the turn**. The message contains:
 
-- A link to the review artifact.
+- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed).
 - The verdict (Ready / Minor Revisions Needed / Critical Blockers).
 - Finding counts by severity, plus question count (for example, "1 critical, 3 high, 2 medium, 4 low, 2 questions"). Questions never block the verdict.
 - One closing line: "Which findings should I address? (for example, `fix H1–H3` or `fix all high`)".
@@ -341,7 +362,7 @@ That closing line is a question for the user. It is never a reason to start fixi
 
 - **Subagent wake-up rule**: When a reviewer subagent's completion message resumes you, the only steps left are Step 5 (synthesis), Step 6 (cleanup), and Step 7 (stop). This holds even if the conversation was implementing code before the review started.
 - **"Review and fix" requests**: Treat them as two requests. The review still ends here. Fixing starts in a later turn, after the user confirms which findings to address.
-- **Callers**: A calling workflow whose own instructions say to act on findings (for example, the `ship-it` review loop) may do so after this skill returns. The review step itself never fixes anything.
+- **Callers**: Calling workflows that automate reviews or act on findings (for example, `pr-review` or the `ship-it` review loop) run Steps 1 through 6 and skip Step 7. They resume their own flow after Step 6 completes (cleanup included), do not emit the hand-off question, and may then act on the findings per their own instructions. The review step itself never fixes anything.
 
 ## Output Format
 
@@ -355,7 +376,7 @@ The final synthesized review MUST be created as an artifact file using the `writ
 
 The review file sections appear in this order:
 
-1. `## Summary`: high-level summary paragraph, citation audit tally, and the flags in effect.
+1. `## Summary`: high-level summary paragraph, citation audit tally, the flags in effect, and a closing `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>` line.
 2. `## Structural Assessment` (only when the diff has document files).
 3. `## Changed Files Summary` (if applicable).
 4. `## Review Comments (Ordered by Severity)`: findings under `### <ID>. <short claim>` headings (`C1`, `H1`, `M1`, `L1`).

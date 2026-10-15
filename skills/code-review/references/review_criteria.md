@@ -54,11 +54,15 @@ Identify potential vulnerabilities.
 
 ### 6. API Soundness (lane B)
 
-If changes alter public APIs or configuration surfaces:
+If changes alter public APIs, exported signatures, or configuration surfaces, evaluate them against [reviewing_apis.md](./reviewing_apis.md) and the canonical principles in [canonical_api_design.md](../../api-review/references/canonical_api_design.md):
 
-- **Contract Integrity**: Ensure interfaces are clear, decoupled from implementation details, and statically typed.
-- **Explicit Configuration**: Prevent stateful globals, singletons, registries, or environment variables for configuring packages. Ensure dependencies are explicitly parameter-injected.
-- **KISS/YAGNI**: Avoid over-generalizing or building speculative future-proof features.
+- **Contract Integrity**: Ensure interfaces expose capabilities rather than internal implementation details or storage models.
+- **Minimal Surface Area (KISS/YAGNI)**: Avoid speculative parameters or over-generalized helper abstractions.
+- **Ergonomics & Predictability**: Use intent-revealing names, adhere to the Principle of Least Astonishment, and enforce Command-Query Separation (CQS).
+- **Explicit Configuration**: Ensure dependencies are explicitly parameter-injected. Reject stateful globals, singletons, registries, or environment variables for configuring packages.
+- **Strict Typing & Validation**: Use strong domain types or enums instead of raw strings, and validate inputs at boundaries.
+- **Operational Reliability**: Design mutating operations with safe retries (idempotency) and use cursor-based pagination for collections.
+- **Diff-Anchored Scope**: Every reported API finding must anchor to a line modified in the diff (+/-). Do not demand refactoring untouched legacy code or changing existing conventions outside the diff.
 
 ## Severity Levels
 

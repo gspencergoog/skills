@@ -1,6 +1,6 @@
 # Foundational writing standards (`standards.md`)
 
-This document synthesizes international writing standards (ISO 24495-1:2023, W3C Cognitive Accessibility, Plain Writing Act, Simplified Technical English) and natural writing controls to eliminate "AI-isms" and structural fluff.
+This document unifies international writing standards (ISO 24495-1:2023, W3C COGA, Plain Writing Act, and ASD-STE100) with natural writing controls to eliminate "AI-isms" and fluff.
 
 ______________________________________________________________________
 
@@ -8,21 +8,25 @@ ______________________________________________________________________
 
 When writing or auditing text, aim for these quantitative thresholds:
 
-| Metric                            | Target / Limit                                    | Rule                                                                                                                              |
-| :-------------------------------- | :------------------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------- |
-| **Sentence Length (Procedural)**  | $\le \mathbf{20\text{ words}}$                    | Procedural steps must be short and direct (1 action per step).                                                                    |
-| **Sentence Length (Descriptive)** | $\le \mathbf{25\text{ words}}$ (15–20 average)    | Flag and split any sentence over 25 words.                                                                                        |
-| **Paragraph Length**              | $\le \mathbf{4\text{ sentences}}$ (40–80 words)   | Keep paragraphs focused on a single concept.                                                                                      |
-| **Word Length**                   | $\le \mathbf{5\text{ characters}}$ median         | Prefer simple words (*use* vs *utilize*, *check* vs *investigate*).                                                               |
-| **Noun Clusters**                 | $\le \mathbf{3\text{ consecutive nouns}}$         | Avoid heavy noun stacks (e.g., write *"system for monitoring engine temperature"*, not *"engine temperature monitoring system"*). |
+| Metric                                     | Target / Limit                                    | Rule                                                                                                                              |
+| :----------------------------------------- | :------------------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------- |
+| **Sentence Length (Procedural)**           | $\le \mathbf{20\text{ words}}$                    | Procedural steps must be short and direct (1 action per step).                                                                    |
+| **Sentence Length (Descriptive)**          | $\le \mathbf{25\text{ words}}$ (15–20 average)    | Flag and split any sentence over 25 words.                                                                                        |
+| **Sentence Cognitive Complexity (PCC)**    | $\le \mathbf{5\text{ points}}$                    | Keep per-sentence syntactic load in the simple (0–2) or moderate (3–5) band; rewrite sentences scoring $> 5$.                     |
+| **Subject-Verb Distance ($\text{DD}_{\text{SV}}$)** | $\le \mathbf{6\text{ words}}$                     | Keep subjects and governing verbs adjacent; avoid center-embedded clauses between subject and verb.                               |
+| **Pre-Verbal Delay ($\text{Delay}_{\text{ROOT}}$)** | $\le \mathbf{8\text{ words}}$                     | Limit introductory clauses and phrases before the main subject and verb to 8 words or fewer.                                      |
+| **Stacked Negations**                      | $\le \mathbf{1\text{ negative operator}}$         | Avoid combining multiple negations (`not`, `never`, `unless`, `without`, `except`, `fail to`) in one sentence.                    |
+| **Paragraph Length**                       | $\le \mathbf{4\text{ sentences}}$ (40–80 words)   | Keep paragraphs focused on a single concept.                                                                                      |
+| **Word Length & Familiarity**              | $\le \mathbf{5\text{ characters}}$ median         | Prefer everyday words over archaic or formal terms (`instead of` vs `in lieu of`, `prevent` vs `obviate`).                        |
+| **Noun Clusters**                          | $\le \mathbf{3\text{ consecutive nouns}}$         | Avoid heavy noun stacks (e.g., write `"system for monitoring engine temperature"`, not `"engine temperature monitoring system"`). |
 
-Run `python3 scripts/analyze_prose.py <path-to-file>` to measure these stats automatically.
+Run `python3 scripts/analyze_prose.py <path-to-file>` to measure these stats automatically. The script runs a zero-dependency first-party lexicon and stdlib syntactic engine by default. It automatically upgrades to `wordfreq` and `spacy` (`en_core_web_sm`) when those packages are installed locally. Check `summary.capabilities` in the JSON output to see active packages or installation hints.
 
 ______________________________________________________________________
 
 ## 2. Technical markup & Markdown link rules
 
-To ensure technical clarity and prevent UI rendering breakage:
+To maintain technical clarity and prevent UI rendering breakage:
 
 - Enclose variable names, function names, CLI flags, and file paths in backticks: `` `my_function()` ``, `` `--verbose` ``, `` `src/main.ts` ``.
 
@@ -51,9 +55,9 @@ ______________________________________________________________________
 Content must satisfy four core principles:
 
 1. **Relevant**: Include only information the reader needs to achieve their goal. Eliminate filler and background tangents.
-2. **Findable**: Structure documents with descriptive, sentence-case headings (`## Header`), logical ordering, and lists where appropriate so information is scannable.
+2. **Findable**: Structure documents with descriptive, sentence-case headings (`## Header`), logical ordering, and lists so information is scannable.
 3. **Understandable**: Use familiar words, short sentences (15–20 words on average), and simple sentence structures.
-4. **Usable**: Provide clear, actionable instructions that enable the reader to perform their task without re-reading.
+4. **Usable**: Provide clear, actionable instructions that enable the reader to complete their task without re-reading.
 
 ______________________________________________________________________
 
@@ -71,11 +75,35 @@ ______________________________________________________________________
 
 ## 5. Plain Writing Act & STE standards
 
-- Make the actor the subject of the sentence using active voice (*"The server rejected the request"* instead of *"The request was rejected by the server"*).
+- Make the actor the subject of the sentence using active voice (`"The server rejected the request"` instead of `"The request was rejected by the server"`).
 - Use second-person pronouns ("you", "your") for user-facing instructions and guides.
-- Keep subjects and their main verbs close together.
-- Do not turn verbs into heavy nominalizations (use *"decide"* instead of *"make a decision"*).
-- State prerequisites, warnings, or conditions *before* the action verb.
+- Keep subjects and their main verbs close together ($\text{DD}_{\text{SV}} \le 6$).
+- Do not turn verbs into heavy nominalizations (use `"decide"` instead of `"make a decision"`).
+- State prerequisites, warnings, or conditions before the action verb.
+
+### 5.1 Syntactic cognitive complexity & working-memory load (PCC)
+
+Even a short sentence made of common words becomes hard to read when its syntax overloads working memory. `analyze_prose.py` computes a per-sentence **Prose Cognitive Complexity (PCC)** score using additive structural penalties:
+
+- **Subordinate clauses ($+1 + \text{nesting}$)**: Each `if`, `unless`, `although`, `because`, `while`, `which`, or relative `that` clause adds $+1$ plus nesting depth.
+- **Center-embedded clauses ($+2$)**: Interrupting a subject and its verb with a clause overloads working memory. Move the clause after the verb or split the sentence.
+- **Long subject-verb distance ($+1$ for 7–11 words, $+2$ for $\ge 12$ words)**: Avoid piling prepositional phrases between the subject noun and its governing verb.
+- **Pre-verbal delay ($+1$ for 9–14 words, $+2$ for $\ge 15$ words)**: Keep introductory phrases short so the reader reaches the main subject and verb quickly.
+- **Passive voice ($+1$ agentless, $+2$ with `by`-agent or nested)**: Prefer active voice with a concrete actor.
+- **Stacked negations ($+2$ for $\ge 2$ negative operators)**: Combining `unless`, `not`, `never`, `without`, or `fail to` in one sentence requires mental truth-table inversion. Rewrite as a positive condition.
+- **Abstractness clusters ($+1$)**: Sentences with 3+ abstract nominalizations (`conceptualization`, `methodology`, `operationalization`) and no concrete actor (`client`, `server`, `file`) lose reader grounding.
+
+### 5.2 Lexical familiarity, nominalizations, phrasal verbs & synonym rotation
+
+- **Short obscure and archaic words**: Word length alone does not measure familiarity. Avoid archaic or formal words (`lieu`, `dint`, `ergo`, `obviate`, `heretofore`; full table in `scripts/prose_lexicon.py`), while keeping standard software terms (`mutex`, `idempotent`, `inode`).
+- **Rare domain nouns (advisory)**: Specialized non-CS nouns (`epistemology`, `malfeasance`) appear in `rare_domain_nouns_advisory` so you can define them on first use.
+- **Light-verb nominalizations**: Replace phrases like `perform an investigation` or `make a decision` with direct verbs (`investigate`, `decide`).
+- **Soft phrasal verbs**: Replace colloquial phrasal verbs (`spin up`, `dive into`, `boil down to`) with literal verbs (`start`, `examine`, `mean`).
+- **STE100 one-word-per-meaning consistency**: Do not rotate between interchangeable action verbs (`check`, `verify`, `confirm`, `validate`) across a document. Pick one verb per action so readers do not wonder whether a different word implies a different procedure.
+
+### 5.3 Epistemic modality protection
+
+Never strip or penalize epistemic modal hedges (`may`, `might`, `could`, `should`, `would`) such as `"The request may have failed"` or `"The lock might be held by another worker"`. In engineering root-cause analysis and RFCs, modal verbs distinguish unverified hypotheses from confirmed facts. `analyze_prose.py` explicitly exempts epistemic hedges from passive-voice and complexity penalties.
 
 ______________________________________________________________________
 
@@ -132,7 +160,7 @@ ______________________________________________________________________
 
 ### 6.3 Converting vague adjectives into concrete technical behaviors
 
-Never use vague praise adjectives (*robust, seamless, intuitive, frictionless, scalable*). Replace them with the actual technical mechanism:
+Never use vague praise adjectives (`robust`, `seamless`, `intuitive`, `frictionless`, `scalable`). Replace them with the actual technical mechanism:
 
 - ❌ *"Implements robust error handling."*
   $\rightarrow$ ✅ *"Catches `NetworkException` and retries failed requests up to 3 times before timing out."*
@@ -147,21 +175,21 @@ ______________________________________________________________________
 
 #### Avoid copula substitutions & promotional language
 
-Do not replace simple `is`, `are`, or `has` verbs with flowery or promotional equivalents such as *serves as, stands as, acts as, boasts, features* (as a verb), or *offers*. Avoid advertisement words like *premier, leading, state-of-the-art, committed to,* and *dedicated to*.
+Do not replace simple `is`, `are`, or `has` verbs with promotional equivalents such as `serves as`, `stands as`, `acts as`, `boasts`, or `offers`. Avoid advertisement words like `premier`, `leading`, `state-of-the-art`, `committed to`, and `dedicated to`.
 
 - ❌ *"The service stands as a premier solution and boasts sub-millisecond reads."*
   $\rightarrow$ ✅ *"The service is a key-value store with sub-millisecond reads."*
 
 #### No superficial analysis (dangling `-ing` participle clauses)
 
-Avoid attaching trailing present-participle clauses starting with *highlighting, emphasizing, reflecting, showcasing, ensuring,* or *demonstrating* that merely restate the obvious or add vague commentary.
+Avoid attaching trailing present-participle clauses starting with `highlighting`, `emphasizing`, `reflecting`, `showcasing`, `ensuring`, or `demonstrating` that restate the obvious or add vague commentary.
 
 - ❌ *"The client caches tokens locally, reflecting a modular design and ensuring optimal performance."*
   $\rightarrow$ ✅ *"The client caches tokens locally to reduce network requests."*
 
 #### No puffery or forced significance
 
-Do not inflate the importance of a change or topic with phrases like *"serves as a testament to," "marking a pivotal moment," "underscoring the importance of," "leaving an indelible mark,"* or *"shaping the landscape."* If something matters, state the concrete facts that show why.
+Do not inflate the importance of a change with phrases like `"serves as a testament to"`, `"marking a pivotal moment"`, `"leaving an indelible mark"`, or `"shaping the landscape"`. If something matters, state the concrete facts that show why.
 
 #### No negative parallelism
 
@@ -173,22 +201,22 @@ Avoid sentences that construct an artificial contrast:
 
 #### No "rule of three" padding
 
-Avoid listing three adjectives or three noun phrases simply to sound thorough (e.g., *"fast, modular, and extensible"* or *"marketers, engineers, and designers"* unless those exact three groups are the only ones).
+Avoid listing three adjectives or three noun phrases simply to sound thorough (e.g., `"fast, modular, and extensible"` or `"marketers, engineers, and designers"`). List three items only when those exact three groups are the only ones.
 
 #### No false ranges (`from X to Y`)
 
-Do not use *"from X to Y"* unless X and Y are endpoints of a logical, measurable scale such as time, size, or numeric range.
+Do not use `"from X to Y"` unless X and Y are endpoints of a logical, measurable scale such as time, size, or numeric range.
 
 - ❌ *"The guide covers everything from authentication to database sharding."*
 - ✅ *"The guide covers topics including authentication and database sharding."*
 
 #### Eliminate "elegant variation" & weasel attribution
 
-Do not cycle through coined synonyms just to avoid repeating a subject's name; repeat the exact noun or use a pronoun naturally. Avoid vague attribution (*"Experts argue," "Observers note," "Several sources indicate"*) unless you cite specific sources immediately.
+Do not cycle through coined synonyms just to avoid repeating a subject's name; repeat the exact noun or use a pronoun naturally. Avoid vague attribution (`"Experts argue"`, `"Observers note"`, `"Several sources indicate"`) unless you cite specific sources immediately.
 
 #### No "challenges and future outlook" conclusions
 
-Do not end a document or section with a formulaic summary paragraph starting with *"Despite [X], [Subject] continues to..."*, *"Looking ahead..."*, or *"Overall, this change ensures..."*. End with the last factual point.
+Do not end a document or section with a formulaic summary paragraph starting with `"Despite [X], [Subject] continues to..."`, `"Looking ahead..."`, or `"Overall, this change..."`. End with the last factual point.
 
 ______________________________________________________________________
 
@@ -205,11 +233,11 @@ Do not use em-dash characters (`—`) or double-hyphen stand-ins (`--`) to splic
 
 #### Avoid overusing inline-header lists
 
-Do not reflexively format bulleted lists as inline-header lists (`- **Title**: body`, `- **Title** — body`, or `- **Statement.** Explanation`). Not every bullet item has to begin with a bold statement. Starting every bullet with bold text is one of the most recognizable structural habits of LLM output; when every item is bolded, nothing stands out.
+Do not reflexively format unordered or numbered lists as inline-header lists (`- **Title**: body`, `1. **Title**: body`, or `- **Statement.** Explanation`). Not every list item has to start with a bold statement. Starting every bullet or numbered item with bold text is a recognizable habit of LLM output; when every item is bolded, nothing stands out.
 
 - Prefer regular prose paragraphs when sentences build on one another.
-- When a bulleted list is appropriate, write plain, unbolded bullet items that start directly with the verb or subject.
-- Reserve inline-header lists strictly for genuine key-value reference material (such as named API parameters, CLI flags, configuration keys, or glossary terms) where readers scan for a specific identifier.
+- When a bulleted or numbered list is appropriate, write plain, unbolded list items that start directly with the verb or subject.
+- Reserve inline-header lists strictly for genuine key-value reference material such as API parameters, CLI flags, configuration keys, or glossary terms.
 
 ❌ **Overused inline-header list**:
 
@@ -232,8 +260,8 @@ Do not reflexively format bulleted lists as inline-header lists (`- **Title**: b
 - Use sentence case for headings (e.g., `## Configuring automatic retries`, not `## Configuring Automatic Retries`). Do not use Title Case in headings.
 - Avoid excessive bolding of keywords or "key takeaways" inside body paragraphs.
 - Avoid creating tables for simple information that fits in a single sentence, and do not add decorative emojis (`🚀`, `🧠`) in prose or lists.
-- Use straight quotes (`"`, `'`) and straight apostrophes (`'`). Do not use curly or smart quotes (`“`, `’`).
-- Never invent citations, URLs, or DOIs. In chat or review responses, omit collaborative opening filler (*"Certainly!"*, *"Here is the information,"* *"I hope this helps"*), AI self-apologies, or `Subject:` lines.
+- Use straight quotes (`"`, `'`) and straight apostrophes (`'`). Do not use curly or smart quotes.
+- Never invent citations, URLs, or DOIs. Omit collaborative opening filler (`"Certainly!"`, `"Here is the information"`, `"I hope this helps"`), AI self-apologies, or `Subject:` lines.
 
 ______________________________________________________________________
 
@@ -244,9 +272,9 @@ When writing system prompts, agent skills, tool guidelines, or automated prompts
 1. **Token conservation principles**:
 
    - Every token consumed in a prompt reduces attention efficiency and limits remaining history/code space.
-   - Omit polite and conversational filler like *"Please make sure to..."*, *"It would be appreciated if you..."*, or *"As an AI assistant, you should..."*. Use direct imperative verbs (*"Extract parameters..."*, *"Return JSON format..."*).
+   - Omit polite and conversational filler like `"Please make sure to..."`, `"It would be appreciated if you..."`, or `"As an AI assistant..."`. Use direct imperative verbs (`"Extract parameters..."`, `"Return JSON format..."`).
    - Use brief XML tags (`<instructions>`, `<constraints>`) or Markdown bullet points instead of prose paragraphs to delineate sections.
-   - Where supported (such as agent skills), use progressive disclosure by separating core instructions from deep reference files (`references/`). For standalone prompts where multi-file loading is not feasible, keep the primary directive concise at the top and relegate large reference data or schemas to clearly delimited sections at the end of the prompt.
+   - Where supported (such as agent skills), use progressive disclosure by separating core instructions from deep reference files (`references/`). For standalone prompts, keep the primary directive concise at the top and place large reference schemas at the end.
 
 2. **Assume high baseline knowledge**:
 
@@ -255,7 +283,7 @@ When writing system prompts, agent skills, tool guidelines, or automated prompts
 
 3. **Semantic delimiters**:
 
-   - Use XML tags (`<instructions>`, `<constraints>`, `<context>`, `<examples>`) or Markdown headers (`#`) to bound prompt components so the model distinguishes instructions from user input.
+   - Use XML tags (`<instructions>`, `<constraints>`, `<context>`, `<examples>`) or Markdown headers (`#`) to bound prompt components. This helps the model distinguish instructions from user input.
 
 4. **Primacy & recency placement**:
 
@@ -264,7 +292,7 @@ When writing system prompts, agent skills, tool guidelines, or automated prompts
 
 5. **Positive action directives**:
 
-   - Frame instructions as direct, positive actions (*"Format the output as a 3-column table with headers X, Y, Z"*) rather than vague negative prohibitions (*"Don't generate bad tables"*).
+   - Frame instructions as direct, positive actions (`"Format the output as a 3-column table with headers X, Y, Z"`) rather than negative prohibitions (`"Don't generate bad tables"`).
 
 6. **Few-shot concrete examples**:
 
@@ -278,19 +306,19 @@ Prose created by an AI agent must be standalone and free from meta-instruction c
 
 ### 8.1 Core rules
 
-1. Do not leak instruction meta-concepts, planning tiers, phase numbers, prompt milestone names, or task division labels into the target prose. State the technical behavior or feature directly without referencing external planning structures (unless those structures are formally defined within the document itself).
-2. Supply essential background so the document is understandable on its own. Never refer to "earlier in our chat", "the plan discussed previously", or "as requested in previous turns".
+1. Do not leak instruction meta-concepts, planning tiers, phase numbers, milestone names, or task labels into the target prose. State the technical behavior directly without referencing external planning structures unless the document formally defines them.
+2. Supply essential background so the document is understandable on its own. Never refer to `"earlier in our chat"`, `"the plan discussed previously"`, or `"as requested in previous turns"`.
 3. Remove all subagent IDs (`task-123`), agent tool names, step numbers, and internal agent orchestration artifacts.
 4. Always use clean, relative paths (`src/utils/file.ts`) instead of local absolute system paths (`/Users/.../src/utils/file.ts`).
-5. Replace vague pointers (*"this issue"*, *"the bug mentioned earlier"*) with concrete named entities (*"the race condition in `AuthService.login()`"*).
+5. Replace vague pointers (`"this issue"`, `"the bug mentioned earlier"`) with concrete named entities (`"the race condition in AuthService.login()"`).
 
 ### 8.2 The fresh reader audit checklist
 
 When writing or reviewing prose, execute this 3-question audit:
 
-1. **The Origin Check**: *Did this term, phase label, or classification originate from the user's prompt / execution plan or is it an established concept in the domain / target document?*
+1. **The Origin Check**: *Did this term, phase label, or classification originate from the user's prompt or execution plan, or is it an established domain concept?*
    - If from an external prompt or plan $\rightarrow$ **Strip the meta-label or define it in-line.**
-2. **The Standalone Check**: *Can a reader with no knowledge of the chat, task prompt, or repository history understand every paragraph without asking "What does X refer to?"*
+2. **The Standalone Check**: *Can a new reader understand every paragraph without asking "What does X refer to?"*
    - If not $\rightarrow$ **Add explicit context or replace vague pronouns/terms.**
 3. **The Hygiene Check**: *Are there any absolute system paths (`/Users/...`), subagent IDs (`task-xyz`), or transcript turn references (`in turn 2`)?*
    - If present $\rightarrow$ **Sanitize to relative paths / domain facts.**

@@ -58,6 +58,16 @@ For findings on document files, also apply these filters:
 - **Unchanged files**: Move findings that exist only in unchanged files (for example, inbound links broken by a rename) to the Structural Assessment.
 - **Category required**: Every document finding has exactly one category from [reviewing_documents.md](reviewing_documents.md#finding-categories).
 
+## API Findings (Apropos Boundary Filters)
+
+When evaluating public interfaces, methods, endpoints, or configuration surfaces, apply these boundary filters to prevent scope creep:
+
+- **Changed-line anchor required**: Every API finding must anchor to a line modified in the diff (+/-). If an API flaw belongs to an existing, untouched class or method outside the diff, drop the finding from Review Comments.
+- **No legacy refactor demands**: Never demand that the author refactor, rename, or modernize unchanged APIs elsewhere in the codebase.
+- **Local idioms over canonical ideals**: If the surrounding module adheres to an established local pattern (such as naming conventions or error representations), prioritize local consistency over abstract purity, unless the change is intentionally introducing a new architectural pattern.
+- **Accidental complexity filter**: Drop suggestions that demand speculative design patterns (like builders, abstract factories, or intermediate wrapper classes) for simple interfaces unless concrete cognitive complexity warrants it.
+- **Systemic observations**: If an API change exposes a broader architectural flaw in the existing codebase that cannot be resolved within the diff, do not file it as a defect against the author. Convert it to a Question (`Q1...`) only if it directly settles whether the change is safe; otherwise drop it.
+
 ## Panel Runs
 
 Under `--panel`, each reviewer drops its own out-of-lane findings below `high`. Out-of-lane findings at `critical` or `high` are kept and tagged `out-of-lane` in their Body.

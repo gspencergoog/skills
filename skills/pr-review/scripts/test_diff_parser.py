@@ -261,6 +261,210 @@ class TestDiffParser(unittest.TestCase):
             tagged = tag_findings_with_hunk_status(findings, hunks, repo_dir=str(coords_json))
             self.assertEqual(tagged[0]["original_code"], "line 12\nline 13")
 
+    def test_normalize_findings_preserves_enriched_metadata(self):
+        raw_payload = {
+            "review_summary": {
+                "overview": "Adds async handling.",
+                "verdict": "REQUEST_CHANGES",
+                "checked_clean": [
+                    "No memory leak: Executed - valgrind clean",
+                ],
+                "structural_assessment": {
+                    "implementer": "Clean interface",
+                },
+            },
+            "findings": [
+                {
+                    "id": "H1",
+                    "file_path": "lib/parser.dart",
+                    "line_start": 12,
+                    "line_end": 15,
+                    "severity": "high",
+                    "evidence_tier": "Read",
+                    "evidence_detail": "lib/parser.dart:12 unawaited future",
+                    "why": "Unawaited future causes silent failures.",
+                    "description": "Unawaited future",
+                    "draft_comment": "Await the future.",
+                }
+            ],
+            "questions": [
+                {
+                    "id": "Q1",
+                    "file_path": "lib/config.dart",
+                    "line": 40,
+                    "severity": "question",
+                    "evidence_tier": "Speculation",
+                    "evidence_detail": "Unclear default timeout",
+                    "why": "May terminate early",
+                    "to_settle": "Check timeout in client.dart",
+                    "description": "Does timeout apply to streams?",
+                    "draft_comment": "**Question**: Does timeout apply to streams?",
+                }
+            ],
+        }
+        normalized = normalize_findings_payload(raw_payload)
+        summary = normalized["review_summary"]
+        self.assertEqual(summary["overview"], "Adds async handling.")
+        self.assertEqual(summary["verdict"], "REQUEST_CHANGES")
+        self.assertEqual(len(summary["checked_clean"]), 1)
+        self.assertEqual(summary["structural_assessment"]["implementer"], "Clean interface")
+
+        findings = normalized["findings"]
+        self.assertEqual(len(findings), 2)
+        h1 = findings[0]
+        self.assertEqual(h1["evidence_tier"], "Read")
+        self.assertEqual(h1["why"], "Unawaited future causes silent failures.")
+
+        q1 = findings[1]
+        self.assertEqual(q1["id"], "Q1")
+        self.assertEqual(q1["severity"], "question")
+        self.assertEqual(q1["line_start"], 40)
+        self.assertEqual(q1["line_end"], 40)
+        self.assertEqual(q1["to_settle"], "Check timeout in client.dart")
+
+    def test_normalize_findings_double_pass_deduplicates_questions_and_preserves_summary(self):
+        raw_payload = {
+            "review_summary": {
+                "overview": "Adds async handling.",
+                "verdict": "REQUEST_CHANGES",
+            },
+            "findings": [
+                {
+                    "id": "H1",
+                    "file_path": "lib/parser.dart",
+                    "line_start": 12,
+                    "line_end": 15,
+                    "severity": "high",
+                    "draft_comment": "Fix this.",
+                }
+            ],
+            "questions": [
+                {
+                    "id": "Q1",
+                    "file_path": "lib/config.dart",
+                    "line": 40,
+                    "severity": "question",
+                    "draft_comment": "**Question**: Does timeout apply to streams?",
+                }
+            ],
+        }
+        pass1 = normalize_findings_payload(raw_payload)
+        self.assertEqual(len(pass1["findings"]), 2)
+        self.assertNotIn("questions", pass1)
+
+        pass2 = normalize_findings_payload(pass1)
+        self.assertEqual(len(pass2["findings"]), 2)
+        self.assertNotIn("questions", pass2)
+        self.assertEqual(pass2["review_summary"]["overview"], "Adds async handling.")
+        self.assertEqual(pass2["review_summary"]["verdict"], "REQUEST_CHANGES")
+
+    def test_normalize_findings_questions_default_to_question_severity(self):
+        raw_payload = {
+            "findings": [],
+            "questions": [
+                {"id": "Q1", "file_path": "a.py", "line_start": 3, "draft_comment": "Needed?"},
+                {"id": "Q2", "file_path": "a.py", "line_start": 9, "severity": "LOW"},
+            ],
+        }
+        normalized = normalize_findings_payload(raw_payload)
+        severities = {f["id"]: f["severity"] for f in normalized["findings"]}
+        # Missing severity defaults to "question"; an explicit one is kept.
+        self.assertEqual(severities, {"Q1": "question", "Q2": "low"})
+
+    def test_normalize_findings_legacy_dict_summary_fallback(self):
+        raw_payload = {
+            "summary": {
+                "overview": "Legacy summary dict.",
+                "verdict": "APPROVE",
+                "checked_clean": ["All clean"],
+            },
+            "findings": [],
+        }
+        normalized = normalize_findings_payload(raw_payload)
+        self.assertEqual(normalized["review_summary"]["overview"], "Legacy summary dict.")
+        self.assertEqual(normalized["review_summary"]["verdict"], "APPROVE")
+        self.assertEqual(normalized["review_summary"]["checked_clean"], ["All clean"])
+        self.assertNotIn("summary", normalized)
+
+    def test_end_to_end_export_to_normalize_pipeline(self):
+        import pathlib
+        import sys
+        import tempfile
+
+        code_review_scripts = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "code-review"
+            / "scripts"
+        )
+        if str(code_review_scripts) not in sys.path:
+            sys.path.insert(0, str(code_review_scripts))
+
+        from lint_review import export_report_to_json, parse_report
+
+        report_text = """\
+## Summary
+Reviewed 2 files. Overall structure is solid.
+Citation audit: 2 checked, 0 dropped. Flags: `--max`.
+
+## Structural Assessment
+- **Implementer**: Clean design
+- **Tester / Verifier**: Full test coverage
+
+## Review Comments (Ordered by Severity)
+
+### H1. Missing await
+- **File**: `lib/client.dart`
+- **Line**: `22`
+- **Severity**: `high`
+- **Evidence**: `Read` - line inspection
+- **Body**: Future is not awaited.
+- **Why**: Requests finish prematurely.
+- **Suggestion**:
+```dart
+await client.send();
+```
+
+## Questions
+
+### Q1. Is timeout configurable?
+- **File**: `lib/client.dart`
+- **Line**: `10`
+- **Evidence**: `Speculation` - default used
+- **Why**: May hang on slow network.
+- **To settle**: Inspect options class.
+
+## Checked and Found Clean
+- Memory leak in buffer: Executed - valgrind clean
+"""
+        report = parse_report(report_text)
+        with tempfile.TemporaryDirectory() as tmp:
+            json_path = pathlib.Path(tmp) / "review_results.json"
+            exported = export_report_to_json(report, json_path)
+
+            # Pass 1 through diff_parser normalization
+            pass1 = normalize_findings_payload(exported)
+            self.assertEqual(
+                pass1["review_summary"]["overview"],
+                "Reviewed 2 files. Overall structure is solid.",
+            )
+            self.assertEqual(pass1["review_summary"]["verdict"], "REQUEST_CHANGES")
+            self.assertEqual(len(pass1["review_summary"]["checked_clean"]), 1)
+            self.assertEqual(
+                pass1["review_summary"]["structural_assessment"]["implementer"],
+                "Clean design",
+            )
+            self.assertEqual(len(pass1["findings"]), 2)
+            self.assertNotIn("questions", pass1)
+
+            # Pass 2 (as happens in launch_dashboard)
+            pass2 = normalize_findings_payload(pass1)
+            self.assertEqual(len(pass2["findings"]), 2)
+            self.assertNotIn("questions", pass2)
+            self.assertEqual(
+                pass2["review_summary"]["overview"],
+                "Reviewed 2 files. Overall structure is solid.",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

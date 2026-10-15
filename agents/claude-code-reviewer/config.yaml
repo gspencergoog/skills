@@ -35,6 +35,12 @@ prompt_section_customization:
         - Run the downstream impact pass (at most 10 files) and fill in the Structural Assessment.
         In a mixed diff, review the code files first, with the same depth as a code-only review, then the documents. The document mandate adds to the code review and replaces none of it.
 
+        When the prompt includes an **API Review Mandate**, review modified public API surfaces against `reviewing_apis.md`:
+        - Read the `reviewing_apis.md` reference with `view_file` before reviewing.
+        - Apply the Dual-Scope Model: inspect sibling methods, parent interfaces, and call sites for context, but report only findings anchored to modified lines (+/-).
+        - Evaluate contract integrity, minimal surface area (KISS/YAGNI), ergonomics (naming, CQS, least astonishment), explicit configuration, strict validation, and operational reliability.
+        - Do not demand refactoring untouched legacy code or changing existing conventions outside the diff.
+
         When the prompt includes a **Lane Assignment** block (`--panel`), evaluate only the criteria and lenses it lists. Another reviewer covers the rest in parallel. Report an issue outside your lane only at `critical` or `high`, and tag its Body with `out-of-lane`. In the Structural Assessment, fill in only your own lenses.
 
     - title: Evidence Standard
@@ -64,6 +70,7 @@ prompt_section_customization:
         - **Questions**: Keep at most 3 Questions (`Q1…`), each naming a specific claim and the exact check (`To settle`) that resolves it. Drop generic "verify that…" reminders.
         - **Evidence for Documents**: Every document finding quotes the text it is about at `Read` (or `Fetched`), with its location (both sides for an inconsistency). Drop document findings without quoted evidence and generic "add a section" comments that name no concrete risk in `Why`.
         - **Check Before Claiming a Gap**: Before reporting something in a document as undefined, missing, or unaddressed, search the whole document, the document it is excerpted from, and its linked files. Drop the finding if the term is defined elsewhere, or if the document explicitly defers or scopes out the gap and the deferral causes no concrete risk.
+        - **API Boundary Filters**: When evaluating API surfaces, drop findings that demand refactoring untouched legacy code outside the diff, prefer local module idioms over abstract canonical ideals for incremental additions, drop suggestions demanding speculative design patterns (like builders or factories) without concrete cognitive complexity, and convert systemic codebase flaws into Questions (`Q1…`) only if directly settling whether the change is safe.
 
     - title: Read-Only Mandate
       content: |
@@ -80,7 +87,7 @@ prompt_section_customization:
         Your output must adhere strictly to the following `code-review` sections and format:
 
         ## Summary
-        A concise paragraph summarizing the overall changes, architecture, and overall verdict (`Ready` / `Minor Revisions Needed` / `Critical Blockers`).
+        A concise paragraph summarizing the overall changes and architecture. End the Summary with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`.
 
         ## Structural Assessment
         Include this section only when the prompt has a Document Review Mandate. Each lens verdict names what you checked and what you found; a bare "no issues" is not a verdict. Downstream impact lists files outside the diff, not the changed files themselves:
@@ -106,7 +113,8 @@ prompt_section_customization:
         - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output (<=15 lines), quoted text with `path:line` (both sides for an inconsistency), or line-cited trace>
         - **Body**: Concrete explanation of the defect.
         - **Why**: Concrete consequence if shipped as-is.
-        - **Suggestion**: (Optional) Compilable drop-in replacement for code, or replacement text or a specific question for documents.
+        - **Suggestion**: (Optional) Compilable drop-in replacement for code, or replacement text or a specific question for documents. One fenced block at most; it is posted as a committable GitHub suggestion unless the fence is ```diff or ```patch. Never put a test or example here.
+        - **Repro test**: (Optional, `--verify` only) The `review_scratch_*` test that reproduces the defect, in one fenced block. It is posted as a plain code block, never as a committable suggestion.
 
         ## Questions
         Up to 3 unresolved questions (`Q1…`); omit if none. Each entry uses a `### Q1. <claim as a question>` heading:

@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: "Conducts interactive, high-signal code reviews on external GitHub Pull Requests by deriving an unbiased description from the diff before reading the PR description or comments, reconciling stated vs. actual intent, launching a local review dashboard with GitHub suggestion block editing, and submitting atomic batched reviews."
+description: "Conducts interactive, high-signal code reviews on external GitHub Pull Requests by deriving an unbiased description from the diff before reading the PR description or comments, reconciling stated vs. actual intent, delegating code analysis to code-review with composable flags, launching a local review dashboard with GitHub suggestion block editing, and submitting atomic batched reviews."
 ---
 
 # PR Review Skill
@@ -9,12 +9,34 @@ description: "Conducts interactive, high-signal code reviews on external GitHub 
 > **READ-ONLY WORKSPACE, BLIND-FIRST ISOLATION, ZERO-APPROVAL COMMANDS & USER APPROVAL ENFORCEMENT**
 > - Do NOT modify repository code in the primary workspace.
 > - Perform all checkout and diff operations in an ephemeral temporary directory (`/tmp/pr-review-XXXXXX`).
-> - **Zero-Approval Command Execution**: Do not run `mkdir -p` or `rm` in shell commands (`review_engine.py`, `diff_parser.py`, `launch_dashboard.py`, and `write_to_file` create `<conversation-scratch-dir>` and parent directories automatically), and pass `<conversation-scratch-dir>/workspace_dir.txt` directly to `--repo-dir` and `--cleanup` instead of using `"$(cat ...)"` command substitution.
+> - **Zero-Approval Command Execution**: Do not run `mkdir -p` or `rm` in shell commands (`review_engine.py`, `diff_parser.py`, `launch_dashboard.py`, and `write_to_file` create `<conversation-scratch-dir>` and parent directories automatically), and pass `<conversation-scratch-dir>/workspace_dir.txt` directly to `--repo-dir` and `--cleanup` instead of using `"$(cat ...)"` command substitution. The one exception is `code-review`'s Step 6 cleanup loop in Step 3.3, which removes only the directories `code-review` itself created.
+> - **Scratch directory**: `<conversation-scratch-dir>` is `<appDataDir>/brain/<conversation-id>/scratch/pr-review/`. Every intermediate file this skill names (`pr_coords.json`, `pr.diff`, `workspace_dir.txt`, `blind_description.md`, `review_results.json`, `review_findings.json`, and so on) lives there.
 > - **Stage 1 Blindness**: Before `<conversation-scratch-dir>/blind_description.md` is written solely from the code diff, do NOT inspect the PR `title`, `body`, commit messages, branch names (`headRefName`), `comments`, `reviews`, or `threads`. Only `gh pr view --json number,url` (Step 1) and `review_engine.py --prepare-workspace` (Step 2) are permitted in Stage 1. The `stack` object in `pr_coords.json` (PR numbers, states, and rebase flags only) may be read in Stage 1; `pr_stack.json` (which carries branch names) and `gh stack view` output may not.
 > - Launch the review dashboard and wait for the user to submit or abort before posting any reviews or comments to GitHub.
 > - Never promise future work or unverified assumptions in review comments.
 
 This skill automates reviewing external GitHub Pull Requests (reviewing someone else's code). It derives an unbiased summary of the code changes from the diff alone before reconciling that summary against the author's stated purpose and review comments, then opens a local web dashboard so the human reviewer can inspect, edit, and approve every comment before posting to GitHub.
+
+---
+
+## Flags
+
+`pr-review` accepts the same composable analysis flags as `code-review`, passing them through to Step 3:
+
+| Flag | Effect | Cost |
+| :--- | :--- | :--- |
+| *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) and seed hypotheses | Baseline |
+| `--fast` | Single-pass in-session review without subagents; tier 1 checks only | Minimal latency / no subagents |
+| `--claude` (or `--opus`) | The single reviewer is `claude-code-reviewer`. Under `--panel`, reviewer B is `claude-code-reviewer`. | Uses 3P quota |
+| `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B) | About 2x subagents |
+| `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in throwaway checkouts) for trusted authors | Test runtime and dependency installs |
+| `--max` | Same as `--claude --panel --verify` | All of the above |
+| `--challenge` | Challenge protocol sending refuting evidence back to reviewers | One extra subagent turn per disputed reviewer |
+
+Legacy `--mode <depth>` syntax maps to these flags for backward compatibility:
+- `--mode fast` or `--mode standard` maps to `--fast`.
+- `--mode deep` maps to the default (Gemini reviewer).
+- `--mode max` maps to `--max`.
 
 ---
 
@@ -28,11 +50,10 @@ Follow these steps in order when reviewing a pull request:
    - Determine the target PR from the user prompt (URL, PR number, or head branch).
    - If no PR is specified, run `gh pr view --json number,url` (do NOT request `title`, `body`, `headRefName`, `comments`, or `reviews`) in the active workspace.
 2. **Select Analysis Depth**:
-   - If the user did not specify `--mode fast`, `--mode standard`, `--mode deep`, or `--mode max`, use `ask_question` to prompt:
-     - **(Recommended) Deep Review (`--mode deep`)**: Delegate to `gemini-code-reviewer` with Tier 1 static/CI checks, seeded hypotheses, and evidence/citation verification.
-     - **Standard Review (`--mode standard`)**: Direct review of the diff and surrounding context files in the checkout with a self-critique pass.
-     - **Fast Review (`--mode fast`)**: Diff-only single-pass scan for quick turnaround.
-     - **Max Review (`--mode max`)**: Two-lane `claude-code-reviewer` panel with Tier 2 test and mutation verification in isolated `/tmp/pr-review-*` checkouts.
+   - If the user did not specify analysis flags or a legacy `--mode`, use `ask_question` to prompt:
+     - **(Recommended) Deep Review (default)**: Delegate to `gemini-code-reviewer` with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
+     - **Fast Review (`--fast`)**: Single-pass in-session review without spawning subagents for rapid turnaround.
+     - **Max Review (`--max`)**: Two-lane panel (lane A `gemini-code-reviewer`, lane B `claude-code-reviewer`) with Tier 2 test and mutation verification in isolated checkouts.
 
 ---
 
@@ -80,47 +101,33 @@ Follow these steps in order when reviewing a pull request:
    `--input-stack` is ignored when the file does not exist. For a stacked PR, `pr_context.json` gains a `stack` object (members bottom-first with `number`, `title`, `state`, `is_draft`, `head_ref`, `base_ref`, `needs_rebase`, and `is_target`) and `pr_meta.json` gains `stack: {number, size, position}`.
 2. **Reconcile Stated Intent vs. Actual Diff**:
    - Compare `blind_description.md` against the author's `title`, `body`, `comments`, `reviews`, and `threads` in `pr_context.json` (if `threads_complete` is `false`, or if `pr_meta.json` contains `latest_head_sha` differing from `head_sha`, note this in a `> [!NOTE]` callout).
-   - Copy the text of `blind_description.md` verbatim into `<conversation-scratch-dir>/pr_description.md` — do **not** rewrite or soften the Stage 1 prose to match the author's framing. Prepend a top-level `## Intent Alignment: <Status>` section (`Matches Stated Purpose`, `Partial Divergence`, `Diverges from Stated Purpose`, or `Unstated Scope`) and weave inline GitHub callouts (`> [!WARNING]`, `> [!IMPORTANT]`, `> [!NOTE]`) directly beneath the relevant items in `## Summary`, `## Inferred Purpose`, `## Quality Assessment`, and `## Changes`. See [review_guidelines.md](references/review_guidelines.md) for callout rules.
+   - Copy the text of `blind_description.md` verbatim into `<conversation-scratch-dir>/pr_description.md`: do not rewrite or soften the Stage 1 prose to match the author's framing. Prepend a top-level `## Intent Alignment: <Status>` section (`Matches Stated Purpose`, `Partial Divergence`, `Diverges from Stated Purpose`, or `Unstated Scope`) and weave inline GitHub callouts (`> [!WARNING]`, `> [!IMPORTANT]`, `> [!NOTE]`) directly beneath the relevant items in `## Summary`, `## Inferred Purpose`, `## Quality Assessment`, and `## Changes`. See [review_guidelines.md](references/review_guidelines.md) for callout rules.
    - If `pr_context.json` has a non-null `stack`, add a `## Stack Context` section right after `## Intent Alignment` following the template in [review_guidelines.md](references/review_guidelines.md). You may run `gh stack view --short` in the checkout (`workspace_dir.txt`) for the same information in `gh`'s own format. Treat the stack as review context, not as a finding: a predecessor that `needs_rebase` or is still a draft is a `> [!NOTE]`, a claim in the body that a later PR in the stack covers something is checked against that PR's diff (`gh pr diff <n>`) before it is accepted, and anything the diff builds on from a predecessor is reviewed in that predecessor's PR, not here.
-3. **Analyze Code & Draft Concrete Suggestions**:
-   Execute the analysis corresponding to the selected depth mode:
-   - **`--mode fast` (Fast Review)**: Scan `<conversation-scratch-dir>/pr.diff` directly in a single pass without reading external context files or spawning subagents. Flag clear defects on modified lines.
-   - **`--mode standard` (Standard Review)**: Inspect `<conversation-scratch-dir>/pr.diff` and surrounding context files in the temporary checkout (`workspace_dir.txt`) following [review_guidelines.md](references/review_guidelines.md), then perform a self-critique pass to drop speculative or unverified claims.
-   - **`--mode deep` (Deep Review, default)**: Run Tier 1 read-only checks (inspect `gh pr checks` status and run configured fast static analyzers on modified files) and delegate the review to `gemini-code-reviewer` following the [`code-review`](../code-review/SKILL.md) skill criteria and [evidence.md](../code-review/references/evidence.md) (seeded hypotheses from Stage 1's `## Reviewer Focus & Risks`, evidence tiers, and `Why` consequences). Audit `critical` and `high` citations in the checkout before converting confirmed findings into `raw_findings.json`.
-   - **`--mode max` (Max Review)**: Check the collaborator trust gate in [`code-review/references/verification.md`](../code-review/references/verification.md) (`authorAssociation` in `OWNER`, `MEMBER`, `COLLABORATOR`). If trusted, run `review_engine.py --pr <pr> --prepare-workspace --reference <conversation-scratch-dir>/workspace_dir.txt --output-workspace <conversation-scratch-dir>/workspace_dir_b.txt` to create a second `/tmp/pr-review-*` checkout for Lane B (and clean it up in Step 5.2 with `--cleanup <conversation-scratch-dir>/workspace_dir_b.txt`) so both lanes can run Tier 2 test and mutation verification; if untrusted, restrict both lanes to Tier 1 read-only verification. Invoke two `claude-code-reviewer` subagents in parallel (`Code Reviewer A`: correctness, concurrency, edge cases, security; `Code Reviewer B`: maintainability, test quality, API soundness, efficiency), audit `critical`/`high` citations, deduplicate findings, and convert confirmed findings into `raw_findings.json`.
-   - In all modes, formulate GitHub suggestion blocks following [suggestion_syntax.md](references/suggestion_syntax.md). Each `draft_comment` states the problem and its effect first, then the fix. Keep the top-level review `overview` to 1–2 paragraphs without listing individual findings.
-4. **Structure & Tag Findings**:
-   - Write candidate findings to `<conversation-scratch-dir>/raw_findings.json` using the canonical shape in [findings_schema.md](references/findings_schema.md). Copy `pr_meta.json` into `pr_metadata`, and do not set `approved`:
-     ```json
-     {
-       "pr_metadata": { "...": "copied from pr_meta.json" },
-       "review_summary": {
-         "overview": "1-2 paragraphs summarizing the review assessment and verdict rationale.",
-         "verdict": "REQUEST_CHANGES"
-       },
-       "findings": [
-         {
-           "id": "f1",
-           "severity": "high",
-           "category": "correctness",
-           "file_path": "src/parser.ts",
-           "line_start": 120,
-           "line_end": 122,
-           "side": "RIGHT",
-           "description": "One-sentence summary of the problem.",
-           "draft_comment": "Problem and effect first, followed by fix or ```suggestion fence."
-         }
-       ]
-     }
-     ```
-   - Run `diff_parser.py` to validate diff hunks and tag findings (`is_diff_hunk: true` for lines inside diff hunks; `is_diff_hunk: false` for lines outside diff hunks). Pass `<conversation-scratch-dir>/workspace_dir.txt` directly to `--repo-dir` (do not use `"$(cat ...)"`):
+3. **Delegate Code Review Analysis to `code-review`**:
+   Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and the chosen flags (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`):
+   - **Preserve Blindness Invariant**: Do not pass the PR number or URL directly to `code-review`. Run `code-review` strictly on the local checkout commit range `origin/<base_ref>...<head_sha>` in the temporary checkout directory.
+   - **Checkout Ownership**: The `workspace_dir.txt` checkout belongs to `pr-review`. It is not `code-review`'s `$pr_review_dir_a`, even though both live under `/tmp/pr-review-*`. `code-review` reads it in place and never removes it; Step 3.4 reads it and Step 5.2 removes it. Any `--verify` checkout that `code-review` creates (`$pr_review_dir_a` for lane A, `$pr_review_dir_b` for lane B per [verification.md](../code-review/references/verification.md#per-reviewer-checkouts)) is `code-review`'s own and is removed in its Step 6.
+   - **Seed Hypotheses**: Pass the risks identified in Stage 1's `blind_description.md` (`## Reviewer Focus & Risks`) into `code-review` as seed hypotheses.
+   - **Execution Modes & Trust Gate**:
+     - Under `--fast`: `code-review` performs a single-pass in-session review on the diff and context files without spawning subagents.
+     - Under default (or `--claude`, `--panel`, `--verify`, `--challenge`, `--max`): `code-review` manages subagent reviewer lanes, verification tiers, citation audits, and challenge rounds as configured. Under `--verify`, look up collaborator trust with `gh api repos/<owner>/<repo>/pulls/<pull_number> --jq .author_association`, filling in `owner`, `repo`, and `pull_number` from `pr_coords.json` (do not use `gh`'s `{owner}/{repo}` placeholders, which resolve from the current directory, not from the PR under review). See [verification.md](../code-review/references/verification.md#trust-check). State the result in the `code-review` prompt: unless author association is `OWNER`, `MEMBER`, or `COLLABORATOR`, the change is an untrusted PR and every lane stays restricted to Tier 1 read-only checks, even though `code-review` operates within a local temporary checkout.
+   - **Orchestration Continuity**: Run `code-review` Steps 1 through 6 and skip Step 7. Pass `--json <conversation-scratch-dir>/review_results.json` so Step 5's `lint_review.py --export-json` writes where Step 3.4 reads (without a path, `code-review` would write to its own `<artifact-dir>`). Run `code-review`'s Step 6 cleanup loop as written; it is the one exception to the Zero-Approval rule above, and it removes only the directories `code-review` created (`$diff_dir` and any `--verify` checkouts), never the `workspace_dir.txt` checkout. After Step 6 completes, continue to Step 3.4 in the same turn, including when a reviewer subagent's completion message resumes you. Do not emit Step 7's hand-off question.
+   - **Suggestion Syntax**: Formulate code suggestions following [suggestion_syntax.md](references/suggestion_syntax.md) so they serialize into GitHub suggestion blocks. The exporter posts each finding's `Suggestion` as a committable ```` ```suggestion ```` block (except ```` ```diff ````/```` ```patch ```` fences) and a `Repro test` as a plain code block; `lint_review.py` rejects a `Suggestion` with more than one fenced block.
+   - **JSON Output**: The `code-review` workflow validates the report AST and exports `<conversation-scratch-dir>/review_results.json` via `lint_review.py --export-json <conversation-scratch-dir>/review_results.json`.
+4. **Tag Hunk Boundaries and Validate Findings**:
+   - Merge `pr_meta.json` into the review metadata and parse diff hunk boundaries using `diff_parser.py`:
      ```bash
      python3 scripts/diff_parser.py \
        --diff <conversation-scratch-dir>/pr.diff \
-       --findings <conversation-scratch-dir>/raw_findings.json \
+       --findings <conversation-scratch-dir>/review_results.json \
        --repo-dir <conversation-scratch-dir>/workspace_dir.txt \
        --output <conversation-scratch-dir>/review_findings.json
      ```
+   - `diff_parser.py` tags each finding with `is_diff_hunk: true` (for comments on lines modified within diff hunks) or `is_diff_hunk: false` (for outside-diff or broader context observations), while preserving enriched metadata:
+     - Evidence tiers (`evidence_tier`, `evidence_detail`), consequences (`why`), and resolution criteria (`to_settle`).
+     - Clarification questions (merged into `findings[]` with `severity: "question"`).
+     - Hypotheses checked clean (`checked_clean[]`) and structural assessment (`structural_assessment`).
+   - If manual or legacy findings are used in `<conversation-scratch-dir>/raw_findings.json`, pass `--findings <conversation-scratch-dir>/raw_findings.json` instead.
 
 ---
 
@@ -166,6 +173,7 @@ Follow these steps in order when reviewing a pull request:
    ```bash
    python3 scripts/review_engine.py --cleanup <conversation-scratch-dir>/workspace_dir.txt
    ```
+   Any `--verify` checkouts and the staged diff directory that `code-review` created were already removed by its Step 6 in Step 3.3.
 3. **Report to User**:
    Provide the user with a summary containing the review verdict, approved comments count, and the URL to the submitted GitHub review.
 
