@@ -31,9 +31,10 @@ These review guidelines ensure feedback is actionable, objective, and respectful
    - If an issue exists on lines outside the diff hunk, note it in the top-level review summary rather than attempting an invalid inline comment.
 
 5. **State the Problem Before the Fix**:
-   - Each comment is read on its own, next to the code. Open with what is wrong and what it causes, then give the fix or suggestion block.
-   - A comment that is only an instruction ("Add `await` here.") is not enough. Write "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async catalog functions report success before they finish. Add `await`." instead.
-   - Keep `description` to one sentence naming the problem. The dashboard puts it in bold at the top of the comment if the comment doesn't already contain it.
+   - Each comment is read on its own, next to the code. Open with what is wrong and what it causes in 1–3 short sentences, then give the fix or suggestion block.
+   - Never restate what the diff lines already show; the author can see the diff right above the comment.
+   - Keep each comment's prose within 80 words and 4 sentences ($\le 25$ words per sentence, $\text{PCC} \le 5$), with no em-dashes or AI filler words (see [`write-prose`](../../write-prose/references/audiences.md)).
+   - Keep `description` to one short sentence naming the problem for the dashboard card header; `launch_dashboard.py` does not prepend `**{description}**` onto non-empty `draft_comment` text.
 
 6. **Keep the Review Summary Short**:
    - Write 1-2 short paragraphs: what the PR does, the overall assessment, and the reason for the verdict.

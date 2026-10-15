@@ -49,7 +49,7 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
       "evidence_detail": "src/parser.ts:121 - return Promise without await",
       "description": "The promise from resolveDynamicValue() is never awaited.",
       "why": "Async functions report success before completion, dropping errors silently.",
-      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before they finish.\n\n**Impact**: Async functions report success before completion, dropping errors silently.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```",
+      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before completion and drop errors silently.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```",
       "is_diff_hunk": true,
       "original_code": "    resolveDynamicValue(fc);"
     },
@@ -65,7 +65,7 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
       "description": "Does defaultTimeout apply to long-lived streaming calls?",
       "why": "If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.",
       "to_settle": "Check grpc client timeout options in net/client.ts",
-      "draft_comment": "**Question**: Does defaultTimeout apply to long-lived streaming calls?\n\n**To Settle**: Check grpc client timeout options in net/client.ts",
+      "draft_comment": "Does defaultTimeout apply to long-lived streaming calls? If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.",
       "is_diff_hunk": true
     }
   ]
@@ -88,8 +88,8 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
 | `findings[].suggestion` | `code-review` | Raw text of the finding's `Suggestion` block. Already folded into `draft_comment` (as a committable ```` ```suggestion ```` block unless it was a ```` ```diff ````/```` ```patch ```` fence); nothing downstream reads it on its own. |
 | `findings[].repro_test` | `code-review` | (`--verify` only) Raw text of the finding's `Repro test` block. Folded into `draft_comment` under a `**Repro test**` label as a plain code block, never as a committable suggestion. |
 | `findings[].to_settle` | agent / `code-review` | (Question findings only) Exact command, file, or symbol that settles the question. |
-| `findings[].description` | agent | One sentence naming the problem. |
-| `findings[].draft_comment` | agent | The full comment body: the problem and its effect first, then the fix or a suggestion block. If it doesn't contain `description`, the launcher prefixes `**{description}**`. |
+| `findings[].description` | agent | One short sentence naming the problem for the dashboard card header. |
+| `findings[].draft_comment` | agent / `code-review` | The concise peer-facing comment body ($\le 80$ prose words, $\le 4$ sentences): the defect and its consequence first, followed by a suggestion block (or a natural 1–2 sentence question for `Q1…`). If `draft_comment` is empty, the launcher falls back to `description`. |
 | `findings[].is_diff_hunk` | `diff_parser.py` | `true` for an inline comment. `false` means the comment goes under "Broader Context" in the summary. |
 | `findings[].original_code` | `diff_parser.py` | The source lines the finding covers, shown in the dashboard. |
 | `findings[].approved` | dashboard only | Don't write it. The launcher sets every finding to `false`, and the user checks the ones to post. |

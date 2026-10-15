@@ -13,7 +13,7 @@ This skill reviews code against the canonical API Design guidelines.
 2. **Identify Target**: Identify the code to review.
    - If the user specified files (e.g., "review main.dart"), use those.
    - If the user has an open file in their context, assume that is the target.
-   - If neither, ask the user to specify the target files.
+   - If neither, prompt the user (using your interactive question tool if available, or by asking in chat and waiting for their reply) to specify the target files.
 3. **Analyze**: For each target file, perform a deep analysis against the "Foundations of Canonical API Design Principles" (loaded in step 1), specifically looking for:
    - **Contract-First**: Is the interface clear and decoupled from implementation?
    - **KISS/YAGNI**: Are there unnecessary parameters or over-generalized features?
@@ -28,3 +28,4 @@ This skill reviews code against the canonical API Design guidelines.
    - **Suggestions**: Ergonomic improvements (renaming, rearranging).
    - **Code Examples**: Provide `before` vs `after` code blocks for the suggested improvements.
    - Save the report as a markdown artifact in the conversation artifacts directory (e.g., `<appDataDir>/brain/<conversation-id>/api_review_results.md`).
+   - When the review recommends tuning specific signatures, route paths, or parameter defaults with competing ergonomic tradeoffs and the `a2ui-pane` plugin is available, also read the `genui` skill and render an inline `contract_workbench` or `consequence_cards` surface alongside the artifact link so the user can interactively select the target signature; skip the surface when `a2ui-pane` is not installed.

@@ -26,9 +26,16 @@ anything. Nothing is deleted without a plan.
    alongside a readable `.md` version. Use `--out` to put it elsewhere.
 
 2. Read the plan. Every branch carries a verdict and the evidence behind it.
-   Check the *Needs review* section by hand.
+   Check the *Needs review* section by hand. When the `a2ui-pane` plugin is
+   available (`render_a2ui` is reachable as a native or lazy MCP tool) and the
+   plan reports `DIVERGED` or `UNKNOWN` branches under *Needs review*, read the
+   `genui` skill and render a `triage_matrix` surface in the pane so the user
+   can classify each branch (`Delete`, `Keep`, `Inspect`); otherwise present the
+   Markdown summary and ask via your interactive question tool or chat.
 
-3. Execute.
+3. Confirm and execute. Before running `--execute`, request confirmation via an
+   inline `confirm_gate` surface in `genui` (when `a2ui-pane` is available) or
+   via your interactive question tool / chat (waiting for approval):
 
    ```bash
    python3 scripts/cleanup_branches.py --execute /path/to/plan.json

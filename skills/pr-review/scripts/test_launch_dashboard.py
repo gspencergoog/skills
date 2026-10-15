@@ -292,12 +292,12 @@ class TestNormalizeReviewData(unittest.TestCase):
         )
         self.assertEqual([f["approved"] for f in data["findings"]], [False, False])
 
-    def test_prefixes_description(self):
+    def test_preserves_draft_comment_without_prefixing_description(self):
         data, _ = normalize_review_data(
             {"findings": [{"description": "Promise not awaited.", "draft_comment": "Add await."}]}
         )
         self.assertEqual(
-            data["findings"][0]["draft_comment"], "**Promise not awaited.**\n\nAdd await."
+            data["findings"][0]["draft_comment"], "Add await."
         )
 
     def test_no_duplicate_description(self):
@@ -313,7 +313,7 @@ class TestNormalizeReviewData(unittest.TestCase):
 
     def test_description_only(self):
         data, _ = normalize_review_data({"findings": [{"description": "Unused import"}]})
-        self.assertEqual(data["findings"][0]["draft_comment"], "**Unused import**")
+        self.assertEqual(data["findings"][0]["draft_comment"], "Unused import")
 
     def test_pr_metadata_wins_over_pr_meta(self):
         data, _ = normalize_review_data(
@@ -416,7 +416,8 @@ class TestNormalizeReviewData(unittest.TestCase):
         self.assertEqual(f["file_path"], "src/app.py")
         self.assertEqual(f["line_start"], 10)
         self.assertEqual(f["line_end"], 12)
-        self.assertIn("**Check bounds**", f["draft_comment"])
+        self.assertEqual(f["description"], "Check bounds")
+        self.assertEqual(f["draft_comment"], "Bounds are not checked.")
 
     @unittest.skipUnless(shutil.which("node"), "node is required for JS Markdown XSS tests")
     def test_dashboard_markdown_renderer_xss_safety(self):

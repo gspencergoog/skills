@@ -59,7 +59,7 @@ Invoke a subagent to execute the `code-review` skill on the working directory or
 2. **Oscillation Detection**:
    - Maintain a list of files and line ranges modified in previous review iterations of the conversation.
    - If a finding (especially `LOW` severity) suggests modifying lines that were already edited in a previous pass, flag it as a potential **oscillation**.
-   - **User Resolution**: For any detected oscillation, do not guess or silently skip. Call `ask_question` to present the conflicting recommendations to the user, explain the tradeoff, and ask how they prefer to resolve it.
+   - **User Resolution**: For any detected oscillation, do not guess or silently skip. Render the conflicting recommendations and their tradeoffs to the user via `consequence_cards` in `genui` (when `a2ui-pane` is available) or prompt via your interactive question tool / chat (waiting for their reply), pre-populating or listing your recommended option first with `(Recommended)`.
 3. Apply agreed-upon fixes.
 4. Run static analyzer and unit test suite to verify fixes.
 5. Create git commit (e.g. `fix(review): address code review feedback - pass N`).
@@ -72,6 +72,6 @@ ______________________________________________________________________
 
 - **Homeostasis Condition**: 0 `critical`, `high`, `medium`, and `low` findings reported (`Questions` excluded).
 - **Subagent Cleanup**: Explicitly call `manage_subagents` (`Action: 'kill_all'`) when review loops complete to ensure no background subagent processes remain active.
-- **Oscillation Intervention**: `ask_question` prompt triggered whenever a review recommendation conflicts with code modified in a previous loop pass.
-- **Max Iterations Cap**: Maximum 5 review loops per phase. If issues persist after 5 loops, terminate subagents (`manage_subagents` with `'kill_all'`), pause, and present remaining items to the user via `ask_question`.
+- **Oscillation Intervention**: `consequence_cards` surface (via `genui`) or interactive question / chat prompt triggered whenever a review recommendation conflicts with code modified in a previous loop pass.
+- **Max Iterations Cap**: Maximum 5 review loops per phase. If issues persist after 5 loops, terminate subagents (`manage_subagents` with `'kill_all'`), pause, and present remaining items to the user via `triage_matrix` in `genui` (when `a2ui-pane` is available) or via your interactive question tool / chat.
 - **Git Checkpoint Policy**: Always commit changes after each loop iteration so progress is checkpointed and revertable.

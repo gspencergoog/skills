@@ -11,7 +11,7 @@ ______________________________________________________________________
 
 ## Procedural Workflow Summary
 
-Execute these 5 phases sequentially:
+Execute these 5 phases sequentially. When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render a `progress_board` surface (`mode: "pane"`, `surfaceId: "ship-it-progress"`) at the start of Phase 1, updating its status rows (`$/items = [...]`) at each phase transition; skip silently when `a2ui-pane` is not installed:
 
 1. **Phase 1: PR Segmentation & Stacking Analysis** (Pre-flight git status check, diff scope analysis, and stacked worktree proposals)
 2. **Phase 2: Per-Branch Static Analysis & Test Audit** (Linter/analyzer gate, 90%+ coverage enforcement, and test quality audit)
@@ -25,7 +25,7 @@ ______________________________________________________________________
 
 1. **Pre-flight Working Tree Check**:
    - Run `git status --porcelain` to inspect untracked files and uncommitted working tree changes.
-   - **If uncommitted or untracked changes are found**: Explicitly prompt the user via `ask_question` asking what to do with them (e.g. stage and commit them into the current branch, stash them, or include them in the diff scope calculation).
+   - **If uncommitted or untracked changes are found**: Explicitly prompt the user (using your interactive question tool if available, or by presenting the options in chat and waiting for their reply, listing your recommended option first with `(Recommended)`) asking what to do with them (e.g. stage and commit them into the current branch, stash them, or include them in the diff scope calculation).
 2. **Evaluate Diff Scope**:
    - Inspect git branch diff stat against base branch (e.g. `git diff --stat main...HEAD`), and then inspect the individual diffs in groups or per-file (`git diff main...HEAD -- <files...>`) for large changesets rather than pulling large raw diffs all at once, but do look at all the diffs.
    - Evaluate if the change should remain a single PR or be split into stacked PRs:
@@ -84,7 +84,7 @@ Execute iterative review passes on the current branch/worktree:
    - Launch a subagent (`Workspace: "inherit"`) following the `code-review` skill on the working directory diff.
    - Parse findings (`critical`, `high`, `medium`, and `low`); Questions are answered, not fixed, and do not block homeostasis.
    - Apply fixes, run unit tests, and commit changes (`git commit -m "fix(review): address review comments"`).
-   - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, use `ask_question` to ask the user how to resolve the conflicting recommendations.
+   - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, present the conflicting recommendations to the user via `consequence_cards` in `genui` (when `a2ui-pane` is available) or via your interactive question tool / chat prompt (waiting for their reply).
    - **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`/`high`/`medium`/`low` findings (Questions do not count, or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`** before proceeding to Phase 4 (Documentation Sync).
 
 ______________________________________________________________________
@@ -104,7 +104,7 @@ ______________________________________________________________________
 2. **Project, README, CHANGELOG & Design Documentation**:
    - Check if CLI flags, configuration schemas, installation procedures, breaking changes, or public API usage changed.
    - Audit and update existing project documentation files (`README.md`, `CHANGELOG.md`, proposal/design RFC documents, package guides) using `write-prose` skill standards.
-   - **Missing `README.md` Detection**: If no `README.md` exists in the component/package root and creating one would benefit the project, explicitly prompt the user via `ask_question` asking if they would like a new `README.md` generated.
+   - **Missing `README.md` Detection**: If no `README.md` exists in the component/package root and creating one would benefit the project, explicitly prompt the user (using your interactive question tool if available, or in chat and waiting for their reply) asking if they would like a new `README.md` generated.
 3. **Final Verification**:
    - Run the full test suite one final time to verify all tests pass.
    - Commit documentation updates (`git commit -m "docs: sync inline documentation, README, and CHANGELOG"`).
@@ -118,10 +118,10 @@ ______________________________________________________________________
 
 Refer to [post_pr_creation.md](references/post_pr_creation.md) for detailed execution steps:
 
-1. **Prompt User for Draft Submission Approval**: Present the generated PR description and prompt the user via `ask_question` for explicit permission to create the Draft PR on GitHub.
+1. **Prompt User for Draft Submission Approval**: Present the generated PR description and request explicit permission to create the Draft PR on GitHub by rendering an inline `confirm_gate` via `genui` (when `a2ui-pane` is available) or prompting via your interactive question tool / chat (waiting for approval).
 2. **Submit Draft PR**: Upon approval, push branch and run `gh pr create --draft` (following `gh-cli` skill).
 3. **5-Minute CI & Feedback Schedule**: Set a 5-minute schedule timer (`schedule` tool) to monitor CI status (`gh pr checks`) and review comments (`analyze-github-pr` script).
-4. **Feedback Resolution Selection**: If CI fails or review comments exist, prompt the user via `ask_question`:
+4. **Feedback Resolution Selection**: If CI fails or review comments exist, prompt the user (using your interactive question tool if available, or in chat and waiting for their reply, listing your recommended option first with `(Recommended)`):
    - **Interactive Dashboard**: Delegate to `pr-feedback-handler` skill (`launch_dashboard.py`).
    - **Direct Fix & Respond**: Fix findings directly, verify with unit tests, commit, push, and submit thread replies via `pr-feedback-handler` scripts (`update_thread.py`).
-5. **Mark Ready for Review**: Once CI passes and feedback is clean, prompt the user via `ask_question` and run `gh pr ready` to publish out of draft state.
+5. **Mark Ready for Review**: Once CI passes and feedback is clean, request approval via an inline `confirm_gate` in `genui` (when `a2ui-pane` is available) or via your interactive question tool / chat, and run `gh pr ready` to publish out of draft state.

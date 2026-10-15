@@ -1,6 +1,6 @@
 ---
 name: write-prose
-description: Master prose writing and orchestration skill for creating clear, plain, accessible, and natural human writing. Synthesizes ISO 24495-1:2023, W3C Cognitive Accessibility Guidance, Plain Writing Act, and Simplified Technical English (STE) standards. Use when writing, drafting, editing, or reviewing reports, PR descriptions, commit messages, API docstrings, READMEs, architecture documents, user guides, prompts, or general technical prose.
+description: Master prose writing and orchestration skill for creating clear, plain, accessible, and natural human writing. Synthesizes ISO 24495-1:2023, W3C Cognitive Accessibility Guidance, Plain Writing Act, and Simplified Technical English (STE) standards. Use when writing, drafting, editing, or reviewing reports, PR descriptions, inline code review comments, commit messages, API docstrings, READMEs, architecture documents, user guides, prompts, or general technical prose.
 ---
 
 # Master prose writing & orchestration (`write-prose`)
@@ -28,10 +28,11 @@ This skill is the central source of truth for clear, plain, accessible, and natu
 Determine the target audience and document format:
 
 1. **Pull requests / commits**: Engineering peers $\rightarrow$ Focus on "Why" over "How", factual tone, no fluff.
-2. **API documentation / docstrings**: API consumers $\rightarrow$ Third-person singular verbs, concise summaries, clear parameter prose.
-3. **User guides / tutorials**: End users $\rightarrow$ Direct second-person ("you"), short critical paths, explicit step-by-step instructions.
-4. **Architecture / design RFCs**: Team leads & stakeholders $\rightarrow$ Clear tradeoffs, decision-first layout, plain language.
-5. **Prompts & system instructions**: AI agents / LLMs $\rightarrow$ Imperative tone, XML tags, positive directives, assume high baseline knowledge (name concepts without explaining them).
+2. **Inline code review comments**: PR authors $\rightarrow$ State the defect and consequence in 1–3 short sentences ($\le 80$ words) without restating the diff.
+3. **API documentation / docstrings**: API consumers $\rightarrow$ Third-person singular verbs, concise summaries, clear parameter prose.
+4. **User guides / tutorials**: End users $\rightarrow$ Direct second-person ("you"), short critical paths, explicit step-by-step instructions.
+5. **Architecture / design RFCs**: Team leads & stakeholders $\rightarrow$ Clear tradeoffs, decision-first layout, plain language.
+6. **Prompts & system instructions**: AI agents / LLMs $\rightarrow$ Imperative tone, XML tags, positive directives, assume high baseline knowledge (name concepts without explaining them).
 
 Evaluate reader knowledge and conceptual boundaries:
 
@@ -39,7 +40,7 @@ Evaluate reader knowledge and conceptual boundaries:
 - Make sure the document stands alone without assuming access to prompt history, conversation transcripts, or external planning documents.
 
 > [!NOTE]
-> If the target audience or document context is ambiguous, use `ask_question` to clarify before drafting.
+> If the target audience or document context is ambiguous, prompt the user (using your interactive question tool if available, or by asking in chat and waiting for their reply) to clarify before drafting.
 
 For detailed audience templates and tone matrices, see [references/audiences.md](references/audiences.md).
 
@@ -52,6 +53,7 @@ ______________________________________________________________________
 For specialized document types, delegate content gathering to domain skills while enforcing `write-prose` quality standards:
 
 - **Pull request descriptions**: Refer to [write-pr-description](../write-pr-description/SKILL.md) for diff structure and testing steps.
+- **Inline code review comments**: Refer to [code-review](../code-review/SKILL.md) and [pr-review](../pr-review/SKILL.md) for evidence tiers, comment prose budgets, and suggestion block rules.
 - **Commit messages**: Refer to [commit-changes](../commit-changes/SKILL.md) for conventional commit formatting.
 - **Code & API documentation**: Refer to [code-documentation](../code-documentation/SKILL.md) for docstring and tag conventions.
 - **AI prompts & skill instructions**: Refer to Section 7 in [references/standards.md](references/standards.md#7-prompt-design-standards-for-llm-audiences) for XML tagging, primacy placement, and token conservation.

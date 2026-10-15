@@ -26,6 +26,7 @@ Apply these falsification rules (from [evidence.md](evidence.md)) to every candi
 - **Severity obeys the evidence cap**: `critical` and `high` require `Executed`, `Read`, `Fetched`, or a `Deduction` trace where every step cites an exact `path:line`. Downgrade or convert to a Question when the evidence is `Speculation` or an incomplete trace.
 - **Concrete `Why` required**: Every finding must include a `Why` field naming the concrete consequence (what breaks, corrupts, leaks, or fails). If you cannot state a concrete consequence, drop the finding or downgrade it to a Question.
 - **Tree checked before claiming removal, misuse, or missing coverage**: Drop any claim that code or test coverage was deleted unless `rg` against `HEAD` confirmed it did not move. Drop any API-misuse or missing-argument claim unless you read the target signature and call sites in this session. Drop any "test pins incidental behavior" claim unless you checked the docstring or spec first.
+- **Inline comment prose budget**: Strip any sentence that merely restates what the diff lines already show. Keep each comment's combined prose (`Body` + `Why` + unfenced `Suggestion`) to at most 80 words and 4 sentences, with every sentence $\le 25$ words, cognitive complexity $\text{PCC} \le 5$, and zero banned AI words, em-dashes, or 4+ noun clusters.
 
 ## Questions
 

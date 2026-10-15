@@ -87,12 +87,6 @@ def _normalize_pr_description(
     return {"markdown": md, "alignment": align}
 
 
-def _comment_mentions(comment: str, description: str) -> bool:
-    """Returns True if `comment` already contains the text of `description`."""
-    needle = description.strip().rstrip(".").casefold()
-    return bool(needle) and needle in comment.casefold()
-
-
 def _normalize_pr_metadata(data: dict, meta: Optional[dict]) -> dict:
     """Merges `pr_meta`, `pr_metadata`, top-level `head_sha`, and external `meta`."""
     pr_metadata = dict(data.get("pr_meta") or {})
@@ -112,8 +106,8 @@ def _normalize_finding(finding: dict) -> dict:
     item["approved"] = False
     description = (item.get("description") or "").strip()
     comment = (item.get("draft_comment") or item.get("comment_body") or "").strip()
-    if description and not _comment_mentions(comment, description):
-        comment = f"**{description}**\n\n{comment}" if comment else f"**{description}**"
+    if not comment and description:
+        comment = description
     item["draft_comment"] = comment
     return item
 
@@ -141,8 +135,8 @@ def normalize_review_data(
     Returns:
       A (normalized, warnings) tuple. `normalized` has `pr_metadata`,
       `review_summary`, `pr_description`, and `findings`. Every finding starts
-      with `approved: False`, and its `draft_comment` opens with the finding's
-      `description` so the editor shows the full comment that gets posted.
+      with `approved: False`, and falls back to `description` only when
+      `draft_comment` is empty.
       `warnings` names each required metadata field that is still missing.
     """
     canonical_input = normalize_findings_payload(data)

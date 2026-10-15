@@ -50,8 +50,8 @@ Follow these steps in order when reviewing a pull request:
    - Determine the target PR from the user prompt (URL, PR number, or head branch).
    - If no PR is specified, run `gh pr view --json number,url` (do NOT request `title`, `body`, `headRefName`, `comments`, or `reviews`) in the active workspace.
 2. **Select Analysis Depth**:
-   - If the user did not specify analysis flags or a legacy `--mode`, use `ask_question` to prompt:
-     - **(Recommended) Deep Review (default)**: Delegate to `gemini-code-reviewer` with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
+   - If the user did not specify analysis flags or a legacy `--mode`, prompt the user to choose (using your interactive question tool if available, or by asking in chat and waiting for their reply):
+     - **(Recommended) Deep Review**: Delegate to `gemini-code-reviewer` with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
      - **Fast Review (`--fast`)**: Single-pass in-session review without spawning subagents for rapid turnaround.
      - **Max Review (`--max`)**: Two-lane panel (lane A `gemini-code-reviewer`, lane B `claude-code-reviewer`) with Tier 2 test and mutation verification in isolated checkouts.
 

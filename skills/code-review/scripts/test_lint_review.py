@@ -235,6 +235,12 @@ None.
             self.assertEqual(h1["description"], "`_fits_limits` measures code points instead of UTF-8 bytes")
             self.assertIn("Multibyte diffs exceed", h1["why"])
             self.assertIn("return _byte_len(text) <= max_bytes", h1["suggestion"])
+            self.assertIn(
+                "`len(text)` counts characters rather than UTF-8 bytes. "
+                "Multibyte diffs exceed `view_file`'s 46,080-byte read cap and truncate.",
+                h1["draft_comment"],
+            )
+            self.assertNotIn("**Impact**:", h1["draft_comment"])
             self.assertIn("```suggestion", h1["draft_comment"])
 
             self.assertEqual(len(data["questions"]), 1)
@@ -246,7 +252,14 @@ None.
             self.assertEqual(q1["line_end"], 41)
             self.assertEqual(q1["evidence_tier"], "Speculation")
             self.assertIn("Check how `git diff`", q1["to_settle"])
-            self.assertIn("**Question**", q1["draft_comment"])
+            self.assertEqual(
+                q1["draft_comment"],
+                'Can `split_diff_grouped` receive surrogate-escaped text on stdin? '
+                'If binary diffs contain non-UTF-8 bytes, `encode("utf-8")` raises `UnicodeEncodeError`.',
+            )
+            self.assertNotIn("**Question**", q1["draft_comment"])
+            self.assertNotIn("**Evidence**", q1["draft_comment"])
+            self.assertNotIn("**To Settle**", q1["draft_comment"])
 
             self.assertEqual(len(data["review_summary"]["checked_clean"]), 2)
 
@@ -547,6 +560,131 @@ None.
         self.assertEqual(
             data["review_summary"]["overview"], "First paragraph.\n\nSecond paragraph."
         )
+
+    def test_why_deduplication_in_draft_comment(self):
+        report_text = """\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Overlapping why is not repeated
+- **File**: `split_diff.py`
+- **Line**: `50`
+- **Severity**: `medium`
+- **Evidence**: `Read` - line 50
+- **Body**: `len(text)` counts characters instead of UTF-8 bytes, so multibyte diffs exceed the 46,080-byte read cap.
+- **Why**: Multibyte diffs exceed the 46,080-byte read cap.
+- **Suggestion**:
+```python
+return _byte_len(text) <= max_bytes
+```
+"""
+        data = self._export(report_text)
+        comment = data["findings"][0]["draft_comment"]
+        self.assertEqual(comment.count("46,080-byte read cap"), 1)
+        self.assertNotIn("**Impact**:", comment)
+
+    def test_comment_prose_length_fails(self):
+        five_sentences = (
+            "First short sentence here. "
+            "Second short sentence here. "
+            "Third short sentence here. "
+            "Fourth short sentence here. "
+            "Fifth short sentence here."
+        )
+        bad = f"""\
+## Review Comments (Ordered by Severity)
+### M1. Too many sentences
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: {five_sentences}
+- **Why**: Causes a bug.
+"""
+        rules = [v.rule for v in check_report(parse_report(bad))]
+        self.assertIn("comment-prose-length", rules)
+
+    def test_comment_sentence_length_fails(self):
+        long_sentence = (
+            "When the caller passes a dictionary with more than thirty entries "
+            "and the configuration flag for strict validation is enabled in "
+            "the runtime environment, the validator drops every remaining key "
+            "without logging a warning."
+        )
+        bad = f"""\
+## Review Comments (Ordered by Severity)
+### M1. Long sentence
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: {long_sentence}
+- **Why**: Drops keys silently.
+"""
+        rules = [v.rule for v in check_report(parse_report(bad))]
+        self.assertIn("comment-sentence-length", rules)
+
+    def test_comment_sentence_complexity_fails(self):
+        complex_sentence = (
+            "The parser, which when tokens that are not yet validated arrive "
+            "while the buffer is still locked, fails unless the caller retries."
+        )
+        bad = f"""\
+## Review Comments (Ordered by Severity)
+### M1. Complex sentence
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: {complex_sentence}
+- **Why**: Causes a failure.
+"""
+        rules = [v.rule for v in check_report(parse_report(bad))]
+        self.assertIn("comment-sentence-complexity", rules)
+
+    def test_comment_ai_ism_fails(self):
+        for body_text in (
+            "We should delve into this parser branch.",
+            "The parser fails here — and drops the token.",
+            "The system configuration validation pipeline rejects valid input.",
+        ):
+            with self.subTest(body_text=body_text):
+                bad = f"""\
+## Review Comments (Ordered by Severity)
+### M1. AI-ism check
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: {body_text}
+- **Why**: Breaks callers.
+"""
+                rules = [v.rule for v in check_report(parse_report(bad))]
+                self.assertIn("comment-ai-ism", rules)
+
+    def test_long_suggestion_code_block_ignored_by_prose_length(self):
+        long_code = "\n".join(f"    value_{i} = compute_step({i})" for i in range(30))
+        report_text = f"""\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Long code block in suggestion
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: `compute_all()` skips the initialization steps.
+- **Why**: Downstream callers read uninitialized state.
+- **Suggestion**:
+```suggestion
+{long_code}
+```
+"""
+        self.assertEqual(check_report(parse_report(report_text)), [])
 
 
 if __name__ == "__main__":

@@ -1,22 +1,23 @@
 # Audience & voice matrix (`audiences.md`)
 
-This guide provides concrete matrices and **one-shot reference examples** demonstrating how the same technical concept is adapted across 5 distinct audiences.
+This guide provides concrete matrices and **one-shot reference examples** demonstrating how the same technical concept is adapted across 6 distinct audiences.
 
 ______________________________________________________________________
 
 ## 1. Audience matrix & rule adaptations
 
-| Audience              | Primary Goal                                  | Voice / Person               | Verb & Tense Style                                                                                   | Structural Focus                                                                                 | Excluded Meta- & Agent Context                                                              |
-| :-------------------- | :-------------------------------------------- | :--------------------------- | :--------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------ |
-| **Peer Engineers**    | PR descriptions, commit logs, code reviews    | Factual / Impersonal         | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*).      | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps.            | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths. |
-| **API Consumers**     | Library docs, docstrings, SDK references      | Third-person neutral         | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*. | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample.                | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs.        |
-| **End Users / Devs**  | Tutorials, user guides, setup docs            | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step.                                | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result.                        | Omit internal project planning terminology, turn references, execution steps.               |
-| **Leadership / RFCs** | System designs, RFCs, technical proposals     | Objective / Analytical       | Present tense; decision-first layout.                                                                | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting.                           |
-| **AI Agents / LLMs**  | System prompts, agent skills, tool directives | Imperative / Unambiguous     | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives.                    | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples.        | Keep directives clear; define domain terms explicitly.                                      |
+| Audience                   | Primary Goal                                  | Voice / Person               | Verb & Tense Style                                                                                                                 | Structural Focus                                                                                 | Excluded Meta- & Agent Context                                                                                                               |
+| :------------------------- | :-------------------------------------------- | :--------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Peer Engineers**         | PR descriptions, commit logs, code reviews    | Factual / Impersonal         | Past-tense for changes (*"Added"*, *"Fixed"*); Present for logic intent (*"Why"* over *"How"*).                                    | Summary $\rightarrow$ Logic Changes $\rightarrow$ Impact $\rightarrow$ Testing Steps.            | Omit prompt milestone names, phase labels, chat history, subagent IDs, local machine paths.                                                  |
+| **Inline Review Comments** | PR diff hunk comments, review dashboards      | Direct / Peer-to-peer        | Present tense for defect and consequence; 1–3 short sentences ($\le 80$ words total, $\le 25$ words/sentence, $\text{PCC} \le 5$). | Defect + Consequence $\rightarrow$ Drop-in `suggestion` block.                                   | Never restate what the diff lines already say; omit bold title headers, `**Impact**:` labels, and internal `Evidence` / `To Settle` fields. |
+| **API Consumers**          | Library docs, docstrings, SDK references      | Third-person neutral         | 3rd-person singular present (*"Calculates..."*, *"Retries..."*); Booleans start with *"Whether..."*.                               | 1-Sentence Summary $\rightarrow$ Parameter Prose $\rightarrow$ Usage Code Sample.                | Omit internal task phases, prompt framing, refactoring milestone labels, agent logs.                                                         |
+| **End Users / Devs**       | Tutorials, user guides, setup docs            | Direct second-person ("you") | Imperative action verbs (*"Open"*, *"Configure"*); 1 action per step.                                                              | Prerequisites $\rightarrow$ Numbered Steps $\rightarrow$ Expected Result.                        | Omit internal project planning terminology, turn references, execution steps.                                                                |
+| **Leadership / RFCs**      | System designs, RFCs, technical proposals     | Objective / Analytical       | Present tense; decision-first layout.                                                                                              | Executive Summary $\rightarrow$ Proposal $\rightarrow$ Trade-offs Table $\rightarrow$ Migration. | Omit prompt execution phases, step-by-step agent troubleshooting.                                                                            |
+| **AI Agents / LLMs**       | System prompts, agent skills, tool directives | Imperative / Unambiguous     | Direct imperative commands (*"Execute"*, *"Return"*); positive action directives.                                                  | Role Anchor $\rightarrow$ XML Delimiters $\rightarrow$ Guardrails $\rightarrow$ Examples.        | Keep directives clear; define domain terms explicitly.                                                                                       |
 
 ______________________________________________________________________
 
-## 2. One-shot reference examples (same topic, 5 audiences)
+## 2. One-shot reference examples (same topic, 6 audiences)
 
 **Scenario**: Adding exponential backoff retry logic to an HTTP network service client.
 
@@ -115,4 +116,16 @@ When configuring retry logic, enforce exponential backoff using these parameters
 <output_format>
 Return client configuration as a YAML block formatted inside ```yaml code fences.
 </output_format>
+````
+
+______________________________________________________________________
+
+### Example F: Inline code review comment (PR diff hunk)
+
+````markdown
+`send()` retries on all `Exception` types, which repeats non-idempotent `POST` requests after a 400 Bad Request. Gate the retry loop on `isRetryable(error)` so 4xx responses fail immediately.
+
+```suggestion
+      if (!isRetryable(error) || attempt >= config.maxRetries) rethrow;
+```
 ````

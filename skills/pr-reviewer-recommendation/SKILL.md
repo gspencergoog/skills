@@ -49,7 +49,7 @@ When asked to find or recommend reviewers for a PR or branch:
 
 5. **Assign Recommended Reviewers**:
 
-   - If analyzing a GitHub PR (i.e., when analyzing a specific `--pr`), use the `ask_question` tool to ask the user if they want you to execute the command to assign the recommended reviewers.
+   - If analyzing a GitHub PR (i.e., when analyzing a specific `--pr`), request user confirmation to execute the command and assign the recommended reviewers (by rendering an inline `confirm_gate` via `genui` when available, or by prompting via your interactive question tool or chat and waiting for their reply).
    - Format the options as:
      - `"(Recommended) Yes, assign the recommended reviewers to the PR"`
      - `"No, I will assign them manually"`

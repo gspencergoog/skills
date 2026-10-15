@@ -45,7 +45,7 @@ Before analyzing PR feedback or launching the dashboard:
 1. **Verify Workspace State & Branch Sync**: Run `git status` in the target project directory. Verify active branch matches the PR HEAD branch and there are no uncommitted changes.
 2. **Check for Active/Pending CI Runs**:
    - Inspect the `pendingChecks` list from `analyze_comments.py`.
-   - If active checks are running, prompt the user via `ask_question` to determine whether to proceed immediately with triage or wait for CI completion.
+   - If active checks are running, prompt the user (using your interactive question tool if available, or by asking in chat and waiting for their reply, listing your recommended option first with `(Recommended)`) to determine whether to proceed immediately with triage or wait for CI completion.
 
 ______________________________________________________________________
 
@@ -178,7 +178,7 @@ Once the approved code changes are verified and committed:
   3. Report a clear completion summary to the user with the commit hash, pushed branch, and links to the resolved threads.
 
 - **In Interactive Mode (Default)**:
-  1. **Interactive Next Steps Menu**: Use `ask_question` to ask the user how they would like to proceed:
+  1. **Interactive Next Steps Menu**: Prompt the user for how to proceed (using an inline `confirm_gate` or choice surface via `genui` when available, your interactive question tool, or a numbered prompt in chat, then waiting for their reply):
      - **Option 1**: "(Recommended) Push changes and update/resolve review threads on GitHub."
      - **Option 2**: "Push changes to remote only (do not resolve threads yet)."
      - **Option 3**: "Keep changes local for manual review."

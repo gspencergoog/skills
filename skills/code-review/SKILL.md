@@ -213,8 +213,8 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - **Severity**: `<critical | high | medium | low>`
   - **Category**: `<document category>` (document files only)
   - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or line-cited trace>
-  - **Body**: `<explanation of the defect>`
-  - **Why**: `<concrete consequence if shipped as-is>`
+  - **Body**: `<1-3 short peer sentences explaining the defect without restating the diff lines (<= 25 words/sentence, PCC <= 5)>`
+  - **Why**: `<1 short sentence (<= 25 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>`
   - **Suggestion**: (Optional drop-in code snippet, replacement text, or specific question. One fenced block at most; the exporter posts it as a committable GitHub suggestion unless the fence is ```` ```diff ```` or ```` ```patch ````. Never put a test or example here.)
   - **Repro test**: (Optional, `--verify` only. The scratch test that reproduces the defect, in one fenced block. It is posted as a plain code block, never as a committable suggestion.)
 
@@ -319,7 +319,7 @@ Audit and combine the refined comments into the final output:
 - **Generate file summaries**: For reviews with multiple files, include `## Changed Files Summary` with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
 - When writing file paths, write them as Markdown links.
-- Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. For long review artifacts or RFC reviews, run `write-prose`'s `analyze_prose.py` script to audit readability metrics.
+- Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. `lint_review.py` automatically runs `analyze_prose.py` on every finding and question comment.
 - **Save and Lint Artifact**: Write the synthesized review to `review_results.md` in the conversation artifact directory (`<appDataDir>/brain/<conversation-id>/`) using `write_to_file` (never into the temporary checkout). Then run:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md
@@ -328,7 +328,7 @@ Audit and combine the refined comments into the final output:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md --export-json <export-path>
   ```
-  If `lint_review.py` exits non-zero, fix the reported formatting or severity-cap violations in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. Do not emit the full review directly into the chat response.
+  If `lint_review.py` exits non-zero, fix the reported formatting, severity-cap, or `comment-*` prose violations (`comment-prose-length`, `comment-sentence-length`, `comment-sentence-complexity`, `comment-ai-ism`) in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. Do not emit the full review directly into the chat response.
 
 ### Step 6: Workspace Cleanup
 
@@ -351,12 +351,14 @@ If any temporary directory was created for reviewing the PR, for `--verify` chec
 
 ### Step 7: Stop and Hand Off
 
+When running as a top-level review (not invoked by `pr-review` or `ship-it`) with 3 or more total findings and questions, and the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render a `triage_matrix` surface in the pane (`mode: "pane"`, `surfaceId: "review-triage"`). Pre-populate recommended buckets (`Fix now` for `critical` and `high`, `Follow-up` for `medium` and `low`, `Discuss` for `Questions`) with each finding's file/line anchor in `trace`. When `a2ui-pane` is not installed or fewer than 3 items exist, skip the pane render.
+
 Send one short chat message, then **end the turn**. The message contains:
 
-- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed).
+- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed), plus `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` if you rendered the `triage_matrix` surface.
 - The verdict (Ready / Minor Revisions Needed / Critical Blockers).
 - Finding counts by severity, plus question count (for example, "1 critical, 3 high, 2 medium, 4 low, 2 questions"). Questions never block the verdict.
-- One closing line: "Which findings should I address? (for example, `fix H1–H3` or `fix all high`)".
+- One closing line: "Which findings should I address? (for example, `fix H1 to H3`, `fix all high`, or submit your selections in the A2UI Pane)".
 
 That closing line is a question for the user. It is never a reason to start fixing. Do not edit files, stage changes, or start a fix plan in the same turn.
 
@@ -391,8 +393,8 @@ Each finding in `## Review Comments` specifies:
 - **Severity**: `critical`, `high`, `medium`, or `low`.
 - **Category**: (Document files only) One of the categories in [reviewing_documents.md](references/reviewing_documents.md#finding-categories).
 - **Evidence**: The tier (`Executed`, `Read`, `Fetched`, `Deduction`, or `Speculation`) followed by `—` and the command output, quoted text with `path:line`, or line-cited trace.
-- **Body**: The explanation of the defect.
-- **Why**: The concrete consequence if shipped as-is.
+- **Body**: 1–3 short peer sentences explaining the defect without restating the diff lines ($\le 25$ words per sentence, $\text{PCC} \le 5$).
+- **Why**: 1 short sentence ($\le 25$ words) naming the concrete consequence if shipped as-is (combined comment prose $\le 80$ words and $\le 4$ sentences).
 - **Suggestion**: (Optional) The specific code replacement, replacement text, or question.
 
 Each entry in `## Questions` specifies `File`, `Line`, `Evidence`, `Why`, and `To settle` (the exact file, symbol, or command that answers it).

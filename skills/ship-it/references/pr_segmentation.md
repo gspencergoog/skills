@@ -8,7 +8,7 @@ Before evaluating diff scope, check working tree cleanliness:
 
 1. Run `git status --porcelain` to check for uncommitted edits or untracked files.
 2. **If uncommitted or untracked changes are found**:
-   - Use `ask_question` to explicitly ask the user how they want to handle them:
+   - Prompt the user (using your interactive question tool if available, or in chat and waiting for their reply, listing your recommended option first with `(Recommended)`) to ask how they want to handle them:
      - Option 1: Stage and commit active work into the current branch before diff evaluation.
      - Option 2: Include uncommitted working tree changes in the diff scope calculation.
      - Option 3: Stash uncommitted changes (`git stash`) before proceeding.

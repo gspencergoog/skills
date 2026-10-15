@@ -8,10 +8,32 @@ import re
 import sys
 from typing import Any, Callable
 
+_WRITE_PROSE_SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "write-prose" / "scripts"
+if str(_WRITE_PROSE_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_WRITE_PROSE_SCRIPTS))
+
+from analyze_prose import analyze_prose
+
 VALID_TIERS = ("Executed", "Read", "Fetched", "Deduction", "Speculation", "Recalled")
 CLEAN_TIERS = ("Executed", "Read", "Fetched", "Deduction")
 ID_TO_SEVERITY = {"C": "critical", "H": "high", "M": "medium", "L": "low"}
 CLASS_ORDER = {"C": 0, "H": 1, "M": 2, "L": 3}
+
+MAX_COMMENT_WORDS = 80
+MAX_COMMENT_SENTENCES = 4
+MAX_SENTENCE_WORDS = 25
+MAX_SENTENCE_PCC = 5
+
+_STOPWORDS = frozenset({
+    "that", "this", "with", "from", "into", "when", "where", "which",
+    "while", "will", "would", "could", "should", "have", "does", "were",
+    "been", "being", "than", "then", "them", "they", "their", "there",
+    "these", "those", "only", "also", "more", "most", "some", "such",
+})
+_TRAILING_SEVERITY_TAG_RE = re.compile(
+    r"\s*\(\s*`?(?:critical|high|medium|low)`?(?:\s+severity)?\s*\)\s*([.!?]?)\s*$",
+    re.IGNORECASE,
+)
 
 HEADING_RE = re.compile(r"^###\s+([CHMLQ]\d+)\.\s*(.*)$")
 SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
@@ -154,94 +176,106 @@ def _record_section_line(
     return current
 
 
-def parse_report(text: str) -> Report:
-    """Parse a markdown review report into findings, questions, and clean lines."""
-    report = Report()
-    section = "other"
+@dataclass
+class _ParserState:
+    report: Report = field(default_factory=Report)
+    section: str = "other"
     current: Finding | None = None
     current_field: str | None = None
-    fence_marker = ""
+    fence_marker: str = ""
     capture_field: str | None = None
-    fence_indent = 0
-    captured_lines: list[str] = []
+    fence_indent: int = 0
+    captured_lines: list[str] = field(default_factory=list)
 
+
+def _handle_fence_transition(state: _ParserState, raw_line: str) -> bool:
+    """Updates fence state and captures fenced field bodies; returns True if line is consumed."""
+    old_fence = state.fence_marker
+    state.fence_marker, in_fence = _update_fence(state.fence_marker, raw_line)
+
+    if state.capture_field is not None:
+        if old_fence and not state.fence_marker:
+            if state.current is not None:
+                state.current.fields[state.capture_field] = "\n".join(state.captured_lines)
+            state.capture_field = None
+            return True
+        leading = len(raw_line) - len(raw_line.lstrip(" "))
+        state.captured_lines.append(raw_line[min(state.fence_indent, leading):])
+        return True
+
+    if (
+        not old_fence
+        and state.fence_marker
+        and state.current is not None
+        and state.current_field in FENCED_FIELDS
+    ):
+        meta = state.current.fence(state.current_field)
+        if meta.fenced:
+            meta.extra_fences += 1
+        else:
+            state.capture_field = state.current_field
+            meta.fenced = True
+            meta.info = raw_line.strip().lstrip("`~").strip()
+            meta.lead_in = state.current.fields.get(state.current_field, "")
+            state.fence_indent = len(raw_line) - len(raw_line.lstrip(" "))
+            state.captured_lines = []
+        return True
+
+    return in_fence
+
+
+def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> None:
+    """Processes a single non-fenced markdown line in the review report."""
+    field_match = FIELD_RE.match(stripped)
+    if field_match and field_match.group(1).strip().lower() == "verified":
+        state.report.verified_lines.append(lineno)
+
+    section_match = SECTION_RE.match(stripped)
+    if section_match:
+        state.section = _classify_section(section_match.group(1))
+        if state.section == "comments":
+            state.report.review_comments_line = lineno
+        state.current = None
+        state.current_field = None
+        return
+
+    heading_match = HEADING_RE.match(stripped)
+    if heading_match and state.section in ("comments", "questions"):
+        finding = Finding(
+            id=heading_match.group(1),
+            severity="",
+            fields={},
+            line=lineno,
+            title=heading_match.group(2).strip(),
+        )
+        target = state.report.questions if state.section == "questions" else state.report.findings
+        target.append(finding)
+        state.current = finding
+        state.current_field = None
+        return
+
+    if field_match and state.current is not None:
+        key = field_match.group(1).strip()
+        val = field_match.group(2).strip()
+        state.current.fields[key] = val
+        state.current_field = key
+        if key.lower() == "severity":
+            state.current.severity = _strip_ticks(val).lower()
+        return
+
+    state.current = _record_section_line(
+        state.report, state.section, state.current, stripped, lineno
+    )
+
+
+def parse_report(text: str) -> Report:
+    """Parse a markdown review report into findings, questions, and clean lines."""
+    state = _ParserState()
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
-        old_fence = fence_marker
-        fence_marker, in_fence = _update_fence(fence_marker, raw_line)
-
-        # Accumulate the body of a fenced block under a FENCED_FIELDS field.
-        if capture_field is not None:
-            if old_fence and not fence_marker:
-                # Closing fence reached
-                if current is not None:
-                    current.fields[capture_field] = "\n".join(captured_lines)
-                capture_field = None
-                continue
-            leading = len(raw_line) - len(raw_line.lstrip(" "))
-            captured_lines.append(raw_line[min(fence_indent, leading):])
+        if _handle_fence_transition(state, raw_line):
             continue
-
-        if not old_fence and fence_marker:
-            if current is not None and current_field in FENCED_FIELDS:
-                meta = current.fence(current_field)
-                if meta.fenced:
-                    # A second fence under the same field ("replace X with
-                    # Y"). Counted for the suggestion-single-fence rule; the
-                    # body stays in the markdown stream and is skipped below.
-                    meta.extra_fences += 1
-                else:
-                    capture_field = current_field
-                    meta.fenced = True
-                    meta.info = raw_line.strip().lstrip("`~").strip()
-                    meta.lead_in = current.fields.get(current_field, "")
-                    fence_indent = len(raw_line) - len(raw_line.lstrip(" "))
-                    captured_lines = []
-                    continue
-
-        if in_fence:
-            continue
-
-        stripped = raw_line.strip()
-        field_match = FIELD_RE.match(stripped)
-        if field_match and field_match.group(1).strip().lower() == "verified":
-            report.verified_lines.append(lineno)
-
-        section_match = SECTION_RE.match(stripped)
-        if section_match:
-            section = _classify_section(section_match.group(1))
-            if section == "comments":
-                report.review_comments_line = lineno
-            current = None
-            current_field = None
-            continue
-
-        heading_match = HEADING_RE.match(stripped)
-        if heading_match and section in ("comments", "questions"):
-            finding = Finding(
-                id=heading_match.group(1),
-                severity="",
-                fields={},
-                line=lineno,
-                title=heading_match.group(2).strip(),
-            )
-            target = report.questions if section == "questions" else report.findings
-            target.append(finding)
-            current = finding
-            current_field = None
-            continue
-
-        if field_match and current is not None:
-            key = field_match.group(1).strip()
-            val = field_match.group(2).strip()
-            current.fields[key] = val
-            current_field = key
-            if key.lower() == "severity":
-                current.severity = _strip_ticks(val).lower()
-            continue
-
-        current = _record_section_line(report, section, current, stripped, lineno)
-
-    return report
+        _handle_unquoted_line(state, raw_line.strip(), lineno)
+    return state.report
 
 
 def _check_unparsed_comments(report: Report) -> list[Violation]:
@@ -421,6 +455,172 @@ def _check_single_fence_per_field(report: Report) -> list[Violation]:
     return violations
 
 
+def _content_words(text: str) -> set[str]:
+    return {
+        w for w in re.findall(r"[a-z0-9_]{4,}", text.lower())
+        if w not in _STOPWORDS
+    }
+
+
+def _why_already_covered(body: str, why: str) -> bool:
+    """Returns True when `body` already states the consequence in `why`."""
+    if not body or not why:
+        return True
+    norm_body = re.sub(r"\s+", " ", body.strip().rstrip(".")).lower()
+    norm_why = re.sub(r"\s+", " ", why.strip().rstrip(".")).lower()
+    if norm_why in norm_body:
+        return True
+    why_words = _content_words(norm_why)
+    if not why_words:
+        return False
+    body_words = _content_words(norm_body)
+    return (len(why_words & body_words) / len(why_words)) >= 0.5
+
+
+def _build_finding_prose(body: str, why: str) -> str:
+    """Combines `body` with `why` only when `body` does not already state `why`."""
+    clean_body = body.strip()
+    clean_why = why.strip()
+    if not clean_body:
+        return clean_why
+    if not clean_why or _why_already_covered(clean_body, clean_why):
+        return clean_body
+    sep = " " if clean_body.endswith((".", "!", "?")) else ". "
+    return f"{clean_body}{sep}{clean_why}"
+
+
+def _strip_trailing_severity_tag(text: str) -> str:
+    """Strips trailing severity tags like (`medium`) or (`medium` severity) from question Why text."""
+    cleaned = _TRAILING_SEVERITY_TAG_RE.sub(r"\1", text.strip()).strip()
+    if cleaned and not cleaned.endswith((".", "!", "?")):
+        cleaned += "."
+    return cleaned
+
+
+def _build_question_prose(q: Finding) -> str:
+    """Builds peer-facing question prose from `q.title`, optional `Body`, and cleaned `Why`."""
+    title = q.title.strip()
+    body = q.fields.get("Body", "").strip()
+    why = _strip_trailing_severity_tag(q.fields.get("Why", ""))
+    question_text = title
+    if body and body.lower() not in title.lower():
+        sep = " " if question_text.endswith((".", "!", "?")) else "? "
+        question_text = f"{question_text}{sep}{body}" if question_text else body
+    if question_text and not question_text.endswith((".", "!", "?")):
+        question_text += "?"
+    return _build_finding_prose(question_text, why)
+
+
+def _extract_finding_comment_prose(f: Finding) -> str:
+    """Returns the prose portion of a finding's assembled comment (excluding code fences)."""
+    body = f.fields.get("Body", "").strip()
+    why = f.fields.get("Why", "").strip()
+    sugg = f.fields.get("Suggestion", "").rstrip().lstrip("\n")
+    sugg_meta = f.fence("Suggestion")
+    lead_in = sugg_meta.lead_in.strip()
+    parts: list[str] = []
+    main_prose = _build_finding_prose(body, why)
+    if main_prose:
+        parts.append(main_prose)
+    if lead_in:
+        parts.append(lead_in)
+    if sugg:
+        formatted_sugg = _format_suggestion(sugg_meta, sugg)
+        if not formatted_sugg.startswith("```"):
+            parts.append(formatted_sugg)
+    return "\n\n".join(parts)
+
+
+def _collect_ai_ism_labels(violations_dict: dict[str, Any]) -> list[str]:
+    """Collects human-readable labels for AI-ism, em-dash, and noun-cluster violations."""
+    labels: list[str] = []
+    for item in violations_dict.get("banned_ai_words_found", []):
+        labels.append(f"banned word '{item['banned_word']}'")
+    for item in violations_dict.get("banned_ai_phrases_found", []):
+        labels.append(f"banned phrase '{item['banned_phrase']}'")
+    if violations_dict.get("em_dashes_found"):
+        labels.append("em-dash '—'")
+    for item in violations_dict.get("noun_clusters_found", []):
+        labels.append(f"noun cluster '{item['cluster']}'")
+    return labels
+
+
+def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Violation]:
+    """Runs write-prose checks on a single finding or question's assembled prose."""
+    if not prose.strip():
+        return []
+    metrics = analyze_prose(
+        "-",
+        complexity_threshold=MAX_SENTENCE_PCC,
+        engine="stdlib",
+        text=prose,
+    )
+    if "error" in metrics:
+        return []
+    summary = metrics["summary"]
+    v_dict = metrics["violations"]
+    out: list[Violation] = []
+
+    words = summary["total_words"]
+    sentences = summary["total_sentences"]
+    if words > MAX_COMMENT_WORDS or sentences > MAX_COMMENT_SENTENCES:
+        out.append(
+            Violation(
+                line,
+                "comment-prose-length",
+                f"'{item_id}' comment prose is {words} words / {sentences} sentences "
+                f"(max {MAX_COMMENT_WORDS} words, {MAX_COMMENT_SENTENCES} sentences).",
+            )
+        )
+
+    long_sents = v_dict.get("sentences_exceeding_25_words", [])
+    if long_sents:
+        longest = max(s["word_count"] for s in long_sents)
+        out.append(
+            Violation(
+                line,
+                "comment-sentence-length",
+                f"'{item_id}' has {len(long_sents)} sentence(s) exceeding "
+                f"{MAX_SENTENCE_WORDS} words (longest: {longest} words).",
+            )
+        )
+
+    complex_sents = v_dict.get("complex_sentences_found", [])
+    if complex_sents:
+        worst = max(s["cognitive_complexity"] for s in complex_sents)
+        out.append(
+            Violation(
+                line,
+                "comment-sentence-complexity",
+                f"'{item_id}' has {len(complex_sents)} sentence(s) with cognitive complexity "
+                f"PCC > {MAX_SENTENCE_PCC} (max PCC: {worst}).",
+            )
+        )
+
+    ai_labels = _collect_ai_ism_labels(v_dict)
+    if ai_labels:
+        out.append(
+            Violation(
+                line,
+                "comment-ai-ism",
+                f"'{item_id}' contains prose violation(s): {', '.join(ai_labels)}.",
+            )
+        )
+    return out
+
+
+def _check_comment_prose(report: Report) -> list[Violation]:
+    """Runs write-prose checks on each finding and question comment prose."""
+    violations: list[Violation] = []
+    for f in report.findings:
+        prose = _extract_finding_comment_prose(f)
+        violations.extend(_lint_single_comment_prose(f.id, f.line, prose))
+    for q in report.questions:
+        prose = _build_question_prose(q)
+        violations.extend(_lint_single_comment_prose(q.id, q.line, prose))
+    return violations
+
+
 RULES: list[Callable[[Report], list[Violation]]] = [
     _check_unparsed_comments,
     _check_ids_sequential,
@@ -431,6 +631,7 @@ RULES: list[Callable[[Report], list[Violation]]] = [
     _check_clean_section,
     _check_verified_removed,
     _check_single_fence_per_field,
+    _check_comment_prose,
 ]
 
 
@@ -579,97 +780,88 @@ def _format_repro_test(meta: FenceMeta, test: str) -> str:
     return test
 
 
+def _build_finding_draft_comment(f: Finding, body: str, why: str, sugg: str, repro: str) -> str:
+    """Assembles the peer-facing draft_comment for a finding."""
+    sugg_meta = f.fence("Suggestion")
+    lead_in = sugg_meta.lead_in.strip()
+    repro_meta = f.fence("Repro test")
+    repro_lead_in = repro_meta.lead_in.strip()
+
+    draft_parts: list[str] = []
+    main_prose = _build_finding_prose(body, why)
+    if main_prose:
+        draft_parts.append(main_prose)
+    if lead_in:
+        draft_parts.append(lead_in)
+    if sugg:
+        draft_parts.append(_format_suggestion(sugg_meta, sugg))
+    if repro:
+        heading = f"**Repro test**: {repro_lead_in}" if repro_lead_in else "**Repro test**"
+        draft_parts.append(heading)
+        draft_parts.append(_format_repro_test(repro_meta, repro))
+    return "\n\n".join(draft_parts)
+
+
+def _build_finding_dict(f: Finding) -> dict[str, Any]:
+    """Converts a parsed Finding into its exported JSON dictionary."""
+    line_start, line_end = _parse_line_range(f.fields.get("Line", "1"))
+    ev = f.fields.get("Evidence", "")
+    body = f.fields.get("Body", "").strip()
+    why = f.fields.get("Why", "").strip()
+    sugg = f.fields.get("Suggestion", "").rstrip().lstrip("\n")
+    repro = f.fields.get("Repro test", "").rstrip().lstrip("\n")
+    desc = f.title or (body.split(".")[0].strip() + "." if body else f.id)
+
+    finding_dict: dict[str, Any] = {
+        "id": f.id,
+        "severity": f.severity or "medium",
+        "file_path": _strip_ticks(f.fields.get("File", "")),
+        "line_start": line_start,
+        "line_end": line_end,
+        "side": "RIGHT",
+        "evidence_tier": _extract_tier(ev),
+        "evidence_detail": _extract_evidence_detail(ev),
+        "description": desc,
+        "body": body,
+        "why": why,
+        "draft_comment": _build_finding_draft_comment(f, body, why, sugg, repro),
+    }
+    if "Category" in f.fields:
+        finding_dict["category"] = f.fields["Category"].strip().lower()
+    if sugg:
+        finding_dict["suggestion"] = sugg
+    if repro:
+        finding_dict["repro_test"] = repro
+    return finding_dict
+
+
+def _build_question_dict(q: Finding) -> dict[str, Any]:
+    """Converts a parsed Question Finding into its exported JSON dictionary."""
+    line_start, line_end = _parse_line_range(q.fields.get("Line", "1"))
+    ev = q.fields.get("Evidence", "")
+    why = q.fields.get("Why", "").strip()
+    to_settle = q.fields.get("To settle", "").strip()
+    desc = q.title or q.fields.get("Body", "").strip()
+    return {
+        "id": q.id,
+        "severity": "question",
+        "file_path": _strip_ticks(q.fields.get("File", "")),
+        "line_start": line_start,
+        "line_end": line_end,
+        "side": "RIGHT",
+        "evidence_tier": _extract_tier(ev),
+        "evidence_detail": _extract_evidence_detail(ev),
+        "description": desc,
+        "why": why,
+        "to_settle": to_settle,
+        "draft_comment": _build_question_prose(q),
+    }
+
+
 def export_report_to_json(report: Report, output_path: pathlib.Path) -> dict[str, Any]:
     """Exports a validated Report to canonical review_results.json."""
-    findings_list: list[dict[str, Any]] = []
-    for f in report.findings:
-        line_start, line_end = _parse_line_range(f.fields.get("Line", "1"))
-        ev = f.fields.get("Evidence", "")
-        tier = _extract_tier(ev)
-        ev_detail = _extract_evidence_detail(ev)
-        body = f.fields.get("Body", "").strip()
-        why = f.fields.get("Why", "").strip()
-        sugg = f.fields.get("Suggestion", "").rstrip().lstrip("\n")
-        sugg_meta = f.fence("Suggestion")
-        lead_in = sugg_meta.lead_in.strip()
-        repro = f.fields.get("Repro test", "").rstrip().lstrip("\n")
-        repro_meta = f.fence("Repro test")
-        repro_lead_in = repro_meta.lead_in.strip()
-        desc = f.title or (body.split(".")[0].strip() + "." if body else f.id)
-
-        draft_parts = []
-        if body:
-            draft_parts.append(body)
-        if why:
-            draft_parts.append(f"**Impact**: {why}")
-        if lead_in:
-            draft_parts.append(lead_in)
-        if sugg:
-            draft_parts.append(_format_suggestion(sugg_meta, sugg))
-        if repro:
-            heading = "**Repro test**"
-            if repro_lead_in:
-                heading += f": {repro_lead_in}"
-            draft_parts.append(heading)
-            draft_parts.append(_format_repro_test(repro_meta, repro))
-        draft_comment = "\n\n".join(draft_parts)
-
-        finding_dict: dict[str, Any] = {
-            "id": f.id,
-            "severity": f.severity or "medium",
-            "file_path": _strip_ticks(f.fields.get("File", "")),
-            "line_start": line_start,
-            "line_end": line_end,
-            "side": "RIGHT",
-            "evidence_tier": tier,
-            "evidence_detail": ev_detail,
-            "description": desc,
-            "body": body,
-            "why": why,
-            "draft_comment": draft_comment,
-        }
-        if "Category" in f.fields:
-            finding_dict["category"] = f.fields["Category"].strip().lower()
-        if sugg:
-            finding_dict["suggestion"] = sugg
-        if repro:
-            finding_dict["repro_test"] = repro
-        findings_list.append(finding_dict)
-
-    questions_list: list[dict[str, Any]] = []
-    for q in report.questions:
-        line_start, line_end = _parse_line_range(q.fields.get("Line", "1"))
-        ev = q.fields.get("Evidence", "")
-        tier = _extract_tier(ev)
-        ev_detail = _extract_evidence_detail(ev)
-        why = q.fields.get("Why", "").strip()
-        to_settle = q.fields.get("To settle", "").strip()
-        desc = q.title or q.fields.get("Body", "").strip()
-
-        draft_comment = f"**Question**: {desc}"
-        if ev:
-            draft_comment += f"\n\n**Evidence**: {ev}"
-        if why:
-            draft_comment += f"\n\n**Why**: {why}"
-        if to_settle:
-            draft_comment += f"\n\n**To Settle**: {to_settle}"
-
-        question_dict: dict[str, Any] = {
-            "id": q.id,
-            "severity": "question",
-            "file_path": _strip_ticks(q.fields.get("File", "")),
-            "line_start": line_start,
-            "line_end": line_end,
-            "side": "RIGHT",
-            "evidence_tier": tier,
-            "evidence_detail": ev_detail,
-            "description": desc,
-            "why": why,
-            "to_settle": to_settle,
-            "draft_comment": draft_comment,
-        }
-        questions_list.append(question_dict)
-
+    findings_list = [_build_finding_dict(f) for f in report.findings]
+    questions_list = [_build_question_dict(q) for q in report.questions]
     cleaned_overview = _clean_overview(report.summary_text)
 
     payload: dict[str, Any] = {

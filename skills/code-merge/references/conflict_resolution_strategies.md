@@ -21,7 +21,7 @@ Classify every conflict and semantic hazard into one of four tiers before editin
 | **Tier 1** | Mechanical, Formatting, Imports, 1:1 File Moves & Symbol Renames | Lockfiles, import sorting, `DU`/`UD` directory moves (`agent_sdks/python/` $\to$ `python/`), unambiguous symbol renames (`A2uiValidator` $\to$ `PayloadValidator`). | **100% Autonomous** |
 | **Tier 2** | Orthogonal / Composable Intents | `OURS` adds recursion depth tracking (`MAX_DYNAMIC_VALUE_DEPTH`); `THEIRS` adds `catalogId` forwarding in the same method. | **Autonomous Synthesis** (`f_theirs(f_ours(BASE))`) |
 | **Tier 3** | Non-1:1 Structural Splits & Consolidations | `OURS` extracts inline schema properties into `$defs/TestCase`; `THEIRS` adds 10 new enum actions to the old inline block. | **Lineage-Guided Synthesis** (Ask user only if target is ambiguous) |
-| **Tier 4** | Mutually Exclusive Intents & Competing Renames | `OURS` renames `X -> Y` while `THEIRS` renames `X -> Z`; or `OURS` deletes a feature that `THEIRS` expands. | **Escalate via `/grill-me`** (`ask_question` batch) |
+| **Tier 4** | Mutually Exclusive Intents & Competing Renames | `OURS` renames `X -> Y` while `THEIRS` renames `X -> Z`; or `OURS` deletes a feature that `THEIRS` expands. | **Escalate via `/grill-me`** (`genui` `consequence_cards`, or interactive question tool / chat batch) |
 
 ______________________________________________________________________
 
@@ -100,15 +100,15 @@ When `merge_assistant.py analyze` or manual inspection identifies a **Tier 4 Int
    Users find abstract labels like `OURS` and `THEIRS` confusing when comparing diffs. In all questions, summaries, and option choices, **always state the concrete branch, ref, or repository name** (e.g. `v1_0` vs. `upstream/main`).
 2. **Never paste raw `<<<<<<<` / `=======` / `>>>>>>>` conflict blocks in chat.**
 3. **Cluster by Root Cause**: If one architectural decision affects 12 files, ask **one** question for the cluster, not 12 per-file questions.
-4. **Cap Batch Size at 2–4 Questions**: Present all Tier 4 questions in a single `ask_question` tool call.
+4. **Cap Batch Size at 2 to 4 Questions**: Render Tier 4 clusters using the `genui` skill's `consequence_cards` template when `a2ui-pane` is available (`mode: "pane"` with `stack: true` and a distinct `surfaceId` per cluster for 2 to 4 clusters), or present them in a single interactive question tool batch (or numbered chat prompt, ending the turn to wait for a reply) when `a2ui-pane` is not installed.
 5. **Use the 3-Bullet Intent Discrepancy Brief**: Keep each question title/stem to three short lines:
    - **Base**: 1 sentence stating original behavior at the common ancestor.
    - **Discrepancy**: 1 sentence contrasting `<target-branch>` (e.g. `v1_0`) intent vs. `<incoming-branch>` (e.g. `main`) intent.
    - **Impact**: Number of affected files or tests.
 
-### 5.2. Required Option Structure (`ask_question`)
+### 5.2. Required Option Structure
 
-Format options as direct user rulings naming the specific branches, placing your recommended synthesis first and always including the `/grill-me` Parking Lot deferral option:
+Format options as direct user rulings naming the specific branches, putting thought into your recommended synthesis so it appears first (pre-populated in `$/choice` for `consequence_cards` or prefixed with `(Recommended)` in the interactive question tool / chat fallback), and always including the `/grill-me` Parking Lot deferral option:
 
 - `(Recommended) <Synthesize both / Adopt specific winning intent with 1-clause rationale>`
 - `<Keep <target-branch> (e.g. v1_0) behavior and adapt <incoming-branch> (e.g. main) callers>`

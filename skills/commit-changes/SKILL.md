@@ -21,7 +21,9 @@ Before committing, ensure all intended files are staged and that you understand 
    - Check diff summary first using `git diff --cached --stat` to gauge scope.
    - Inspect detailed diffs in groups or per-file (`git diff --cached -- <file> | cat`) for large changesets rather than pulling full raw diffs all at once, but do look at all the diffs.
    - Review comments for clarity and "why" vs "what".
-4. **Confirm**: Get user approval for the plan/message. Use the ask_question tool to ask the user if they approve of the plan/message.
+4. **Confirm**: Get user approval for the staged changes and commit message before running `git commit`:
+   - When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render an inline `confirm_gate` surface with the staged diff summary and proposed commit message.
+   - When `a2ui-pane` is not installed, prompt the user via your host's interactive question tool (or present the commit message in chat and wait for their approval before continuing).
 5. **Commit**:
    - Use the standard CLI command `git commit -m "<message>"`.
    - Message Format: Follow [references/conventional_commits.md](references/conventional_commits.md).

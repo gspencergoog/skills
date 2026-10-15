@@ -36,7 +36,7 @@ Before diving into technical details, establish clear boundaries:
 - Define the engineering objective and the specific problem being solved.
 - Identify constraints (language version, backward compatibility, performance targets).
 - List explicit **non-goals** to prevent scope creep.
-- If requirements are ambiguous or key decisions are unmade, recommend that the user runs the `/grill-me` slash command or ask targeted clarifying questions.
+- If requirements are ambiguous, assumptions are unverified, or phase rollout order has non-obvious dependencies, recommend that the user runs `/grill-me`, or render an `assumption_ledger` or `wave_sequencer` surface via the `genui` skill when `a2ui-pane` is available (falling back to your host's interactive question tool or a numbered chat prompt when `a2ui-pane` is not installed).
 
 ### 2. Read-Only Codebase Discovery
 
@@ -91,7 +91,7 @@ Resolve any reported validation errors before proceeding.
 
 To prevent confirmation bias and context contamination from the generation steps, you can delegate an objective review of the draft plan to an independent subagent (e.g. `research` or `self`).
 
-1. **Ask User for Review Confirmation**: Always prompt the user using the `ask_question` tool before launching the subagent review:
+1. **Ask User for Review Confirmation**: Always prompt the user to choose (using your interactive question tool if available, or by presenting the options in chat and waiting for their reply before continuing) before launching the subagent review:
    - Ask whether to run an in-depth independent subagent review or proceed directly to presenting the plan.
    - Provide options formatted as:
      - `(Recommended) Yes, run an independent subagent review`
