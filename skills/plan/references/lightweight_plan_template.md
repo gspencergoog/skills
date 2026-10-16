@@ -23,7 +23,7 @@ ______________________________________________________________________
 
 ## Proposed Changes
 
-- [ ] #### [MODIFY] [path/to/file.ext](file:///absolute/path/to/file.ext)
+- [ ] [MODIFY] [path/to/file.ext](file:///absolute/path/to/file.ext)
   - [Precise description of the change, function signature, or logic adjustment]
 
 ## Verification Plan

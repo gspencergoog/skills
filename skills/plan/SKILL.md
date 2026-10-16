@@ -62,10 +62,10 @@ Choose the appropriate reference template based on the scope of work:
 Draft the plan according to the chosen template and write it using `write_to_file`. Ensure the plan includes:
 
 - **Component Grouping**: Group changes logically by component, service, or layer (dependencies first).
-- **Explicit Action Demarcations**: For every planned file change, specify:
-  - `#### [NEW] [basename](file:///absolute/path/to/file)`
-  - `#### [MODIFY] [basename](file:///absolute/path/to/file)`
-  - `#### [DELETE] [basename](file:///absolute/path/to/file)`
+- **Explicit Action Demarcations**: For every planned file change, format the entry as a task list item without heading hashes (do not write `- [ ] #### ...`, which is invalid Markdown):
+  - `- [ ] [NEW] [basename](file:///absolute/path/to/file)`
+  - `- [ ] [MODIFY] [basename](file:///absolute/path/to/file)`
+  - `- [ ] [DELETE] [basename](file:///absolute/path/to/file)`
 - **Concrete Signatures & Logic**: Describe the specific functions, methods, error handling, and parameters being touched, rather than vague placeholders.
 - **Architecture & Diagrams**: For non-trivial workflows or component interactions, include a Mermaid diagram following the [mermaid-diagrams](../mermaid-diagrams/SKILL.md) skill.
 - **Cognitive Complexity Budget**: Reference the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill to ensure new or refactored functions remain maintainable (standard threshold $\\le 15$).
@@ -83,6 +83,7 @@ python3 /Users/gspencer/code/cheats/agents/skills/plan/scripts/validate_plan.py 
 The script verifies:
 
 - All required structural sections are present.
+- Task list items do not contain inline heading hashes (e.g. `- [ ] #### ...`).
 - Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace.
 - No files marked `[NEW]` collide with existing files on disk.
 - No unresolved placeholders (`TODO`, `TBD`, `implement rest here`) remain.

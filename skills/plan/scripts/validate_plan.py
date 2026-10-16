@@ -63,6 +63,11 @@ class PlanValidator:
         re.IGNORECASE,
     )
 
+    # Task list items with inline heading hashes (e.g. "- [ ] #### [MODIFY] ...")
+    CHECKBOX_HEADING_RE = re.compile(
+        r"^\s*(?:(?:[-*+]|\d+\.)\s+)?\[[ xX]\]\s+#{1,6}\s+"
+    )
+
     # Placeholders that indicate incomplete plans
     SUSPICIOUS_PLACEHOLDERS = [
         re.compile(r"\bTODO\b", re.IGNORECASE),
@@ -88,6 +93,7 @@ class PlanValidator:
         self.issues.clear()
         self._check_sections()
         self._check_code_blocks()
+        self._check_task_list_headings()
         self._check_placeholders()
         self._check_file_actions()
         return self.issues
@@ -135,6 +141,29 @@ class PlanValidator:
                     line_num=block_start_line,
                 )
             )
+
+    def _check_task_list_headings(self) -> None:
+        """Flags task list items that contain inline heading hashes (e.g. '- [ ] #### Item')."""
+        in_code_block = False
+
+        for i, line in enumerate(self.lines, start=1):
+            stripped = line.strip()
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_code_block = not in_code_block
+                continue
+            if in_code_block:
+                continue
+
+            if self.CHECKBOX_HEADING_RE.search(line):
+                self.issues.append(
+                    ValidationIssue(
+                        is_error=True,
+                        message=(
+                            f"Invalid Markdown: task list item contains heading hashes: '{line.strip()}'"
+                        ),
+                        line_num=i,
+                    )
+                )
 
     def _check_placeholders(self) -> None:
         """Flags unresolved placeholders (TODO, TBD, implement rest)."""

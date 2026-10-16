@@ -59,9 +59,9 @@ flowchart TD
 
 [Introduce non-breaking abstractions, backward-compatibility shims, and shared interfaces without breaking existing callers.]
 
-- [ ] #### [NEW] \[path/to/shim.ext\](file:///absolute/path/to/shim.ext)
+- [ ] [NEW] \[path/to/shim.ext\](file:///absolute/path/to/shim.ext)
   - Introduce adapter layer
-- [ ] #### [MODIFY] \[path/to/existing_caller.ext\](file:///absolute/path/to/existing_caller.ext)
+- [ ] [MODIFY] \[path/to/existing_caller.ext\](file:///absolute/path/to/existing_caller.ext)
   - Route through adapter
 
 **Phase 1 Verification**: [Commands to run compatibility and regression suites]
@@ -72,9 +72,9 @@ ______________________________________________________________________
 
 [Implement the new subsystems, migrate core logic, and switch default routing.]
 
-- [ ] #### [NEW] \[path/to/new_subsystem.ext\](file:///absolute/path/to/new_subsystem.ext)
+- [ ] [NEW] \[path/to/new_subsystem.ext\](file:///absolute/path/to/new_subsystem.ext)
   - Implement new subsystem logic
-- [ ] #### [MODIFY] \[path/to/consumer.ext\](file:///absolute/path/to/consumer.ext)
+- [ ] [MODIFY] \[path/to/consumer.ext\](file:///absolute/path/to/consumer.ext)
   - Switch consumers to new subsystem
 
 **Phase 2 Verification**: [Commands to test new subsystem and integration suites]
@@ -85,9 +85,9 @@ ______________________________________________________________________
 
 [Remove legacy code, drop deprecated shims, update documentation.]
 
-- [ ] #### [DELETE] \[path/to/deprecated_file.ext\](file:///absolute/path/to/deprecated_file.ext)
+- [ ] [DELETE] \[path/to/deprecated_file.ext\](file:///absolute/path/to/deprecated_file.ext)
   - Remove deprecated legacy adapter
-- [ ] #### [MODIFY] \[path/to/exports.ext\](file:///absolute/path/to/exports.ext)
+- [ ] [MODIFY] \[path/to/exports.ext\](file:///absolute/path/to/exports.ext)
   - Clean up public API surface
 
 **Phase 3 Verification**: [Commands to verify no dangling references remain]

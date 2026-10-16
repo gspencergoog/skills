@@ -51,10 +51,10 @@ flowchart TD
 
 Description of the initial setup, shared data structures, or interface definitions.
 
-- [ ] #### [NEW] \[path/to/new_file.ext\](file:///absolute/path/to/new_file.ext)
+- [ ] [NEW] \[path/to/new_file.ext\](file:///absolute/path/to/new_file.ext)
   - Define `TypeName` struct/class with fields `...`
   - Implement validation logic for inputs
-- [ ] #### [MODIFY] \[path/to/existing_file.ext\](file:///absolute/path/to/existing_file.ext)
+- [ ] [MODIFY] \[path/to/existing_file.ext\](file:///absolute/path/to/existing_file.ext)
   - Add export for new types
   - Update imports
 
@@ -66,10 +66,10 @@ ______________________________________________________________________
 
 Description of the primary operational changes.
 
-- [ ] #### [MODIFY] \[path/to/service.ext\](file:///absolute/path/to/service.ext)
+- [ ] [MODIFY] \[path/to/service.ext\](file:///absolute/path/to/service.ext)
   - Implement `process_request()` using `[reused_helper]`
   - Add error handling for edge cases
-- [ ] #### [NEW] \[path/to/handler.ext\](file:///absolute/path/to/handler.ext)
+- [ ] [NEW] \[path/to/handler.ext\](file:///absolute/path/to/handler.ext)
   - Implement request dispatching
 
 **Phase 2 Verification**: \[Command to verify Phase 2, e.g. `cargo test --lib core_logic`\]
@@ -80,7 +80,7 @@ ______________________________________________________________________
 
 Description of wiring into entry points, CLI commands, or external callers.
 
-- [ ] #### [MODIFY] \[path/to/main.ext\](file:///absolute/path/to/main.ext)
+- [ ] [MODIFY] \[path/to/main.ext\](file:///absolute/path/to/main.ext)
   - Register new handler in dispatcher
   - Wire command-line arguments
 

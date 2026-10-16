@@ -21,9 +21,9 @@ VALID_PLAN = """# Feature: Add Cache Invalidation
 ## Proposed Changes
 
 ### Cache Subsystem
-- [ ] #### [MODIFY] [lib/cache.py](file:///lib/cache.py)
+- [ ] [MODIFY] [lib/cache.py](file:///lib/cache.py)
   - Add `invalidate_key()` method.
-- [ ] #### [NEW] [lib/ttl.py](file:///lib/ttl.py)
+- [ ] [NEW] [lib/ttl.py](file:///lib/ttl.py)
   - Implement time-to-live helper.
 
 ## Verification Plan
@@ -82,6 +82,18 @@ class TestPlanValidator(unittest.TestCase):
         strict_errors = [issue for issue in strict_issues if issue.is_error]
         self.assertTrue(any("Unresolved placeholder" in e.message for e in strict_errors))
 
+    def test_checkbox_heading_is_rejected(self) -> None:
+        plan_with_checkbox_heading = VALID_PLAN.replace(
+            "- [ ] [MODIFY] [lib/cache.py](file:///lib/cache.py)",
+            "- [ ] #### [MODIFY] [lib/cache.py](file:///lib/cache.py)",
+        )
+        validator = PlanValidator(plan_with_checkbox_heading)
+        issues = validator.validate()
+        errors = [issue for issue in issues if issue.is_error]
+        self.assertTrue(
+            any("task list item contains heading hashes" in e.message for e in errors)
+        )
+
     def test_workspace_file_verification_modify_exists(self) -> None:
         # Create lib/cache.py in workspace
         lib_dir = self.workspace / "lib"
@@ -94,7 +106,7 @@ class TestPlanValidator(unittest.TestCase):
 None.
 
 ## Proposed Changes
-- [ ] #### [MODIFY] [{self.workspace / "lib/cache.py"}](file://{self.workspace / "lib/cache.py"})
+- [ ] [MODIFY] [{self.workspace / "lib/cache.py"}](file://{self.workspace / "lib/cache.py"})
   - Edit cache logic.
 
 ## Verification Plan
@@ -113,7 +125,7 @@ Run tests.
 None.
 
 ## Proposed Changes
-- [ ] #### [MODIFY] [{missing_file}](file://{missing_file})
+- [ ] [MODIFY] [{missing_file}](file://{missing_file})
   - Edit nonexistent file.
 
 ## Verification Plan
@@ -134,7 +146,7 @@ Run tests.
 None.
 
 ## Proposed Changes
-- [ ] #### [NEW] [{existing_file}](file://{existing_file})
+- [ ] [NEW] [{existing_file}](file://{existing_file})
   - Create duplicate.
 
 ## Verification Plan
