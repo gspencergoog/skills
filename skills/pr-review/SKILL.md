@@ -1,6 +1,15 @@
 ---
 name: pr-review
-description: "Conducts interactive, high-signal code reviews on external GitHub Pull Requests by deriving an unbiased description from the diff before reading the PR description or comments, reconciling stated vs. actual intent, delegating code analysis to code-review with composable flags, launching a local review dashboard with GitHub suggestion block editing, and submitting atomic batched reviews."
+description: >-
+  Reviews someone else's GitHub pull request end to end: writes an unbiased
+  summary from the diff before reading the author's description, reconciles
+  stated and actual intent, runs code-review on a throwaway checkout, stages
+  every comment in a local dashboard for approval, and posts one batched review.
+  Use when the user asks to review, critique, or comment on a PR by number or
+  URL. Flags: --fast, --panel, --verify, --claude, --challenge, --max. Don't use
+  for reviewing local or uncommitted changes (use code-review), for responding
+  to feedback on the user's own PR (use pr-feedback-handler), or for summarizing
+  a PR without reviewing it (use analyze-github-pr).
 ---
 
 # PR Review Skill

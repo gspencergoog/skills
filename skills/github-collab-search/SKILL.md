@@ -1,7 +1,13 @@
 ---
 name: github-collab-search
 description: >-
-  Discover, extract, and summarize collaborative GitHub interactions (pull requests, issues, reviews, and line comments) between two users across repositories or organizations. Use when preparing peer feedback (e.g. peer review cycles or performance reviews), analyzing collaboration history, auditing co-authored changes, or overcoming GitHub's search API boolean OR qualifier bug and 1,000-result caps.
+  Finds and digests collaborative GitHub history between two people: pull
+  requests, issues, reviews, and line comments where both took part, across
+  repositories or an organization, working around GitHub search's OR behavior on
+  repeated user qualifiers and its 1,000-result cap. Use when preparing peer
+  feedback or performance review input, analyzing how two engineers have worked
+  together, or auditing co-authored and co-reviewed changes. Don't use for
+  looking up a single PR or issue (use gh-cli or analyze-github-pr).
 ---
 
 # GitHub Collaboration Search (`github-collab-search`)

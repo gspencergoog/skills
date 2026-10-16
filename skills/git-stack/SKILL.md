@@ -1,7 +1,14 @@
 ---
 name: git-stack
 description: >-
-  Inspects, validates ancestry, cascade-rebases, and synchronizes GitHub pull request stacks across git worktrees and forks without manual merge-base calculations. Use when working with stacked PRs, updating branch chains, rebasing multi-PR features, or diagnosing stack ancestry drift.
+  Inspects, validates, cascade-rebases, and synchronizes stacked GitHub pull
+  requests across git worktrees and forks, computing the rebase bases itself and
+  retargeting PR base branches after a rebase. Use when working with stacked PRs
+  or dependent branch chains, when a lower branch changed and the stack needs a
+  rebase, when gh stack fails because branches live in separate worktrees or
+  come from a fork, or when diagnosing stack ancestry drift. Don't use for
+  single-PR operations such as viewing, checking out, or merging one PR (use
+  gh-cli).
 ---
 
 # Git Stack Skill (`git-stack`)

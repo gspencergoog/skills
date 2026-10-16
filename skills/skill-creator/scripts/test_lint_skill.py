@@ -114,6 +114,138 @@ description: Valid description.
         self.assertIsNone(err)
         self.assertIsNotNone(metadata)
 
+    def test_pyyaml_colon_error_is_normalized(self):
+        content = """---
+name: test-skill
+description: Calculate complexity. Use this skill whenever asked to: (1) do something.
+---
+# Body
+"""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        with patch.object(yaml, "safe_load", side_effect=yaml.YAMLError("mapping values are not allowed here")):
+            metadata, body, err = parse_yaml_frontmatter(content)
+        self.assertIsNone(metadata)
+        self.assertIn("unquoted string contains ': '", err)
+        self.assertIn(">-", err)
+
+
+CLEAN_DESCRIPTION = (
+    "Reviews pull requests and local changes for defects and produces a findings "
+    "report with an evidence tier on every finding. Use when the user asks for a "
+    "review, a critique, or a second opinion on a diff. Don't use for posting the "
+    "review to GitHub (use pr-review instead)."
+)
+
+
+def skill_content(description_block: str, body: str = "# Body\n\nInstructions.\n") -> str:
+    return f"---\nname: test-skill\n{description_block}\n---\n{body}"
+
+
+def folded(description: str) -> str:
+    return "description: >-\n  " + description
+
+
+class TestDescriptionQuality(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.skill_dir = Path(self.temp_dir) / "test-skill"
+        self.skill_dir.mkdir(parents=True, exist_ok=True)
+        self.skill_md = self.skill_dir / "SKILL.md"
+
+    def tearDown(self):
+        shutil.rmtree(self.temp_dir)
+
+    def lint(self, content: str):
+        self.skill_md.write_text(content, encoding="utf-8")
+        return validate_skill_file(self.skill_md)
+
+    def description_issues(self, content: str):
+        return [i for i in self.lint(content) if "description" in i.message or "When to use" in i.message]
+
+    def test_clean_description_has_no_issues(self):
+        self.assertEqual(self.description_issues(skill_content(folded(CLEAN_DESCRIPTION))), [])
+
+    def test_over_limit_is_error(self):
+        text = "Reviews things. Use when asked. " + ("x" * 1000)
+        issues = self.description_issues(skill_content(folded(text)))
+        self.assertTrue(any(i.is_error and "platform limit" in i.message for i in issues))
+
+    def test_soft_length_bounds_warn(self):
+        short = self.description_issues(skill_content(folded("Reviews code. Use when asked to review.")))
+        self.assertTrue(any(not i.is_error and "aim for 200 to 800" in i.message for i in short))
+        long_text = "Reviews code. Use when asked. " + ("word " * 170)
+        long_issues = self.description_issues(skill_content(folded(long_text)))
+        self.assertTrue(any(not i.is_error and "aim for 200 to 800" in i.message for i in long_issues))
+        self.assertFalse(any(i.is_error for i in long_issues))
+
+    def test_missing_trigger_warns(self):
+        text = CLEAN_DESCRIPTION.replace("Use when", "Handy when")
+        issues = self.description_issues(skill_content(folded(text)))
+        self.assertTrue(any("'Use when ...' clause" in i.message for i in issues))
+
+    def test_second_person_outside_quotes_warns(self):
+        text = CLEAN_DESCRIPTION.replace("Use when the user asks", "Use when you need")
+        issues = self.description_issues(skill_content(folded(text)))
+        self.assertTrue(any("first or second person" in i.message for i in issues))
+
+    def test_second_person_inside_quotes_is_ignored(self):
+        text = CLEAN_DESCRIPTION.replace("a second opinion on a diff", 'a second opinion, or says "what if we drop this" or "how do I review"')
+        issues = self.description_issues(skill_content(folded(text)))
+        self.assertFalse(any("first or second person" in i.message for i in issues))
+
+    def test_flag_gloss_warns_and_bare_flags_do_not(self):
+        glossed = CLEAN_DESCRIPTION + " Supports --panel (two reviewers) and --verify (runs tests)."
+        issues = self.description_issues(skill_content(folded(glossed)))
+        self.assertTrue(any("glosses a flag" in i.message for i in issues))
+        bare = CLEAN_DESCRIPTION + " Flags: --panel, --verify, --max."
+        issues = self.description_issues(skill_content(folded(bare)))
+        self.assertFalse(any("glosses a flag" in i.message for i in issues))
+
+    def test_puffery_word_warns_with_word_boundaries(self):
+        issues = self.description_issues(skill_content(folded(CLEAN_DESCRIPTION.replace("a findings report", "a comprehensive findings report"))))
+        self.assertTrue(any("puffery word 'comprehensive'" in i.message for i in issues))
+        clean = CLEAN_DESCRIPTION.replace("a findings report", "a report that effectively remasters the branch")
+        issues = self.description_issues(skill_content(folded(clean)))
+        self.assertFalse(any("puffery" in i.message for i in issues))
+
+    def test_em_dash_warns(self):
+        issues = self.description_issues(skill_content(folded(CLEAN_DESCRIPTION.replace(" and produces", " \u2014 and produces"))))
+        self.assertTrue(any("em-dash" in i.message for i in issues))
+
+    def test_body_when_to_use_section_warns(self):
+        body = "# Body\n\n## When To Use This Skill\n\n- always\n"
+        issues = self.description_issues(skill_content(folded(CLEAN_DESCRIPTION), body=body))
+        self.assertTrue(any("'When to use' section" in i.message for i in issues))
+
+    def test_plain_scalar_style_warns(self):
+        issues = self.description_issues(skill_content('description: "' + CLEAN_DESCRIPTION + '"'))
+        self.assertTrue(any("uses a quoted scalar" in i.message for i in issues))
+
+    def test_literal_scalar_warns_about_newlines(self):
+        block = "description: |-\n  Reviews code and more. Use when asked.\n  Second line that keeps its newline and makes this long enough to pass the length rule, more words here, and more."
+        issues = self.description_issues(skill_content(block))
+        self.assertTrue(any("literal newlines" in i.message for i in issues))
+
+    def test_imperative_and_noun_openers_warn(self):
+        for opener in ("Create components", "Guide for writing", "A specialized workflow for"):
+            text = opener + CLEAN_DESCRIPTION[len("Reviews pull requests"):]
+            issues = self.description_issues(skill_content(folded(text)))
+            self.assertTrue(any("third-person capability statement" in i.message for i in issues), opener)
+
+    def test_symlinked_skill_dirs_are_skipped(self):
+        real = Path(self.temp_dir) / "real-skill"
+        real.mkdir()
+        (real / "SKILL.md").write_text(skill_content(folded(CLEAN_DESCRIPTION)).replace("test-skill", "real-skill"), encoding="utf-8")
+        link = Path(self.temp_dir) / "linked-skill"
+        link.symlink_to(real, target_is_directory=True)
+        found = find_skill_md_files(Path(self.temp_dir))
+        self.assertIn(real / "SKILL.md", found)
+        self.assertNotIn(link / "SKILL.md", found)
+        self.assertEqual(find_skill_md_files(link), [link / "SKILL.md"])
+
 
 class TestValidateSkillFile(unittest.TestCase):
     def setUp(self):
@@ -157,12 +289,25 @@ unrecognized_custom_key: value
         content = """---
 name: test-skill
 description: Valid description for this skill.
-author: John Doe
-version: 1.0.0
 license: MIT
 compatibility: python 3.10+
 metadata:
   category: dev
+allowed-tools:
+  - Bash
+---
+# Body
+"""
+        self.skill_md.write_text(content, encoding="utf-8")
+        issues = validate_skill_file(self.skill_md)
+        self.assertFalse(any("Disallowed keys in YAML frontmatter" in i.message for i in issues))
+
+    def test_legacy_keys_rejected(self):
+        content = """---
+name: test-skill
+description: Valid description for this skill.
+author: John Doe
+version: 1.0.0
 key_features:
   - feature 1
 tags:
@@ -172,7 +317,10 @@ tags:
 """
         self.skill_md.write_text(content, encoding="utf-8")
         issues = validate_skill_file(self.skill_md)
-        self.assertFalse(any("Disallowed keys in YAML frontmatter" in i.message for i in issues))
+        errors = [i.message for i in issues if i.is_error and "Disallowed keys" in i.message]
+        self.assertEqual(len(errors), 1)
+        for key in ("author", "key_features", "tags", "version"):
+            self.assertIn(key, errors[0])
 
     def test_missing_name_and_short_description(self):
         content = """---

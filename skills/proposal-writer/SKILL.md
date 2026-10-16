@@ -1,6 +1,14 @@
 ---
 name: proposal-writer
-description: 'Helps write technical proposals, system designs, RFCs, or architecture documents for software products. Use this skill when: (1) the user asks to write a technical proposal, RFC, or system design document, (2) you need to propose a new software architecture or major feature, or (3) you want to document a software design before implementation.'
+description: >-
+  Writes technical proposals, RFCs, system designs, and architecture documents
+  for human stakeholders, choosing a lightweight, standard, or detailed template
+  by project size and including non-goals, diagrams, an API review, and a
+  self-critique pass. Use when the user asks for a proposal, RFC, design doc, or
+  architecture document, wants to propose a new architecture or major feature,
+  or wants a design written down before implementation. Don't use for the
+  engineering execution plan with file-level steps (use plan), or for open-ended
+  option exploration before a direction is chosen.
 ---
 
 # Writing technical proposals

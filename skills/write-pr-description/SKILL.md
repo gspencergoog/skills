@@ -1,6 +1,13 @@
 ---
 name: write-pr-description
-description: Creates a description of the current branch's changes in the form of a pull request (PR) description. Use this when the user asks to write, generate, draft, or create a PR or PR description.
+description: >-
+  Writes a pull request description for the current branch from its diff against
+  the base branch: a squash-commit-ready title, the reason for the change, a
+  structured summary of what changed, and the testing performed, saved to the
+  scratch directory for review. Use when the user asks to write, generate,
+  draft, or create a PR or PR description, or before opening a PR. Don't use for
+  commit messages (use commit-changes) or for the whole prepare-and-ship
+  pipeline (use ship-it).
 ---
 
 # Write PR Description Skill

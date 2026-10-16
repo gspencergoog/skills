@@ -1,6 +1,14 @@
 ---
 name: api-review
-description: Reviews the specified code against the canonical API Design guidelines. Use this skill when the user asks for an API review or to check code against API design principles.
+description: >-
+  Reviews code against the canonical API design principles: contract-first
+  interfaces, KISS and YAGNI, intent-revealing names, command-query separation,
+  strict types over strings, visible validation, and lean public entry points,
+  and reports findings with concrete rewrites. Use when the user asks for an API
+  review, asks whether a public interface is well designed, or wants a class,
+  module, or endpoint checked against API design principles before it ships.
+  Don't use for a full code review of a change (use code-review), which already
+  applies these principles to the modified lines.
 ---
 
 # API review skill

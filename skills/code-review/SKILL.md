@@ -1,6 +1,16 @@
 ---
 name: code-review
-description: Performs a multi-step review of pull requests, local changes, or whole local files, using iterative refinement (generation, critique, synthesis) to produce actionable feedback. Every finding carries an evidence tier and a consequence; severity is capped by evidence. Reviews code, and reviews documentation, normative specifications, design docs, RFCs, ADRs, and blueprints for structure, correctness, completeness, consistency, and downstream impact rather than wording. Automatically syncs remote PRs to a temporary directory if not present locally. Use when you need to review code changes, pull requests, specs, or design docs thoroughly. Supports --fast (in-session scan without subagents), --json (structured review_results.json output), --claude / --opus (Claude reviewer), --panel (two reviewers with split criteria), --verify (run tests and mutation checks in a throwaway checkout), --max (all three), and --challenge (send refuting evidence back to the reviewer and require a retraction).
+description: >-
+  Reviews code and technical documents (pull requests, local changes, whole
+  files, specs, design docs, RFCs, ADRs, blueprints) in generate, critique, and
+  synthesize passes. Every finding carries an evidence tier and a concrete
+  consequence, and severity is capped by the evidence. Syncs remote PRs into a
+  temporary checkout. Use when the user asks for a review, a critique, a second
+  opinion on a diff, or a check of a spec or design before implementation.
+  Flags: --fast, --json, --claude, --opus, --panel, --verify, --max,
+  --challenge. Don't use for posting the review to GitHub (use pr-review), for
+  acting on review feedback (use pr-feedback-handler), or for API-design-only
+  checks (use api-review).
 ---
 
 # Code Review

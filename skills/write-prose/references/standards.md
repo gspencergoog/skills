@@ -80,6 +80,10 @@ ______________________________________________________________________
 - Keep subjects and their main verbs close together ($\text{DD}_{\text{SV}} \le 6$).
 - Do not turn verbs into heavy nominalizations (use `"decide"` instead of `"make a decision"`).
 - State prerequisites, warnings, or conditions before the action verb.
+- Use simple tenses. Present perfect and progressive forms add a second reading (`"We have received the report"` asks whether it still matters now); write `"We received the report"`.
+- Do not drop words to save space. Keep the subject, verb, and article explicit: `"Files not backed up will be lost"` leaves the reader guessing which files; write `"The system deletes any file that has no backup"`.
+- Use each word as one part of speech. If `oil` is a noun in the document, write `"Apply oil to the valve"`, not `"Oil the valve"`.
+- When simplifying text that is consumed by another agent, a translation pipeline, or a non-native reader, keep every safety condition, exception, and scope qualifier. If a shorter sentence would lose one, keep the longer phrasing and say which sentence you deliberately left alone and why.
 
 ### 5.1 Syntactic cognitive complexity & working-memory load (PCC)
 

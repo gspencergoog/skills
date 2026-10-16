@@ -1,6 +1,13 @@
 ---
 name: skill-creator
-description: Guide for creating and validating effective skills. Use this skill when creating a new skill, updating an existing skill, or validating/linting skill files and directory structures for correctness, frontmatter rules, and link integrity.
+description: >-
+  Creates, edits, and validates agent skills: scaffolds a skill directory with
+  init_skill.py, writes the SKILL.md frontmatter as a trigger contract and the
+  body as procedural instructions, organizes scripts, references, and assets,
+  and lints the result with lint_skill.py for frontmatter, structure, and link
+  integrity. Use when creating a new skill, updating or restructuring an
+  existing one, writing or tuning a skill description, linting skill files, or
+  when the user says "turn this into a skill".
 ---
 
 # Skill Creator
@@ -308,14 +315,34 @@ Any example files and directories not needed for the skill should be deleted. Th
 
 Write the YAML frontmatter with `name` and `description`:
 
-- `name`: The skill name
-- `description`: This is the primary triggering mechanism for your skill, and helps an agent understand when to use the skill.
-  - Include both what the Skill does and specific triggers/contexts for when to use it.
-  - Include all "when to use" information here - Not in the body. The body is only loaded after triggering, so "When to Use This Skill" sections in the body are not helpful to an agent.
-  - **Combatting Undertriggering**: Models can sometimes undertrigger skills when tasks are implicit. To combat this, make skill descriptions slightly "pushy" by explicitly listing synonym triggers and intent contexts (e.g., *"Make sure to use this skill whenever the user mentions dashboards, data visualization, internal metrics, or wants to display company data, even if they don't explicitly ask for a 'dashboard'"*).
-  - Example description for a `docx` skill: "Comprehensive document creation, editing, and analysis with support for tracked changes, comments, formatting preservation, and text extraction. Use when an agent needs to work with professional documents (.docx files) for: (1) Creating new documents, (2) Modifying or editing content, (3) Working with tracked changes, (4) Adding comments, or any other document tasks"
+- `name`: The skill name in kebab-case, equal to the directory name.
+- `description`: The primary triggering mechanism for the skill. The router sees only `name` and `description` when deciding whether to load the skill, so the description is a trigger contract, not an abstract. Every description follows this shape:
 
-Do not include any other fields in YAML frontmatter.
+  ```yaml
+  ---
+  name: my-skill
+  description: >-
+    <Capability statement in third person, present tense, one or two
+    sentences, naming what the skill produces or operates on.> Use when
+    <the user intents, phrasings, and situations that should trigger it, as
+    a comma list>. Don't use for <a neighboring intent> (use <other-skill>
+    instead).
+  ---
+  ```
+
+  Rules, each of which `lint_skill.py` checks:
+
+  - Write the value as a `>-` folded block scalar. It wraps at 80 columns and tolerates an unquoted `: ` inside the text, which breaks plain scalars.
+  - Open with a third-person capability statement (`Reviews ...`, `Merges ...`, `Renames ...`), not an imperative (`Create ...`) or a noun phrase (`Guide for ...`). In a catalog of fifty entries an imperative reads as a standing order.
+  - Include a `Use when ...` clause that lists the user's own phrasings and situations. Be slightly pushy: models under-trigger when a request is implicit, so name synonyms and contexts ("even if the user does not say 'dashboard'"). All when-to-use text lives here, never in a body section, because the body loads only after the skill has already triggered.
+  - Add `Don't use for ... (use <skill> instead)` when a neighboring skill could claim the same request. Name the other skill only if it ships alongside this one; a public skill must not point at a private one.
+  - Stay between 200 and 800 characters. Under 200 the router has too little to match on; 1024 is a hard platform limit and the linter errors there.
+  - Flags may appear as bare names (`Flags: --fast, --panel`). Do not gloss them, list subcommands, or summarize the instructions: that invites running the command without reading the body.
+  - Write in third person. No `you`, `we`, or `I` outside quoted user phrasings.
+  - No puffery (`comprehensive`, `robust`, `seamless`, `powerful`, `master`, `effective`) and no em-dashes. Say what the skill does.
+  - The `init_skill.py` placeholder is shorter than 200 characters by design and warns until it is filled in.
+
+Allowed frontmatter keys are `name`, `description`, `license`, `compatibility`, `metadata`, and `allowed-tools`. Do not add others; no host reads them and they cost tokens in every prompt.
 
 ##### Body
 
@@ -337,13 +364,13 @@ python3 scripts/lint_skill.py <path/to/skills-directory>
 
 The linting script verifies:
 
-1. **Frontmatter syntax & fields**: Ensures valid YAML containing `name` and `description` only.
+1. **Frontmatter syntax & fields**: Ensures valid YAML containing `name` and `description` plus, at most, `license`, `compatibility`, `metadata`, and `allowed-tools`.
 2. **Naming matching**: Confirms `name` matches the directory folder name.
-3. **Description quality**: Ensures `description` is non-empty and contains clear trigger context.
+3. **Description quality**: Enforces the trigger-contract template above: `>-` scalar, third-person opener, a `Use when` clause, 200 to 800 characters (error at 1024), no first or second person outside quotes, no flag glosses, no puffery or em-dashes, and no `When to use` section left in the body.
 4. **Structure & clutter**: Checks for disallowed auxiliary files (e.g. `INSTALLATION_GUIDE.md`, `CHANGELOG.md`) and unrecognized subdirectories.
 5. **Link integrity**: Validates relative Markdown links to ensure target files exist on disk.
 
-Fix any reported errors before using or sharing the skill.
+Directory scans skip skills whose directory is a symlink (skills maintained elsewhere); pass such a skill's path directly to lint it anyway. Fix any reported errors before using or sharing the skill.
 
 ### Step 6: Iterate
 

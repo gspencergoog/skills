@@ -1,6 +1,14 @@
 ---
 name: pr-feedback-handler
-description: Interactively handles GitHub PR review feedback by launching a review dashboard or generating a triage report before applying any workspace changes. Use when tasked with addressing PR comments.
+description: >-
+  Works through review feedback on the user's own GitHub pull request: fetches
+  the unresolved threads, verifies each comment against the code, drafts a fix
+  or reply per thread, collects the user's decisions through a local dashboard
+  or a triage report, then implements the approved fixes with regression tests,
+  pushes, replies, and resolves the threads. Supports --auto-approve. Use when
+  the user asks to address, respond to, or resolve review comments on their PR,
+  or to handle PR feedback. Don't use for reviewing someone else's PR (use
+  pr-review).
 ---
 
 # PR Feedback Handler Skill

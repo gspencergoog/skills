@@ -33,7 +33,9 @@ class TestInitSkill(unittest.TestCase):
 
         content = (created / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: my-skill", content)
-        self.assertIn("description:", content)
+        self.assertIn("description: >-", content)
+        self.assertIn("Use when", content)
+        self.assertIn("Don't use for", content)
 
     def test_initialization_with_flags(self):
         created = create_skill_template(

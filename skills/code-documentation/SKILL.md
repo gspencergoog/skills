@@ -1,6 +1,12 @@
 ---
 name: code-documentation
-description: Guide for writing effective code documentation, including docstrings, JSDoc, dartdoc, and implementation comments. Use this skill when writing new code, adding features, or improving existing documentation in Dart, Python, or TypeScript to ensure clarity and maintainability.
+description: >-
+  Writes and reviews code documentation: dartdoc, JSDoc, Python docstrings, and
+  implementation comments, with per-language conventions for Dart, Python, and
+  TypeScript. Use when writing new code or features, documenting public APIs,
+  improving existing docstrings or comments, or checking a change for missing or
+  unhelpful documentation. Don't use for prose documents such as READMEs, design
+  docs, or PR descriptions (use write-prose).
 ---
 
 # Code Documentation Skill

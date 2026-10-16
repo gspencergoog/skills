@@ -1,6 +1,13 @@
 ---
 name: analyze-github-pr
-description: Fetches and produces a comprehensive analysis of a GitHub Pull Request, including its description and review comments. Use this skill when investigating a PR or when information is needed from a PR and its comments.
+description: >-
+  Fetches a GitHub pull request's description, reviews, review threads,
+  comments, and CI diagnostics into a JSON file and summarizes what the PR says
+  about itself. Use when the user wants to understand, summarize, or extract
+  information from a PR and its discussion, or when another task needs the PR's
+  context before acting on it. Don't use for reviewing or commenting on the PR
+  (use pr-review) or for addressing feedback on the user's own PR (use
+  pr-feedback-handler).
 ---
 
 # Analyze GitHub PR Skill

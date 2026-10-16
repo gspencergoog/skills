@@ -1,6 +1,14 @@
 ---
 name: flutter-concurrency
-description: Execute long-running, CPU-bound tasks (like parsing large JSON payloads) in a background isolate in Flutter, handling Web fallbacks and integrating safely with state management while avoiding resource leaks.
+description: >-
+  Moves CPU-bound work in Flutter, such as parsing large JSON payloads, off the
+  UI thread into a background isolate, picks manual or generated JSON
+  serialization, handles the Web platform where isolates are unavailable, and
+  integrates results with state management without leaking resources. Use when a
+  Flutter app janks or drops frames while parsing or processing data, when a
+  payload takes longer than a frame to decode, or when adding background
+  computation to a Flutter app. Don't use for diagnosing hangs, races, or test
+  timeouts (use dart-concurrency).
 ---
 
 # Flutter Concurrency and Data Management

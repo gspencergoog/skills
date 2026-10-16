@@ -1,14 +1,16 @@
 ---
 name: plan
 description: >-
-  Creates a structured, actionable implementation plan for software engineering
-  tasks while maintaining a strictly read-only guarantee on the target codebase.
-  Use this skill whenever: (1) the user asks to "plan", "create a plan", "make
-  an implementation plan", or run "/plan", (2) transitioning from brainstorming
-  (such as from the just-brainstorm skill) to an engineering execution plan,
-  (3) a task requires multi-file changes, refactoring, or architectural migration,
-  or (4) the user requests an actionable breakdown of implementation phases,
-  concrete file changes, and verification steps before writing code.
+  Writes a phased implementation plan for a software task as a reviewable
+  artifact with a Proceed button, while keeping the target codebase read-only:
+  scope and non-goals, codebase discovery, concrete file-level changes, and a
+  verification command per phase, checked by a plan linter and an optional
+  independent review. Use when the user asks to plan, "create a plan", "make an
+  implementation plan", or runs /plan, when a brainstorm has settled on a
+  direction, when a task spans several files or a migration, or when the user
+  wants the steps laid out before any code is written. Don't use for exploring
+  options before a direction is chosen, or for stakeholder-facing RFCs and
+  design documents (use proposal-writer).
 ---
 
 # Implementation Plan

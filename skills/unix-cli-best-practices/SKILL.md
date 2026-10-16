@@ -1,11 +1,12 @@
 ---
 name: unix-cli-best-practices
 description: >-
-  Safe, portable, and efficient command-line patterns for macOS/BSD Unix tools
-  (grep, find, sed, awk, xargs, mdfind, pbcopy, open), modern alternatives
-  (rg, fd), and structured JSON processing with jq. Covers common shell
-  scripting and one-liner use cases including fast searching, text processing,
-  codebase navigation, parallel execution, and JSON manipulation.
+  Provides portable command-line patterns for text processing, file search, and
+  JSON handling: ripgrep and fd in place of grep and find, BSD versus GNU
+  differences in sed, awk, and xargs on macOS, jq recipes for structured output,
+  parallel execution, and shell one-liner hygiene. Use when writing or reviewing
+  shell one-liners or scripts, searching a codebase from the terminal, filtering
+  JSON output, or when a command behaves differently on macOS than on Linux.
 ---
 
 # Unix CLI best practices

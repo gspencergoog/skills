@@ -1,6 +1,16 @@
 ---
 name: ship-it
-description: 'Codifies the end-to-end code preparation, quality audit, and PR shipping workflow. Use when preparing code to ship out for review, including: (1) PR segmentation & stacking analysis, (2) Unit test creation, test quality auditing, and 90%+ coverage enforcement, (3) Iterative subagent API and code review homeostasis loops, (4) Code documentation, CHANGELOG, and README synchronization, and (5) Post-PR draft creation, CI tracking, and feedback handling.'
+description: >-
+  Takes finished code through the pre-review pipeline: splits the work into
+  stackable pull requests, runs static analysis and a test quality audit with 90
+  percent or higher coverage, loops subagent API and code reviews until clean,
+  syncs code documentation, README, and CHANGELOG, writes the PR description,
+  and tracks the draft PR through CI and feedback. Use when the user says "ship
+  it", wants code prepared for review, or asks for the full test, review,
+  document, and PR workflow on a branch. Don't use for a single commit (use
+  commit-changes), for the PR text alone (use write-pr-description), for
+  feedback on an existing PR (use pr-feedback-handler), or for reviewing someone
+  else's PR (use pr-review).
 ---
 
 # Ship-It: End-to-End Code Preparation & PR Shipping Workflow

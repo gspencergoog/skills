@@ -1,6 +1,13 @@
 ---
 name: cost-optimization
-description: Framework for optimizing LLM inference costs and API spend per completed task across LLM platforms (Anthropic, OpenAI, Google Gemini/Vertex AI, AWS Bedrock, Azure, etc.). Use when asked to optimize AI spend, reduce token consumption, profile API usage, configure prompt caching, prune context windows, or tune model selection and reasoning effort.
+description: >-
+  Reduces LLM inference cost per completed task across Anthropic, OpenAI, Gemini
+  and Vertex AI, Bedrock, and Azure: profiles where tokens go, then works the
+  levers in order (prompt caching, input and output token hygiene, agent-loop
+  context control, batching) before trading capability for cost through
+  reasoning effort and model choice. Use when asked to cut AI spend, reduce
+  token consumption, profile API usage, configure prompt caching, prune context
+  windows, or tune model selection and reasoning effort.
 ---
 
 # Cost Optimization - Cutting LLM Spend per Completed Task

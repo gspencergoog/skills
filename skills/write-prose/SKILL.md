@@ -1,6 +1,13 @@
 ---
 name: write-prose
-description: Master prose writing and orchestration skill for creating clear, plain, accessible, and natural human writing. Synthesizes ISO 24495-1:2023, W3C Cognitive Accessibility Guidance, Plain Writing Act, and Simplified Technical English (STE) standards. Use when writing, drafting, editing, or reviewing reports, PR descriptions, inline code review comments, commit messages, API docstrings, READMEs, architecture documents, user guides, prompts, or general technical prose.
+description: >-
+  Enforces clear, natural human writing free of AI-isms, obscure words,
+  em-dashes, inline-header list overuse, and complex sentences. Use when
+  producing, editing, or reviewing any substantial prose deliverable, even if
+  the user does not mention writing style. Applies to artifacts, design docs,
+  reports, READMEs, PR or CL descriptions, review comments, commit messages, API
+  docs, user guides, and prompts. Don't use for brief chat replies or code-only
+  edits.
 ---
 
 # Master prose writing & orchestration (`write-prose`)
@@ -40,7 +47,7 @@ Evaluate reader knowledge and conceptual boundaries:
 - Make sure the document stands alone without assuming access to prompt history, conversation transcripts, or external planning documents.
 
 > [!NOTE]
-> If the target audience or document context is ambiguous, prompt the user (using your interactive question tool if available, or by asking in chat and waiting for their reply) to clarify before drafting.
+> If the target audience or document context is ambiguous, prompt the user via your interactive question tool or in chat before drafting.
 
 For detailed audience templates and tone matrices, see [references/audiences.md](references/audiences.md).
 

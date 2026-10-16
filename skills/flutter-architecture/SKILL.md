@@ -1,6 +1,12 @@
 ---
 name: flutter-architecture
-description: Implement the Flutter team's recommended app architecture (MVVM, unidirectional data flow, repositories, view models, and dependency injection with provider) when structuring new apps or refactoring features.
+description: >-
+  Structures Flutter apps along the Flutter team's recommended architecture:
+  MVVM with view models, repositories and services, unidirectional data flow, an
+  optional domain layer of use cases, dependency injection with provider, and
+  ListenableBuilder for reactive UI. Use when starting a new Flutter app, adding
+  a feature that needs a data source or view model, refactoring widgets that mix
+  UI and business logic, or deciding whether a feature needs a domain layer.
 ---
 
 # Flutter App Architecture Implementation

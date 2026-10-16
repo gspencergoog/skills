@@ -1,6 +1,13 @@
 ---
 name: gh-cli
-description: GitHub CLI (gh) reference for repositories, issues, pull requests, Actions, stacks, authentication, and CLI configuration.
+description: >-
+  Runs GitHub operations from the command line with gh: repositories, issues,
+  pull requests, GitHub Actions runs, stacked PRs, authentication, and CLI
+  configuration, with JSON output and jq filtering recipes. Use when a task
+  needs gh commands or flags, when scripting against GitHub, when checking CI or
+  PR state, or when gh authentication fails. Don't use for cascade-rebasing PR
+  stacks (use git-stack) or for mining collaboration history between two people
+  (use github-collab-search).
 ---
 
 # GitHub CLI (`gh`)

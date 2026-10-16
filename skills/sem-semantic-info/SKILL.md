@@ -1,6 +1,14 @@
 ---
 name: sem-semantic-info
-description: 'Use the `sem` CLI to view semantic codebase diffs, evaluate dependency graphs, perform impact analysis, and investigate code history without formatting noise. Explicitly supports subcommands: `sem diff` (semantic diffs), `sem impact` (impact analysis), `sem graph` (dependency graph), `sem blame` (semantic blame), `sem log` (entity history), `sem context` (entity context), and `sem entities` (list entities). Use instead of standard git diff/log when analyzing structural code changes.'
+description: >-
+  Inspects a repository through the sem CLI, which tracks functions, classes,
+  and types instead of lines: semantic diffs between commits, dependency and
+  call graphs, transitive impact of changing an entity, semantic blame, and
+  per-entity history. Use when analyzing structural code changes, measuring the
+  blast radius of a rename or signature change, tracing callers and callees, or
+  when git diff and git log are too noisy to read. Don't use for entities
+  defined in external packages, which sem does not index; find the local
+  wrappers with rg first.
 ---
 
 # `sem` Semantic Info Skill

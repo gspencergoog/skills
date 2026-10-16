@@ -36,14 +36,41 @@ ALLOWED_SUBDIRECTORIES = {
 ALLOWED_FRONTMATTER_KEYS = {
     "name",
     "description",
+    "license",
     "compatibility",
     "metadata",
-    "version",
-    "license",
-    "key_features",
-    "author",
-    "tags",
+    "allowed-tools",
 }
+
+# Description quality thresholds. The description is injected into every
+# system prompt, so it must be long enough to route on and short enough to
+# fit the 1024-character platform limit with room to spare.
+DESCRIPTION_MAX_CHARS = 1024
+DESCRIPTION_SOFT_MIN = 200
+DESCRIPTION_SOFT_MAX = 800
+
+TRIGGER_RE = re.compile(r"\buse when\b", re.IGNORECASE)
+SECOND_PERSON_RE = re.compile(r"\b(you|your|yours|I|we|us|our)\b")
+QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+FLAG_GLOSS_RE = re.compile(r"--[A-Za-z][\w-]*[^()\n]{0,20}\(")
+BODY_WHEN_TO_USE_RE = re.compile(r"^#{1,6}\s+when to use\b", re.IGNORECASE | re.MULTILINE)
+NON_VERB_OPENERS = {
+    "a", "an", "the", "this", "guide", "guidelines", "best", "framework",
+    "comprehensive", "unified", "safe", "master",
+}
+PUFFERY_RE = re.compile(
+    r"\b(?:comprehensive|robust|seamless(?:ly)?|leverage[sd]?|delve[sd]?|powerful|"
+    r"cutting-edge|master|effective|high-quality|high-signal|professional|"
+    r"state-of-the-art|best-in-class)\b|\bultra-",
+    re.IGNORECASE,
+)
+EM_DASH = "\u2014"
+
+UNQUOTED_COLON_HINT = (
+    "unquoted string contains ': '. "
+    "Strings containing colons must be enclosed in quotes ('...' or \"...\") "
+    "or formatted as a block scalar ('>-' or '|-')."
+)
 
 
 class ValidationIssue:
@@ -93,6 +120,10 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str,
                     result[str(k)] = v
             return result, body, None
         except yaml.YAMLError as e:
+            if "mapping values are not allowed" in str(e):
+                # Match the fallback parser's hint so both branches report the
+                # same actionable message for an unquoted ': ' in a value.
+                return None, body, f"Invalid YAML syntax in frontmatter: {UNQUOTED_COLON_HINT}"
             return None, body, f"Invalid YAML in frontmatter: {e}"
     except ImportError:
         pass
@@ -112,11 +143,7 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str,
         val = "\n".join(current_val_lines).strip()
         if not is_block_scalar and not is_quoted and not is_nested:
             if re.search(r":\s", val):
-                return (
-                    f"Invalid YAML syntax in field '{current_key}': unquoted string contains ': '. "
-                    "Strings containing colons must be enclosed in quotes ('...' or \"...\") "
-                    "or formatted as a block scalar ('>-' or '|-')."
-                )
+                return f"Invalid YAML syntax in field '{current_key}': {UNQUOTED_COLON_HINT}"
         metadata[current_key] = val
         return None
 
@@ -145,9 +172,7 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str,
                     return (
                         None,
                         body,
-                        f"Invalid YAML syntax in field '{current_key}': unquoted string contains ': '. "
-                        "Strings containing colons must be enclosed in quotes ('...' or \"...\") "
-                        "or formatted as a block scalar ('>-' or '|-').",
+                        f"Invalid YAML syntax in field '{current_key}': {UNQUOTED_COLON_HINT}",
                     )
 
             current_val_lines = [val_part] if (val_part and not is_block_scalar) else []
@@ -177,6 +202,100 @@ def parse_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str,
                 metadata[k] = v[1:-1].strip()
 
     return metadata, body, None
+
+
+def description_scalar_style(raw_yaml: str) -> str:
+    """Returns how the raw `description:` value is written: '>-', '>', '|', '|-', 'quoted', 'plain', or 'missing'.
+
+    The parsed dict loses this, and only `>-` both folds safely and survives
+    an unquoted ': ' inside the text, so the linter wants the raw form.
+    """
+    for line in raw_yaml.splitlines():
+        match = re.match(r"^description\s*:\s*(.*)$", line)
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if value in (">-", ">", "|", "|-", ">+", "|+"):
+            return value
+        if value.startswith(('"', "'")):
+            return "quoted"
+        return "plain"
+    return "missing"
+
+
+def _opener_is_third_person(description: str) -> bool:
+    """Loose voice heuristic: a third-person present-tense verb ends in 's' and is not a known noun opener."""
+    first = re.match(r"[A-Za-z][\w-]*", description.strip())
+    if not first:
+        return False
+    word = first.group(0)
+    if word.lower() in NON_VERB_OPENERS:
+        return False
+    return word.endswith("s")
+
+
+def check_description_quality(
+    description: str, raw_yaml: str, body: str, skill_md_path: Path
+) -> List[ValidationIssue]:
+    """Checks the description against the house trigger-contract template.
+
+    Everything except the hard 1024-character limit is a warning: the
+    description is prose, and these heuristics cannot parse grammar.
+    """
+    issues: List[ValidationIssue] = []
+
+    def warn(message: str) -> None:
+        issues.append(ValidationIssue(False, skill_md_path, message))
+
+    length = len(description)
+    if length >= DESCRIPTION_MAX_CHARS:
+        issues.append(
+            ValidationIssue(
+                True,
+                skill_md_path,
+                f"Frontmatter 'description' is {length} characters; the platform limit is {DESCRIPTION_MAX_CHARS}.",
+            )
+        )
+    elif length > DESCRIPTION_SOFT_MAX:
+        warn(f"Frontmatter 'description' is {length} characters; aim for {DESCRIPTION_SOFT_MIN} to {DESCRIPTION_SOFT_MAX}.")
+    elif length < DESCRIPTION_SOFT_MIN:
+        warn(
+            f"Frontmatter 'description' is {length} characters; aim for {DESCRIPTION_SOFT_MIN} to {DESCRIPTION_SOFT_MAX} "
+            "so the router has triggers to match on."
+        )
+
+    style = description_scalar_style(raw_yaml)
+    if style != ">-":
+        warn(f"Frontmatter 'description' uses a {style} scalar; write it as 'description: >-' (folded block) so it wraps and tolerates ': '.")
+
+    if "\n" in description:
+        warn("Frontmatter 'description' contains literal newlines (a '|' scalar); use '>-' so the text folds into one paragraph.")
+
+    if not TRIGGER_RE.search(description):
+        warn("Frontmatter 'description' has no 'Use when ...' clause; the router only sees the description, so list the user intents here.")
+
+    if not _opener_is_third_person(description):
+        warn("Frontmatter 'description' should open with a third-person capability statement (e.g. 'Reviews ...', 'Merges ...'), not an imperative or a noun phrase.")
+
+    unquoted = QUOTED_SPAN_RE.sub("", description)
+    person = SECOND_PERSON_RE.search(unquoted)
+    if person:
+        warn(f"Frontmatter 'description' uses first or second person ('{person.group(0)}'); describe the capability in third person.")
+
+    if FLAG_GLOSS_RE.search(description):
+        warn("Frontmatter 'description' glosses a flag with a parenthetical; list bare flag names only and explain them in the body.")
+
+    puffery = PUFFERY_RE.search(description)
+    if puffery:
+        warn(f"Frontmatter 'description' contains the puffery word '{puffery.group(0)}'; state what the skill does instead.")
+
+    if EM_DASH in description:
+        warn("Frontmatter 'description' contains an em-dash; use a comma, colon, or separate sentence.")
+
+    if BODY_WHEN_TO_USE_RE.search(body):
+        warn("SKILL.md body has a 'When to use' section; move its triggers into the frontmatter description, which is the only part the router reads.")
+
+    return issues
 
 
 def check_exact_case_path_exists(base_dir: Path, rel_target: str) -> bool:
@@ -228,7 +347,8 @@ def validate_skill_file(skill_md_path: Path) -> List[ValidationIssue]:
                 ValidationIssue(
                     True,
                     skill_md_path,
-                    f"Disallowed keys in YAML frontmatter: {', '.join(sorted(extra_keys))}. Only 'name' and 'description' are allowed.",
+                    f"Disallowed keys in YAML frontmatter: {', '.join(sorted(extra_keys))}. "
+                    f"Allowed keys are: {', '.join(sorted(ALLOWED_FRONTMATTER_KEYS))}.",
                 )
             )
 
@@ -252,6 +372,9 @@ def validate_skill_file(skill_md_path: Path) -> List[ValidationIssue]:
             issues.append(ValidationIssue(True, skill_md_path, "Frontmatter is missing required 'description' field."))
         elif len(description.strip()) < 10:
             issues.append(ValidationIssue(True, skill_md_path, "Frontmatter 'description' is too short (must be >= 10 characters)."))
+        else:
+            raw_yaml = content.split("---", 2)[1] if content.startswith("---") else ""
+            issues.extend(check_description_quality(description, raw_yaml, body or "", skill_md_path))
 
     # 2. Directory Clutter & Structure Validation
     if skill_dir.exists() and skill_dir.is_dir():
@@ -336,7 +459,13 @@ def validate_skill_file(skill_md_path: Path) -> List[ValidationIssue]:
 
 
 def find_skill_md_files(target: Path) -> List[Path]:
-    """Finds all SKILL.md files given a file or directory target."""
+    """Finds all SKILL.md files given a file or directory target.
+
+    Directory scans skip skills whose directory is a symlink: those point at
+    skills maintained elsewhere (for example a google3 checkout), and this
+    linter's house rules do not apply to them. A symlinked skill passed
+    directly as the target is still linted.
+    """
     if target.is_file():
         if target.name == "SKILL.md":
             return [target]
@@ -350,7 +479,7 @@ def find_skill_md_files(target: Path) -> List[Path]:
         found = list(target.glob("*/SKILL.md"))
         if not found:
             found = list(target.glob("**/SKILL.md"))
-        return sorted(found)
+        return sorted(p for p in found if not p.parent.is_symlink())
 
     return []
 

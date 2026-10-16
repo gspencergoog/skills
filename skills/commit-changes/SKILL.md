@@ -1,6 +1,13 @@
 ---
 name: commit-changes
-description: Ensure the git repository is in a healthy state (linting, testing, formatting) and prepare a descriptive git commit. Use this when the user asks to commit changes or "finish up" a task and the project is in a git repository.
+description: >-
+  Prepares a git commit: checks that the repository is healthy by running the
+  language's formatter, linter, and tests, reviews the staged diff, and writes a
+  conventional commit message that explains why the change was made. Use when
+  the user asks to commit, "finish up", "wrap this up", or land the current work
+  in a git repository. Don't use for the full pre-review pipeline with coverage
+  and review loops (use ship-it) or for writing a pull request description (use
+  write-pr-description).
 ---
 
 # Commit Changes Skill

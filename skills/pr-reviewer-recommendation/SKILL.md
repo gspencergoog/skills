@@ -1,6 +1,11 @@
 ---
 name: pr-reviewer-recommendation
-description: Analyzes GitHub Pull Requests (PRs) or git branches to recommend the best primary and secondary reviewers. Uses git history, ownership, blame, and repository collaboration to identify the most suitable contributors. Use when asked to find, suggest, or recommend reviewers for a PR, branch, or commit range.
+description: >-
+  Recommends primary and secondary reviewers for a GitHub pull request, branch,
+  or commit range from git history, file and directory ownership, blame on the
+  modified lines, and past review collaboration in the repository. Use when
+  asked who should review a change, to find or suggest reviewers for a PR or
+  branch, or to identify the owners of the files a change touches.
 ---
 
 # PR Reviewer Recommendation Skill

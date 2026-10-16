@@ -1,6 +1,12 @@
 ---
 name: dart-cli-app-best-practices
-description: Best practices for creating high-quality, executable Dart CLI applications, covering entrypoint structure, exit code handling, and recommended packages. Trigger this skill when creating new Dart CLI apps, refactoring bin entrypoints, writing executable shell scripts in Dart for Linux/macOS, reviewing CLI code quality, or implementing error handling and exit code logic.
+description: >-
+  Guides the structure of Dart command-line applications: a thin bin/
+  entrypoint, exit code handling with exitCode rather than exit(), exception
+  handling, executable scripts for Linux and macOS, and the recommended packages
+  (args, io, path). Use when creating a Dart CLI app, refactoring a bin/
+  entrypoint, writing an executable Dart script, reviewing CLI code, or
+  implementing error handling and exit code logic.
 ---
 
 # Dart CLI Application Best Practices

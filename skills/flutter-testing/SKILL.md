@@ -1,6 +1,13 @@
 ---
 name: flutter-testing
-description: Comprehensive Flutter testing router. Guides the selection, implementation, and execution of unit, widget, and integration tests, leveraging specialized tools and linking to deep reference guides.
+description: >-
+  Routes Flutter testing work: picks unit, widget, or integration tests for the
+  task, points to the matching reference guide (mocking, matchers, plugin
+  testing, common errors), and runs tests through the Dart MCP run_tests tool
+  with the CLI as fallback. Use when writing or fixing Flutter or Dart tests,
+  choosing a test type, running or debugging a failing test suite, or when asked
+  about mocks, matchers, or integration test setup. Don't use for test timeouts
+  caused by async bugs (use dart-concurrency).
 ---
 
 # Flutter Testing Router

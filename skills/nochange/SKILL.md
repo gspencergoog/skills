@@ -1,7 +1,12 @@
 ---
 name: nochange
-description: |-
-  Provide commentary, explanations, code analysis, or answers without making any modifications to the codebase or executing commands. Use when the user explicitly requests "/nochange", "nochange", or asks to explain/review code without editing.
+description: >-
+  Answers, explains, analyzes, and reviews code using read-only tools only, with
+  no file edits, no file creation, and no commands that change workspace state.
+  Use when the user runs /nochange, says "nochange", or asks to explain, walk
+  through, or review code without editing it. Don't use for short factual
+  lookups where the user did not ask for a read-only mode, and leave the mode
+  only after the user explicitly asks for changes.
 ---
 
 # Nochange Skill

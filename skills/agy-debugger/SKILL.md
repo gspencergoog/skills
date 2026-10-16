@@ -1,7 +1,12 @@
 ---
 name: agy-debugger
 description: >-
-  Manage the Antigravity auditor and debugger. Use when asked to install, uninstall, enable, disable, or launch the real-time logging and non-interruptive pausing UI.
+  Installs, enables, disables, uninstalls, and launches the Antigravity auditor
+  and debugger: a before-tool-call hook plus a local web UI that logs every tool
+  call in real time and can pause a call for inspection without interrupting the
+  session. Use when the user asks to install, enable, disable, remove, start, or
+  open the debugger or auditor, or wants to watch or pause an agent's tool calls
+  as they happen.
 ---
 
 # Antigravity Debugger

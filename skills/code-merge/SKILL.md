@@ -1,16 +1,15 @@
 ---
 name: code-merge
 description: >-
-  Merges Git branches, forks, and repositories by distilling 3-way engineering
-  intents (base, ours, theirs), tracking file and symbol renames across
-  directory restructures, detecting silent multi-language AST and schema
-  contract conflicts, and resolving compatible changes autonomously while
-  escalating high-level intent clashes via concise grill-me questions. Use when
-  merging or rebasing branches, syncing long-lived release branches after
-  squash merges, porting changes across repositories or subtrees, or resolving
-  merge conflicts. Don't use for deleting stale merged branches (use
-  branch-cleanup), routine single-branch commits without conflicts (use
-  commit-changes), or Google3 Piper/CitC changelist operations (use vcs).
+  Merges Git branches, forks, and repositories by reconstructing the intent of
+  the base, ours, and theirs sides instead of comparing conflict markers. Tracks
+  file and symbol renames across restructures, detects silent AST and schema
+  contract conflicts, resolves compatible changes on its own, and escalates real
+  intent clashes as short questions. Use when merging or rebasing branches,
+  syncing a long-lived release branch after squash merges, porting changes
+  across repositories or subtrees, or resolving merge conflicts. Don't use for
+  deleting merged branches (use branch-cleanup), routine single-branch commits
+  (use commit-changes), or monorepo changelist tooling outside Git.
 ---
 
 # Intent-Driven Code Merging (`code-merge`)

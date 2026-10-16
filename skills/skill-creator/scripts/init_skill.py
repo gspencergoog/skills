@@ -35,7 +35,11 @@ def create_skill_template(
     if not skill_md_path.exists():
         content = f"""---
 name: {skill_name}
-description: Write a clear description of what this skill does and specific triggers/contexts for when an agent should use it.
+description: >-
+  <Third-person capability statement: what this skill produces or operates
+  on, in one or two sentences.> Use when <the user intents, phrasings, and
+  situations that should trigger it, as a comma list>. Don't use for
+  <a neighboring intent> (use <other-skill> instead).
 ---
 
 # {skill_name.replace('-', ' ').title()}

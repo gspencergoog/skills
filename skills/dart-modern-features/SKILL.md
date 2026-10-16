@@ -1,6 +1,13 @@
 ---
 name: dart-modern-features
-description: Guidelines for using modern Dart features (v3.0 - v3.10) to reduce boilerplate, improve type safety, and increase readability. Trigger this skill when writing or refactoring Dart/Flutter code to apply modern paradigms including Records, Pattern Matching, Switch Expressions, Class Modifiers, Extension Types, Digit Separators, Wildcards, Null-Aware Elements, and Dot Shorthands.
+description: >-
+  Applies Dart 3 language features when writing or refactoring Dart and Flutter
+  code: records, pattern matching, switch expressions, class modifiers,
+  extension types, digit separators, wildcard variables, null-aware elements,
+  and dot shorthands. Use when new Dart code is being written, when older Dart
+  is being modernized, or when a review asks whether boilerplate could be
+  replaced by a language feature. Don't use for async or isolate problems (use
+  dart-concurrency).
 ---
 
 # Dart Modern Features Guidelines

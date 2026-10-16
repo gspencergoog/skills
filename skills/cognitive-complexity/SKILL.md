@@ -1,13 +1,13 @@
 ---
 name: cognitive-complexity
 description: >-
-  Calculate Cognitive Complexity for source code across multiple programming
-  languages (Python, TypeScript, JavaScript, Dart, Swift, Kotlin, and C/C++)
-  according to the SonarSource standard. Use this skill whenever asked to: (1)
-  determine, measure, or evaluate the cognitive complexity of code, files, or
-  directories, (2) identify high-complexity functions or code hotspots for
-  refactoring, (3) inspect complexity breakdowns with line-by-line increments,
-  or (4) assess maintainability and understandability metrics.
+  Calculates Cognitive Complexity per the SonarSource standard for Python,
+  TypeScript, JavaScript, Dart, Swift, Kotlin, and C or C++ files, with
+  per-function scores, line-by-line increment breakdowns, and JSON output. Use
+  when asked to measure, evaluate, or compare the complexity of code, files, or
+  directories, to find high-complexity functions or hotspots to refactor, to
+  explain where a score comes from, or to check maintainability before or after
+  a change.
 ---
 
 # Cognitive Complexity Skill

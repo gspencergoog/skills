@@ -1,6 +1,13 @@
 ---
 name: branch-cleanup
-description: Clean up local and remote tracking git branches that have already been merged to the main branch. Use this when a repository has stale local or remote branches that have been merged (either normally or via squash-and-merge) and need to be deleted safely.
+description: >-
+  Finds git branches whose work has already landed on the main branch, including
+  squash-merged ones, and deletes them along with their worktrees and, on
+  request, their remote tracking branches. Writes an analysis plan first and
+  deletes only what that plan approved. Use when a repository has stale local or
+  remote branches, when the user asks to clean up, prune, or tidy branches, or
+  after a batch of PRs has merged. Don't use for merging or rebasing branches
+  (use code-merge).
 ---
 
 # Git Branch Cleanup Skill
