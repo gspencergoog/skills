@@ -36,11 +36,11 @@ This skill automates reviewing external GitHub Pull Requests (reviewing someone 
 | :--- | :--- | :--- |
 | *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) and seed hypotheses | Baseline |
 | `--fast` | Single-pass in-session review without subagents; tier 1 checks only | Minimal latency / no subagents |
-| `--claude` (or `--opus`) | The single reviewer is `claude-code-reviewer`. Under `--panel`, reviewer B is `claude-code-reviewer`. | Uses 3P quota |
-| `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B) | About 2x subagents |
+| `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code). | Uses 3P quota |
+| `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B) | About 2x reviewers |
 | `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in throwaway checkouts) for trusted authors | Test runtime and dependency installs |
 | `--max` | Same as `--claude --panel --verify` | All of the above |
-| `--challenge` | Challenge protocol sending refuting evidence back to reviewers | One extra subagent turn per disputed reviewer |
+| `--challenge` | Challenge protocol sending refuting evidence back to reviewers | One extra turn per disputed reviewer |
 
 Legacy `--mode <depth>` syntax maps to these flags for backward compatibility:
 - `--mode fast` or `--mode standard` maps to `--fast`.
@@ -60,9 +60,9 @@ Follow these steps in order when reviewing a pull request:
    - If no PR is specified, run `gh pr view --json number,url` (do NOT request `title`, `body`, `headRefName`, `comments`, or `reviews`) in the active workspace.
 2. **Select Analysis Depth**:
    - If the user did not specify analysis flags or a legacy `--mode`, prompt the user to choose (using your interactive question tool if available, or by asking in chat and waiting for their reply):
-     - **(Recommended) Deep Review**: Delegate to `gemini-code-reviewer` with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
-     - **Fast Review (`--fast`)**: Single-pass in-session review without spawning subagents for rapid turnaround.
-     - **Max Review (`--max`)**: Two-lane panel (lane A `gemini-code-reviewer`, lane B `claude-code-reviewer`) with Tier 2 test and mutation verification in isolated checkouts.
+     - **(Recommended) Deep Review**: Delegate to a Gemini reviewer lane (`gemini-launch-candidate-high` via `swarm` on Tier 1) with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
+     - **Fast Review (`--fast`)**: Single-pass in-session review without spawning swarm workers or subagents for rapid turnaround.
+     - **Max Review (`--max`)**: Two-lane panel (lane A Gemini `gemini-launch-candidate-high`, lane B Claude `opus-5.5-max` / `opus`) with Tier 2 test and mutation verification in isolated checkouts.
 
 ---
 
@@ -120,7 +120,7 @@ Follow these steps in order when reviewing a pull request:
    - **Execution Modes & Trust Gate**:
      - Under `--fast`: `code-review` performs a single-pass in-session review on the diff and context files without spawning subagents.
      - Under default (or `--claude`, `--panel`, `--verify`, `--challenge`, `--max`): `code-review` manages subagent reviewer lanes, verification tiers, citation audits, and challenge rounds as configured. Under `--verify`, look up collaborator trust with `gh api repos/<owner>/<repo>/pulls/<pull_number> --jq .author_association`, filling in `owner`, `repo`, and `pull_number` from `pr_coords.json` (do not use `gh`'s `{owner}/{repo}` placeholders, which resolve from the current directory, not from the PR under review). See [verification.md](../code-review/references/verification.md#trust-check). State the result in the `code-review` prompt: unless author association is `OWNER`, `MEMBER`, or `COLLABORATOR`, the change is an untrusted PR and every lane stays restricted to Tier 1 read-only checks, even though `code-review` operates within a local temporary checkout.
-   - **Orchestration Continuity**: Run `code-review` Steps 1 through 6 and skip Step 7. Pass `--json <conversation-scratch-dir>/review_results.json` so Step 5's `lint_review.py --export-json` writes where Step 3.4 reads (without a path, `code-review` would write to its own `<artifact-dir>`). Run `code-review`'s Step 6 cleanup loop as written; it is the one exception to the Zero-Approval rule above, and it removes only the directories `code-review` created (`$diff_dir` and any `--verify` checkouts), never the `workspace_dir.txt` checkout. After Step 6 completes, continue to Step 3.4 in the same turn, including when a reviewer subagent's completion message resumes you. Do not emit Step 7's hand-off question.
+   - **Orchestration Continuity**: Run `code-review` Steps 1 through 6 and skip Step 7. Pass `--json <conversation-scratch-dir>/review_results.json` so Step 5's `lint_review.py --export-json` writes where Step 3.4 reads (without a path, `code-review` would write to its own `<artifact-dir>`). Run `code-review`'s Step 6 cleanup loop as written; it is the one exception to the Zero-Approval rule above, and it removes only the directories `code-review` created (`$diff_dir` and any `--verify` checkouts), never the `workspace_dir.txt` checkout. After Step 6 completes, continue to Step 3.4 in the same turn, including when a swarm worker or reviewer subagent wakes you. Do not emit Step 7's hand-off question.
    - **Suggestion Syntax**: Formulate code suggestions following [suggestion_syntax.md](references/suggestion_syntax.md) so they serialize into GitHub suggestion blocks. The exporter posts each finding's `Suggestion` as a committable ```` ```suggestion ```` block (except ```` ```diff ````/```` ```patch ```` fences) and a `Repro test` as a plain code block; `lint_review.py` rejects a `Suggestion` with more than one fenced block.
    - **JSON Output**: The `code-review` workflow validates the report AST and exports `<conversation-scratch-dir>/review_results.json` via `lint_review.py --export-json <conversation-scratch-dir>/review_results.json`.
 4. **Tag Hunk Boundaries and Validate Findings**:

@@ -90,12 +90,12 @@ Execute iterative review passes on the current branch/worktree:
    - Implement recommended mitigations for findings across all severity levels (`HIGH`, `MEDIUM`, and objective `LOW`).
    - Commit clean state: `git commit -m "refactor(api): apply API review mitigations"`.
 2. **Code Review Iterative Loop**:
-   - Refer to [review_homeostasis.md](references/review_homeostasis.md) for subagent prompt templates, oscillation handling rules, and homeostasis criteria.
-   - Launch a subagent (`Workspace: "inherit"`) following the `code-review` skill on the working directory diff.
+   - Refer to [review_homeostasis.md](references/review_homeostasis.md) for reviewer prompt templates, oscillation handling rules, and homeostasis criteria.
+   - Run the `code-review` skill from the root session on the working directory diff. On Jetski root sessions (`Tier 1`), `code-review` spawns `@rev-a` via `swarm` and wakes the warm `waiting` worker via `post_message` + `swarm_wait` across homeostasis passes; when `swarm` is unavailable, it falls back to a `self` subagent (`Workspace: "inherit"`).
    - Parse findings (`critical`, `high`, `medium`, and `low`); Questions are answered, not fixed, and do not block homeostasis.
    - Apply fixes, run unit tests, and commit changes (`git commit -m "fix(review): address review comments"`).
    - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, present the conflicting recommendations to the user via `consequence_cards` in `genui` (when `a2ui-pane` is available) or via your interactive question tool / chat prompt (waiting for their reply).
-   - **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`/`high`/`medium`/`low` findings (Questions do not count, or after max 5 iterations). **Terminate all active subagents using `manage_subagents` with Action `'kill_all'`** before proceeding to Phase 4 (Documentation Sync).
+   - **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`/`high`/`medium`/`low` findings (Questions do not count, or after max 5 iterations). **Terminate any active swarm workers (`swarm{action: "kill", name: "rev-a"}` / `"rev-b"`) and subagents (`manage_subagents` with Action `'kill_all'`)** before proceeding to Phase 4 (Documentation Sync).
 
 ______________________________________________________________________
 

@@ -33,7 +33,7 @@ The most common approach is to review files in logical groups:
 
 Splitting the same changes by concern is what `--panel` does: two reviewers get the full diff, each with its own lane. Lane A covers correctness, concurrency and failure modes, edge cases, tests, and the Implementer and Tester lenses. Lane B covers security, maintainability, efficiency, API soundness, and the Consumer and Operator lenses. The orchestrator assigns its seeded hypotheses by lane as well: correctness, state, and test hypotheses go to lane A; wiring, security, API, performance, and dependency hypotheses go to lane B. See SKILL.md Step 3, "Panel Review", for the lane blocks.
 
-When a split by component and `--panel` both apply, each partition gets its own A/B pair. State the total subagent count in chat before launching.
+When a component split and `--panel` both apply, each partition gets an A/B pair (`rev-a-1` / `rev-b-1` on Tier 1, or subagents on Tier 2). State the total reviewer count in chat before launching.
 
 ### 4. Deletion-Heavy Diffs
 
@@ -48,18 +48,51 @@ This script can:
 
 - Read a diff from stdin or a file.
 - Extract a diff from a JSON file (useful if the diff is wrapped in JSON).
-- Pack per-file diffs (and split oversized files along hunk boundaries) into size-bounded chunk files (`diff_chunk_01.diff`, `diff_chunk_02.diff`, …) with `--grouped` so each chunk fits in a single `view_file` call ($\le 35\text{ KB}$ and $\le 700$ lines by default) and write a `manifest.json`.
+- Pack per-file diffs (and split oversized files along hunk boundaries) into size-bounded chunk files (`diff_chunk_01.diff`, `diff_chunk_02.diff`, …) with `--grouped` so each chunk fits in a single `view_file` call ($\le 35\text{ KB}$ and $\le 700$ lines by default). It writes `manifest.json`, `diff_lines.jsonl`, `diff_hunks.jsonl`, and `diff_entities.jsonl` (populated when `--repo-dir` or `--with-entities` is supplied).
 - Split the diff into separate files per changed file in a specified output directory (when `--grouped` is omitted).
 
-**Grouped Staging Example (Recommended for Subagent Prompts):**
+**Grouped Staging Example (Recommended for Swarm Briefs and Subagent Prompts):**
 
 ```bash
 diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)
 git diff main...HEAD | python3 <skills-directory>/code-review/scripts/split_diff.py \
-  --grouped --max-bytes 35000 --max-lines 700 --output-dir "$diff_dir"
+  --grouped --repo-dir . --base-ref main --max-bytes 35000 --max-lines 700 --output-dir "$diff_dir"
 ```
 
-When `split_diff.py --grouped` produces 1–3 chunks, you can pass all chunk paths to a single reviewer (or a single `--panel` A/B pair) so the reviewer reads each chunk via `view_file`. When it produces 4 or more chunks across distinct components, partition the chunks across multiple reviewer invocations by component or artifact type.
+When `split_diff.py --grouped` produces 1 to 3 chunks, pass all chunk paths to one reviewer (or one `--panel` A/B pair) to read via `view_file`. For 4 or more chunks across components, partition them across swarm worker lanes or subagent calls by component or artifact type.
+
+**Relational Diff Triage with DuckDB (`staged_diff_macros.sql`):**
+
+On large diffs (> 500 lines), query the staged JSONL files in `$diff_dir` with [../scripts/staged_diff_macros.sql](../scripts/staged_diff_macros.sql) before assigning chunks or seeding hypotheses:
+
+```bash
+~/.local/bin/duckdb -batch -dark-mode -box \
+  -init <skills-directory>/code-review/scripts/staged_diff_macros.sql -c "
+-- 1. Rank modified functions and methods by added lines and rewrite percentage
+SELECT file_path, kind, name, chunk_name, lines_added, pct_rewritten
+FROM diff_entity_churn('$diff_dir')
+LIMIT 15;
+
+-- 2. Detect public or internal signature changes between OLD and NEW
+SELECT file_path, kind, name, old_signature, new_signature
+FROM diff_signature_drift('$diff_dir');
+
+-- 3. Identify modified production functions not mentioned in any test diff
+SELECT file_path, kind, name, chunk_name, lines_added
+FROM diff_untested_functions('$diff_dir');
+
+-- 4. Find symbols deleted from OLD without a matching replacement in NEW
+SELECT o.file_path, o.kind, o.name, o.signature, o.line_start AS old_line
+FROM staged_diff_entities('$diff_dir') o
+ANTI JOIN staged_diff_entities('$diff_dir') n
+  ON o.file_path = n.file_path
+ AND o.kind = n.kind
+ AND o.name = n.name
+ AND n.side = 'NEW'
+WHERE o.side = 'OLD'
+ORDER BY o.file_path, o.line_start;
+"
+```
 
 **Per-File Split Example:**
 

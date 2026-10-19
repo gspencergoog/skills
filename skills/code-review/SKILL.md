@@ -37,11 +37,11 @@ You are an expert Senior Software Engineer specializing in code review and in re
 | *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) | Baseline |
 | `--fast` | Single-pass in-session review without subagents; tier 1 checks only | Minimal latency / no subagents |
 | `--json [<path>]` | Emits `review_results.json` via `lint_review.py --export-json`, to `<path>` when given, otherwise to `<artifact-dir>/review_results.json` | Same as underlying mode |
-| `--claude` (or `--opus`) | The single reviewer is `claude-code-reviewer`. Under `--panel`, reviewer B is `claude-code-reviewer`. | Uses 3P quota |
-| `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B), for code and documents | About 2× subagents |
+| `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code) | Uses 3P quota |
+| `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B), for code and documents | About 2× reviewers |
 | `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in a per-reviewer throwaway checkout) for trusted changes | Test runtime and dependency installs |
 | `--max` | Same as `--claude --panel --verify` | All of the above |
-| `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra subagent turn per disputed reviewer |
+| `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra turn per disputed reviewer |
 
 `--fast` is mutually exclusive with `--claude`, `--panel`, `--verify`, and `--challenge`. If specified together, `--fast` takes precedence and the other flags are dropped (running strictly in-session without subagents). Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
 
@@ -78,9 +78,10 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
 - **Pin Base and Head SHAs**: Record `base_sha=$(git merge-base <base> HEAD)` (or `git rev-parse HEAD` for uncommitted working-tree changes against `HEAD`). Set `head_sha` to `git rev-parse HEAD` in the source repo, except for a `--verify` checkout of local working-tree changes, where `head_sha` is `git -C "$pr_review_dir_a" rev-parse HEAD` (the review snapshot commit) and the prompt notes that the top commit is the review snapshot, so `git diff $base_sha $head_sha` inside the checkout covers the change under review.
 - **Stage Diff Into Size-Bounded Chunks**: For any diff over 150 lines or 6 KB, create a temporary diff directory (`diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)`) and pipe the unified diff into `split_diff.py --grouped`:
   ```bash
-  <diff command> | python3 <skill-dir>/scripts/split_diff.py --grouped --output-dir "$diff_dir"
+  <diff command> | python3 <skill-dir>/scripts/split_diff.py \
+    --grouped --repo-dir <workspace-dir> --base-ref "$base_sha" --output-dir "$diff_dir"
   ```
-  This packs per-file diffs (splitting oversized files along hunk boundaries) into `diff_chunk_01.diff`, `diff_chunk_02.diff`, … where each chunk is $\le 35\text{ KB}$ and $\le 700$ lines (fitting in a single `view_file` call) and writes `manifest.json`. Retain `$diff_dir` for cleanup in Step 6.
+  This packs per-file diffs (splitting oversized files along hunk boundaries) into `diff_chunk_01.diff`, `diff_chunk_02.diff`, … where each chunk is $\le 35\text{ KB}$ and $\le 700$ lines (fitting in a single `view_file` call). It also writes `manifest.json`, `diff_lines.jsonl`, `diff_hunks.jsonl`, and `diff_entities.jsonl`. Retain `$diff_dir` for cleanup in Step 6.
 
 ### Step 1b: Classify Artifacts
 
@@ -107,7 +108,7 @@ Consider:
 
 Then run **tier 1 verification** yourself, so the reviewer can spend its effort on the review. Tier 1 is read-only and always on. It covers CI status and failed-job logs for PRs, analyzers and linters in check mode on the changed files, toolchain dry-run or task-graph queries, and repo doc validators for document files. Use only tools that are already installed. For in-place runs, compare `git status --porcelain` before and after. Collect the output for the reviewer prompt (cap inline output at 1 KB, failing lines first; if longer, write the full output to `$diff_dir/tier1.log`, creating `$diff_dir` with `mktemp -d -t pr-review-diffs-XXXXXX` if needed, and cite the path). Commands and rules are in [verification.md](references/verification.md#tier-1-commands).
 
-Next, write **a few Seed Hypotheses** from the diff stat, the context files, and the tier 1 output—specific, falsifiable claims (one line each) per [evidence.md](references/evidence.md#hypotheses). Under `--panel`, label each hypothesis with its lane (`[A]` for correctness, state, edge cases, and tests; `[B]` for wiring, security, API, performance, and dependencies). Under `--verify`, mark which hypotheses a mutation run can settle. For deletion-heavy diffs, include hypotheses checking whether deleted symbols or deleted test coverage still exist in `HEAD` ([splitting_reviews.md](references/splitting_reviews.md#4-deletion-heavy-diffs)).
+Next, write **a few Seed Hypotheses** from the diff stat, the context files, and the tier 1 output—specific, falsifiable claims (one line each) per [evidence.md](references/evidence.md#hypotheses). On diffs over 500 lines where `duckdb` is installed, query `$diff_dir` with [scripts/staged_diff_macros.sql](scripts/staged_diff_macros.sql) (`diff_untested_functions`, `diff_signature_drift`, and `diff_entity_churn`; see [splitting_reviews.md](references/splitting_reviews.md#tooling-support)) to seed hypotheses around high-churn functions, changed signatures, and untested changes. Under `--panel`, label each hypothesis with its lane (`[A]` for correctness, state, edge cases, and tests; `[B]` for wiring, security, API, performance, and dependencies). Under `--verify`, mark which hypotheses a mutation run can settle. For deletion-heavy diffs, include hypotheses checking whether deleted symbols or deleted test coverage still exist in `HEAD` ([splitting_reviews.md](references/splitting_reviews.md#4-deletion-heavy-diffs)).
 
 - **Ruled out by the caller**: When the invoking prompt supplies hypotheses already disproved in a prior pass (for example, the `ship-it` review loop passing the previous pass's `## Checked and Found Clean` lines), include them under the seeds as `Ruled out last pass: …`. Instruct the reviewer to re-test a ruled-out line only if the current diff touches the lines it cites.
 
@@ -115,39 +116,47 @@ _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_re
 
 ### Step 3: Generate Initial Review
 
-Before analyzing the diff, determine the reviewer subagents based on the flags:
+Before analyzing the diff, select the highest available reviewer delegation tier from the hierarchy below. Every tier reads and follows [reviewer_mandate.md](references/reviewer_mandate.md).
 
-- **Reviewer Selection**:
-  - **Fast In-Session Review (`--fast`)**: If the user passed `--fast`, do not spawn subagents. The primary agent conducts the entire review directly in the active session:
-    1. Read the unified diff (or diff chunks if large) and surrounding context files.
+- **Reviewer Delegation Hierarchy**:
+  - **Fast In-Session Review (`--fast`)**: If the user passed `--fast`, do not spawn swarm workers or subagents. Conduct the review directly in the active session:
+    1. Read [reviewer_mandate.md](references/reviewer_mandate.md), the unified diff (or diff chunks if large), and surrounding context files.
     2. Run Tier 1 read-only checks (linters, static analyzers) if configured.
-    3. Evaluate changes directly against the review criteria (Correctness, Concurrency, Edge Cases, Maintainability, Security, API Soundness, or Document lenses).
-    4. Draft review findings adhering strictly to the `### <ID>. <short claim>` format with required `Evidence`, `Why`, and `Suggestion` fields.
+    3. Evaluate changes against the review criteria (Correctness, Concurrency, Edge Cases, Maintainability, Security, API Soundness, or Document lenses).
+    4. Draft review findings using the `### <ID>. <short claim>` format with `Evidence`, `Why`, and `Suggestion` fields.
     5. Apply Step 4's self-critique truth filters ([critique_rules.md](references/critique_rules.md)) to the drafted findings, then proceed to Step 5 (Synthesis) without citation auditing or challenge loops.
-  - **Gemini Review (Default)**: By default, delegate Steps 3 & 4 to one `gemini-code-reviewer` (pinned to Gemini 4 Argon High).
-  - **Claude Review (`--claude` / `--opus`)**: If the user passed `--claude` or `--opus`, requested Claude, or asked for a cross-model review, delegate Steps 3 & 4 to `claude-code-reviewer` (drawing from `3p-daily` quota).
-    - _Quota Fallback_: If `claude-code-reviewer` fails due to 3P quota or capacity limits, report the issue to the user and fall back to `gemini-code-reviewer`.
-  - **Panel Review (`--panel`)**: Launch two reviewers in one `invoke_subagent` call, one per lane. See [Panel Review](#panel-review---panel) below.
+  - **Tier 1: Jetski Root Session (`swarm` tool available)**:
+    - **Default (Gemini)**: Spawn or wake worker `rev-a` pinned to `model: "gemini-launch-candidate-high"`.
+    - **Claude (`--claude` / `--opus`)**: Pin the single worker `rev-a` (or lane B worker `rev-b` under `--panel`) to `model: "opus-5.5-max"` (drawing from `3p-daily` quota).
+    - **Proactive Quota Check & Fallback**: Before spawning or waking an `opus-5.5-max` worker, call `swarm{action: "models"}` to inspect `remainingFraction`. If `opus-5.5-max` has zero remaining quota before spawn, report the fallback to the user and pass `model: "gemini-launch-candidate-high"` to `swarm{action: "add"}`. If an existing `waiting` worker exhausts quota between passes, switch its model in place via `swarm{action: "model", name: "<name>", model: "gemini-launch-candidate-high"}`.
+    - **Warm Worker Reuse**: If a swarm already exists in the conversation, check `swarm{action: "status"}`. When `rev-a` (or `rev-b`) is in `waiting` state, wake it via `post_message` with the review brief and call `swarm_wait{since: <last_seq>}` in the same turn. Do not call `kill` + `add` between passes, because `kill` permanently burns the roster name. If a prior worker was killed, increment the suffix (`rev-a-2`, `rev-b-2`).
+    - **First Swarm Creation**: Call `swarm{action: "add", name: "rev-a", model: "<model>", brief: "<prompt>"}` (and a second `swarm{action: "add", name: "rev-b", model: "<model>", brief: "<prompt>"}` call in the same turn under `--panel`). Emit `[Open the Swarm UI](sidecar://swarm/swarm_board/)` in chat and **end the turn immediately**. Do not call `read_board`, `post_message`, or `swarm_wait` on that turn; those tools mount on the next turn when the worker wakes `@coordinator`.
+  - **Tier 2a: Claude Code (`Agent` or `Task` tool available, no `swarm`)**:
+    - Spawn 1 `general-purpose` subagent (or 2 parallel `general-purpose` subagents in one turn under `--panel`), passing `model: "opus"` when `--claude` or `--opus` is active.
+  - **Tier 2b: Jetski Child Subagent (`invoke_subagent` available, `swarm` unavailable or non-root)**:
+    - In a child subagent where `swarm` is unavailable or non-root, call `invoke_subagent` with `TypeName: "self"`, `Role: "Code Reviewer"` (or `"Code Reviewer A"` / `"Code Reviewer B"`), and `Model: "inherit"`.
+  - **Tier 3: Single-Agent CLI (no `swarm` and no subagent tool)**:
+    - Follow the `--fast` in-session review flow above, reading [reviewer_mandate.md](references/reviewer_mandate.md) (and running Lane A then Lane B sequentially if `--panel` was requested).
 
-- **Packaging the Subagent Prompt (Strict Invariants)**:
-  - **No Dummy Probes**: Never launch a subagent with a test or placeholder prompt (e.g. "Test if agent starts"). Always supply the full review payload directly in the initial `invoke_subagent` prompt.
-  - **Programmatic Diff Staging & Prompt Size Guard**: Keep total `invoke_subagent` prompts under 10 KB so the platform never truncates them:
-    - Always place all instructions (`### Target Workspace`, `### Context & Key Reference Files`, `### Tier 1 Verification Results`, `### Hypotheses`, `### Review Mandate`, `### Document Review Mandate`, `### Lane Assignment`, `### Verification Mandate`, and `### Report Format`) **before** `### Modified Code Diff`.
+- **Packaging the Reviewer Brief / Prompt (Strict Invariants)**:
+  - **No Dummy Probes**: Never launch a swarm worker or subagent with a test or placeholder prompt (e.g. "Test if agent starts"). Always supply the full review payload directly in the initial `brief` or `Prompt`.
+  - **Programmatic Diff Staging & Prompt Size Guard**: Keep total briefs and subagent prompts under 10 KB so the platform never truncates them:
+    - Always place all instructions (`### Target Workspace`, `### Context & Key Reference Files`, `### Tier 1 Verification Results`, `### Hypotheses`, `### Review Mandate`, `### Document Review Mandate`, `### API Review Mandate`, `### Lane Assignment`, `### Verification Mandate`, and `### Report Format`) **before** `### Modified Code Diff`.
     - Cap `### Tier 1 Verification Results` at 1 KB inline (failing lines first; stage full logs to `$diff_dir/tier1.log`).
     - For small diffs ($\le 150$ lines and $\le 6\text{ KB}$), embed the unified diff inline at the bottom of the prompt under `### Modified Code Diff`.
-    - For larger diffs (> 150 lines or > 6 KB), do **not** paste the raw diff inline into `invoke_subagent`. Instead, list the generated `diff_chunk_XX.diff` absolute paths and covered files from `split_diff.py --grouped` under `### Modified Code Diff` and instruct the reviewer subagent to read every listed `.diff` chunk file with `view_file` before evaluating the changes.
-  - **Explicit Workspace & Context Paths**: Explicitly specify the target workspace root directory (`$pr_review_dir_a`, `$pr_review_dir_b`, or local worktree path) and list the relevant context files identified in Step 2 (imports, interfaces, tests, linked documents) so the reviewer can read them via `view_file` if needed.
+    - For larger diffs (> 150 lines or > 6 KB), do **not** paste the raw diff inline. List the `diff_chunk_XX.diff` paths and covered files from `split_diff.py --grouped` under `### Modified Code Diff`, and instruct the reviewer to read each chunk with `view_file`.
+  - **Explicit Workspace & Context Paths**: Specify the root directory of the workspace (`$pr_review_dir_a`, `$pr_review_dir_b`, or worktree path). List the context files from Step 2 (imports, interfaces, tests, linked documents) so the reviewer can read them via `view_file`.
   - **Absolute Reference Paths**: Give reference and rubric files as absolute paths under this skill's directory, so the reviewer can open them.
   - **Mixed Diffs**: Use one prompt per reviewer. Put the code mandate first, then the Document Review Mandate. The document mandate adds to the code review and replaces none of it: code files get the same depth as in a code-only review.
-  - **Large Diffs**: For very large diffs (> 500 lines or > 10 files), either pass the grouped `diff_chunk_XX.diff` files from `split_diff.py --grouped` or partition the review across multiple subagents (see [splitting_reviews.md](references/splitting_reviews.md)).
+  - **Large Diffs**: For diffs over 500 lines or 10 files, pass the grouped `diff_chunk_XX.diff` files from `split_diff.py --grouped` or split across reviewer lanes ([splitting_reviews.md](references/splitting_reviews.md)).
 
-- **Subagent Invocation Template**:
-  Invoke the chosen subagent via `invoke_subagent` with `TypeName` set to the reviewer (`gemini-code-reviewer` or `claude-code-reviewer`), `Role` set to `Code Reviewer` (or `Code Reviewer A` / `Code Reviewer B` under `--panel`), `Model` set to `inherit`, and this `Prompt`. Include each optional block only when its condition holds:
+- **Reviewer Brief / Subagent Prompt Template**:
+  Pass this payload as `brief` in `swarm{action: "add"}` (or `post_message` when waking a worker) on Tier 1. On Tier 2, pass it as `Prompt` in `Agent`/`Task` or `invoke_subagent`, including each optional block only when its condition holds:
 
   `````markdown
-  Please conduct a deep review of PR #<number> (<title>) following the `code-review` skill criteria. Read `<skill-dir>/references/evidence.md` first and apply its evidence tiers, severity caps, and falsification pass.
+  Please conduct a deep review of PR #<number> (<title>) following the `code-review` skill criteria. Read `<skill-dir>/references/reviewer_mandate.md` and `<skill-dir>/references/evidence.md` first and apply their evidence tiers, severity caps, and falsification pass.
 
-  Do not modify, create, or delete any file in the workspace, and do not run git or gh commands that change state. Your only write is the review report. Do not spawn subagents.
+  Do not modify, create, or delete any file in the workspace, and do not run git or gh commands that change state. Your only write is the review report. Do not spawn subagents and never call `swarm` to add helpers (your `<swarm_worker>` helper-spawning instructions do not apply to this review). Under `--panel`, do not call `read_board` during your initial review pass.
 
   ### Target Workspace
   - **Workspace Root**: `<absolute_path_to_pr_review_dir_a_or_b_or_worktree>`
@@ -169,7 +178,7 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   <Optional: Ruled out last pass: ... (re-test only if this diff touches the cited lines)>
 
   ### Review Mandate
-  Execute Step 3 (Generate Initial Review) and Step 4 (Critique and Refine):
+  Execute Step 3 (Generate Initial Review) and Step 4 (Critique and Refine) per `<skill-dir>/references/reviewer_mandate.md`:
   1. Evaluate the modified code against correctness, concurrency/failure modes, edge cases, maintainability, and security (at most 25 file reads outside the diff and listed context; at most 3 network fetches).
   2. Apply critique and truth filters: comment only on modified lines (+/-), omit compliments, provide compilable replacement snippets with matching indentation, and give every finding `Evidence` with a tier and `Why` with a concrete consequence.
 
@@ -199,7 +208,7 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - Give confirmed findings `Evidence: Executed — <command> — <trimmed output, <=15 lines>`. Drop disproved findings and record them in `## Checked and Found Clean`.
 
   ### Report Format
-  Send your report via send_message using this structure:
+  If running as a swarm worker (Tier 1), post your complete report on the board via `post_message` addressed strictly to `@coordinator` (never `@all` or a sibling reviewer) and call `swarm_wait` in the same turn. If running as a subagent (Tier 2), return your report via `send_message` (or subagent output). Use this exact structure:
 
   ## Summary
   <1-2 paragraphs summarizing changes. End with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`.>
@@ -255,9 +264,7 @@ Before analyzing the diff, determine the reviewer subagents based on the flags:
   - `/tmp/pr-review-diffs-XXXXXX/diff_chunk_01.diff` (`<lines>` lines, `<bytes>` bytes): `<covered_files>`
   `````
 
-  _Note: Both subagents configure `disableModelSelection: true`, preserving their pinned models regardless of caller model._
-
-The reviewer subagent evaluates code changes against the following criteria:
+The reviewer evaluates code changes against the following criteria:
 
 - **Correctness**: Verify functionality, handle edge cases, check API usage.
 - **Efficiency**: Identify bottlenecks, redundant calculations.
@@ -279,12 +286,12 @@ Document files are evaluated with the four lenses and the rubrics in [reviewing_
 
 #### Panel Review (`--panel`)
 
-`--panel` means the user accepts about twice the subagent quota for better coverage. Launch two reviewers in one `invoke_subagent` call. Both get the full diff and the same optional blocks. Each also gets a Lane Assignment block, so their criteria don't overlap:
+`--panel` means the user accepts about twice the reviewer quota for better coverage. Launch two reviewers in one turn (via two `swarm{action: "add"}` calls on Tier 1, or two parallel subagents on Tier 2). Both get the full diff and the same optional blocks. Each also gets a Lane Assignment block, so their criteria don't overlap:
 
-| Lane | Theme | Code criteria | Document lenses | Agent |
+| Lane | Theme | Code criteria | Document lenses | Reviewer / Model |
 | :--- | :--- | :--- | :--- | :--- |
-| **A** | Does it work, and can it be verified? | Correctness; concurrency and failure modes; edge cases; tests ([reviewing_tests.md](references/reviewing_tests.md)) | Implementer; Tester / Verifier | `gemini-code-reviewer` |
-| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness ([reviewing_apis.md](references/reviewing_apis.md)) | Consumer; Operator / Adversary | `gemini-code-reviewer`, or `claude-code-reviewer` with `--claude` / `--opus` (same quota fallback as above) |
+| **A** | Does it work, and can it be verified? | Correctness; concurrency and failure modes; edge cases; tests ([reviewing_tests.md](references/reviewing_tests.md)) | Implementer; Tester / Verifier | `rev-a` (`gemini-launch-candidate-high` on Tier 1; default model on Tier 2) |
+| **B** | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness ([reviewing_apis.md](references/reviewing_apis.md)) | Consumer; Operator / Adversary | `rev-b` (`gemini-launch-candidate-high`, or `opus-5.5-max` / `model: "opus"` with `--claude` or `--opus`, with quota fallback to `gemini-launch-candidate-high`) |
 
 Lane Assignment block for reviewer A (swap in lane B's lists for reviewer B):
 
@@ -316,9 +323,10 @@ Ensure that:
 
 Audit and combine the refined comments into the final output:
 
+- **Collect Reviewer Reports (Tier 1 `swarm`)**: When a worker wakes `@coordinator`, call `read_board` (with `since: <last_seq>` on later passes) to read the report(s) and record the latest `seq` cursor.
 - **Clean check (`--verify`)**: Before reading citations, run `git -C "$dir" status --porcelain` on `$pr_review_dir_a` (and `$pr_review_dir_b` under `--panel --verify`) per [verification.md](references/verification.md#orchestrator-clean-check). If anything other than `?? review_scratch_*` appears, restore tracked files (`git -C "$dir" restore .`), remove unexpected untracked files (`git -C "$dir" clean -fd -e 'review_scratch_*'`), note the leftover edit in the Summary, and audit all findings from that reviewer below.
 - **Citation audit**: For every `critical` and `high` finding (and all findings from a reviewer that failed the clean check), open the cited `path:line` (±10 lines) in the review workspace with `view_file`. If a quoted line, symbol, or signature does not match the file on disk, drop the finding or downgrade it to a Question, and audit the rest of that reviewer's findings regardless of severity. Record `"Citation audit: N checked, M dropped (…)"` in the Summary. If the working-tree guard caught an in-place tier 1 change, note that in the Summary as well.
-- **Reviewer challenge (`--challenge` only)**: When `--challenge` is active and the citation audit or a quick disproof check refutes a `critical` or `high` finding, send one `send_message` to that reviewer naming the finding ID, quoting the refuting file lines or command output, and asking it to `"withdraw, or reply with evidence at a tier that supports the severity"`. Allow at most one round trip per disputed reviewer. A reply that pivots to a different argument without supplying `Executed`, `Read`, `Fetched`, or line-cited `Deduction` evidence for the original claim counts as withdrawn. Note `"N disputed (M withdrawn, K upheld)"` in the Summary.
+- **Reviewer challenge (`--challenge` only)**: When `--challenge` is active and a check refutes a `critical` or `high` finding, challenge that reviewer naming the finding ID and quoting the refuting evidence. Ask it to `"withdraw, or reply with evidence at a tier that supports the severity"`. Use `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, `resume: "<agentId>"` on Tier 2a, or `send_message` on Tier 2b. Allow at most one round trip per disputed reviewer. A reply that pivots to a different argument without supplying `Executed`, `Read`, `Fetched`, or line-cited `Deduction` evidence for the original claim counts as withdrawn. Note `"N disputed (M withdrawn, K upheld)"` in the Summary.
 - Deduplicate overlapping comments.
 - **Panel merge**: When both lanes flag the same issue on the same line, keep one finding at the higher severity and add "(raised by both reviewers)" to its Body. Keep `out-of-lane` findings. Merge the two partial Structural Assessments into one.
 - Prioritize high-severity issues (critical, high).
@@ -372,7 +380,7 @@ Send one short chat message, then **end the turn**. The message contains:
 
 That closing line is a question for the user. It is never a reason to start fixing. Do not edit files, stage changes, or start a fix plan in the same turn.
 
-- **Subagent wake-up rule**: When a reviewer subagent's completion message resumes you, the only steps left are Step 5 (synthesis), Step 6 (cleanup), and Step 7 (stop). This holds even if the conversation was implementing code before the review started.
+- **Reviewer wake-up rule**: When a swarm worker or reviewer subagent wakes you, the only steps left are Step 5 (synthesis), Step 6 (cleanup), and Step 7 (stop). This holds even if the conversation was implementing code before the review started.
 - **"Review and fix" requests**: Treat them as two requests. The review still ends here. Fixing starts in a later turn, after the user confirms which findings to address.
 - **Callers**: Calling workflows that automate reviews or act on findings (for example, `pr-review` or the `ship-it` review loop) run Steps 1 through 6 and skip Step 7. They resume their own flow after Step 6 completes (cleanup included), do not emit the hand-off question, and may then act on the findings per their own instructions. The review step itself never fixes anything.
 

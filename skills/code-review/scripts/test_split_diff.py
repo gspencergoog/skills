@@ -9,10 +9,13 @@ import shutil
 
 import split_diff
 from split_diff import (
+    extract_diff_entities,
     extract_diff_from_json,
+    main,
+    parse_diff_records,
+    resolve_repo_dir,
     split_diff as split_diff_fn,
     split_diff_grouped,
-    main
 )
 
 class TestSplitDiff(unittest.TestCase):
@@ -338,6 +341,144 @@ class TestSplitDiff(unittest.TestCase):
             self.assertIn("Successfully split diff into 1 grouped chunk(s)", printed)
             self.assertIn("diff_chunk_01.diff", printed)
             mock_exit.assert_not_called()
+
+    def test_parse_diff_records_line_numbers_and_edge_cases(self):
+        diff_content = (
+            'diff --git "a/dir/file\\303\\251.py" "b/dir/file\\303\\251.py"\n'
+            '--- "a/dir/file\\303\\251.py"\n'
+            '+++ "b/dir/file\\303\\251.py"\n'
+            "@@ -10,3 +10,3 @@ def greet():\n"
+            " context_before\n"
+            "-old_val\n"
+            "+new_val\n"
+            " context_after\n"
+            "\\ No newline at end of file\n"
+            "diff --git a/deleted.py b/deleted.py\n"
+            "--- a/deleted.py\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-gone\n"
+        )
+        hunks, lines = parse_diff_records(diff_content)
+        self.assertEqual(len(hunks), 2)
+        self.assertEqual(hunks[0]["file_path"], "dir/fileé.py")
+        self.assertEqual(hunks[0]["func_context"], "def greet():")
+        self.assertEqual(hunks[0]["added_lines"], 1)
+        self.assertEqual(hunks[0]["deleted_lines"], 1)
+
+        self.assertEqual(hunks[1]["file_path"], "deleted.py")
+        self.assertEqual(hunks[1]["old_start"], 1)
+        self.assertEqual(hunks[1]["old_count"], 1)
+        self.assertEqual(hunks[1]["new_count"], 0)
+
+        self.assertEqual(len(lines), 5)
+        self.assertEqual(
+            [(r["op"], r["old_line"], r["new_line"], r["content"]) for r in lines],
+            [
+                (" ", 10, 10, "context_before"),
+                ("-", 11, None, "old_val"),
+                ("+", None, 11, "new_val"),
+                (" ", 12, 12, "context_after"),
+                ("-", 1, None, "gone"),
+            ],
+        )
+
+    def test_split_diff_grouped_preserves_monotonic_lines_on_split_hunk(self):
+        diff_content = (
+            "diff --git a/huge.py b/huge.py\n"
+            "--- a/huge.py\n"
+            "+++ b/huge.py\n"
+            "@@ -100,6 +200,6 @@ def big():\n"
+            "+line200\n"
+            "+line201\n"
+            "+line202\n"
+            "+line203\n"
+            "+line204\n"
+            "+line205\n"
+        )
+        chunks = split_diff_grouped(
+            diff_content, self.test_dir, max_bytes=35000, max_lines=7
+        )
+        self.assertGreaterEqual(len(chunks), 2)
+
+        lines_path = os.path.join(self.test_dir, "diff_lines.jsonl")
+        hunks_path = os.path.join(self.test_dir, "diff_hunks.jsonl")
+        entities_path = os.path.join(self.test_dir, "diff_entities.jsonl")
+        self.assertTrue(os.path.isfile(lines_path))
+        self.assertTrue(os.path.isfile(hunks_path))
+        self.assertTrue(os.path.isfile(entities_path))
+
+        with open(lines_path, "r", encoding="utf-8") as f:
+            line_recs = [json.loads(line) for line in f if line.strip()]
+        with open(hunks_path, "r", encoding="utf-8") as f:
+            hunk_recs = [json.loads(line) for line in f if line.strip()]
+
+        self.assertEqual([r["new_line"] for r in line_recs], [200, 201, 202, 203, 204, 205])
+        self.assertEqual(line_recs[0]["chunk_name"], "diff_chunk_01.diff")
+        self.assertEqual(line_recs[-1]["chunk_name"], f"diff_chunk_{len(chunks):02d}.diff")
+        self.assertEqual(len(hunk_recs), 1)
+        self.assertEqual(hunk_recs[0]["hunk_id"], 1)
+        self.assertEqual(hunk_recs[0]["chunk_name"], "diff_chunk_01.diff")
+
+    def test_extract_diff_entities_python_and_brace_languages(self):
+        py_path = os.path.join(self.test_dir, "mod.py")
+        ts_path = os.path.join(self.test_dir, "service.ts")
+        with open(py_path, "w", encoding="utf-8") as f:
+            f.write(
+                "class Worker:\n"
+                "    def run(self, count: int) -> bool:\n"
+                "        return count > 0\n\n"
+                "async def helper(name: str) -> str:\n"
+                "    return name\n"
+            )
+        with open(ts_path, "w", encoding="utf-8") as f:
+            f.write(
+                "export class Client {\n"
+                "  public fetch(url: string): void {\n"
+                "    if (url) {\n"
+                "      return;\n"
+                "    }\n"
+                "  }\n"
+                "}\n"
+                "export function makeClient(id: number) {\n"
+                "  return id;\n"
+                "}\n"
+            )
+
+        with patch("split_diff._read_git_blob") as mock_blob:
+            mock_blob.side_effect = lambda repo, ref, path: (
+                "def helper(name: str) -> int:\n    return 0\n"
+                if path == "mod.py"
+                else None
+            )
+            entities = extract_diff_entities(
+                ["mod.py", "service.ts"], self.test_dir, base_ref="HEAD~1"
+            )
+
+        by_key = {(e["file_path"], e["side"], e["name"]): e for e in entities}
+        self.assertEqual(by_key[("mod.py", "NEW", "Worker")]["kind"], "class")
+        self.assertEqual(by_key[("mod.py", "NEW", "Worker")]["line_end"], 3)
+        self.assertEqual(by_key[("mod.py", "NEW", "run")]["kind"], "method")
+        self.assertIn("def run(self, count: int) -> bool", by_key[("mod.py", "NEW", "run")]["signature"])
+        self.assertEqual(by_key[("mod.py", "NEW", "helper")]["kind"], "function")
+        self.assertIn("async def helper(name: str) -> str", by_key[("mod.py", "NEW", "helper")]["signature"])
+        self.assertIn("def helper(name: str) -> int", by_key[("mod.py", "OLD", "helper")]["signature"])
+
+        self.assertEqual(by_key[("service.ts", "NEW", "Client")]["kind"], "class")
+        self.assertEqual(by_key[("service.ts", "NEW", "Client")]["line_end"], 7)
+        self.assertEqual(by_key[("service.ts", "NEW", "fetch")]["kind"], "method")
+        self.assertEqual(by_key[("service.ts", "NEW", "makeClient")]["kind"], "function")
+
+    def test_resolve_repo_dir_formats(self):
+        txt_file = os.path.join(self.test_dir, "workspace_dir.txt")
+        with open(txt_file, "w", encoding="utf-8") as f:
+            f.write(f"{self.test_dir}\n")
+        self.assertEqual(resolve_repo_dir(txt_file), self.test_dir)
+
+        json_file = os.path.join(self.test_dir, "pr_coords.json")
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump({"workspace_dir": self.test_dir}, f)
+        self.assertEqual(resolve_repo_dir(json_file), self.test_dir)
 
 if __name__ == "__main__":
     unittest.main()

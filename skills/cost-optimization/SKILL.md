@@ -196,5 +196,6 @@ Select models based on **cost per completed task**, not token sticker price.
 ## Step 4: Deliverables
 
 1. **Cost Profile & Plan**: Document scope, quality bar, baseline cost per task, token distribution profile, and ranked shortlist of recommended levers.
+   - When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool) and the profile or sweep compares 4 or more data points on a shared unit axis, read the `genui` skill and render a chart (an inline `donut` or `stacked-bar` `Chart` for token spend concentration across categories, or a `scatter` / `line` chart for reasoning-effort and model sweeps; use `mode: "inline"` when compact under 500px or `metrics_dashboard` in `mode: "pane"` when pairing with KPI cards). Skip the chart for 1 to 3 scalar numbers or when `a2ui-pane` is not installed.
 2. **Execution Diffs**: Provide atomic, one-lever-per-diff changes with validation measurements (baseline vs. new cost per task and pass rate).
 3. **Skipped Levers & Justification**: List levers evaluated but skipped (due to low potential impact, platform limitations, or quality tradeoffs).
