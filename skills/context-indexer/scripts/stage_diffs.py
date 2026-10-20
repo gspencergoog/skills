@@ -7,11 +7,11 @@ import argparse
 import ast
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from typing import Any
 
 DIFF_HEADER_RE = re.compile(
@@ -27,9 +27,7 @@ PLUS_HEADER_RE = re.compile(
 MINUS_HEADER_RE = re.compile(
     r'^--- (?:"a/((?:[^"\\]|\\.)+)"|a/([^\t\n]+))', re.MULTILINE
 )
-HUNK_HEADER_RE = re.compile(
-    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$"
-)
+HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 OCTAL_ESCAPE_RE = re.compile(r"(?:\\[0-3][0-7]{2})+")
 FILE_META_PREFIXES = (
     "diff --git ",
@@ -247,9 +245,7 @@ def _annotate_hunk_lines(
         if idx == 0 and first_is_hunk:
             annotated.append((line, None))
             continue
-        rec, cur_old, cur_new = _build_diff_line_record(
-            line, meta, cur_old, cur_new
-        )
+        rec, cur_old, cur_new = _build_diff_line_record(line, meta, cur_old, cur_new)
         annotated.append((line, rec))
 
     if not first_is_hunk:
@@ -337,9 +333,7 @@ def _split_headerless_file_diff(
     if _fits_limits(file_diff, max_bytes, max_lines):
         hunks = [meta] if active_meta else []
         return [(file_diff, recs, hunks)]
-    return _split_annotated_by_lines(
-        "", annotated, active_meta, max_bytes, max_lines
-    )
+    return _split_annotated_by_lines("", annotated, active_meta, max_bytes, max_lines)
 
 
 def _split_file_diff_annotated(
@@ -374,9 +368,7 @@ def _split_file_diff_annotated(
         candidate = header + "".join(cur_hunk_strs) + hunk
 
         if cur_hunk_strs and not _fits_limits(candidate, max_bytes, max_lines):
-            segments.append(
-                (header + "".join(cur_hunk_strs), cur_recs, cur_hunks)
-            )
+            segments.append((header + "".join(cur_hunk_strs), cur_recs, cur_hunks))
             cur_hunk_strs, cur_recs, cur_hunks = [], [], []
 
         if _fits_limits(header + hunk, max_bytes, max_lines):
@@ -385,9 +377,7 @@ def _split_file_diff_annotated(
             cur_hunks.append(meta)
         else:
             segments.extend(
-                _split_annotated_by_lines(
-                    header, annotated, meta, max_bytes, max_lines
-                )
+                _split_annotated_by_lines(header, annotated, meta, max_bytes, max_lines)
             )
 
     if cur_hunk_strs:
@@ -443,8 +433,7 @@ def _write_grouped_chunk(
 def _write_jsonl(path: str, records: list[dict[str, Any]]) -> str:
     """Writes a list of dictionaries to a newline-delimited JSON file."""
     with open(path, "w", encoding="utf-8") as f:
-        for rec in records:
-            f.write(json.dumps(rec) + "\n")
+        f.writelines(json.dumps(rec) + "\n" for rec in records)
     return os.path.abspath(path)
 
 
@@ -532,8 +521,7 @@ def _extract_py_entities(
     entities = [
         ent
         for node in ast.walk(tree)
-        if (ent := _py_node_to_entity(node, file_path, side, method_ids))
-        is not None
+        if (ent := _py_node_to_entity(node, file_path, side, method_ids)) is not None
     ]
     entities.sort(key=lambda e: (e["line_start"], e["line_end"]))
     return entities
@@ -621,9 +609,7 @@ def _try_sem_entities(
                 "name": str(it.get("name") or ""),
                 "signature": str(it.get("signature") or it.get("name") or ""),
                 "line_start": int(it.get("line_start") or 1),
-                "line_end": int(
-                    it.get("line_end") or it.get("line_start") or 1
-                ),
+                "line_end": int(it.get("line_end") or it.get("line_start") or 1),
             }
             for it in items
             if isinstance(it, dict) and it.get("name")
@@ -683,13 +669,9 @@ def extract_diff_entities(
         full_path = root / rel_path
         if full_path.is_file():
             try:
-                new_text = full_path.read_text(
-                    encoding="utf-8", errors="replace"
-                )
+                new_text = full_path.read_text(encoding="utf-8", errors="replace")
                 entities.extend(
-                    _extract_content_entities(
-                        rel_path, "NEW", new_text, full_path
-                    )
+                    _extract_content_entities(rel_path, "NEW", new_text, full_path)
                 )
             except OSError:
                 pass
@@ -697,9 +679,7 @@ def extract_diff_entities(
         if base_ref:
             old_text = _read_git_blob(resolved_dir, base_ref, rel_path)
             if old_text is not None:
-                entities.extend(
-                    _extract_content_entities(rel_path, "OLD", old_text)
-                )
+                entities.extend(_extract_content_entities(rel_path, "OLD", old_text))
 
     return entities
 
@@ -712,9 +692,7 @@ def _collect_grouped_segments(
     list[dict[str, Any]],
 ]:
     """Splits all file diffs into segments and collects unique file paths and hunk records."""
-    segments: list[
-        tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]
-    ] = []
+    segments: list[tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]] = []
     all_files: list[str] = []
     all_hunks: list[dict[str, Any]] = []
     seen_hunk_ids: set[int] = set()
@@ -738,9 +716,7 @@ def _collect_grouped_segments(
 
 
 def _pack_segments_into_chunks(
-    segments: list[
-        tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]
-    ],
+    segments: list[tuple[str, str, list[dict[str, Any]], list[dict[str, Any]]]],
     output_dir: str,
     max_bytes: int,
     max_lines: int,
@@ -810,12 +786,8 @@ def split_diff_grouped(
         segments, output_dir, max_bytes, max_lines
     )
 
-    lines_jsonl = _write_jsonl(
-        os.path.join(output_dir, "diff_lines.jsonl"), all_lines
-    )
-    hunks_jsonl = _write_jsonl(
-        os.path.join(output_dir, "diff_hunks.jsonl"), all_hunks
-    )
+    lines_jsonl = _write_jsonl(os.path.join(output_dir, "diff_lines.jsonl"), all_lines)
+    hunks_jsonl = _write_jsonl(os.path.join(output_dir, "diff_hunks.jsonl"), all_hunks)
     entity_recs = (
         extract_diff_entities(all_files, repo_dir or ".", base_ref)
         if (with_entities or repo_dir)
@@ -850,9 +822,7 @@ def split_diff(diff_content: str, output_dir: str) -> list[str]:
     for i, file_diff in enumerate(files):
         file_name = _extract_file_name(file_diff, i)
         safe_name = (
-            file_name.replace("/", "_")
-            if file_name != f"chunk_{i}.diff"
-            else file_name
+            file_name.replace("/", "_") if file_name != f"chunk_{i}.diff" else file_name
         )
 
         file_path = os.path.join(output_dir, safe_name)
@@ -890,12 +860,8 @@ def main() -> None:
         default=sys.stdin,
         help="Input file (default: stdin)",
     )
-    parser.add_argument(
-        "--json", action="store_true", help="Input is JSON encoded"
-    )
-    parser.add_argument(
-        "--json-key", help="Key in JSON containing the diff string"
-    )
+    parser.add_argument("--json", action="store_true", help="Input is JSON encoded")
+    parser.add_argument("--json-key", help="Key in JSON containing the diff string")
     parser.add_argument(
         "--output-dir", required=True, help="Directory to write chunks to"
     )

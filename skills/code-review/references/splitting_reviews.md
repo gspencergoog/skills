@@ -41,8 +41,8 @@ When a diff mostly deletes, moves, or consolidates files, seed hypotheses of the
 
 ## Tooling Support
 
-To assist with splitting large diffs, use the provided Python script:
-`scripts/split_diff.py` (inside the directory the SKILL.md is in)
+To assist with splitting large diffs, use the [`context-indexer`](../../context-indexer/SKILL.md) staging script:
+[`../../context-indexer/scripts/stage_diffs.py`](../../context-indexer/scripts/stage_diffs.py)
 
 This script can:
 
@@ -55,19 +55,19 @@ This script can:
 
 ```bash
 diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)
-git diff main...HEAD | python3 <skills-directory>/code-review/scripts/split_diff.py \
+git diff main...HEAD | python3 <skills-directory>/context-indexer/scripts/stage_diffs.py \
   --grouped --repo-dir . --base-ref main --max-bytes 35000 --max-lines 700 --output-dir "$diff_dir"
 ```
 
-When `split_diff.py --grouped` produces 1 to 3 chunks, pass all chunk paths to one reviewer (or one `--panel` A/B pair) to read via `view_file`. For 4 or more chunks across components, partition them across swarm worker lanes or subagent calls by component or artifact type.
+When `stage_diffs.py --grouped` produces 1 to 3 chunks, pass all chunk paths to one reviewer (or one `--panel` A/B pair) to read via `view_file`. For 4 or more chunks across components, partition them across swarm worker lanes or subagent calls by component or artifact type.
 
 **Relational Diff Triage with DuckDB (`staged_diff_macros.sql`):**
 
-On large diffs (> 500 lines), query the staged JSONL files in `$diff_dir` with [../scripts/staged_diff_macros.sql](../scripts/staged_diff_macros.sql) before assigning chunks or seeding hypotheses:
+On large diffs (> 500 lines), query the staged JSONL files in `$diff_dir` with [../../context-indexer/scripts/staged_diff_macros.sql](../../context-indexer/scripts/staged_diff_macros.sql) before assigning chunks or seeding hypotheses:
 
 ```bash
-~/.local/bin/duckdb -batch -dark-mode -box \
-  -init <skills-directory>/code-review/scripts/staged_diff_macros.sql -c "
+duckdb -batch -dark-mode -box \
+  -init <skills-directory>/context-indexer/scripts/staged_diff_macros.sql -c "
 -- 1. Rank modified functions and methods by added lines and rewrite percentage
 SELECT file_path, kind, name, chunk_name, lines_added, pct_rewritten
 FROM diff_entity_churn('$diff_dir')
@@ -97,14 +97,34 @@ ORDER BY o.file_path, o.line_start;
 **Per-File Split Example:**
 
 ```bash
-python3 <skills-directory>/code-review/scripts/split_diff.py --output-dir scratch/diff_chunks < diff.txt
+python3 <skills-directory>/context-indexer/scripts/stage_diffs.py --output-dir scratch/diff_chunks < diff.txt
 ```
 
 For JSON inputs:
 
 ```bash
-python3 <skills-directory>/code-review/scripts/split_diff.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
+python3 <skills-directory>/context-indexer/scripts/stage_diffs.py --json --json-key diff --output-dir scratch/diff_chunks < input.json
 ```
+
+**Large Document Staging & Section Splitting (`stage_markdown.py` & `staged_md_macros.sql`):**
+
+For specs, RFCs, or blueprints (`> 500` lines), run [../../context-indexer/scripts/stage_markdown.py](../../context-indexer/scripts/stage_markdown.py) with `--split-chunks`. It writes size-bounded `md_chunk_NN.md` files (`<= 35 KB` and `<= 700` lines) alongside relational JSONL tables (`md_sections.jsonl`, `md_code_blocks.jsonl`, `md_tables.jsonl`, `md_frontmatter.jsonl`, `md_links.jsonl`):
+
+```bash
+md_dir=$(mktemp -d -t doc-review-chunks-XXXXXX)
+python3 <skills-directory>/context-indexer/scripts/stage_markdown.py \
+  --root . --split-chunks --max-bytes 35000 --max-lines 700 \
+  --output-dir "$md_dir" path/to/spec.md
+
+duckdb -batch -dark-mode -box \
+  -init <skills-directory>/context-indexer/scripts/staged_md_macros.sql -c "
+SELECT section_id, level, heading, chunk_name, line_start, subtree_line_end
+FROM staged_md_sections('$md_dir')
+WHERE level <= 2;
+"
+```
+
+For quick ad hoc section outlines on a single Markdown file (`>= 350` lines) without staging JSONL files, load `skills/duckdb/scripts/markdown_macros.sql` and query `read_md_sections('path/to/spec.md')`.
 
 ## How to Combine Subdivided Reviews
 

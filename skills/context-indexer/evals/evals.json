@@ -1,0 +1,35 @@
+{
+  "repo_criteria": ["evals/code_quality_rubric.json"],
+  "evals": [
+    {
+      "id": "context_indexer_task_1_stage_diffs",
+      "prompt": "Using the context-indexer skill, how do I stage a large git diff into size-bounded chunks with AST entity extraction and query the highest-churn modified functions and signature drift with DuckDB?",
+      "expected_chat_output": [
+        "References 'scripts/stage_diffs.py' with '--grouped' (and '--repo-dir' or '--with-entities').",
+        "References loading 'scripts/staged_diff_macros.sql' into 'duckdb -batch -dark-mode' and querying 'diff_entity_churn' and 'diff_signature_drift'."
+      ],
+      "expected_repo_state": ["No files are modified."],
+      "agent_config": "bare-agent"
+    },
+    {
+      "id": "context_indexer_task_2_stage_markdown",
+      "prompt": "Using the context-indexer skill, how can I stage a set of Markdown specification files to audit broken relative file and #anchor links and extract uppercase RFC 2119 requirements?",
+      "expected_chat_output": [
+        "References running 'scripts/stage_markdown.py' with '--output-dir'.",
+        "References loading 'scripts/staged_md_macros.sql' into 'duckdb -batch -dark-mode' and querying 'staged_md_broken_links' and 'staged_md_requirements'."
+      ],
+      "expected_repo_state": ["No files are modified."],
+      "agent_config": "bare-agent"
+    },
+    {
+      "id": "context_indexer_task_3_artifact_tables",
+      "prompt": "Using the context-indexer skill, how can I stage and query pipe tables across past conversation Markdown artifacts ('~/.gemini/jetski/brain/*/*.md') as keyed JSON rows with DuckDB?",
+      "expected_chat_output": [
+        "References running 'scripts/stage_markdown.py' with '--output-dir' over the Markdown files.",
+        "References loading 'scripts/staged_md_macros.sql' into 'duckdb -batch -dark-mode' and querying 'staged_md_tables'."
+      ],
+      "expected_repo_state": ["No files are modified."],
+      "agent_config": "bare-agent"
+    }
+  ]
+}

@@ -104,6 +104,30 @@ Candidates are files outside the diff; don't list the changed files themselves. 
 
 If the repo ships a validator for its documents (for example `validate_blueprints.py`, a link checker, or a JSON Schema example validator), the orchestrator runs it in check mode during Step 2 and passes the output to the reviewer. Treat its errors as evidence. Report the command and result in the Structural Assessment. Don't install dependencies to run a validator. If it can't run, say so.
 
+For large Markdown specs, RFCs, or blueprints (`> 500` lines), stage the document with [stage_markdown.py](../../context-indexer/scripts/stage_markdown.py) and query the staged JSONL tables with [staged_md_macros.sql](../../context-indexer/scripts/staged_md_macros.sql):
+
+```bash
+md_dir=$(mktemp -d -t doc-review-md-XXXXXX)
+python3 <skill-dir>/../context-indexer/scripts/stage_markdown.py \
+  --root <repo-root> --output-dir "$md_dir" <doc-paths...>
+
+duckdb -batch -dark-mode -box \
+  -init <skill-dir>/../context-indexer/scripts/staged_md_macros.sql -c "
+-- 1. Check broken relative file links and unresolved #anchor slugs
+SELECT file_path, line_num, label, raw_target, reason
+FROM staged_md_broken_links('$md_dir');
+
+-- 2. Inventory uppercase RFC 2119 normative statements for Tester traceability
+SELECT file_path, section_heading, line_num, keyword, statement
+FROM staged_md_requirements('$md_dir');
+
+-- 3. Inspect structured pipe tables as keyed JSON objects
+SELECT file_path, section_heading, line_num, cells
+FROM staged_md_tables('$md_dir')
+LIMIT 20;
+"
+```
+
 ## Output Additions
 
 Document findings use the same fields as code findings (`File`, `Line`, `Severity`, `Evidence`, `Body`, `Why`, `Suggestion`), plus one document-only field:

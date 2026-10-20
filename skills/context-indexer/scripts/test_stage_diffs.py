@@ -1,26 +1,29 @@
-import unittest
-from unittest.mock import patch, MagicMock, mock_open
-import sys
-import os
 import importlib
 import json
-import tempfile
+import os
 import shutil
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
 
-import split_diff
-from split_diff import (
+import stage_diffs
+from stage_diffs import (
     extract_diff_entities,
     extract_diff_from_json,
     main,
     parse_diff_records,
     resolve_repo_dir,
-    split_diff as split_diff_fn,
     split_diff_grouped,
 )
+from stage_diffs import (
+    split_diff as split_diff_fn,
+)
+
 
 class TestSplitDiff(unittest.TestCase):
     def setUp(self):
-        importlib.reload(split_diff)
+        importlib.reload(stage_diffs)
         self.test_dir = tempfile.mkdtemp()
 
     def tearDown(self):
@@ -38,7 +41,7 @@ class TestSplitDiff(unittest.TestCase):
         self.assertEqual(extract_diff_from_json({"diff": "d1"}), "d1")
         self.assertEqual(extract_diff_from_json({"patch": "p1"}), "p1")
         self.assertEqual(extract_diff_from_json({"content": "c1"}), "c1")
-        
+
         # Priority test: diff over patch
         self.assertEqual(extract_diff_from_json({"diff": "d1", "patch": "p1"}), "d1")
 
@@ -62,24 +65,24 @@ class TestSplitDiff(unittest.TestCase):
             "-old\n"
             "+new\n"
         )
-        
+
         summary = split_diff_fn(diff_content, self.test_dir)
         self.assertEqual(len(summary), 2)
         self.assertIn("- file1.py -> file1.py", summary[0])
         self.assertIn("- dir/file2.md -> dir_file2.md", summary[1])
-        
+
         # Check files were written
         file1_path = os.path.join(self.test_dir, "file1.py")
         file2_path = os.path.join(self.test_dir, "dir_file2.md")
-        
+
         self.assertTrue(os.path.exists(file1_path))
         self.assertTrue(os.path.exists(file2_path))
-        
+
         with open(file1_path, "r") as f:
             content = f.read()
             self.assertTrue(content.startswith("diff --git a/file1.py"))
             self.assertIn("+print('world')", content)
-            
+
         with open(file2_path, "r") as f:
             content = f.read()
             self.assertTrue(content.startswith("diff --git a/dir/file2.md"))
@@ -90,12 +93,12 @@ class TestSplitDiff(unittest.TestCase):
             'diff --git "a/file name.py" "b/file name.py"\n'
             '--- "a/file name.py"\n'
             '+++ "b/file name.py"\n'
-            '+new line\n'
+            "+new line\n"
         )
         summary = split_diff_fn(diff_content, self.test_dir)
         self.assertEqual(len(summary), 1)
         self.assertIn("- file name.py -> file name.py", summary[0])
-        
+
         file_path = os.path.join(self.test_dir, "file name.py")
         self.assertTrue(os.path.exists(file_path))
 
@@ -119,7 +122,7 @@ class TestSplitDiff(unittest.TestCase):
         summary = split_diff_fn(diff_content, self.test_dir)
         self.assertEqual(len(summary), 1)
         self.assertIn("- chunk_0.diff -> chunk_0.diff", summary[0])
-        
+
         file_path = os.path.join(self.test_dir, "chunk_0.diff")
         self.assertTrue(os.path.exists(file_path))
         with open(file_path, "r") as f:
@@ -131,18 +134,22 @@ class TestSplitDiff(unittest.TestCase):
     @patch("builtins.print")
     def test_main_plain_text(self, mock_print, mock_exit):
         diff_content = "diff --git a/file1.py b/file1.py\n+new line"
-        
+
         # Mock stdin reading by patching sys.stdin directly
         mock_stdin = MagicMock()
         mock_stdin.read.return_value = diff_content
-        
+
         test_args = ["split_diff.py", "--output-dir", self.test_dir]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             main()
-            
+
             # Check success message printed
-            printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
-            self.assertIn(f"Successfully split diff into 1 files in {self.test_dir}", printed)
+            printed = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
+            self.assertIn(
+                f"Successfully split diff into 1 files in {self.test_dir}", printed
+            )
             self.assertIn("- file1.py -> file1.py", printed)
             mock_exit.assert_not_called()
 
@@ -150,16 +157,20 @@ class TestSplitDiff(unittest.TestCase):
     @patch("builtins.print")
     def test_main_json_success(self, mock_print, mock_exit):
         json_data = json.dumps({"diff": "diff --git a/file1.py b/file1.py\n+new line"})
-        
+
         mock_stdin = MagicMock()
         mock_stdin.read.return_value = json_data
-        
+
         test_args = ["split_diff.py", "--json", "--output-dir", self.test_dir]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             main()
-            
-            printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
-            self.assertIn(f"Successfully split diff into 1 files in {self.test_dir}", printed)
+
+            printed = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
+            self.assertIn(
+                f"Successfully split diff into 1 files in {self.test_dir}", printed
+            )
             mock_exit.assert_not_called()
 
     @patch("sys.exit")
@@ -167,18 +178,21 @@ class TestSplitDiff(unittest.TestCase):
     def test_main_json_invalid(self, mock_print, mock_exit):
         def raise_system_exit(code=0):
             raise SystemExit(code)
+
         mock_exit.side_effect = raise_system_exit
-        
+
         mock_stdin = MagicMock()
         mock_stdin.read.return_value = "{invalid json"
-        
+
         test_args = ["split_diff.py", "--json", "--output-dir", self.test_dir]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             with self.assertRaises(SystemExit) as cm:
                 main()
-            
+
             # Check error printed and exited with 1
-            printed_err = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
+            printed_err = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
             self.assertIn("Error: Input is not valid JSON", printed_err)
             self.assertEqual(cm.exception.code, 1)
 
@@ -186,18 +200,29 @@ class TestSplitDiff(unittest.TestCase):
     @patch("builtins.print")
     def test_main_json_missing_diff_key(self, mock_print, mock_exit):
         json_data = json.dumps({"not_diff": "value"})
-        
+
         mock_stdin = MagicMock()
         mock_stdin.read.return_value = json_data
-        
-        test_args = ["split_diff.py", "--json", "--json-key", "my_missing_key", "--output-dir", self.test_dir]
+
+        test_args = [
+            "split_diff.py",
+            "--json",
+            "--json-key",
+            "my_missing_key",
+            "--output-dir",
+            self.test_dir,
+        ]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             main()
-            
+
             # Since my_missing_key is not in json_data, extract_diff_from_json returns "" (empty string)
             # which splits into 0 files
-            printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
-            self.assertIn(f"Successfully split diff into 0 files in {self.test_dir}", printed)
+            printed = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
+            self.assertIn(
+                f"Successfully split diff into 0 files in {self.test_dir}", printed
+            )
             mock_exit.assert_not_called()
 
     @patch("sys.exit")
@@ -205,20 +230,23 @@ class TestSplitDiff(unittest.TestCase):
     def test_main_json_value_error(self, mock_print, mock_exit):
         def raise_system_exit(code=0):
             raise SystemExit(code)
+
         mock_exit.side_effect = raise_system_exit
-        
+
         json_data = json.dumps({"not_diff": "value"})
-        
+
         mock_stdin = MagicMock()
         mock_stdin.read.return_value = json_data
-        
+
         test_args = ["split_diff.py", "--json", "--output-dir", self.test_dir]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             with self.assertRaises(SystemExit) as cm:
                 main()
-            
+
             # Check error printed and exited with 1
-            printed_err = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
+            printed_err = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
             self.assertIn("Error: Could not find diff in JSON data", printed_err)
             self.assertEqual(cm.exception.code, 1)
 
@@ -296,7 +324,11 @@ class TestSplitDiff(unittest.TestCase):
             self.assertEqual(chunk["files"], ["big.py"])
             with open(chunk["chunk_file"], "r", encoding="utf-8") as f:
                 text = f.read()
-            self.assertTrue(text.startswith("diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"))
+            self.assertTrue(
+                text.startswith(
+                    "diff --git a/big.py b/big.py\n--- a/big.py\n+++ b/big.py\n"
+                )
+            )
 
     def test_split_diff_grouped_splits_oversized_single_hunk_by_lines(self):
         diff_content = (
@@ -337,7 +369,9 @@ class TestSplitDiff(unittest.TestCase):
         test_args = ["split_diff.py", "--grouped", "--output-dir", self.test_dir]
         with patch.object(sys, "argv", test_args), patch("sys.stdin", mock_stdin):
             main()
-            printed = "\n".join([call[0][0] for call in mock_print.call_args_list if call[0]])
+            printed = "\n".join(
+                [call[0][0] for call in mock_print.call_args_list if call[0]]
+            )
             self.assertIn("Successfully split diff into 1 grouped chunk(s)", printed)
             self.assertIn("diff_chunk_01.diff", printed)
             mock_exit.assert_not_called()
@@ -413,9 +447,13 @@ class TestSplitDiff(unittest.TestCase):
         with open(hunks_path, "r", encoding="utf-8") as f:
             hunk_recs = [json.loads(line) for line in f if line.strip()]
 
-        self.assertEqual([r["new_line"] for r in line_recs], [200, 201, 202, 203, 204, 205])
+        self.assertEqual(
+            [r["new_line"] for r in line_recs], [200, 201, 202, 203, 204, 205]
+        )
         self.assertEqual(line_recs[0]["chunk_name"], "diff_chunk_01.diff")
-        self.assertEqual(line_recs[-1]["chunk_name"], f"diff_chunk_{len(chunks):02d}.diff")
+        self.assertEqual(
+            line_recs[-1]["chunk_name"], f"diff_chunk_{len(chunks):02d}.diff"
+        )
         self.assertEqual(len(hunk_recs), 1)
         self.assertEqual(hunk_recs[0]["hunk_id"], 1)
         self.assertEqual(hunk_recs[0]["chunk_name"], "diff_chunk_01.diff")
@@ -445,7 +483,7 @@ class TestSplitDiff(unittest.TestCase):
                 "}\n"
             )
 
-        with patch("split_diff._read_git_blob") as mock_blob:
+        with patch("stage_diffs._read_git_blob") as mock_blob:
             mock_blob.side_effect = lambda repo, ref, path: (
                 "def helper(name: str) -> int:\n    return 0\n"
                 if path == "mod.py"
@@ -459,15 +497,26 @@ class TestSplitDiff(unittest.TestCase):
         self.assertEqual(by_key[("mod.py", "NEW", "Worker")]["kind"], "class")
         self.assertEqual(by_key[("mod.py", "NEW", "Worker")]["line_end"], 3)
         self.assertEqual(by_key[("mod.py", "NEW", "run")]["kind"], "method")
-        self.assertIn("def run(self, count: int) -> bool", by_key[("mod.py", "NEW", "run")]["signature"])
+        self.assertIn(
+            "def run(self, count: int) -> bool",
+            by_key[("mod.py", "NEW", "run")]["signature"],
+        )
         self.assertEqual(by_key[("mod.py", "NEW", "helper")]["kind"], "function")
-        self.assertIn("async def helper(name: str) -> str", by_key[("mod.py", "NEW", "helper")]["signature"])
-        self.assertIn("def helper(name: str) -> int", by_key[("mod.py", "OLD", "helper")]["signature"])
+        self.assertIn(
+            "async def helper(name: str) -> str",
+            by_key[("mod.py", "NEW", "helper")]["signature"],
+        )
+        self.assertIn(
+            "def helper(name: str) -> int",
+            by_key[("mod.py", "OLD", "helper")]["signature"],
+        )
 
         self.assertEqual(by_key[("service.ts", "NEW", "Client")]["kind"], "class")
         self.assertEqual(by_key[("service.ts", "NEW", "Client")]["line_end"], 7)
         self.assertEqual(by_key[("service.ts", "NEW", "fetch")]["kind"], "method")
-        self.assertEqual(by_key[("service.ts", "NEW", "makeClient")]["kind"], "function")
+        self.assertEqual(
+            by_key[("service.ts", "NEW", "makeClient")]["kind"], "function"
+        )
 
     def test_resolve_repo_dir_formats(self):
         txt_file = os.path.join(self.test_dir, "workspace_dir.txt")
@@ -479,6 +528,7 @@ class TestSplitDiff(unittest.TestCase):
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump({"workspace_dir": self.test_dir}, f)
         self.assertEqual(resolve_repo_dir(json_file), self.test_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

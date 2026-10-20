@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for agents/skills/code-review/scripts/staged_diff_macros.sql."""
+"""Unit tests for agents/skills/context-indexer/scripts/staged_diff_macros.sql."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from typing import Any
 SCRIPTS_DIR = Path(__file__).resolve().parent
 STAGED_MACROS_SQL = SCRIPTS_DIR / "staged_diff_macros.sql"
 RAW_MACROS_SQL = SCRIPTS_DIR.parent.parent / "duckdb" / "scripts" / "diff_macros.sql"
-SPLIT_DIFF_PY = SCRIPTS_DIR / "split_diff.py"
+SPLIT_DIFF_PY = SCRIPTS_DIR / "stage_diffs.py"
 
 
 def _find_duckdb() -> str | None:

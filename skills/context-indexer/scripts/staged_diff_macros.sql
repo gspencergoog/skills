@@ -1,8 +1,8 @@
 -- Relational Staged Diff Macros for DuckDB (Layer 2 & Layer 3)
--- Load with: duckdb -batch -dark-mode -init agents/skills/code-review/scripts/staged_diff_macros.sql
--- Queries JSONL tables emitted by agents/skills/code-review/scripts/split_diff.py --grouped
+-- Load with: duckdb -batch -dark-mode -init agents/skills/context-indexer/scripts/staged_diff_macros.sql
+-- Queries JSONL tables emitted by agents/skills/context-indexer/scripts/stage_diffs.py --grouped
 
--- 1. Layer 2: Read staged diff_lines.jsonl emitted by split_diff.py --grouped
+-- 1. Layer 2: Read staged diff_lines.jsonl emitted by stage_diffs.py --grouped
 CREATE OR REPLACE MACRO staged_diff_lines(diff_dir) AS TABLE
 SELECT *
 FROM read_json(
@@ -21,7 +21,7 @@ FROM read_json(
   ignore_errors=true
 );
 
--- 2. Layer 2: Read staged diff_hunks.jsonl emitted by split_diff.py --grouped
+-- 2. Layer 2: Read staged diff_hunks.jsonl emitted by stage_diffs.py --grouped
 CREATE OR REPLACE MACRO staged_diff_hunks(diff_dir) AS TABLE
 SELECT *
 FROM read_json(
@@ -42,7 +42,7 @@ FROM read_json(
   ignore_errors=true
 );
 
--- 3. Layer 3: Read staged diff_entities.jsonl emitted by split_diff.py --grouped --with-entities
+-- 3. Layer 3: Read staged diff_entities.jsonl emitted by stage_diffs.py --grouped --with-entities
 CREATE OR REPLACE MACRO staged_diff_entities(diff_dir) AS TABLE
 SELECT *
 FROM read_json(
