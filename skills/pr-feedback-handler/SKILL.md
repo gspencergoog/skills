@@ -5,10 +5,10 @@ description: >-
   the unresolved threads, verifies each comment against the code, drafts a fix
   or reply per thread, collects the user's decisions through a local dashboard
   or a triage report, then implements the approved fixes with regression tests,
-  pushes, replies, and resolves the threads. Supports --auto-approve. Use when
-  the user asks to address, respond to, or resolve review comments on their PR,
-  or to handle PR feedback. Don't use for reviewing someone else's PR (use
-  pr-review).
+  pushes, replies, and resolves the threads. Supports --auto and --auto-approve.
+  Use when the user asks to address, respond to, or resolve review comments on
+  their PR, or to handle PR feedback. Don't use for reviewing someone else's PR
+  (use pr-review).
 ---
 
 # PR Feedback Handler Skill
@@ -127,19 +127,19 @@ ______________________________________________________________________
 
      The server writes its bound URL to `<conversation-scratch-directory>/dashboard_url.txt` and outputs `DASHBOARD_URL=http://localhost:<port>/`. View `dashboard_url.txt` to find the exact URL to present to the user.
 
-   - **Auto-Approve Mode (Headless)**: When invoked with `--auto-approve` (e.g. `/pr-feedback-handler --auto-approve`), bypass the web server and browser completely:
+   - **Auto-Approve Mode (Headless)**: When invoked with `--auto` or `--auto-approve` (e.g. `/pr-feedback-handler --auto`), bypass the web server and browser completely:
 
      ```bash
      env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py \
        --project-dir <path-to-target-workspace-directory> \
        --data-dir <conversation-scratch-directory> \
        --proposals-file <conversation-scratch-directory>/proposals.json \
-       --auto-approve
+       --auto
      ```
 
      This automatically synthesizes approved decisions from `proposals.json`, writes `<conversation-scratch-directory>/feedback_state.json`, and exits immediately with status `0`.
 
-   - *Artifact Mode*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`).
+   - *Artifact Mode & A2UI Fallback*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`). When the dashboard is unavailable and the `a2ui-pane` plugin is installed, read the `genui` skill and render thread dispositions using `decision_batch` so the user can interactively review and confirm each thread's disposition.
 
 6. **Wait for Completion (Interactive Mode Only)**: In interactive mode, stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user (when local), and block until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status. In auto-approve mode, this step is skipped.
 
@@ -173,8 +173,8 @@ ______________________________________________________________________
 
 Once the approved code changes are verified and committed:
 
-- **When `--auto-approve` was requested**:
-  The user's explicit `--auto-approve` command serves as pre-authorization. Skip the interactive menu and execute the remote updates directly:
+- **When `--auto` or `--auto-approve` was requested**:
+  The user's explicit `--auto` / `--auto-approve` command serves as pre-authorization. Skip the interactive menu and execute the remote updates directly:
   1. Push the local branch to GitHub:
      ```bash
      git push origin <branch>

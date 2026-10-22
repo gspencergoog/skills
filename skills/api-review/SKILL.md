@@ -36,4 +36,5 @@ This skill reviews code against the canonical API Design guidelines.
    - **Suggestions**: Ergonomic improvements (renaming, rearranging).
    - **Code Examples**: Provide `before` vs `after` code blocks for the suggested improvements.
    - Save the report as a markdown artifact in the conversation artifacts directory (e.g., `<appDataDir>/brain/<conversation-id>/api_review_results.md`).
+   - When principle scores from 0 to 10 are evaluated and the `a2ui-pane` plugin is available, read the `genui` skill and render a `scorecard` surface in the pane showing each principle's score, progress bar, tone badge, and collapsible rationale.
    - When the review recommends tuning specific signatures, route paths, or parameter defaults with competing ergonomic tradeoffs and the `a2ui-pane` plugin is available, also read the `genui` skill and render an inline `contract_workbench` or `consequence_cards` surface alongside the artifact link so the user can interactively select the target signature; skip the surface when `a2ui-pane` is not installed.

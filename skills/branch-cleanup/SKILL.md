@@ -7,7 +7,7 @@ description: >-
   deletes only what that plan approved. Use when a repository has stale local or
   remote branches, when the user asks to clean up, prune, or tidy branches, or
   after a batch of PRs has merged. Don't use for merging or rebasing branches
-  (use code-merge).
+  (use merge-code).
 ---
 
 # Git Branch Cleanup Skill

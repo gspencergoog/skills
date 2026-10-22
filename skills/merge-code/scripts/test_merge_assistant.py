@@ -256,6 +256,26 @@ class TestMergeAssistant(unittest.TestCase):
             any("Leftover conflict marker" in iss for iss in issues_d)
         )
 
+    def test_parser_defaults_theirs_to_upstream_main(self):
+        parser = merge_assistant.build_parser()
+        ana_args = parser.parse_args(["analyze"])
+        self.assertEqual(ana_args.repo, ".")
+        self.assertEqual(ana_args.ours, "HEAD")
+        self.assertEqual(ana_args.theirs, "upstream/main")
+
+        mov_args = parser.parse_args(
+            [
+                "merge-moved-file",
+                "--old-path",
+                "old/a.py",
+                "--new-path",
+                "new/a.py",
+                "--base",
+                "deadbeef",
+            ]
+        )
+        self.assertEqual(mov_args.theirs, "upstream/main")
+
 
 if __name__ == "__main__":
     unittest.main()

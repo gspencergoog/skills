@@ -1014,7 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ana = sub.add_parser("analyze", help="Run in-memory 3-way merge and intent scan")
     p_ana.add_argument("--repo", default=".")
     p_ana.add_argument("--ours", default="HEAD")
-    p_ana.add_argument("--theirs", required=True)
+    p_ana.add_argument(
+        "--theirs",
+        default="upstream/main",
+        help="Incoming branch or ref to merge (default: upstream/main)",
+    )
     p_ana.add_argument("--base", default=None)
     p_ana.add_argument("--subtree", default=None)
     p_ana.add_argument("--record-ancestry", action="store_true")
@@ -1028,7 +1032,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_mov.add_argument("--old-path", required=True)
     p_mov.add_argument("--new-path", required=True)
     p_mov.add_argument("--base", required=True)
-    p_mov.add_argument("--theirs", required=True)
+    p_mov.add_argument(
+        "--theirs",
+        default="upstream/main",
+        help="Incoming branch or ref to merge (default: upstream/main)",
+    )
     p_mov.add_argument("--stage-rm", action="store_true", default=True)
 
     p_prep = sub.add_parser(

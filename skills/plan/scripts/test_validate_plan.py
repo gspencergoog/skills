@@ -2,14 +2,12 @@
 """test_validate_plan.py - Unit tests for validate_plan.py"""
 
 import json
-import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
 from validate_plan import PlanValidator, main
-
 
 VALID_PLAN = """# Feature: Add Cache Invalidation
 
@@ -33,6 +31,48 @@ VALID_PLAN = """# Feature: Add Cache Invalidation
 """
 
 
+VALID_PARALLEL_WAVE_PLAN = """# Feature: Parallel Subsystem Upgrade
+
+## User Review Required
+None.
+
+## Phased Implementation Plan
+
+### Wave 1: Foundation [Sequential]
+- [ ] [MODIFY] [lib/types.py](file:///lib/types.py)
+  - Add shared protocol types.
+
+**Wave 1 Verification**: `pytest tests/test_types.py`
+
+### Wave 2: Core Modules [Parallel]
+
+#### Track 2A: Parser Module
+- [ ] [MODIFY] [lib/parser.py](file:///lib/parser.py)
+  - Update parser implementation.
+- [ ] [NEW] [tests/test_parser.py](file:///tests/test_parser.py)
+  - Add parser unit tests.
+
+**Track 2A Verification**: `pytest tests/test_parser.py`
+
+#### Track 2B: Lexer Module
+- [ ] [MODIFY] [lib/lexer.py](file:///lib/lexer.py)
+  - Update lexer implementation.
+- [ ] [NEW] [tests/test_lexer.py](file:///tests/test_lexer.py)
+  - Add lexer unit tests.
+
+**Track 2B Verification**: `pytest tests/test_lexer.py`
+
+### Wave 3: Integration [Sequential]
+- [ ] [MODIFY] [lib/types.py](file:///lib/types.py)
+  - Export parser and lexer symbols.
+
+**Wave 3 Verification**: `pytest`
+
+## Verification Plan
+- Run `pytest`
+"""
+
+
 class TestPlanValidator(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.mkdtemp()
@@ -52,7 +92,6 @@ class TestPlanValidator(unittest.TestCase):
         validator = PlanValidator(invalid_plan)
         issues = validator.validate()
         errors = [issue for issue in issues if issue.is_error]
-        # Should flag missing User Review, Proposed Changes, and Verification Plan
         self.assertTrue(len(errors) >= 3)
         messages = [e.message for e in errors]
         self.assertTrue(any("User Review" in m for m in messages))
@@ -76,11 +115,12 @@ class TestPlanValidator(unittest.TestCase):
         warnings = [issue for issue in issues if not issue.is_error]
         self.assertTrue(any("Unresolved placeholder" in w.message for w in warnings))
 
-        # Under strict mode, placeholders should be errors
         strict_validator = PlanValidator(plan_with_todo, strict=True)
         strict_issues = strict_validator.validate()
         strict_errors = [issue for issue in strict_issues if issue.is_error]
-        self.assertTrue(any("Unresolved placeholder" in e.message for e in strict_errors))
+        self.assertTrue(
+            any("Unresolved placeholder" in e.message for e in strict_errors)
+        )
 
     def test_checkbox_heading_is_rejected(self) -> None:
         plan_with_checkbox_heading = VALID_PLAN.replace(
@@ -95,7 +135,6 @@ class TestPlanValidator(unittest.TestCase):
         )
 
     def test_workspace_file_verification_modify_exists(self) -> None:
-        # Create lib/cache.py in workspace
         lib_dir = self.workspace / "lib"
         lib_dir.mkdir(parents=True)
         (lib_dir / "cache.py").write_text("# cache", encoding="utf-8")
@@ -157,6 +196,83 @@ Run tests.
         warnings = [issue for issue in issues if not issue.is_error]
         self.assertTrue(any("already exists on disk" in w.message for w in warnings))
 
+    def test_parallel_wave_disjoint_tracks_valid(self) -> None:
+        validator = PlanValidator(VALID_PARALLEL_WAVE_PLAN, strict=True)
+        issues = validator.validate()
+        self.assertEqual(issues, [])
+
+    def test_parallel_wave_file_collision_is_error(self) -> None:
+        colliding_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "- [ ] [MODIFY] [lib/lexer.py](file:///lib/lexer.py)",
+            "- [ ] [MODIFY] `lib/parser.py`",
+        )
+        validator = PlanValidator(colliding_plan)
+        issues = validator.validate()
+        errors = [issue for issue in issues if issue.is_error]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Parallel file collision in Wave 2", errors[0].message)
+        self.assertIn("Track 2A", errors[0].message)
+        self.assertIn("Track 2B", errors[0].message)
+        self.assertIn("lib/parser.py", errors[0].message)
+
+    def test_inline_parallel_wave_tag_collision_is_error(self) -> None:
+        inline_plan = """# Inline Wave Plan
+
+## User Review Required
+None.
+
+## Phased Implementation Plan
+
+### Phase 2A: First Slice [Parallel: Wave 2]
+- [ ] [MODIFY] [src/shared.py](file:///src/shared.py)
+**Phase 2A Verification**: `pytest tests/test_a.py`
+
+### Phase 2B: Second Slice [Parallel: Wave 2]
+- [ ] [MODIFY] [src/shared.py](file:///src/shared.py)
+**Phase 2B Verification**: `pytest tests/test_b.py`
+
+## Verification Plan
+- `pytest`
+"""
+        validator = PlanValidator(inline_plan)
+        issues = validator.validate()
+        errors = [issue for issue in issues if issue.is_error]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("Parallel file collision in Wave 2", errors[0].message)
+        self.assertIn("Phase 2A", errors[0].message)
+        self.assertIn("Phase 2B", errors[0].message)
+
+    def test_sequential_waves_touching_same_file_is_valid(self) -> None:
+        # In VALID_PARALLEL_WAVE_PLAN, Wave 1 [Sequential] and Wave 3 [Sequential]
+        # both modify lib/types.py. Even if Track 2A also touched lib/types.py,
+        # Sequential Wave 1 and Wave 3 must not collide with Wave 2.
+        plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "- [ ] [MODIFY] [lib/parser.py](file:///lib/parser.py)",
+            "- [ ] [MODIFY] [lib/types.py](file:///lib/types.py)",
+        )
+        validator = PlanValidator(plan, strict=True)
+        issues = validator.validate()
+        self.assertEqual(issues, [])
+
+    def test_parallel_track_missing_verification_warning_and_strict_error(self) -> None:
+        missing_verif_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "**Track 2B Verification**: `pytest tests/test_lexer.py`\n",
+            "",
+        )
+        validator = PlanValidator(missing_verif_plan, strict=False)
+        issues = validator.validate()
+        errors = [issue for issue in issues if issue.is_error]
+        warnings = [issue for issue in issues if not issue.is_error]
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Track 2B", warnings[0].message)
+        self.assertIn("missing a track verification command", warnings[0].message)
+
+        strict_validator = PlanValidator(missing_verif_plan, strict=True)
+        strict_issues = strict_validator.validate()
+        strict_errors = [issue for issue in strict_issues if issue.is_error]
+        self.assertEqual(len(strict_errors), 1)
+
     def test_cli_json_output(self) -> None:
         plan_file = self.workspace / "plan.md"
         plan_file.write_text(VALID_PLAN, encoding="utf-8")
@@ -176,4 +292,3 @@ Run tests.
 
 if __name__ == "__main__":
     unittest.main()
-

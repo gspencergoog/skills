@@ -1,31 +1,32 @@
 ---
 name: plan
 description: >-
-  Writes a phased implementation plan for a software task as a reviewable
-  artifact with a Proceed button, while keeping the target codebase read-only:
-  scope and non-goals, codebase discovery, concrete file-level changes, and a
-  verification command per phase, checked by a plan linter and an optional
-  independent review. Use when the user asks to plan, "create a plan", "make an
-  implementation plan", or runs /plan, when a brainstorm has settled on a
-  direction, when a task spans several files or a migration, or when the user
-  wants the steps laid out before any code is written. Don't use for exploring
-  options before a direction is chosen, or for stakeholder-facing RFCs and
-  design documents (use proposal-writer).
+  Writes a phased implementation plan with parallel execution waves for a
+  software task as a reviewable artifact with a Proceed button, while keeping
+  the target codebase read-only: scope and non-goals, size-routed discovery
+  (duckdb, context-indexer, rg, and sem-semantic-info), concrete file-level
+  changes, and per-track verification commands, checked by a plan linter and an
+  optional independent review. Use when the user asks to plan, "create a plan",
+  "make an implementation plan", or runs /plan, when a brainstorm has settled on
+  a direction, when a task spans several files or a migration, or when the user
+  wants steps laid out before code is written. Don't use for exploring options
+  before a direction is chosen, or for stakeholder-facing RFCs and design
+  documents (use proposal-writer).
 ---
 
 # Implementation Plan
 
-Use this skill to produce actionable, phased implementation plans for software tasks while keeping the target codebase strictly read-only.
+Use this skill to produce actionable, wave-structured implementation plans for software tasks while keeping the target codebase strictly read-only.
 
 ## Core Rules
 
-1. **Strict Read-Only Guarantee**: Under no circumstances should you modify, add, or delete files in the target codebase during planning. Do not run commands that alter repository state (e.g. `git checkout`, `git stash`, `sed -i`, `rm`, `npm install`). The only permitted file creation is the plan artifact itself.
-2. **Mandatory Artifact Generation**: Save the plan as a markdown artifact in the conversation artifact directory (`<appDataDir>/brain/<conversation-id>/implementation_plan.md` or a descriptive `<name>_plan.md`) using `write_to_file`.
-3. **Triggering the "Proceed" Button**: When calling `write_to_file` to create the plan artifact, you must provide `ArtifactMetadata` with:
-   - `RequestFeedback: true` — This specific property triggers the interactive **"Proceed"** button in the Antigravity UI.
-   - `UserFacing: true` — Displays the plan in the artifacts panel with text selection for inline comments.
-   - `Summary: "<multi-line summary>"` — Outlines the plan's scope and objectives.
-4. **No Full Chat Re-Summaries**: The Antigravity UI renders the full artifact for the user. Do not copy or re-summarize the full plan in your chat response. Provide only a concise message pointing to the artifact, highlight key open questions or critical decisions, and stop to await user approval.
+1. Guard the target repository as strictly read-only during planning. Never edit, add, or delete codebase files or run mutating commands (`git checkout`, `git stash`, `sed -i`, `rm`, `npm install`). The only permitted file creation is the plan artifact itself.
+2. Save the plan as a markdown artifact in `<appDataDir>/brain/<conversation-id>/implementation_plan.md` (or `<name>_plan.md`) using `write_file` (`write_to_file`).
+3. Include `ArtifactMetadata` when creating or updating the plan artifact:
+   - Set `RequestFeedback: true` to display the interactive **"Proceed"** button in the UI.
+   - Set `UserFacing: true` to open the plan in the artifacts panel for inline comments.
+   - Set `Summary: "<multi-line summary>"` to describe the plan's scope and waves.
+4. Do not copy or re-summarize the full plan in chat. Output a concise message linking to the artifact, highlight key open questions or decisions, and stop to await user approval.
 
 ______________________________________________________________________
 
@@ -33,100 +34,111 @@ ______________________________________________________________________
 
 ### 1. Clarify & Define Scope
 
-Before diving into technical details, establish clear boundaries:
+Establish clear boundaries before inspecting implementation details:
 
-- Define the engineering objective and the specific problem being solved.
-- Identify constraints (language version, backward compatibility, performance targets).
-- List explicit **non-goals** to prevent scope creep.
-- If requirements are ambiguous, assumptions are unverified, or phase rollout order has non-obvious dependencies, recommend that the user runs `/grill-me`, or render an `assumption_ledger` or `wave_sequencer` surface via the `genui` skill when `a2ui-pane` is available (falling back to your host's interactive question tool or a numbered chat prompt when `a2ui-pane` is not installed).
+- Define the engineering objective and the problem being solved.
+- Identify constraints such as language version, backward compatibility, and performance targets.
+- List explicit non-goals to prevent scope creep.
+- When requirements, assumptions, or wave dependencies are unclear, recommend `/grill-me` or render a `decision_batch`, `assumption_ledger`, or `wave_sequencer` surface via the `genui` skill. Fall back to your host's structured question tool or a numbered chat prompt when `a2ui-pane` is not installed.
 
-### 2. Read-Only Codebase Discovery
+### 2. Size-Routed Read-Only Codebase Discovery
 
-Ground every step of the plan in real repository facts. Consult [codebase_discovery.md](references/codebase_discovery.md) for ecosystem-specific patterns.
+Ground every step of the plan in real repository facts while keeping token usage low. Consult [codebase_discovery.md](references/codebase_discovery.md) for copy-paste SQL and CLI recipes.
 
-1. **Detect Tooling & Invariants**: Inspect package manifests (`package.json`, `pubspec.yaml`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to find exact build commands, test runners, and linters.
-2. **Locate Existing Abstractions**: Search for existing utilities, base classes, or helpers with `grep_search` or `find_by_name`. Reuse existing code rather than planning duplicate utilities.
-3. **Measure Blast Radius**: Search for references to symbols being modified or deleted using `rg` or the [sem-semantic-info](../sem-semantic-info/SKILL.md) skill (`sem impact`) to ensure all downstream call sites are planned for updates.
-4. **Identify Test Coverage**: Locate existing test suites that cover the affected modules to include in regression verification.
+> [!IMPORTANT]
+> **Slice Before Reading (`>= 350` lines)**: Never call `read_file` (`view_file`) on a whole file of 350 or more lines. Index its section spans (`duckdb` or `stage_markdown.py` for Markdown) or symbol lines (`rg -n` or `sem` for code) first, then read only `StartLine`..`EndLine`.
+
+1. Query prior session context and past `*plan*.md` artifacts first with [duckdb](../duckdb/SKILL.md) (`duckdb -batch -dark-mode` over `conversation_summaries.db` and `read_md_sections('brain/*/*plan*.md')`).
+2. Route file and specification discovery by artifact format and size:
+   - Point lookups and source files `< 350` lines: `rg -n` and `fd` ([unix-cli-best-practices](../unix-cli-best-practices/SKILL.md)), then targeted `read_file` line slices.
+   - Markdown specs or audits `>= 350` lines or `10+` files: `duckdb` with `markdown_macros.sql` (`read_md_sections`, `read_md_code_blocks`).
+   - Complex specs `> 500` lines, pipe tables, frontmatter, or RFC 2119 rules: `stage_markdown.py` and `staged_md_macros.sql` ([context-indexer](../context-indexer/SKILL.md)).
+   - Raw branch or PR diffs `<= 500` lines: `duckdb` with `diff_macros.sql` (`read_diff_lines`, `read_diff_hunks`).
+   - Branch or PR diffs `> 500` lines (AST churn and signature drift): `stage_diffs.py` and `staged_diff_macros.sql` ([context-indexer](../context-indexer/SKILL.md)).
+   - Worktree symbol graphs and blast radius: `sem impact <file>` ([sem-semantic-info](../sem-semantic-info/SKILL.md)) and language MCP tools (`find_definition`, `analyze_files`).
+3. Inspect package manifests (`package.json`, `pubspec.yaml`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to find exact build commands, test runners, and linters.
+4. Identify shared chokepoint files such as barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`), central registries, and `CHANGELOG.md`. Isolate those chokepoints into sequential waves.
 
 ### 3. Select Plan Depth
 
-Choose the appropriate reference template based on the scope of work:
+Choose the reference template that matches the scope of work:
 
-- **Lightweight Plan**: Use [lightweight_plan_template.md](references/lightweight_plan_template.md) for small bug fixes, single-file edits, or isolated minor features.
-- **Standard Plan**: Use [standard_plan_template.md](references/standard_plan_template.md) for multi-file features, typical refactors, or new components.
-- **Complex / Migration Plan**: Use [complex_plan_template.md](references/complex_plan_template.md) for cross-package architectural shifts, breaking API updates, or multi-phase data migrations.
+- [lightweight_plan_template.md](references/lightweight_plan_template.md) for small bug fixes, single-file edits, or isolated minor features (1 to 2 files, sequential).
+- [standard_plan_template.md](references/standard_plan_template.md) for multi-file features, refactors, or new components, including parallel tracks when 2 or more tracks operate on disjoint files.
+- [complex_plan_template.md](references/complex_plan_template.md) for cross-package architectural shifts, breaking API updates, or multi-wave migrations with parallel execution and verification lanes.
 
 ### 4. Draft the Implementation Plan Artifact
 
-Draft the plan according to the chosen template and write it using `write_to_file`. Ensure the plan includes:
+Draft the plan according to the chosen template and write it using `write_file` (`write_to_file`):
 
-- **Component Grouping**: Group changes logically by component, service, or layer (dependencies first).
-- **Explicit Action Demarcations**: For every planned file change, format the entry as a task list item without heading hashes (do not write `- [ ] #### ...`, which is invalid Markdown):
+- Organize multi-component work using the **Sandwich Wave Topology**:
+  - `### Wave 1: Foundation & Shared Contracts [Sequential]` for shared types, schemas, interfaces, and test harnesses.
+  - `### Wave 2: Core Implementation [Parallel]` divided into `#### Track 2A: ...` and `#### Track 2B: ...` where each track edits a strictly disjoint set of files.
+  - `### Wave 3: Integration, Exports & Cleanup [Sequential]` for barrel exports, central registries, CLI wiring, and end-to-end verification.
+- Isolate shared chokepoint files into sequential foundation or integration waves so parallel tracks never touch the same file path.
+- Specify an **Execution Strategy & Parallelization** table for multi-track plans, selecting the right orchestrator:
+  - `/swarm` (`native_swarm`) when 2 or more tracks edit disjoint files across 3 or more files, pairing `1` verifier per `2-4` authors (`workspace: "share"` or `"branch"`).
+  - `/run-workflow` (`parallel()` / `pipeline()`) when tracks follow a uniform per-shard recipe across many files or modules.
+  - Single-agent sequential execution when the plan touches 1 to 2 files or has a strictly linear dependency chain.
+- Format every planned file entry as a task list item without heading hashes (never write `- [ ] #### ...`):
   - `- [ ] [NEW] [basename](file:///absolute/path/to/file)`
   - `- [ ] [MODIFY] [basename](file:///absolute/path/to/file)`
   - `- [ ] [DELETE] [basename](file:///absolute/path/to/file)`
-- **Concrete Signatures & Logic**: Describe the specific functions, methods, error handling, and parameters being touched, rather than vague placeholders.
-- **Architecture & Diagrams**: For non-trivial workflows or component interactions, include a Mermaid diagram following the [mermaid-diagrams](../mermaid-diagrams/SKILL.md) skill.
-- **Cognitive Complexity Budget**: Reference the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill to ensure new or refactored functions remain maintainable (standard threshold $\\le 15$).
-- **Writing Style**: Follow the [write-prose](../write-prose/SKILL.md) skill: active voice, plain language, concise sentences, and no marketing adjectives or puffery.
-- **Phased Verification Checkpoints**: Each phase must end with an explicit test or build command to verify that step independently before moving to the next.
+- Describe concrete function signatures, methods, error handling, and parameters rather than placeholders.
+- Include a Mermaid architecture or wave-DAG diagram following [mermaid-diagrams](../mermaid-diagrams/SKILL.md) for multi-component or multi-wave workflows.
+- Enforce function maintainability budgets ($\le 15$ per [cognitive-complexity](../cognitive-complexity/SKILL.md)) and clear prose ([write-prose](../write-prose/SKILL.md)).
+- End every sequential wave and parallel track with a runnable test command (`**Track 2A Verification**:` or `**Wave 1 Verification**:`) and a wave-barrier gate.
 
 ### 5. Automated Plan Validation
 
-Run the plan validation script to verify structure, code fence balance, and file path integrity against the workspace:
+Run [validate_plan.py](scripts/validate_plan.py) to check structure, code fence balance, file path integrity, and parallel wave disjointness:
 
 ```bash
-python3 /Users/gspencer/code/cheats/agents/skills/plan/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace>
+python3 <skill-dir>/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace>
 ```
 
-The script verifies:
+The validator checks:
 
-- All required structural sections are present.
-- Task list items do not contain inline heading hashes (e.g. `- [ ] #### ...`).
-- Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace.
-- No files marked `[NEW]` collide with existing files on disk.
+- All required structural sections are present and code fences are balanced.
+- Task list items do not contain inline heading hashes (`- [ ] #### ...`).
+- Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace, and `[NEW]` files do not collide with existing files.
+- Parallel tracks within the same `[Parallel]` wave edit strictly disjoint file sets (emitting `ERROR` on any intra-wave file collision).
+- Every parallel track (`#### Track NA`) includes its own verification command (`WARNING` by default, `ERROR` with `--strict`).
 - No unresolved placeholders (`TODO`, `TBD`, `implement rest here`) remain.
 
-Resolve any reported validation errors before proceeding.
+Resolve all reported validation errors before proceeding.
 
-### 6. Subagent Review Decision & Execution (Anti-Contamination)
+### 6. Independent Review Decision & Execution (Anti-Contamination)
 
-To prevent confirmation bias and context contamination from the generation steps, you can delegate an objective review of the draft plan to an independent subagent (e.g. `research` or `self`).
+To prevent confirmation bias from the drafting steps, offer an independent quality review of the plan before final presentation.
 
-1. **Ask User for Review Confirmation**: Always prompt the user to choose (using your interactive question tool if available, or by presenting the options in chat and waiting for their reply before continuing) before launching the subagent review:
-   - Ask whether to run an in-depth independent subagent review or proceed directly to presenting the plan.
-   - Provide options formatted as:
-     - `(Recommended) Yes, run an independent subagent review`
-     - `No, skip subagent review and proceed directly to presentation`
-   - If the user selects to skip, proceed directly to **Step 7**.
-2. **Assemble the Review Briefing Packet**: If the user approves running the subagent review, assemble a structured briefing packet. Never send a barebones prompt containing only paths—the reviewer must have enough context to judge intent, constraints, settled decisions, and non-goals:
-   - **Purpose & Core Goal**: The primary user request and definition of success.
-   - **User Constraints & Preferences**: Specific boundaries (e.g., zero new dependencies, backward compatibility, runtime targets).
-   - **Conversation Highlights & Prior Decisions**: Summary of settled design trade-offs and rejected alternatives to prevent re-litigating decisions.
-   - **Explicit Non-Goals**: Out-of-scope boundaries to prevent the reviewer from flagging missing features that were intentionally excluded.
-   - **Planner's Focus Areas / Doubts**: Specific questions or transitions where the planner wants targeted verification (e.g. concurrency, backward compatibility).
-   - **Reference Artifacts**: Links to prior discussion artifacts (e.g. brainstorming docs, RFCs, issues).
-   - **Plan Path & Workspace Root**: Paths to the draft plan artifact and target repository.
-3. **Invoke Subagent**: Format the prompt using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md).
-4. **Subagent Audit**: The subagent inspects the plan against the workspace files and the quality rubric, reporting on intent alignment, disk grounding, technical feasibility, and planner focus areas.
-5. **Incorporate Findings**: Resolve any blockers or gaps identified by the subagent in the plan artifact before presenting it to the user.
+1. Prompt the user via an interactive UI tool before launching the review. Call your host's question tool (`ask_question` or `AskUserQuestion`) or render an inline `confirm_gate` surface via the `genui` skill (`render_a2ui` with `mode: "inline"`). Do not ask this question as plain chat text unless neither tool is available:
+   - `(Recommended) Yes, run an independent review`
+   - `No, skip independent review and proceed directly to presentation`
+   - If the user skips the review, jump to **Step 7**.
+2. Assemble the **Review Briefing Packet** using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md), covering the goal, constraints, settled decisions, non-goals, focus areas, and paths. Keep the prompt under 10 KB. For plans or specs over 500 lines, stage chunks (`<= 35 KB`, `<= 700` lines) with `stage_markdown.py --split-chunks` and pass the chunk paths.
+3. Delegate the review using the highest available tier:
+   - **Tier 1 (Jetski Root Session with `swarm`)**: Spawn a read-only `plan-reviewer` worker via `swarm(action="add", name="plan-reviewer", workspace="inherit", brief=...)` and forbid helper workers. Wait for its board report, then stop it with `swarm(action="kill", name="plan-reviewer")`.
+   - **Tier 2 (Subagent Tool Available)**: Spawn one read-only subagent (`Agent` or `invoke_subagent` with `research-google` or `self`, setting `enable_subagent_tools: false` and forbidding child subagents).
+   - **Tier 3 (Already Inside a Subagent or Swarm Worker)**: Perform the checklist audit directly in-session without spawning further agents.
+4. Audit the plan against the workspace files and [plan_quality_checklist.md](references/plan_quality_checklist.md), checking intent alignment, disk grounding, intra-wave file disjointness, chokepoint isolation, and per-track verification commands.
+5. Resolve any blockers or gaps in the plan artifact and re-run `validate_plan.py` before presenting the plan to the user.
 
 ### 7. Present Plan & Await Approval
 
 Once validated and reviewed:
 
-1. Output a concise response in chat with a markdown link to the generated artifact.
+1. Output a concise response in chat with a markdown link to the generated plan artifact.
 2. Highlight critical decisions, breaking changes, or open questions that need the user's attention.
 3. **STOP and do not start executing changes.** Wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
 
 ______________________________________________________________________
 
-## Relationship to Other Cheats Skills
+## Relationship to Other Skills
 
-- **`just-brainstorm`** ([just-brainstorm](../just-brainstorm/SKILL.md)): Used for early-stage exploration of multiple architectural directions and tradeoffs. Once a direction is selected, it hands off to `plan`.
-- **`proposal-writer`** ([proposal-writer](../proposal-writer/SKILL.md)): Used for high-level RFCs, business cases, and architecture documents intended for human stakeholders ("why" and "what"), whereas `plan` produces the engineering execution blueprint ("how").
-- **`grill-me`** ([grill-me](../grill-me/SKILL.md)): Use when requirements are underspecified or architectural options have trade-offs that need user input.
-- **`api-review`** ([api-review](../api-review/SKILL.md)): Use to review any new or modified API signatures specified in the plan.
-- **`cognitive-complexity`** ([cognitive-complexity](../cognitive-complexity/SKILL.md)): Use to evaluate maintainability and enforce function complexity budgets in the design.
-- **`ship-it`** ([ship-it](../ship-it/SKILL.md)) & **`commit-changes`** ([commit-changes](../commit-changes/SKILL.md)): Downstream execution skills used after implementation is approved and completed.
+- Use [just-brainstorm](../just-brainstorm/SKILL.md) for early exploration of candidate architectures and tradeoffs before selecting a direction for `plan`.
+- Use [proposal-writer](../proposal-writer/SKILL.md) for stakeholder-facing RFCs and architecture documents ("why" and "what"), whereas `plan` produces the execution blueprint ("how").
+- Use [grill-me](../grill-me/SKILL.md) and the `genui` skill when requirements are underspecified or wave ordering needs interactive alignment (`wave_sequencer`, `decision_batch`, `assumption_ledger`).
+- Use [duckdb](../duckdb/SKILL.md), [context-indexer](../context-indexer/SKILL.md), and [sem-semantic-info](../sem-semantic-info/SKILL.md) during Step 2 discovery to index specs, diffs, and symbol blast radius with minimal token overhead.
+- Use [api-review](../api-review/SKILL.md) and [cognitive-complexity](../cognitive-complexity/SKILL.md) to check API signatures and function complexity budgets ($\le 15$) in the design.
+- Use `swarm`, `run-workflow`, [ship-it](../ship-it/SKILL.md), and [commit-changes](../commit-changes/SKILL.md) to execute, test, and land the approved waves after the user clicks **"Proceed"**.

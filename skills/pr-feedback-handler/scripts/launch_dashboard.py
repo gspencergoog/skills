@@ -579,7 +579,7 @@ def main():
     parser.add_argument("--project-dir", default=".", help="Path to the target codebase/repository directory.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launching dashboard even if workspace has uncommitted changes to tracked files.")
     parser.add_argument("--mode", choices=["auto", "web", "artifact", "auto-approve"], default="auto", help="Execution mode: auto (default), web, artifact, or auto-approve.")
-    parser.add_argument("--auto-approve", action="store_true", help="Automatically approve all proposed fixes and draft replies, writing feedback_state.json without launching the dashboard server.")
+    parser.add_argument("--auto-approve", "--auto", dest="auto_approve", action="store_true", help="Automatically approve all proposed fixes and draft replies, writing feedback_state.json without launching the dashboard server.")
     parser.add_argument("--proposals-file", default=None, help="Path to proposals.json overlay file (defaults to <data-dir>/proposals.json).")
     parser.add_argument("--url-file", default=None, help="Path to write active dashboard URL to (defaults to <data-dir>/dashboard_url.txt).")
     args = parser.parse_args()

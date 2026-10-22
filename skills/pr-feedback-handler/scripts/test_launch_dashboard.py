@@ -962,6 +962,21 @@ class TestAutoApproveMode(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
         self.assertTrue(os.path.exists(self.state_file))
 
+    @patch('launch_dashboard.run_git')
+    @patch('sys.argv', ['launch_dashboard.py', '--data-dir', 'temp_auto_approve_test_dir', '--auto'])
+    @patch('sys.exit')
+    def test_main_auto_flag_alias(self, mock_exit, mock_git):
+        def _exit(code=0):
+            raise SystemExit(code)
+        mock_exit.side_effect = _exit
+        mock_git.return_value = ""  # Clean workspace
+
+        from launch_dashboard import main
+        with self.assertRaises(SystemExit) as cm:
+            main()
+        self.assertEqual(cm.exception.code, 0)
+        self.assertTrue(os.path.exists(self.state_file))
+
 
 if __name__ == '__main__':
     unittest.main()

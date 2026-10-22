@@ -15,11 +15,33 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+_HARDENED_GIT_CONFIG: Tuple[Tuple[str, str], ...] = (
+    ("core.hooksPath", "/dev/null"),
+    ("core.fsmonitor", "false"),
+    ("diff.external", ""),
+)
+
+
+def _apply_hardened_git_env(env: Dict[str, str]) -> None:
+    """Appends safe git config overrides to env via GIT_CONFIG_COUNT/KEY/VALUE."""
+    try:
+        base_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0")))
+    except ValueError:
+        base_count = 0
+
+    for offset, (key, value) in enumerate(_HARDENED_GIT_CONFIG):
+        idx = base_count + offset
+        env[f"GIT_CONFIG_KEY_{idx}"] = key
+        env[f"GIT_CONFIG_VALUE_{idx}"] = value
+    env["GIT_CONFIG_COUNT"] = str(base_count + len(_HARDENED_GIT_CONFIG))
+
+
 def run_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
     """Runs a subprocess command and returns (exit_code, stdout, stderr)."""
     env = os.environ.copy()
     # Unset GITHUB_TOKEN override to match user environment policies
     env.pop("GITHUB_TOKEN", None)
+    _apply_hardened_git_env(env)
     try:
         proc = subprocess.run(
             cmd,
@@ -91,15 +113,21 @@ def resolve_pr_coordinates(
     author's stated intent or branch naming.
     """
     cmd = [
-        "gh", "pr", "view", str(pr_identifier),
-        "--json", "number,baseRefName,headRefOid,url,state",
+        "gh",
+        "pr",
+        "view",
+        str(pr_identifier),
+        "--json",
+        "number,baseRefName,headRefOid,url,state",
     ]
     if repo:
         cmd.extend(["--repo", repo])
 
     ret, stdout, stderr = run_command(cmd)
     if ret != 0:
-        raise RuntimeError(f"Failed to fetch PR coordinates for '{pr_identifier}': {stderr}")
+        raise RuntimeError(
+            f"Failed to fetch PR coordinates for '{pr_identifier}': {stderr}"
+        )
 
     raw = json.loads(stdout)
     pr_url = str(raw.get("url") or "")
@@ -116,22 +144,30 @@ def resolve_pr_coordinates(
     }
 
 
-def resolve_pr_metadata(pr_identifier: str, repo: Optional[str] = None) -> Dict[str, Any]:
+def resolve_pr_metadata(
+    pr_identifier: str, repo: Optional[str] = None
+) -> Dict[str, Any]:
     """Fetches PR metadata from GitHub CLI (`gh pr view`).
 
     Returns a dictionary with owner, repo, pull_number, title, author, base_ref,
     head_ref, head_sha, pr_url, and state.
     """
     cmd = [
-        "gh", "pr", "view", str(pr_identifier),
-        "--json", "number,title,author,baseRefName,headRefName,headRefOid,url,state",
+        "gh",
+        "pr",
+        "view",
+        str(pr_identifier),
+        "--json",
+        "number,title,author,baseRefName,headRefName,headRefOid,url,state",
     ]
     if repo:
         cmd.extend(["--repo", repo])
 
     ret, stdout, stderr = run_command(cmd)
     if ret != 0:
-        raise RuntimeError(f"Failed to fetch PR metadata for '{pr_identifier}': {stderr}")
+        raise RuntimeError(
+            f"Failed to fetch PR metadata for '{pr_identifier}': {stderr}"
+        )
 
     raw = json.loads(stdout)
     owner, repo_name = _resolve_owner_and_repo(str(raw.get("url") or ""), repo)
@@ -201,12 +237,14 @@ def _format_comment_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
         body = (node.get("body") or "").strip()
         if not body:
             continue
-        formatted.append({
-            "author": _extract_author_login(node.get("author")),
-            "body": body,
-            "created_at": str(node.get("createdAt") or ""),
-            "url": str(node.get("url") or ""),
-        })
+        formatted.append(
+            {
+                "author": _extract_author_login(node.get("author")),
+                "body": body,
+                "created_at": str(node.get("createdAt") or ""),
+                "url": str(node.get("url") or ""),
+            }
+        )
     return formatted
 
 
@@ -220,13 +258,15 @@ def _format_review_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
         state = str(node.get("state") or "")
         if not body and state in ("", "PENDING", "COMMENTED"):
             continue
-        formatted.append({
-            "author": _extract_author_login(node.get("author")),
-            "body": body,
-            "state": state,
-            "submitted_at": str(node.get("submittedAt") or ""),
-            "url": str(node.get("url") or ""),
-        })
+        formatted.append(
+            {
+                "author": _extract_author_login(node.get("author")),
+                "body": body,
+                "state": state,
+                "submitted_at": str(node.get("submittedAt") or ""),
+                "url": str(node.get("url") or ""),
+            }
+        )
     return formatted
 
 
@@ -237,17 +277,23 @@ def _format_thread_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, Any]]:
         if not isinstance(node, dict):
             continue
         comments_container = node.get("comments") or {}
-        raw_comments = comments_container.get("nodes") if isinstance(comments_container, dict) else []
+        raw_comments = (
+            comments_container.get("nodes")
+            if isinstance(comments_container, dict)
+            else []
+        )
         comments = _format_comment_nodes(raw_comments)
         if not comments:
             continue
-        threads.append({
-            "path": str(node.get("path") or ""),
-            "line": node.get("line"),
-            "is_resolved": bool(node.get("isResolved", False)),
-            "is_outdated": bool(node.get("isOutdated", False)),
-            "comments": comments,
-        })
+        threads.append(
+            {
+                "path": str(node.get("path") or ""),
+                "line": node.get("line"),
+                "is_resolved": bool(node.get("isResolved", False)),
+                "is_outdated": bool(node.get("isOutdated", False)),
+                "comments": comments,
+            }
+        )
     return threads
 
 
@@ -298,13 +344,20 @@ def _fetch_context_via_pr_view(
     """Fetches PR metadata and narrative context using `gh pr view` as a fallback."""
     full_repo = f"{owner}/{repo}"
     cmd = [
-        "gh", "pr", "view", str(pull_number),
-        "--repo", full_repo,
-        "--json", "number,title,body,author,baseRefName,headRefName,headRefOid,url,state,comments,reviews",
+        "gh",
+        "pr",
+        "view",
+        str(pull_number),
+        "--repo",
+        full_repo,
+        "--json",
+        "number,title,body,author,baseRefName,headRefName,headRefOid,url,state,comments,reviews",
     ]
     ret, stdout, stderr = run_command(cmd)
     if ret != 0:
-        raise RuntimeError(f"Failed to fetch PR context for {full_repo}#{pull_number}: {stderr}")
+        raise RuntimeError(
+            f"Failed to fetch PR context for {full_repo}#{pull_number}: {stderr}"
+        )
 
     raw = json.loads(stdout)
     pr_metadata = _build_pr_metadata(raw, owner, repo, pull_number)
@@ -332,17 +385,25 @@ def fetch_pr_context(
     and falls back to `gh pr view --json` if GraphQL fails.
     """
     cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={PR_CONTEXT_GRAPHQL_QUERY}",
-        "-f", f"owner={owner}",
-        "-f", f"repo={repo}",
-        "-F", f"pr={pull_number}",
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        f"query={PR_CONTEXT_GRAPHQL_QUERY}",
+        "-f",
+        f"owner={owner}",
+        "-f",
+        f"repo={repo}",
+        "-F",
+        f"pr={pull_number}",
     ]
     ret, stdout, _ = run_command(cmd)
     if ret == 0 and stdout:
         try:
             payload = json.loads(stdout)
-            pr_data = ((payload.get("data") or {}).get("repository") or {}).get("pullRequest")
+            pr_data = ((payload.get("data") or {}).get("repository") or {}).get(
+                "pullRequest"
+            )
             if isinstance(pr_data, dict):
                 return _parse_graphql_context(pr_data, owner, repo, pull_number)
         except ValueError:
@@ -383,6 +444,27 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 _NARRATIVE_STACK_ENTRY_KEYS = ("title", "head_ref", "base_ref", "url")
 
 
+def _parse_stack_entry(node: Any, pull_number: int) -> Optional[Dict[str, Any]]:
+    """Parses one GraphQL stack entry node into a normalized dict."""
+    if not isinstance(node, dict):
+        return None
+    pr = node.get("pullRequest")
+    if not isinstance(pr, dict) or pr.get("number") is None:
+        return None
+    number = int(pr["number"])
+    return {
+        "number": number,
+        "title": str(pr.get("title") or ""),
+        "state": str(pr.get("state") or ""),
+        "is_draft": bool(pr.get("isDraft", False)),
+        "head_ref": str(pr.get("headRefName") or ""),
+        "base_ref": str(pr.get("baseRefName") or ""),
+        "url": str(pr.get("url") or ""),
+        "is_target": number == pull_number,
+        "needs_rebase": None,
+    }
+
+
 def _parse_stack(stack_data: Any, pull_number: int) -> Optional[Dict[str, Any]]:
     """Normalizes a GraphQL `pullRequest.stack` node into the stack dict used by both stages.
 
@@ -392,33 +474,23 @@ def _parse_stack(stack_data: Any, pull_number: int) -> Optional[Dict[str, Any]]:
     """
     if not isinstance(stack_data, dict):
         return None
-    entries_container = stack_data.get("entries") or {}
-    nodes = entries_container.get("nodes") if isinstance(entries_container, dict) else []
+    raw_entries = stack_data.get("entries")
+    entries_container = raw_entries if isinstance(raw_entries, dict) else {}
+    nodes = entries_container.get("nodes") or []
     entries: List[Dict[str, Any]] = []
-    for node in nodes or []:
-        pr = (node or {}).get("pullRequest") if isinstance(node, dict) else None
-        if not isinstance(pr, dict) or pr.get("number") is None:
-            continue
-        number = int(pr["number"])
-        entries.append({
-            "number": number,
-            "title": str(pr.get("title") or ""),
-            "state": str(pr.get("state") or ""),
-            "is_draft": bool(pr.get("isDraft", False)),
-            "head_ref": str(pr.get("headRefName") or ""),
-            "base_ref": str(pr.get("baseRefName") or ""),
-            "url": str(pr.get("url") or ""),
-            "is_target": number == pull_number,
-            "needs_rebase": None,
-        })
+    for node in nodes:
+        parsed = _parse_stack_entry(node, pull_number)
+        if parsed is not None:
+            entries.append(parsed)
     position = next((i + 1 for i, e in enumerate(entries) if e["is_target"]), None)
-    total = entries_container.get("totalCount") if isinstance(entries_container, dict) else None
+    total = entries_container.get("totalCount")
+    incomplete = isinstance(total, int) and total > len(entries)
     return {
         "number": stack_data.get("number"),
         "size": stack_data.get("size") or len(entries),
         "trunk": str(stack_data.get("baseRefName") or ""),
         "position": position,
-        "entries_complete": not (isinstance(total, int) and total > len(entries)),
+        "entries_complete": not incomplete,
         "entries": entries,
     }
 
@@ -431,15 +503,24 @@ def fetch_pr_stack(owner: str, repo: str, pull_number: int) -> Optional[Dict[str
     reported on stderr and treated as "not stacked".
     """
     cmd = [
-        "gh", "api", "graphql",
-        "-f", f"query={STACK_GRAPHQL_QUERY}",
-        "-f", f"owner={owner}",
-        "-f", f"repo={repo}",
-        "-F", f"pr={pull_number}",
+        "gh",
+        "api",
+        "graphql",
+        "-f",
+        f"query={STACK_GRAPHQL_QUERY}",
+        "-f",
+        f"owner={owner}",
+        "-f",
+        f"repo={repo}",
+        "-F",
+        f"pr={pull_number}",
     ]
     ret, stdout, stderr = run_command(cmd)
     if ret != 0 or not stdout:
-        print(f"Warning: could not query stack membership for #{pull_number}: {stderr}", file=sys.stderr)
+        print(
+            f"Warning: could not query stack membership for #{pull_number}: {stderr}",
+            file=sys.stderr,
+        )
         return None
     try:
         payload = json.loads(stdout)
@@ -447,7 +528,9 @@ def fetch_pr_stack(owner: str, repo: str, pull_number: int) -> Optional[Dict[str
         return None
     if not isinstance(payload, dict):
         return None
-    pr_data = ((payload.get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+    pr_data = ((payload.get("data") or {}).get("repository") or {}).get(
+        "pullRequest"
+    ) or {}
     return _parse_stack(pr_data.get("stack"), pull_number)
 
 
@@ -489,7 +572,9 @@ def blind_stack_summary(stack: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     }
 
 
-def capture_stack_view(workspace_dir: str, pull_number: int) -> Optional[Dict[str, Any]]:
+def capture_stack_view(
+    workspace_dir: str, pull_number: int
+) -> Optional[Dict[str, Any]]:
     """Imports the PR's stack into the checkout and returns `gh stack view --json`.
 
     `gh stack checkout <pr>` pulls every member branch, records the stack in
@@ -503,9 +588,13 @@ def capture_stack_view(workspace_dir: str, pull_number: int) -> Optional[Dict[st
         return None
 
     view: Optional[Dict[str, Any]] = None
-    ret, _, stderr = run_command(["gh", "stack", "checkout", str(pull_number)], cwd=workspace_dir)
+    ret, _, stderr = run_command(
+        ["gh", "stack", "checkout", str(pull_number)], cwd=workspace_dir
+    )
     if ret == 0:
-        ret, stdout, stderr = run_command(["gh", "stack", "view", "--json"], cwd=workspace_dir)
+        ret, stdout, stderr = run_command(
+            ["gh", "stack", "view", "--json"], cwd=workspace_dir
+        )
         if ret == 0 and stdout:
             try:
                 parsed = json.loads(stdout)
@@ -513,18 +602,31 @@ def capture_stack_view(workspace_dir: str, pull_number: int) -> Optional[Dict[st
             except ValueError:
                 view = None
     if view is None:
-        print(f"Note: `gh stack view` unavailable for #{pull_number}: {stderr}", file=sys.stderr)
+        print(
+            f"Note: `gh stack view` unavailable for #{pull_number}: {stderr}",
+            file=sys.stderr,
+        )
 
-    run_command(["git", "checkout", "--quiet", "--detach", start_sha], cwd=workspace_dir)
+    run_command(
+        ["git", "checkout", "--quiet", "--detach", start_sha], cwd=workspace_dir
+    )
     return view
 
 
-def _needs_rebase_from_git(workspace_dir: str, base_ref: str, head_ref: str) -> Optional[bool]:
+def _needs_rebase_from_git(
+    workspace_dir: str, base_ref: str, head_ref: str
+) -> Optional[bool]:
     """Returns True when origin/<head_ref> does not contain origin/<base_ref>."""
     if not base_ref or not head_ref:
         return None
     ret, _, _ = run_command(
-        ["git", "merge-base", "--is-ancestor", f"origin/{base_ref}", f"origin/{head_ref}"],
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            f"origin/{base_ref}",
+            f"origin/{head_ref}",
+        ],
         cwd=workspace_dir,
     )
     if ret == 0:
@@ -532,6 +634,22 @@ def _needs_rebase_from_git(workspace_dir: str, base_ref: str, head_ref: str) -> 
     if ret == 1:
         return True
     return None
+
+
+def _index_stack_branches(
+    stack_view: Optional[Dict[str, Any]],
+) -> Dict[int, Dict[str, Any]]:
+    """Indexes `gh stack view --json` branches by pull request number."""
+    if not isinstance(stack_view, dict):
+        return {}
+    by_number: Dict[int, Dict[str, Any]] = {}
+    for branch in stack_view.get("branches") or []:
+        if not isinstance(branch, dict):
+            continue
+        pr = branch.get("pr")
+        if isinstance(pr, dict) and pr.get("number") is not None:
+            by_number[int(pr["number"])] = branch
+    return by_number
 
 
 def annotate_stack_status(
@@ -545,12 +663,7 @@ def annotate_stack_status(
     number. Without it, falls back to git ancestry in the checkout:
     a branch needs a rebase when it does not contain its base's tip.
     """
-    by_number: Dict[int, Dict[str, Any]] = {}
-    for branch in (stack_view or {}).get("branches") or []:
-        pr = branch.get("pr") if isinstance(branch, dict) else None
-        if isinstance(pr, dict) and pr.get("number") is not None:
-            by_number[int(pr["number"])] = branch
-
+    by_number = _index_stack_branches(stack_view)
     if by_number:
         stack["source"] = "gh stack view"
         for entry in stack.get("entries", []):
@@ -580,7 +693,9 @@ def merge_stack_status(
     if not recorded:
         return fresh
     recorded_entries = {
-        e.get("number"): e for e in recorded.get("entries", []) if e.get("number") is not None
+        e.get("number"): e
+        for e in recorded.get("entries", [])
+        if e.get("number") is not None
     }
     for entry in fresh.get("entries", []):
         old = recorded_entries.get(entry.get("number"))
@@ -614,10 +729,19 @@ def prepare_workspace(
     clone_cmd = ["gh", "repo", "clone", full_repo, temp_dir]
     resolved_ref = resolve_workspace_path(reference_dir)
     if resolved_ref and Path(resolved_ref).is_dir():
-        code, out, _ = run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=resolved_ref)
+        code, out, _ = run_command(
+            ["git", "rev-parse", "--is-inside-work-tree"], cwd=resolved_ref
+        )
         if code == 0 and out == "true":
             repo_url = f"https://github.com/{full_repo}.git"
-            clone_cmd = ["git", "clone", "--reference", resolved_ref, repo_url, temp_dir]
+            clone_cmd = [
+                "git",
+                "clone",
+                "--reference",
+                resolved_ref,
+                repo_url,
+                temp_dir,
+            ]
 
     ret, _, err = run_command(clone_cmd)
     if ret != 0:
@@ -626,12 +750,18 @@ def prepare_workspace(
         ret, _, err = run_command(["gh", "repo", "clone", full_repo, temp_dir])
         if ret != 0:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise RuntimeError(f"Failed to clone repository '{full_repo}' into temporary directory: {err}")
+            raise RuntimeError(
+                f"Failed to clone repository '{full_repo}' into temporary directory: {err}"
+            )
 
-    ret, _, err = run_command(["gh", "pr", "checkout", str(pull_number), "--detach"], cwd=temp_dir)
+    ret, _, err = run_command(
+        ["gh", "pr", "checkout", str(pull_number), "--detach"], cwd=temp_dir
+    )
     if ret != 0:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(f"Failed to check out PR #{pull_number} in temporary directory: {err}")
+        raise RuntimeError(
+            f"Failed to check out PR #{pull_number} in temporary directory: {err}"
+        )
 
     return temp_dir, True
 
@@ -650,7 +780,11 @@ def resolve_workspace_path(path_or_file: Optional[str]) -> str:
     if raw.startswith("{"):
         try:
             data = json.loads(raw)
-            return str(data.get("workspace_dir") or "").strip() if isinstance(data, dict) else ""
+            return (
+                str(data.get("workspace_dir") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
         except ValueError:
             return ""
     return raw.splitlines()[0].strip() if raw else ""
@@ -688,15 +822,23 @@ def get_pr_diff(
     pull_number: Optional[int] = None,
 ) -> str:
     """Extracts unified diff (-U0) comparing base_ref to HEAD."""
+    diff_flags = [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U0",
+    ]
     ret, diff_out, _ = run_command(
-        ["git", "-c", "core.quotePath=false", "diff", "-U0", f"origin/{base_ref}...HEAD"],
+        ["git", *diff_flags, f"origin/{base_ref}...HEAD"],
         cwd=workspace_dir,
     )
     if ret == 0 and diff_out:
         return diff_out
 
     ret, diff_out, _ = run_command(
-        ["git", "-c", "core.quotePath=false", "diff", "-U0", f"{base_ref}...HEAD"],
+        ["git", *diff_flags, f"{base_ref}...HEAD"],
         cwd=workspace_dir,
     )
     if ret == 0 and diff_out:
@@ -710,11 +852,288 @@ def get_pr_diff(
     return ""
 
 
+_RISKY_CONFIG_EXACT = frozenset(
+    {
+        "package.json",
+        ".npmrc",
+        "setup.py",
+        "setup.cfg",
+        "pyproject.toml",
+        "tox.ini",
+        "noxfile.py",
+        "makefile",
+        "gnumakefile",
+        "build.gradle",
+        "build.gradle.kts",
+        "settings.gradle",
+        "settings.gradle.kts",
+        "cargo.toml",
+        "build.rs",
+        "package.swift",
+        "workspace",
+        "workspace.bazel",
+        "module.bazel",
+        ".bazelrc",
+        "build",
+        "build.bazel",
+        "pubspec.yaml",
+        "build.yaml",
+        "analysis_options.yaml",
+        "conftest.py",
+        "pytest.ini",
+        ".gitattributes",
+        ".gitmodules",
+        ".pre-commit-config.yaml",
+        ".envrc",
+        ".mise.toml",
+        ".tool-versions",
+    }
+)
+
+_RISKY_CONFIG_PREFIXES = (
+    ".eslintrc",
+    "eslint.config.",
+    "tsconfig",
+    ".yarnrc",
+)
+
+_RISKY_CONFIG_SUFFIXES = (
+    ".mk",
+    ".gradle",
+    ".gradle.kts",
+    ".bzl",
+)
+
+_RISKY_PATH_SEGMENTS = (
+    ".githooks/",
+    ".husky/",
+    ".github/workflows/",
+    ".cargo/config",
+)
+
+_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/.+? b/(.+)$")
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+_LINE_RISK_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
+    (
+        "process_and_dynamic_execution",
+        re.compile(
+            r"\b(?:subprocess\b|os\.(?:system|popen|exec\w*|spawn\w*)|pty\.spawn|"
+            r"eval\s*\(|exec\s*\(|compile\s*\(|__import__\s*\(|importlib\.import_module|"
+            r"child_process|execSync|spawnSync|execFile\w*|new\s+Function\s*\(|"
+            r"Process\.(?:run|runSync|start)|Isolate\.spawnUri|Command::new)\b"
+        ),
+        "Process spawn or dynamic code execution",
+    ),
+    (
+        "network_and_exfiltration",
+        re.compile(
+            r"(?:\b(?:urllib\.request|requests\.(?:get|post|put|delete|request|Session)|"
+            r"httpx\.|aiohttp\.|socket\.socket|fetch\s*\(|XMLHttpRequest|new\s+WebSocket|"
+            r"http\.(?:get|post|request)|HttpClient|curl\s+|wget\s+)\b|"
+            r"(?:~|\$HOME|/home/|/Users/)[/\w.-]*\.(?:ssh|aws|env|gemini|gnupg|netrc|npmrc|pypirc)\b|"
+            r"\.config/gh\b|/etc/(?:passwd|shadow)\b|"
+            r"\b(?:os\.environ|process\.env|Platform\.environment)\b)"
+        ),
+        "Network egress, sensitive path, or environment access",
+    ),
+    (
+        "obfuscation_and_payloads",
+        re.compile(
+            r"(?:\b(?:base64\.b64decode|codecs\.decode|"
+            r"Buffer\.from\s*\([^)]*['\"]base64['\"]|atob\s*\(|bytes\.fromhex)\b|"
+            r"(?:\\x[0-9a-fA-F]{2}){8,})"
+        ),
+        "Encoded payload or obfuscation primitive",
+    ),
+)
+
+
+def _check_config_file_risk(file_path: str) -> Optional[str]:
+    """Returns a risk reason when file_path is a build, linter plugin, or hook config."""
+    norm = file_path.strip().replace("\\", "/")
+    if not norm:
+        return None
+    lower_norm = norm.lower()
+    base = lower_norm.rsplit("/", 1)[-1]
+    if base in _RISKY_CONFIG_EXACT:
+        return f"Modified build, hook, or tool config ({base})"
+    if base.startswith(_RISKY_CONFIG_PREFIXES) or base.endswith(_RISKY_CONFIG_SUFFIXES):
+        return f"Modified linter, compiler, or build config ({base})"
+    for seg in _RISKY_PATH_SEGMENTS:
+        if lower_norm.startswith(seg) or f"/{seg}" in lower_norm:
+            return f"Modified hook or workflow path ({norm})"
+    return None
+
+
+def _extract_header_path(line: str) -> Optional[str]:
+    """Extracts the target file path from diff --git, rename to, or +++ b/ headers."""
+    if line.startswith("diff --git "):
+        m = _DIFF_GIT_HEADER_RE.match(line)
+        return m.group(1).strip() if m else None
+    if line.startswith("rename to "):
+        return line[len("rename to ") :].strip() or None
+    if line.startswith("+++ b/"):
+        return line[6:].strip() or None
+    return None
+
+
+def _parse_hunk_new_line(line: str) -> Optional[int]:
+    """Extracts the starting new-file line number from a unified diff @@ header."""
+    m = _HUNK_HEADER_RE.match(line)
+    return int(m.group(1)) if m else None
+
+
+def _scan_added_line(
+    file_path: str, line_num: int, content: str
+) -> List[Dict[str, Any]]:
+    """Matches an added diff line against execution, network, and obfuscation patterns."""
+    matches: List[Dict[str, Any]] = []
+    snippet = content.strip()[:160]
+    for category, pattern, reason in _LINE_RISK_PATTERNS:
+        if pattern.search(content):
+            matches.append(
+                {
+                    "category": category,
+                    "file_path": file_path,
+                    "line": line_num,
+                    "reason": reason,
+                    "snippet": snippet,
+                }
+            )
+    return matches
+
+
+def _record_signal(
+    signal: Dict[str, Any],
+    signals: List[Dict[str, Any]],
+    categories: Dict[str, int],
+    flagged_files: List[str],
+) -> None:
+    """Appends a risk signal and updates category counts and ordered flagged_files."""
+    signals.append(signal)
+    cat = signal["category"]
+    categories[cat] = categories.get(cat, 0) + 1
+    fp = signal["file_path"]
+    if fp and fp not in flagged_files:
+        flagged_files.append(fp)
+
+
+def _record_config_if_needed(
+    current_file: str,
+    raw_line: str,
+    seen_config_files: set[str],
+    signals: List[Dict[str, Any]],
+    categories: Dict[str, int],
+    flagged_files: List[str],
+) -> None:
+    """Records a build_and_hook_configs signal once per modified config file."""
+    if current_file in seen_config_files:
+        return
+    config_reason = _check_config_file_risk(current_file)
+    if not config_reason:
+        return
+    seen_config_files.add(current_file)
+    _record_signal(
+        {
+            "category": "build_and_hook_configs",
+            "file_path": current_file,
+            "line": 1,
+            "reason": config_reason,
+            "snippet": raw_line[:160],
+        },
+        signals,
+        categories,
+        flagged_files,
+    )
+
+
+def _step_hunk_line(
+    raw_line: str,
+    current_file: str,
+    new_line: int,
+    signals: List[Dict[str, Any]],
+    categories: Dict[str, int],
+    flagged_files: List[str],
+) -> int:
+    """Processes one hunk body line and returns the updated new_line counter."""
+    if (
+        raw_line.startswith("+++")
+        or raw_line.startswith("-")
+        or raw_line.startswith("\\")
+    ):
+        return new_line
+    if raw_line.startswith("+"):
+        for sig in _scan_added_line(current_file, new_line, raw_line[1:]):
+            _record_signal(sig, signals, categories, flagged_files)
+    return new_line + 1
+
+
+def scan_diff_execution_risks(diff_text: str) -> Dict[str, Any]:
+    """Scans a unified diff for local code execution hazards before running local tools."""
+    signals: List[Dict[str, Any]] = []
+    categories: Dict[str, int] = {}
+    flagged_files: List[str] = []
+    seen_config_files: set[str] = set()
+    current_file = ""
+    new_line: Optional[int] = None
+
+    for raw_line in (diff_text or "").splitlines():
+        header_path = _extract_header_path(raw_line)
+        if header_path is not None:
+            current_file = header_path
+            if raw_line.startswith("diff --git "):
+                new_line = None
+            _record_config_if_needed(
+                current_file,
+                raw_line,
+                seen_config_files,
+                signals,
+                categories,
+                flagged_files,
+            )
+            continue
+
+        hunk_start = _parse_hunk_new_line(raw_line)
+        if hunk_start is not None:
+            new_line = hunk_start
+        elif new_line is not None and current_file:
+            new_line = _step_hunk_line(
+                raw_line, current_file, new_line, signals, categories, flagged_files
+            )
+
+    return {
+        "status": "flagged" if signals else "clean",
+        "risk_count": len(signals),
+        "flagged_files": flagged_files,
+        "categories": categories,
+        "signals": signals,
+    }
+
+
 def _write_json_file(path_str: str, data: Dict[str, Any]) -> None:
     """Writes a dictionary as formatted JSON, creating parent directories if needed."""
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _run_security_scan(args: argparse.Namespace) -> int:
+    """Executes standalone static execution-risk scanning on a diff file or stdin."""
+    try:
+        if args.security_scan == "-":
+            diff_text = sys.stdin.read()
+        else:
+            diff_text = Path(args.security_scan).read_text(encoding="utf-8")
+    except OSError as e:
+        print(f"Error reading diff for --security-scan: {e}", file=sys.stderr)
+        return 1
+
+    scan_result = scan_diff_execution_risks(diff_text)
+    if args.output_security_scan:
+        _write_json_file(args.output_security_scan, scan_result)
+    print(json.dumps(scan_result, indent=2))
+    return 0
 
 
 def _run_prepare_workspace(args: argparse.Namespace) -> int:
@@ -725,14 +1144,18 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
 
     try:
         coords = resolve_pr_coordinates(args.pr, repo=args.repo)
-        stack = fetch_pr_stack(coords["owner"], coords["repo"], int(coords["pull_number"]))
+        stack = fetch_pr_stack(
+            coords["owner"], coords["repo"], int(coords["pull_number"])
+        )
         workspace_dir, _ = prepare_workspace(coords, reference_dir=args.repo_dir)
         coords["workspace_dir"] = workspace_dir
         if stack:
             stack_view = capture_stack_view(workspace_dir, int(coords["pull_number"]))
             annotate_stack_status(stack, stack_view, workspace_dir)
         coords["stack"] = blind_stack_summary(stack)
-        sha_ret, actual_sha, _ = run_command(["git", "rev-parse", "HEAD"], cwd=workspace_dir)
+        sha_ret, actual_sha, _ = run_command(
+            ["git", "rev-parse", "HEAD"], cwd=workspace_dir
+        )
         if sha_ret == 0 and actual_sha:
             coords["head_sha"] = actual_sha
         diff_text = get_pr_diff(
@@ -746,11 +1169,19 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
 
     if not diff_text.strip():
         cleanup_workspace(workspace_dir)
-        print("Error: Extracted PR diff is empty; aborting workspace setup.", file=sys.stderr)
+        print(
+            "Error: Extracted PR diff is empty; aborting workspace setup.",
+            file=sys.stderr,
+        )
         return 1
+
+    security_prescan = scan_diff_execution_risks(diff_text)
+    coords["security_prescan"] = security_prescan
 
     if args.output_coords:
         _write_json_file(args.output_coords, coords)
+    if args.output_security_scan:
+        _write_json_file(args.output_security_scan, security_prescan)
     if args.output_stack and stack:
         _write_json_file(args.output_stack, structural_stack(stack))
     if args.output_diff:
@@ -803,7 +1234,9 @@ def _resolve_target_from_args(args: argparse.Namespace) -> Tuple[str, str, int, 
             )
 
     if not args.pr:
-        raise ValueError("Either --input-coords or --pr is required for --fetch-context.")
+        raise ValueError(
+            "Either --input-coords or --pr is required for --fetch-context."
+        )
 
     coords = resolve_pr_coordinates(args.pr, repo=args.repo)
     return (
@@ -824,8 +1257,12 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
         metadata, context = fetch_pr_context(owner, repo, pull_number)
         recorded_stack = None
         if args.input_stack and Path(args.input_stack).is_file():
-            recorded_stack = json.loads(Path(args.input_stack).read_text(encoding="utf-8"))
-        stack = merge_stack_status(fetch_pr_stack(owner, repo, pull_number), recorded_stack)
+            recorded_stack = json.loads(
+                Path(args.input_stack).read_text(encoding="utf-8")
+            )
+        stack = merge_stack_status(
+            fetch_pr_stack(owner, repo, pull_number), recorded_stack
+        )
     except Exception as e:
         print(f"Error fetching PR context: {e}", file=sys.stderr)
         return 1
@@ -838,7 +1275,11 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
             "position": stack.get("position"),
         }
 
-    if stage1_sha and metadata.get("head_sha") and metadata.get("head_sha") != stage1_sha:
+    if (
+        stage1_sha
+        and metadata.get("head_sha")
+        and metadata.get("head_sha") != stage1_sha
+    ):
         print(
             f"Warning: PR head moved from {stage1_sha} to {metadata['head_sha']} since Stage 1; "
             f"pinning head_sha to Stage 1 checkout ({stage1_sha}).",
@@ -859,9 +1300,13 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """Constructs the argument parser for review_engine.py."""
-    parser = argparse.ArgumentParser(description="Prepare workspace and extract PR diff and context.")
+    parser = argparse.ArgumentParser(
+        description="Prepare workspace and extract PR diff and context."
+    )
     parser.add_argument("--pr", help="PR number, URL, or branch name.")
-    parser.add_argument("--repo", help="Optional owner/repo if not inferred from directory.")
+    parser.add_argument(
+        "--repo", help="Optional owner/repo if not inferred from directory."
+    )
     parser.add_argument(
         "--reference",
         "--repo-dir",
@@ -877,7 +1322,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output-coords",
         help="Output path for Stage 1 blind PR coordinates JSON (no title, body, or comments).",
     )
-    parser.add_argument("--output-workspace", help="Optional file path to record the temporary workspace directory.")
+    parser.add_argument(
+        "--output-workspace",
+        help="Optional file path to record the temporary workspace directory.",
+    )
     parser.add_argument(
         "--output-stack",
         help=(
@@ -891,7 +1339,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stage 2: fetch PR title, description, reviews, and comments for reconciliation.",
     )
-    parser.add_argument("--input-coords", help="Path to Stage 1 pr_coords.json for --fetch-context.")
+    parser.add_argument(
+        "--input-coords", help="Path to Stage 1 pr_coords.json for --fetch-context."
+    )
     parser.add_argument(
         "--input-stack",
         help="Path to the Stage 1 --output-stack file; its rebase status is merged into pr_context.json's `stack`.",
@@ -900,9 +1350,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--require-blind-description",
         help="Path to blind_description.md that must exist and be non-empty before --fetch-context runs.",
     )
-    parser.add_argument("--output-meta", help="Output path for resolved PR metadata JSON.")
-    parser.add_argument("--output-context", help="Output path for PR narrative context JSON (title, body, comments).")
+    parser.add_argument(
+        "--output-meta", help="Output path for resolved PR metadata JSON."
+    )
+    parser.add_argument(
+        "--output-context",
+        help="Output path for PR narrative context JSON (title, body, comments).",
+    )
     parser.add_argument("--output-diff", help="Output path for extracted unified diff.")
+    parser.add_argument(
+        "--security-scan",
+        help="Scan a unified diff file (or '-' for stdin) for local execution risks.",
+    )
+    parser.add_argument(
+        "--output-security-scan",
+        help="Optional output file path for the static execution-risk scan JSON.",
+    )
     parser.add_argument("--cleanup", help="Directory path to safely clean up and exit.")
     return parser
 
@@ -916,8 +1379,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         if cleanup_workspace(args.cleanup):
             print(f"Successfully cleaned up temporary directory: {args.cleanup}")
             return 0
-        print(f"Failed or refused to clean up directory: {args.cleanup}", file=sys.stderr)
+        print(
+            f"Failed or refused to clean up directory: {args.cleanup}", file=sys.stderr
+        )
         return 1
+
+    if args.security_scan:
+        return _run_security_scan(args)
 
     if args.prepare_workspace:
         return _run_prepare_workspace(args)
@@ -946,5 +1414,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

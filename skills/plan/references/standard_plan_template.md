@@ -1,6 +1,6 @@
 # Standard Implementation Plan Template
 
-Use this template for standard multi-file features, bug fixes, or refactors.
+Use this template for multi-file features, bug fixes, or refactors. When 2 or more tracks operate on disjoint files, group them into parallel tracks between sequential foundation and integration waves (**Sandwich Wave Topology**). For strictly linear changes where every step modifies the same file, use standard `### Phase 1` / `### Phase 2` headings.
 
 ______________________________________________________________________
 
@@ -25,19 +25,35 @@ ______________________________________________________________________
 - **Build / Test Tooling**: [e.g. `pytest`, `flutter test`, `npm test`, `cargo test`]
 - **Lint / Static Analysis**: [e.g. `ruff`, `dart analyze`, `eslint`, `mypy`]
 - **Existing Abstractions to Reuse**:
-  - `[Symbol / Module 1]`: [Description of how this existing code satisfies part of the requirement]
-  - `[Symbol / Module 2]`: [Description of existing utility/helper to follow or reuse]
-- **Key Constraints**: [e.g. backward compatibility, memory limits, isolation rules]
+  - `[Symbol / Module 1]`: [How this existing code satisfies part of the requirement]
+  - `[Symbol / Module 2]`: [Existing utility or helper to follow or reuse]
+- **Key Constraints & Non-Goals**: [Backward compatibility, memory limits, explicit out-of-scope items]
 
 ## Architecture & Technical Design
 
 [Explain the proposed approach, data model changes, component interactions, and interface definitions.]
 
 ```mermaid
-flowchart TD
-    [Component A] --> [Component B]
-    [Component B] --> [Component C]
-````
+flowchart LR
+    subgraph W1["Wave 1: Foundation [Sequential]"]
+        F["Shared types & interfaces"]
+    end
+    subgraph W2["Wave 2: Core Logic [Parallel]"]
+        TA["Track 2A: Service A"]
+        TB["Track 2B: Service B"]
+    end
+    subgraph W3["Wave 3: Integration [Sequential]"]
+        I["Barrel exports, CLI wiring, & full suite"]
+    end
+    W1 --> W2 --> W3
+```
+
+### Execution & Verification Strategy
+
+- **Orchestration Mode**: [`Sequential` (single agent) | `/swarm` (named author + verifier workers) | `/run-workflow` (`parallel()` script)]
+- **Workspace Mode**: [`inherit` | `share` (per-author working copy) | `branch` (isolated clone) | dedicated `git worktree`]
+- **Verifier Ratio**: [`1` verifier worker per `2-4` parallel author tracks, or inline verification for sequential plans]
+- **Shared Chokepoint Files**: [List barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`), dispatch registries, or `CHANGELOG.md` isolated in Wave 1 or Wave 3 so Wave 2 tracks never collide]
 
 ### Key Interfaces & Signatures
 
@@ -47,44 +63,64 @@ flowchart TD
 
 ## Phased Implementation Plan
 
-### Phase 1: [Foundation / Types / Models]
+### Wave 1: Foundation & Shared Contracts [Sequential]
 
-Description of the initial setup, shared data structures, or interface definitions.
+Description of initial setup, shared data structures, or interface definitions that parallel tracks build against.
 
-- [ ] [NEW] \[path/to/new_file.ext\](file:///absolute/path/to/new_file.ext)
+- [ ] [NEW] [path/to/types.ext](file:///absolute/path/to/types.ext)
   - Define `TypeName` struct/class with fields `...`
-  - Implement validation logic for inputs
-- [ ] [MODIFY] \[path/to/existing_file.ext\](file:///absolute/path/to/existing_file.ext)
-  - Add export for new types
-  - Update imports
+  - Implement input validation helpers
 
-**Phase 1 Verification**: \[Command or check to verify Phase 1, e.g. `npm run typecheck` or `pytest tests/unit/test_types.py`\]
+**Wave 1 Verification**: `[Command to verify Wave 1, e.g. npm run typecheck or pytest tests/unit/test_types.py]`
 
 ______________________________________________________________________
 
-### Phase 2: [Core Logic / Implementation]
+### Wave 2: Core Implementation [Parallel]
 
-Description of the primary operational changes.
+Independent implementation tracks touching strictly disjoint file sets (`validate_plan.py` enforces zero file overlap across tracks in the same wave).
 
-- [ ] [MODIFY] \[path/to/service.ext\](file:///absolute/path/to/service.ext)
+#### Track 2A: [Subsystem / Component A]
+
+- **Depends on**: Wave 1
+- **Owns**: `path/to/service_a.ext`, `tests/test_service_a.ext`
+- **Must Not Touch**: `path/to/service_b.ext`, `path/to/index.ext`
+
+- [ ] [MODIFY] [path/to/service_a.ext](file:///absolute/path/to/service_a.ext)
   - Implement `process_request()` using `[reused_helper]`
   - Add error handling for edge cases
-- [ ] [NEW] \[path/to/handler.ext\](file:///absolute/path/to/handler.ext)
-  - Implement request dispatching
+- [ ] [NEW] [tests/test_service_a.ext](file:///absolute/path/to/tests/test_service_a.ext)
+  - Add unit tests for `process_request()`
 
-**Phase 2 Verification**: \[Command to verify Phase 2, e.g. `cargo test --lib core_logic`\]
+**Track 2A Verification**: `[Scoped test & lint command for Track 2A, e.g. pytest tests/test_service_a.ext]`
+
+#### Track 2B: [Subsystem / Component B]
+
+- **Depends on**: Wave 1
+- **Owns**: `path/to/handler_b.ext`, `tests/test_handler_b.ext`
+- **Must Not Touch**: `path/to/service_a.ext`, `path/to/index.ext`
+
+- [ ] [NEW] [path/to/handler_b.ext](file:///absolute/path/to/handler_b.ext)
+  - Implement request dispatching for Component B
+- [ ] [NEW] [tests/test_handler_b.ext](file:///absolute/path/to/tests/test_handler_b.ext)
+  - Add unit tests for handler dispatching
+
+**Track 2B Verification**: `[Scoped test & lint command for Track 2B, e.g. pytest tests/test_handler_b.ext]`
+
+**Wave 2 Verifier & Barrier Gate**:
+- Peer `verifier` checks that Track 2A and Track 2B stayed within their owned file boundaries and passed track-local tests.
+- Wave barrier command: `[Combined test & static analysis command before Wave 3 starts]`
 
 ______________________________________________________________________
 
-### Phase 3: [Integration & UI / CLI Surface]
+### Wave 3: Integration, Exports & CLI Surface [Sequential]
 
-Description of wiring into entry points, CLI commands, or external callers.
+Wire parallel tracks into shared chokepoint files, entry points, and documentation.
 
-- [ ] [MODIFY] \[path/to/main.ext\](file:///absolute/path/to/main.ext)
-  - Register new handler in dispatcher
-  - Wire command-line arguments
+- [ ] [MODIFY] [path/to/index.ext](file:///absolute/path/to/index.ext)
+  - Export symbols from Track 2A and Track 2B
+  - Register handlers in central dispatcher
 
-**Phase 3 Verification**: \[Command to run integration test suite, e.g. `pytest tests/integration/`\]
+**Wave 3 Verification**: `[Command to run integration test suite, e.g. pytest tests/integration/]`
 
 ______________________________________________________________________
 
@@ -92,14 +128,14 @@ ______________________________________________________________________
 
 ### Automated Tests
 
-- Run test suite: `[exact test command, e.g. pytest -v tests/test_feature.py]`
+- Run unit tests: `[exact test command, e.g. pytest -v tests/]`
 - Run linter / typechecker: `[exact command, e.g. ruff check .]`
 - Run full regression suite: `[exact command, e.g. pytest]`
 
 ### Edge Cases to Validate
 
-1. [Edge case 1, e.g. empty input / null values / timeout handling]
-2. [Edge case 2, e.g. concurrent access / duplicate IDs]
+1. [Edge case 1, e.g. empty input, null values, or timeout handling]
+2. [Edge case 2, e.g. concurrent access or duplicate IDs]
 3. [Edge case 3, e.g. error propagation when downstream service is unavailable]
 
 ### Manual Verification
@@ -109,9 +145,6 @@ ______________________________________________________________________
 
 ## Rollback & Risk Mitigation
 
-- **Breaking Changes**: [None / Details of breaking API changes and migration shim]
+- **Breaking Changes**: [None, or details of breaking API changes and migration shim]
 - **Rollback Strategy**: [How to cleanly revert if issues arise in production or review]
-
-```
-
-```
+````

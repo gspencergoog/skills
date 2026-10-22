@@ -46,6 +46,7 @@ ______________________________________________________________________
    - Refer to [pr_segmentation.md](references/pr_segmentation.md) for criteria and stacking plan rules.
    - Generate a **PR Stacking Plan Proposal** artifact (`pr_stacking_plan.md`) outlining stacked branches, dedicated `git worktree` locations, and commands.
    - Present the proposed stacking plan to the user using the `grill-me` skill for alignment before executing worktree creation.
+   - When tracking stacked PRs and the `a2ui-pane` plugin is available, read the `genui` skill and render a `stack_board` surface in the pane (`surfaceId: "stack-board"`). Push live row updates using data-only lines (`$/items/N/state`, `$/items/N/tone`, `$/items/N/ci`, `$/items/N/ciTone`, and `$/items/N/step`) as branches advance through static analysis, review, and CI.
 4. **If single PR is sufficient**: Proceed directly to Phase 2 on the current branch.
 
 ______________________________________________________________________

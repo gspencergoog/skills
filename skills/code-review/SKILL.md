@@ -34,12 +34,12 @@ You are an expert Senior Software Engineer specializing in code review and in re
 
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
-| *(none)* | 1 Gemini reviewer; tier 1 verification (read-only checks) | Baseline |
-| `--fast` | Single-pass in-session review without subagents; tier 1 checks only | Minimal latency / no subagents |
+| *(none)* | 1 Gemini reviewer; tier 1a static/remote checks always, plus tier 1b build dry-runs and repo scripts after the Pre-Execution Security Gate | Baseline |
+| `--fast` | Single-pass in-session review without subagents; tier 1a/1b checks only | Minimal latency / no subagents |
 | `--json [<path>]` | Emits `review_results.json` via `lint_review.py --export-json`, to `<path>` when given, otherwise to `<artifact-dir>/review_results.json` | Same as underlying mode |
 | `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code) | Uses 3P quota |
 | `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B), for code and documents | About 2× reviewers |
-| `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in a per-reviewer throwaway checkout) for trusted changes | Test runtime and dependency installs |
+| `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in a per-reviewer throwaway checkout) for trusted changes that pass the Pre-Execution Security Gate | Test runtime and dependency installs |
 | `--max` | Same as `--claude --panel --verify` | All of the above |
 | `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra turn per disputed reviewer |
 
@@ -51,7 +51,7 @@ Follow these steps sequentially to perform a review:
 
 ### Step 1: Gather Changes and Prepare Workspace
 
-Before starting the review, identify the changes, pin commit SHAs, and prepare the target workspace.
+Before starting the review, identify the changes, pin commit SHAs, and prepare the target workspace. All `git` and `gh` clone, checkout, and diff commands in Step 1 must run with git hooks, fsmonitor, and external diff or textconv drivers disabled so syncing an untrusted branch is strictly inert. Do not run any build step, dry-run, repo script, dependency install, or test during Step 1.
 
 - **For GitHub Pull Requests**:
   - Use `gh pr view` to inspect the PR title, description, repository, and head branch.
@@ -61,21 +61,21 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
     - If the PR is not part of the local branch(es) (missing locally or in another repository):
       - Assume the PR branch must be synced to a local temporary directory to conduct the review.
       - Create a dedicated temporary directory with a specific prefix: `pr_review_dir_a=$(mktemp -d -t pr-review-XXXXXX)`.
-      - Clone the repository into that directory. If a local checkout exists on disk, use `git clone --reference <path-to-local-repo> <repo-url> "$pr_review_dir_a"` to speed up the clone. Otherwise, use `gh repo clone <owner/repo> "$pr_review_dir_a"`.
-      - Check out the PR branch in the temporary directory: `cd "$pr_review_dir_a" && gh pr checkout <pr-number-or-url>`.
+      - Clone the repository into that directory with hooks and fsmonitor disabled. If a local checkout exists on disk, use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false clone --reference <path-to-local-repo> <repo-url> "$pr_review_dir_a"` to speed up the clone. Otherwise, use `gh repo clone <owner/repo> "$pr_review_dir_a" -- -c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+      - Check out the PR branch in the temporary directory with hooks and fsmonitor disabled: `cd "$pr_review_dir_a" && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false gh pr checkout <pr-number-or-url>`.
       - Perform all subsequent review steps (inspecting diffs, reading context files, evaluating tests) within `$pr_review_dir_a`.
       - Retain the directory path in `$pr_review_dir_a` for safe cleanup in Step 6.
-  - Use `gh pr diff` (or `git diff <base>...HEAD` in the checkout) to obtain the changes, and `gh pr diff --name-only` for the file list.
+  - Use `gh pr diff` (or `git -c core.hooksPath=/dev/null -c core.fsmonitor=false diff --no-ext-diff --no-textconv <base>...HEAD` in the checkout) to obtain the changes, and `gh pr diff --name-only` for the file list.
   - _Reference: See the [gh-cli](../gh-cli/SKILL.md) skill for detailed usage._
 - **For Local Changes**:
-  - Use `git status` to see modified files.
-  - Use `git diff --stat` (or `git diff --staged --stat`) first to assess change volume.
-  - Get the file list with `git diff --name-only` (unstaged), `git diff --staged --name-only` (staged), or `git diff --name-only <base>...HEAD` (a branch). Add untracked files from `git ls-files --others --exclude-standard` if they are part of the change.
-  - Use targeted diffs (`git diff -- <files...>`) and/or `sem diff` for large changesets to prevent context window saturation.
-  - Use `git log -p` to see recent commits if reviewing a local branch.
-- **For Whole Local Files** (for example, "review this spec"): produce an all-`+` diff with real line numbers using `git diff --no-index /dev/null <file>`. It exits with status 1 when it prints a diff, which is expected. The rest of the workflow treats this like any other diff.
-- **Throwaway Checkouts for `--verify`**: For trusted local changes, or a trusted PR whose branch is already checked out locally, create `$pr_review_dir_a` with the working-tree changes applied and commit a review snapshot, following [verification.md](references/verification.md#throwaway-checkout). Under `--panel --verify`, after building `$pr_review_dir_a` (including any dependency install), create `$pr_review_dir_b` with `cp -a "$pr_review_dir_a/." "$pr_review_dir_b/"` per [verification.md](references/verification.md#per-reviewer-checkouts) so each lane gets its own isolated checkout.
-- **Pin Base and Head SHAs**: Record `base_sha=$(git merge-base <base> HEAD)` (or `git rev-parse HEAD` for uncommitted working-tree changes against `HEAD`). Set `head_sha` to `git rev-parse HEAD` in the source repo, except for a `--verify` checkout of local working-tree changes, where `head_sha` is `git -C "$pr_review_dir_a" rev-parse HEAD` (the review snapshot commit) and the prompt notes that the top commit is the review snapshot, so `git diff $base_sha $head_sha` inside the checkout covers the change under review.
+  - Use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false status` to see modified files.
+  - Use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false diff --no-ext-diff --no-textconv --stat` (or `--staged --stat`) first to assess change volume.
+  - Get the file list with `git diff --no-ext-diff --no-textconv --name-only` (unstaged), `git diff --no-ext-diff --no-textconv --staged --name-only` (staged), or `git diff --no-ext-diff --no-textconv --name-only <base>...HEAD` (a branch). Add untracked files from `git ls-files --others --exclude-standard` if they are part of the change.
+  - Use targeted diffs (`git diff --no-ext-diff --no-textconv -- <files...>`) and/or `sem diff` for large changesets to prevent context window saturation.
+  - Use `git log --no-ext-diff --no-textconv -p` to see recent commits if reviewing a local branch.
+- **For Whole Local Files** (for example, "review this spec"): produce an all-`+` diff with real line numbers using `git diff --no-index --no-ext-diff --no-textconv /dev/null <file>`. It exits with status 1 when it prints a diff, which is expected. The rest of the workflow treats this like any other diff.
+- **Defer `--verify` Throwaway Checkouts to Step 2c**: Do not create `--verify` throwaway checkouts or run dependency installs in Step 1. Those happen in Step 2c only after the Step 2a Pre-Execution Security Gate clears the diff.
+- **Pin Base and Head SHAs**: Record `base_sha=$(git merge-base <base> HEAD)` (or `git rev-parse HEAD` for uncommitted working-tree changes against `HEAD`). Set `head_sha` to `git rev-parse HEAD` in the source repo (updated in Step 2c to `git -C "$pr_review_dir_a" rev-parse HEAD` when a `--verify` snapshot commit is created for local working-tree changes).
 - **Stage Diff Into Size-Bounded Chunks**: For any diff over 150 lines or 6 KB, create a temporary diff directory (`diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)`) and pipe the unified diff into `stage_diffs.py --grouped`:
   ```bash
   <diff command> | python3 <skill-dir>/../context-indexer/scripts/stage_diffs.py \
@@ -93,11 +93,27 @@ Pipe the changed file list into the classifier:
 
 It prints each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), the `rule` that matched, and the `rubric` to use. Group the files into a code partition and a document partition. If a classification is clearly wrong, override it and note why. If there are no document files, skip every document-specific instruction below: code-only reviews work as before. The rules are described in [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
 
-### Step 2: Context Enrichment, Tier 1 Verification, and Seed Hypotheses
+### Step 2: Pre-Execution Security Gate, Context Enrichment, Tier 1 Verification, and Seed Hypotheses
 
-Before reviewing the diffs, identify which additional files from the repository would be helpful to review for context.
-When reviewing a PR synced to a temporary directory, inspect the files directly in that temporary checkout.
-Consider:
+#### Step 2a: Pre-Execution Security Gate
+
+Before running any build step, toolchain dry-run, or repo-hosted validator script (Tier 1b), or building `--verify` throwaway checkouts and installing dependencies (Tier 2), evaluate the diff for local execution hazards per [verification.md](references/verification.md#pre-execution-security-gate):
+
+1. **Obtain Static Execution-Risk Pre-Scan**: If invoked by `pr-review` with `pr_coords.json` already generated, read `pr_coords.json.security_prescan` (and the `## Security & Execution Gate` section in `pr_description.md`). Otherwise, run the static scanner on the unified diff:
+   ```bash
+   python3 <skill-dir>/../pr-review/scripts/review_engine.py \
+     --security-scan <diff-file> \
+     --output-security-scan "$diff_dir/security_prescan.json"
+   ```
+2. **Audit Flagged Surfaces (Read-Only)**: Using only static file reads (`view_file` / `read_file` and `rg`) and Tier 1a checks, inspect every file and line in `security_prescan.signals`, along with any modified build manifests, git/shell hooks, linter plugin registrations, or test files.
+3. **Record the Gate Verdict**:
+   - `SAFE_FOR_LOCAL_EXECUTION`: No execution hazards exist, or all flagged signals are verified benign in context. Tier 1b commands and (when `--verify` is active for a trusted collaborator) Tier 2 checkouts, dependency installs, and tests are unlocked.
+   - `REQUIRES_USER_CONFIRMATION`: The diff modifies build scripts, package lifecycle hooks, linter plugins, or subprocess invocations that appear benign for the PR's stated purpose but alter code that local verification would execute. Pause and ask the user via `confirm_gate` (`genui`) or `ask_question` before running any Tier 1b or Tier 2 command. If declined, restrict verification to Tier 1a.
+   - `BLOCKED_UNSAFE`: The diff introduces command injection, credential or `.env` access, external network exfiltration, obfuscated execution payloads, or rogue hooks/scripts that would run during build or test. Skip all Tier 1b and Tier 2 execution regardless of `author_association`, restrict verification to Tier 1a, and seed a `critical` security hypothesis for Step 3.
+
+#### Step 2b: Context Enrichment and Tier 1a / Tier 1b Verification
+
+Identify which additional files from the repository would be helpful to review for context. When reviewing a PR synced to a temporary directory, inspect the files directly in that temporary checkout. Consider:
 
 - Files that are imported or referenced.
 - Parent classes or interfaces.
@@ -106,10 +122,17 @@ Consider:
 - **For public API changes**: sibling methods in modified classes, parent interfaces or base classes, error types, and existing call sites across the repository to understand expected conventions.
 - **For document files**: the files each changed document links to, the files that link to it (search for its repo-relative path), the governing spec or schema, and the code or tests the document describes.
 
-Then run **tier 1 verification** yourself, so the reviewer can spend its effort on the review. Tier 1 is read-only and always on. It covers CI status and failed-job logs for PRs, analyzers and linters in check mode on the changed files, toolchain dry-run or task-graph queries, and repo doc validators for document files. Use only tools that are already installed. For in-place runs, compare `git status --porcelain` before and after. Collect the output for the reviewer prompt (cap inline output at 1 KB, failing lines first; if longer, write the full output to `$diff_dir/tier1.log`, creating `$diff_dir` with `mktemp -d -t pr-review-diffs-XXXXXX` if needed, and cite the path). Commands and rules are in [verification.md](references/verification.md#tier-1-commands).
+Then run **Tier 1 verification** yourself, so the reviewer can spend its effort on the review:
 
-Next, write **a few Seed Hypotheses** from the diff stat, the context files, and the tier 1 output—specific, falsifiable claims (one line each) per [evidence.md](references/evidence.md#hypotheses). On diffs over 500 lines where `duckdb` is installed, query `$diff_dir` with [../context-indexer/scripts/staged_diff_macros.sql](../context-indexer/scripts/staged_diff_macros.sql) (`diff_untested_functions`, `diff_signature_drift`, and `diff_entity_churn`; see [splitting_reviews.md](references/splitting_reviews.md#tooling-support)) to seed hypotheses around high-churn functions, changed signatures, and untested changes. Under `--panel`, label each hypothesis with its lane (`[A]` for correctness, state, edge cases, and tests; `[B]` for wiring, security, API, performance, and dependencies). Under `--verify`, mark which hypotheses a mutation run can settle. For deletion-heavy diffs, include hypotheses checking whether deleted symbols or deleted test coverage still exist in `HEAD` ([splitting_reviews.md](references/splitting_reviews.md#4-deletion-heavy-diffs)).
+- **Tier 1a (Static Analyzers, Linters & Remote Checks, Always On)**: Run CI status and failed-job queries for PRs (`gh pr checks`, `gh run view --log-failed`), isolated syntax parsing (`python3 -I -c "import ast..."`), and static analyzers or linters in check mode (`ruff check`, `ruff format --check`, `dart format --output=none`, `dart analyze`, `npx --no-install tsc --noEmit`, `npx --no-install eslint`). If the PR diff modifies a linter or analyzer's own executable config or plugin registration (`eslint.config.*`, `.eslintrc*`, `tsconfig*.json` `plugins`, `analysis_options.yaml` `plugins`), that specific tool promotes to Tier 1b and runs only after `SAFE_FOR_LOCAL_EXECUTION`.
+- **Tier 1b (Build Steps, Toolchain Dry-Runs & Repo Scripts, Post-Security-Gate Only)**: Only when Step 2a recorded `SAFE_FOR_LOCAL_EXECUTION` (or user-approved `REQUIRES_USER_CONFIRMATION`), run toolchain dry-run or task-graph queries (`swift build`, `make -n`, `bazel query`, `gradle tasks`), repo-hosted document validator scripts (`python3 -I <script>`), and any config-modified Tier 1a analyzer or linter.
 
+Use only tools that are already installed. For in-place runs, compare `git -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain` before and after. Collect the output for the reviewer prompt (cap inline output at 1 KB, failing lines first; if longer, write the full output to `$diff_dir/tier1.log`, creating `$diff_dir` with `mktemp -d -t pr-review-diffs-XXXXXX` if needed, and cite the path). Commands and rules are in [verification.md](references/verification.md#tier-1-commands).
+
+#### Step 2c: Throwaway Checkouts for `--verify` and Seed Hypotheses
+
+- **Throwaway Checkouts for `--verify`**: Only when `--verify` is active, the author trust check passed (`OWNER`, `MEMBER`, or `COLLABORATOR`), and Step 2a cleared local execution (`SAFE_FOR_LOCAL_EXECUTION` or user-approved `REQUIRES_USER_CONFIRMATION`), create `$pr_review_dir_a` with the working-tree changes applied and commit a review snapshot following [verification.md](references/verification.md#throwaway-checkout). For local working-tree changes, update `head_sha` to `git -C "$pr_review_dir_a" rev-parse HEAD` (the review snapshot commit) and note in the prompt that the top commit is the review snapshot so `git diff $base_sha $head_sha` inside the checkout covers the change under review. Under `--panel --verify`, after building `$pr_review_dir_a` (including any dependency install, passing `--ignore-scripts` on `npm ci` when lifecycle scripts are not required), create `$pr_review_dir_b` with `cp -a "$pr_review_dir_a/." "$pr_review_dir_b/"` per [verification.md](references/verification.md#per-reviewer-checkouts) so each lane gets its own isolated checkout.
+- **Seed Hypotheses**: Write **a few Seed Hypotheses** from the diff stat, the context files, the Step 2a security audit, and the Tier 1 output: specific, falsifiable claims (one line each) per [evidence.md](references/evidence.md#hypotheses). On diffs over 500 lines where `duckdb` is installed, query `$diff_dir` using `duckdb -batch -dark-mode -box -init` with [../context-indexer/scripts/staged_diff_macros.sql](../context-indexer/scripts/staged_diff_macros.sql) (`diff_untested_functions`, `diff_signature_drift`, and `diff_entity_churn`; see [splitting_reviews.md](references/splitting_reviews.md#tooling-support)) to seed hypotheses around high-churn functions, changed signatures, and untested changes. Under `--panel`, label each hypothesis with its lane (`[A]` for correctness, state, edge cases, and tests; `[B]` for wiring, security, API, performance, and dependencies). Under `--verify`, mark which hypotheses a mutation run can settle. For deletion-heavy diffs, include hypotheses checking whether deleted symbols or deleted test coverage still exist in `HEAD` ([splitting_reviews.md](references/splitting_reviews.md#4-deletion-heavy-diffs)).
 - **Ruled out by the caller**: When the invoking prompt supplies hypotheses already disproved in a prior pass (for example, the `ship-it` review loop passing the previous pass's `## Checked and Found Clean` lines), include them under the seeds as `Ruled out last pass: …`. Instruct the reviewer to re-test a ruled-out line only if the current diff touches the lines it cites.
 
 _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_reviews.md) if the review needs to be subdivided._
@@ -121,7 +144,7 @@ Before analyzing the diff, select the highest available reviewer delegation tier
 - **Reviewer Delegation Hierarchy**:
   - **Fast In-Session Review (`--fast`)**: If the user passed `--fast`, do not spawn swarm workers or subagents. Conduct the review directly in the active session:
     1. Read [reviewer_mandate.md](references/reviewer_mandate.md), the unified diff (or diff chunks if large), and surrounding context files.
-    2. Run Tier 1 read-only checks (linters, static analyzers) if configured.
+    2. Run Tier 1a (and Tier 1b if Step 2a cleared local execution) read-only checks if not already run in Step 2b.
     3. Evaluate changes against the review criteria (Correctness, Concurrency, Edge Cases, Maintainability, Security, API Soundness, or Document lenses).
     4. Draft review findings using the `### <ID>. <short claim>` format with `Evidence`, `Why`, and `Suggestion` fields.
     5. Apply Step 4's self-critique truth filters ([critique_rules.md](references/critique_rules.md)) to the drafted findings, then proceed to Step 5 (Synthesis) without citation auditing or challenge loops.
@@ -200,12 +223,13 @@ Before analyzing the diff, select the highest available reviewer delegation tier
   ### Lane Assignment  (include only under --panel; see "Panel Review")
   <lane A or lane B block>
 
-  ### Verification Mandate  (include only under --verify for a trusted change)
+  ### Verification Mandate  (include only under --verify for a trusted change that passed the Step 2a Security Gate)
   - Your checkout: `<pr_review_dir_a or pr_review_dir_b>`. This checkout is reserved for you alone. Run tier 2 commands only there.
+  - Security-first ordering: Complete your read-only inspection of the diff (including Criterion 5: Security and reading the target test files with `view_file`) before running your first tier 2 command. Under `--panel --verify`, Reviewer A (Lane A) must also inspect each target test file and the production diff lines it exercises to confirm no external network calls, credential reads, or host-modifying commands are present before executing it. If you discover an unflagged execution hazard, abort tier 2 execution immediately and report the finding using `Read` or `Deduction` evidence.
   - Allowed: targeted existing tests, `review_scratch_*` repro tests, reverted single-line mutations, and dependency installs inside the checkout.
   - At most 8 commands in total, at most 3 of them mutations (`critical`/`high` falsification first). Every run counts. Before each command, name the finding or hypothesis it checks. Never run anything on the "Never run" list in `<skill-dir>/references/verification.md`.
-  - Mutation discipline: apply one mutation at a time, run only the targeted test, record `Evidence: Executed`, then `git restore <path>` so `git status --porcelain` shows only `review_scratch_*` files.
-  - Give confirmed findings `Evidence: Executed — <command> — <trimmed output, <=15 lines>`. Drop disproved findings and record them in `## Checked and Found Clean`.
+  - Mutation discipline: apply one mutation at a time, run only the targeted test, record `Evidence: Executed`, then `git -c core.hooksPath=/dev/null -c core.fsmonitor=false restore <path>` so `git -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain` shows only `review_scratch_*` files.
+  - Give confirmed findings `Evidence: Executed: <command>: <trimmed output, <=15 lines>`. Drop disproved findings and record them in `## Checked and Found Clean`.
 
   ### Report Format
   If running as a swarm worker (Tier 1), post your complete report on the board via `post_message` addressed strictly to `@coordinator` (never `@all` or a sibling reviewer) and call `swarm_wait` in the same turn. If running as a subagent (Tier 2), return your report via `send_message` (or subagent output). Use this exact structure:
@@ -324,7 +348,7 @@ Ensure that:
 Audit and combine the refined comments into the final output:
 
 - **Collect Reviewer Reports (Tier 1 `swarm`)**: When a worker wakes `@coordinator`, call `read_board` (with `since: <last_seq>` on later passes) to read the report(s) and record the latest `seq` cursor.
-- **Clean check (`--verify`)**: Before reading citations, run `git -C "$dir" status --porcelain` on `$pr_review_dir_a` (and `$pr_review_dir_b` under `--panel --verify`) per [verification.md](references/verification.md#orchestrator-clean-check). If anything other than `?? review_scratch_*` appears, restore tracked files (`git -C "$dir" restore .`), remove unexpected untracked files (`git -C "$dir" clean -fd -e 'review_scratch_*'`), note the leftover edit in the Summary, and audit all findings from that reviewer below.
+- **Clean check (`--verify`)**: Before reading citations, run `git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain` on `$pr_review_dir_a` (and `$pr_review_dir_b` under `--panel --verify`) per [verification.md](references/verification.md#orchestrator-clean-check). If anything other than `?? review_scratch_*` appears, restore tracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false restore .`), remove unexpected untracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false clean -fd -e 'review_scratch_*'`), note the leftover edit in the Summary, and audit all findings from that reviewer below.
 - **Citation audit**: For every `critical` and `high` finding (and all findings from a reviewer that failed the clean check), open the cited `path:line` (±10 lines) in the review workspace with `view_file`. If a quoted line, symbol, or signature does not match the file on disk, drop the finding or downgrade it to a Question, and audit the rest of that reviewer's findings regardless of severity. Record `"Citation audit: N checked, M dropped (…)"` in the Summary. If the working-tree guard caught an in-place tier 1 change, note that in the Summary as well.
 - **Reviewer challenge (`--challenge` only)**: When `--challenge` is active and a check refutes a `critical` or `high` finding, challenge that reviewer naming the finding ID and quoting the refuting evidence. Ask it to `"withdraw, or reply with evidence at a tier that supports the severity"`. Use `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, `resume: "<agentId>"` on Tier 2a, or `send_message` on Tier 2b. Allow at most one round trip per disputed reviewer. A reply that pivots to a different argument without supplying `Executed`, `Read`, `Fetched`, or line-cited `Deduction` evidence for the original claim counts as withdrawn. Note `"N disputed (M withdrawn, K upheld)"` in the Summary.
 - Deduplicate overlapping comments.
@@ -332,7 +356,7 @@ Audit and combine the refined comments into the final output:
 - Prioritize high-severity issues (critical, high).
 - **Number findings and Questions**: Put every finding under a `### <ID>. <short claim>` heading: `C1`, `C2`… for critical, `H1`… for high, `M1`… for medium, `L1`… for low, so the user can say "fix H2 and M1" later. Wording findings sort last within `low`. Number Questions in `## Questions` as `### Q1. <question>` through `Q3` (keep at most 3, choosing the ones with the highest stated stakes in `Why`).
 - **Checked and Found Clean merge**: Take the union of disproved hypotheses from the reviewer(s), deduplicate, drop any line that lacks a tier or disproving evidence, and cap at 10 lines.
-- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), the flags in effect (for example, "Flags: `--claude --panel --verify`"), and any trust limit (for example, "`--verify` limited to tier 1: PR author is not a repo collaborator"). End the Summary with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`; `lint_review.py --export-json` reads this label to set the exported verdict and falls back to finding severities when it is absent.
+- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), the flags in effect (for example, "Flags: `--claude --panel --verify`"), and any trust or security gate limit (for example, "`--verify` limited to tier 1a/1b: PR author is not a repo collaborator" or "`--verify` and tier 1b skipped: blocked by Pre-Execution Security Gate"). End the Summary with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`; `lint_review.py --export-json` reads this label to set the exported verdict and falls back to finding severities when it is absent.
 - **Structural Assessment**: When the diff has document files, put the `## Structural Assessment` section right after the Summary.
 - **Generate file summaries**: For reviews with multiple files, include `## Changed Files Summary` with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
 - **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
@@ -369,11 +393,11 @@ If any temporary directory was created for reviewing the PR, for `--verify` chec
 
 ### Step 7: Stop and Hand Off
 
-When running as a top-level review (not invoked by `pr-review` or `ship-it`) with 3 or more total findings and questions, and the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render a `triage_matrix` surface in the pane (`mode: "pane"`, `surfaceId: "review-triage"`). Pre-populate recommended buckets (`Fix now` for `critical` and `high`, `Follow-up` for `medium` and `low`, `Discuss` for `Questions`) with each finding's file/line anchor in `trace`. When `a2ui-pane` is not installed or fewer than 3 items exist, skip the pane render.
+When running as a top-level review (not invoked by `pr-review` or `ship-it`) with 3 or more total findings and questions, and the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render a `triage_matrix` surface in the pane (`mode: "pane"`, `surfaceId: "review-triage"`). Pre-populate recommended buckets (`Fix now` for `critical` and `high`, `Follow-up` for `medium` and `low`, `Discuss` for `Questions`) with each finding's file/line anchor in `trace`. When `a2ui-pane` is not installed or fewer than 3 items exist, skip the pane render. When the review includes a scored quality rubric summary across 3 or more evaluated criteria, read `genui` and render a `scorecard` surface in the pane (using `stack: true` if stacking with findings) displaying each rubric row's score, progress bar, and rationale.
 
 Send one short chat message, then **end the turn**. The message contains:
 
-- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed), plus `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` if you rendered the `triage_matrix` surface.
+- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed), plus `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` if you rendered a `triage_matrix` or `scorecard` surface.
 - The verdict (Ready / Minor Revisions Needed / Critical Blockers).
 - Finding counts by severity, plus question count (for example, "1 critical, 3 high, 2 medium, 4 low, 2 questions"). Questions never block the verdict.
 - One closing line: "Which findings should I address? (for example, `fix H1 to H3`, `fix all high`, or submit your selections in the A2UI Pane)".

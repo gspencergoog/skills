@@ -77,7 +77,7 @@ To give the human reviewer an unbiased view of what a PR actually does before th
 
 ### Stage 1: Blind Diff Description (`blind_description.md`)
 
-Derive `blind_description.md` **solely** from `pr.diff` and the surrounding code in the temporary checkout before fetching the PR title, description, or comments:
+Derive `blind_description.md` **solely** from `pr.diff`, `pr_coords.json.security_prescan`, and the surrounding code in the temporary checkout before fetching the PR title, description, or comments:
 
 ```markdown
 ## Summary
@@ -88,6 +88,11 @@ Derive `blind_description.md` **solely** from `pr.diff` and the surrounding code
 
 ## Quality Assessment
 <High-level assessment of code structure, test coverage, complexity, and adherence to codebase patterns.>
+
+## Security & Execution Gate
+- **Gate Verdict**: `<SAFE_FOR_LOCAL_EXECUTION | REQUIRES_USER_CONFIRMATION | BLOCKED_UNSAFE>`
+- **Static Pre-Scan**: `<clean | N signal(s) across M file(s) audited>`
+- **Execution Risk Notes**: <Audit of any flagged build/hook/linter configs, subprocess calls, network access, or test execution risks.>
 
 ## Changes
 - **`path/to/file.ext`**: <Concrete description of the behavioral or structural change.>
@@ -100,7 +105,7 @@ Derive `blind_description.md` **solely** from `pr.diff` and the surrounding code
 
 After running `review_engine.py --fetch-context`, compare `blind_description.md` against `pr_context.json` (the author's PR title, body, general comments, reviews, and `threads`) and produce `pr_description.md`:
 
-1. **Preserve the Stage 1 blind prose verbatim**: Copy the sections and bullet points of `blind_description.md` (`## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Changes`, and `## Reviewer Focus & Risks`) unchanged into `pr_description.md`. Do **not** rewrite, delete, or soften the Stage 1 diff-derived text to match the author's framing.
+1. **Preserve the Stage 1 blind prose verbatim**: Copy the sections and bullet points of `blind_description.md` (`## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, `## Changes`, and `## Reviewer Focus & Risks`) unchanged into `pr_description.md`. Do **not** rewrite, delete, or soften the Stage 1 diff-derived text to match the author's framing.
 2. **Prepend an `## Intent Alignment: <Status>` section** at the top of `pr_description.md` using one of four status labels:
    - `## Intent Alignment: Matches Stated Purpose` — The code changes match the PR title and description with no unstated side effects or missing claims.
    - `## Intent Alignment: Partial Divergence` — The code mostly implements the stated purpose but includes unmentioned behavior changes, leaves out a claimed change, or differs in scope.

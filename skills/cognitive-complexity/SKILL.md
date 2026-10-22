@@ -110,6 +110,7 @@ python3 scripts/cognitive_complexity.py <target_file> -f json -v
 Check `functions_exceeding_threshold` in the summary or review any functions with score $> 15$.
 
 - When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool) and the analysis covers 4 or more non-trivial functions (or compares before-and-after refactoring scores across 3 or more functions), read the `genui` skill and render a `horizontal-bar` `Chart` of the top hotspot functions (`mode: "inline"` with `height: 190` when compact under 500px, or `metrics_dashboard` in `mode: "pane"` for larger multi-file audits) alongside the Markdown summary. Skip the chart when analyzing 1 to 3 functions or when `a2ui-pane` is not installed.
+- When per-function scores are reported across 3 or more functions and `a2ui-pane` is available, read `genui` and render a `scorecard` surface in the pane showing each function's complexity score, progress bar against the threshold, tone badge, and collapsible breakdown rationale.
 
 ### Step 3: Inspect the Diagnostic Audit Trail
 

@@ -124,7 +124,7 @@ WHERE level <= 2;
 "
 ```
 
-For quick ad hoc section outlines on a single Markdown file (`>= 350` lines) without staging JSONL files, load `skills/duckdb/scripts/markdown_macros.sql` and query `read_md_sections('path/to/spec.md')`.
+For quick ad hoc section outlines on a single Markdown file (`>= 350` lines) without staging JSONL files, run `duckdb -batch -dark-mode -box -init <skills-directory>/duckdb/scripts/markdown_macros.sql` and query `read_md_sections('path/to/spec.md')`.
 
 ## How to Combine Subdivided Reviews
 

