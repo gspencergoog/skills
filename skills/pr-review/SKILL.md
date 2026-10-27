@@ -149,26 +149,35 @@ Follow these steps in order when reviewing a pull request:
 ### Step 4: Emit Annotated Description in Chat & Launch Dashboard
 
 1. **Emit the Annotated PR Description in Chat**:
-   Output the full contents of `<conversation-scratch-dir>/pr_description.md` directly in your conversation response so the user can read the unbiased summary, intent alignment verdict, quality assessment, and inline annotations in chat before switching to the browser.
-2. **Start Dashboard Server as a Background Task**:
-   Launch `launch_dashboard.py` with `--description-file`:
-   ```bash
-   python3 scripts/launch_dashboard.py \
-     --findings-file <conversation-scratch-dir>/review_findings.json \
-     --meta-file <conversation-scratch-dir>/pr_meta.json \
-     --description-file <conversation-scratch-dir>/pr_description.md \
-     --output-file <conversation-scratch-dir>/review_decisions.json
-   ```
-   Set `WaitMsBeforeAsync` to `1000` so the server runs in the background.
-   - If the output shows `Warning: pr_metadata.<field> is missing`, stop the task, fix `pr_meta.json` or the findings file, and relaunch. The dashboard disables Submit until `owner`, `repo`, `pull_number`, and `head_sha` are present.
+   Output the full contents of `<conversation-scratch-dir>/pr_description.md` directly in your conversation response so the user can read the unbiased summary, intent alignment verdict, quality assessment, and inline annotations in chat before reviewing the findings. In **Pane Mode**, always include a link to open the side panel (e.g. `[Open PR Review](sidecar://review-dashboards/pr-review)`) in this chat response so the user can easily open or bring the dashboard pane into view.
+2. **Open the Dashboard**:
+   - **Pane Mode (Preferred when `review-dashboards` MCP tools are available)**:
+     Call `open_pr_review_dashboard` (native tool or via `call_mcp_tool` on the `review-dashboards` server) with:
+     - `findings_file`: `<conversation-scratch-dir>/review_findings.json`
+     - `meta_file`: `<conversation-scratch-dir>/pr_meta.json`
+     - `description_file`: `<conversation-scratch-dir>/pr_description.md`
+     - `output_file`: `<conversation-scratch-dir>/review_decisions.json`
+     If the returned `warnings` array lists missing `pr_metadata` fields, fix `pr_meta.json` or the findings file and call `open_pr_review_dashboard` again. If `hosted` is `false`, fall back to Browser Mode below. Always accompany the chat response with a clickable link to open or toggle the side panel: `[Open PR Review](sidecar://review-dashboards/pr-review)`.
+   - **Browser Mode (Fallback when MCP tools are unavailable or `hosted: false`)**:
+     Launch `launch_dashboard.py` with `--description-file`:
+     ```bash
+     python3 scripts/launch_dashboard.py \
+       --findings-file <conversation-scratch-dir>/review_findings.json \
+       --meta-file <conversation-scratch-dir>/pr_meta.json \
+       --description-file <conversation-scratch-dir>/pr_description.md \
+       --output-file <conversation-scratch-dir>/review_decisions.json
+     ```
+     Set `WaitMsBeforeAsync` to `1000` so the server runs in the background.
+     If the output shows `Warning: pr_metadata.<field> is missing`, stop the task, fix `pr_meta.json` or the findings file, and relaunch. The dashboard disables Submit until `owner`, `repo`, `pull_number`, and `head_sha` are present.
    - The annotated PR description appears in a formatted Markdown card at the top of the dashboard for reviewer context only (`apply_review.py` never posts it; its text is included only if the user clicks **+ Insert into Review Summary**).
    - Every finding starts unchecked. The user checks the ones to post, one at a time or with **Approve all shown**.
 3. **Wait for Completion**:
-   Stop calling tools and go idle. The launcher opens the review UI in the user's browser and waits until they click **"Submit Review to GitHub"** or **"Abort Review"**.
-4. **Verify Exit Status**:
-   - If the task exited with status `0` (saved), proceed to Step 5.
-   - If the task exited with status `1` (aborted by user), clean up the temporary workspace and stop without contacting GitHub.
-   - If the task exited with status `2` (startup or file validation error), inspect `stderr`, fix the missing or malformed file, and relaunch the dashboard.
+   Stop calling tools and go idle.
+   - In **Pane Mode**, tell the user the dashboard is open in the side pane, include the clickable side panel link (`[Open PR Review](sidecar://review-dashboards/pr-review)`), and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
+   - In **Browser Mode**, the launcher opens the review UI in the user's browser and waits until they click **"Submit Review to GitHub"** or **"Abort Review"**.
+4. **Verify Status**:
+   - In **Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"`, proceed to Step 5; if `status` is `"aborted"`, clean up the temporary workspace and stop without contacting GitHub.
+   - In **Browser Mode**, check the background task exit code: if `0` (saved), proceed to Step 5; if `1` (aborted by user), clean up the temporary workspace and stop without contacting GitHub; if `2` (startup or file validation error), inspect `stderr`, fix the missing or malformed file, and relaunch the dashboard.
 
 ---
 
@@ -201,7 +210,7 @@ Follow these steps in order when reviewing a pull request:
 - **[findings_schema.md](references/findings_schema.md)**: Fields of `review_findings.json`, `review_decisions.json`, `pr_coords.json`, and `pr_context.json`.
 - **`scripts/diff_parser.py`**: Unified diff parser and diff hunk line validator.
 - **`scripts/review_engine.py`**: Two-stage workspace preparer (`--prepare-workspace`, with hardened git config, static execution-risk pre-scanning into `pr_coords.json.security_prescan` or `--security-scan`, and GitHub stack detection via `gh stack view --json` into `--output-stack`), context fetcher (`--fetch-context` with `--require-blind-description` and `--input-stack`), and cleanup utility.
-- **`scripts/launch_dashboard.py`**: Local HTTP server for the interactive review dashboard. Normalizes findings and merges `--meta-file` and `--description-file`.
+- **`scripts/launch_dashboard.py`**: Local HTTP server and `--dump-json` data normalizer for the interactive review dashboard. Normalizes findings and merges `--meta-file` and `--description-file`.
 - **`assets/review_dashboard.html`**: Interactive dark-themed single-page review dashboard with a top-level Blind Diff Description & Intent Alignment card.
 - **`scripts/apply_review.py`**: Submits batched review payloads to the GitHub Reviews API with hybrid comment routing.
 

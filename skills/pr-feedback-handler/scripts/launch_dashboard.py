@@ -158,6 +158,74 @@ def check_git_state(project_dir, expected_branch, expected_repo, head_ref_oid=No
     }
 
 
+def expected_pr_identity(report_data):
+    """Extracts (expected_branch, expected_repo, head_ref_oid) from pr_comments.json data."""
+    pr_obj = report_data.get("pr") if isinstance(report_data.get("pr"), dict) else {}
+    expected_branch = (
+        report_data.get("headRefName")
+        or pr_obj.get("headRef")
+        or pr_obj.get("headRefName")
+        or ""
+    )
+    head_ref_oid = report_data.get("headRefOid", "")
+    expected_repo = report_data.get("repo", "")
+    if not expected_repo and pr_obj:
+        pr_url = pr_obj.get("url", "")
+        m = re.search(r"github\.com/([^/]+/[^/]+)/pull", pr_url)
+        if m:
+            expected_repo = m.group(1)
+    return expected_branch, expected_repo, head_ref_oid
+
+
+def build_comments_payload(data_dir, proposals_file=None, project_dir="."):
+    """Loads pr_comments.json, merges proposals.json if present, and attaches gitState."""
+    comments_path = os.path.join(data_dir, "pr_comments.json")
+    if not os.path.exists(comments_path):
+        raise FileNotFoundError(f"PR comments data not found ({comments_path}).")
+
+    with open(comments_path, "r", encoding="utf-8") as f:
+        report_data = json.load(f)
+
+    proposals_path = proposals_file if proposals_file else os.path.join(data_dir, "proposals.json")
+    if os.path.exists(proposals_path):
+        try:
+            with open(proposals_path, "r", encoding="utf-8") as pf:
+                proposals_data = json.load(pf)
+            proposals_map = {}
+            if isinstance(proposals_data, dict):
+                if "proposals" in proposals_data and isinstance(proposals_data["proposals"], dict):
+                    proposals_map = proposals_data["proposals"]
+                else:
+                    proposals_map = proposals_data
+            elif isinstance(proposals_data, list):
+                for item in proposals_data:
+                    if isinstance(item, dict) and "threadId" in item:
+                        proposals_map[item["threadId"]] = item
+
+            for thread in report_data.get("threads", []):
+                tid = thread.get("id")
+                if tid and tid in proposals_map:
+                    proposal = proposals_map[tid]
+                    if isinstance(proposal, dict):
+                        if "proposedFix" in proposal:
+                            thread["proposedFix"] = proposal["proposedFix"]
+                        if "draftReply" in proposal:
+                            thread["draftReply"] = proposal["draftReply"]
+                        if "action" in proposal:
+                            thread["action"] = proposal["action"]
+                        if "assessment" in proposal:
+                            thread["rating"] = proposal["assessment"]
+                        elif "rating" in proposal:
+                            thread["rating"] = proposal["rating"]
+        except Exception:
+            pass
+
+    expected_branch, expected_repo, head_ref_oid = expected_pr_identity(report_data)
+    git_state = check_git_state(project_dir, expected_branch, expected_repo, head_ref_oid)
+    report_data["gitState"] = git_state
+    return report_data
+
+
 class DashboardHandler(http.server.BaseHTTPRequestHandler):
     data_dir = os.path.expanduser("~/.gemini/jetski/scratch")
     project_dir = "."
@@ -184,51 +252,9 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
             try:
                 comments_path = os.path.join(self.data_dir, "pr_comments.json")
                 if os.path.exists(comments_path):
-                    with open(comments_path, "r", encoding="utf-8") as f:
-                        report_data = json.load(f)
-                    
-                    # Merge proposals.json overlay if present
-                    proposals_path = self.proposals_file if self.proposals_file else os.path.join(self.data_dir, "proposals.json")
-                    if os.path.exists(proposals_path):
-                        try:
-                            with open(proposals_path, "r", encoding="utf-8") as pf:
-                                proposals_data = json.load(pf)
-                            proposals_map = {}
-                            if isinstance(proposals_data, dict):
-                                if "proposals" in proposals_data and isinstance(proposals_data["proposals"], dict):
-                                    proposals_map = proposals_data["proposals"]
-                                else:
-                                    proposals_map = proposals_data
-                            elif isinstance(proposals_data, list):
-                                for item in proposals_data:
-                                    if isinstance(item, dict) and "threadId" in item:
-                                        proposals_map[item["threadId"]] = item
-
-                            for thread in report_data.get("threads", []):
-                                tid = thread.get("id")
-                                if tid and tid in proposals_map:
-                                    proposal = proposals_map[tid]
-                                    if isinstance(proposal, dict):
-                                        if "proposedFix" in proposal:
-                                            thread["proposedFix"] = proposal["proposedFix"]
-                                        if "draftReply" in proposal:
-                                            thread["draftReply"] = proposal["draftReply"]
-                                        if "action" in proposal:
-                                            thread["action"] = proposal["action"]
-                                        if "assessment" in proposal:
-                                            thread["rating"] = proposal["assessment"]
-                                        elif "rating" in proposal:
-                                            thread["rating"] = proposal["rating"]
-                        except Exception:
-                            pass
-
-                    expected_branch = report_data.get("headRefName", "")
-                    expected_repo = report_data.get("repo", "")
-                    head_ref_oid = report_data.get("headRefOid", "")
-                    git_state = check_git_state(self.project_dir, expected_branch, expected_repo, head_ref_oid)
-                    
-                    report_data["gitState"] = git_state
-                    
+                    report_data = build_comments_payload(
+                        self.data_dir, self.proposals_file, self.project_dir
+                    )
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -254,14 +280,7 @@ class DashboardHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     with open(comments_path, "r", encoding="utf-8") as f:
                         report_data = json.load(f)
-                    expected_branch = report_data.get("headRefName") or report_data.get("pr", {}).get("headRef") or report_data.get("pr", {}).get("headRefName", "")
-                    head_ref_oid = report_data.get("headRefOid", "")
-                    expected_repo = report_data.get("repo", "")
-                    if not expected_repo and isinstance(report_data.get("pr"), dict):
-                        pr_url = report_data["pr"].get("url", "")
-                        m = re.search(r'github\.com/([^/]+/[^/]+)/pull', pr_url)
-                        if m:
-                            expected_repo = m.group(1)
+                    expected_branch, expected_repo, head_ref_oid = expected_pr_identity(report_data)
                 except Exception:
                     pass
 
@@ -582,6 +601,8 @@ def main():
     parser.add_argument("--auto-approve", "--auto", dest="auto_approve", action="store_true", help="Automatically approve all proposed fixes and draft replies, writing feedback_state.json without launching the dashboard server.")
     parser.add_argument("--proposals-file", default=None, help="Path to proposals.json overlay file (defaults to <data-dir>/proposals.json).")
     parser.add_argument("--url-file", default=None, help="Path to write active dashboard URL to (defaults to <data-dir>/dashboard_url.txt).")
+    parser.add_argument("--dump-json", action="store_true", help="Print normalized comments + proposals + gitState payload as JSON and exit.")
+    parser.add_argument("--git-state-json", action="store_true", help="Print check_git_state JSON for the PR in data-dir and exit.")
     args = parser.parse_args()
     
     # Resolve path
@@ -589,6 +610,7 @@ def main():
     os.makedirs(resolved_data_dir, exist_ok=True)
     resolved_proposals_file = os.path.abspath(os.path.expanduser(args.proposals_file)) if args.proposals_file else None
     resolved_url_file = os.path.abspath(os.path.expanduser(args.url_file)) if args.url_file else os.path.join(resolved_data_dir, "dashboard_url.txt")
+    resolved_project_dir = os.path.abspath(os.path.expanduser(args.project_dir))
     
     # Pre-flight check: Ensure pr_comments.json exists and is valid JSON
     comments_path = os.path.join(resolved_data_dir, "pr_comments.json")
@@ -599,10 +621,21 @@ def main():
         
     try:
         with open(comments_path, "r", encoding="utf-8") as f:
-            json.load(f)
+            report_data = json.load(f)
     except Exception as e:
         print(f"Error: Failed to parse '{comments_path}' as valid JSON: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if args.dump_json:
+        payload = build_comments_payload(resolved_data_dir, resolved_proposals_file, resolved_project_dir)
+        print(json.dumps(payload), flush=True)
+        sys.exit(0)
+
+    if args.git_state_json:
+        expected_branch, expected_repo, head_ref_oid = expected_pr_identity(report_data)
+        git_state = check_git_state(resolved_project_dir, expected_branch, expected_repo, head_ref_oid)
+        print(json.dumps(git_state), flush=True)
+        sys.exit(0)
     
     # Artifact Mode Check
     if args.mode == "artifact":

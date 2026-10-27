@@ -421,7 +421,7 @@ def run_dashboard_server(
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Launch interactive PR review dashboard.")
     parser.add_argument("--findings-file", required=True, help="Path to review_findings.json.")
-    parser.add_argument("--output-file", required=True, help="Path to save review_decisions.json.")
+    parser.add_argument("--output-file", help="Path to save review_decisions.json.")
     parser.add_argument(
         "--meta-file",
         help="Path to pr_meta.json from review_engine.py; fills PR metadata missing from the findings file.",
@@ -430,19 +430,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--description-file",
         help="Path to pr_description.md containing the blind-first PR description and intent annotations.",
     )
+    parser.add_argument(
+        "--dump-json",
+        action="store_true",
+        help="Print normalized review payload (plus _warnings) as JSON to stdout and exit.",
+    )
     parser.add_argument("--port", type=int, default=0, help="Port to bind (default: random free port).")
     parser.add_argument("--no-browser", action="store_true", help="Do not automatically open browser.")
     args = parser.parse_args(argv)
 
+    if not args.dump_json and not args.output_file:
+        print("Error: --output-file is required unless --dump-json is set.", file=sys.stderr)
+        return 2
+
     findings_file = Path(args.findings_file)
-    output_file = Path(args.output_file)
+    output_file = Path(args.output_file) if args.output_file else Path("review_decisions.json")
     meta_file = Path(args.meta_file) if args.meta_file else None
     description_file = Path(args.description_file) if args.description_file else None
 
     script_dir = Path(__file__).resolve().parent
     html_template_path = script_dir.parent / "assets" / "review_dashboard.html"
 
-    if not html_template_path.is_file():
+    if not args.dump_json and not html_template_path.is_file():
         print(f"Error: Dashboard HTML template does not exist: {html_template_path}", file=sys.stderr)
         return 2
     if not findings_file.is_file():
@@ -455,10 +464,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: Description file does not exist: {description_file}", file=sys.stderr)
         return 2
     try:
-        load_review_data(findings_file, meta_file, description_file)
+        normalized, warnings = load_review_data(findings_file, meta_file, description_file)
     except (OSError, ValueError) as e:
         print(f"Error: Could not read review data: {e}", file=sys.stderr)
         return 2
+
+    if args.dump_json:
+        out = dict(normalized)
+        out["_warnings"] = warnings
+        print(json.dumps(out))
+        sys.stdout.flush()
+        return 0
 
     return run_dashboard_server(
         findings_file=findings_file,

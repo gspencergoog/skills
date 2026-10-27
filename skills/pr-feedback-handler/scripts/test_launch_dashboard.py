@@ -977,6 +977,73 @@ class TestAutoApproveMode(unittest.TestCase):
         self.assertEqual(cm.exception.code, 0)
         self.assertTrue(os.path.exists(self.state_file))
 
+    def test_build_comments_payload_and_expected_pr_identity(self):
+        from launch_dashboard import build_comments_payload, expected_pr_identity
+        with open(self.proposals_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "proposals": {
+                    "t1": {
+                        "proposedFix": "Fix foo",
+                        "draftReply": "Fixed foo.",
+                        "action": "accept",
+                        "assessment": "solid",
+                    }
+                }
+            }, f)
+
+        payload = build_comments_payload(self.data_dir, self.proposals_file, ".")
+        self.assertEqual(payload["threads"][0]["proposedFix"], "Fix foo")
+        self.assertEqual(payload["threads"][0]["draftReply"], "Fixed foo.")
+        self.assertEqual(payload["threads"][0]["action"], "accept")
+        self.assertEqual(payload["threads"][0]["rating"], "solid")
+        self.assertIn("gitState", payload)
+
+        # Fallback extraction when only pr.url and pr.headRef are present
+        branch, repo, oid = expected_pr_identity({
+            "pr": {
+                "url": "https://github.com/octocat/hello-world/pull/99",
+                "headRef": "feat/url-fallback",
+            },
+            "headRefOid": "deadbeef",
+        })
+        self.assertEqual(branch, "feat/url-fallback")
+        self.assertEqual(repo, "octocat/hello-world")
+        self.assertEqual(oid, "deadbeef")
+
+    def test_dump_json_and_git_state_json_cli(self):
+        import io
+        from contextlib import redirect_stdout
+        from launch_dashboard import main
+
+        buf = io.StringIO()
+        with patch("sys.argv", ["launch_dashboard.py", "--data-dir", self.data_dir, "--project-dir", ".", "--dump-json"]), \
+             patch("sys.exit", side_effect=lambda code=0: (_ for _ in ()).throw(SystemExit(code))), \
+             redirect_stdout(buf):
+            with self.assertRaises(SystemExit) as cm:
+                main()
+            self.assertEqual(cm.exception.code, 0)
+        dumped = json.loads(buf.getvalue())
+        self.assertEqual(dumped["repo"], "owner/repo")
+        self.assertIn("gitState", dumped)
+
+        buf2 = io.StringIO()
+        with patch("sys.argv", ["launch_dashboard.py", "--data-dir", self.data_dir, "--project-dir", ".", "--git-state-json"]), \
+             patch("sys.exit", side_effect=lambda code=0: (_ for _ in ()).throw(SystemExit(code))), \
+             redirect_stdout(buf2):
+            with self.assertRaises(SystemExit) as cm2:
+                main()
+            self.assertEqual(cm2.exception.code, 0)
+        git_state = json.loads(buf2.getvalue())
+        self.assertIn("isDirty", git_state)
+
+        missing_dir = os.path.join(self.data_dir, "empty_sub")
+        os.makedirs(missing_dir, exist_ok=True)
+        with patch("sys.argv", ["launch_dashboard.py", "--data-dir", missing_dir, "--dump-json"]), \
+             patch("sys.exit", side_effect=lambda code=0: (_ for _ in ()).throw(SystemExit(code))):
+            with self.assertRaises(SystemExit) as cm3:
+                main()
+            self.assertEqual(cm3.exception.code, 1)
+
 
 if __name__ == '__main__':
     unittest.main()

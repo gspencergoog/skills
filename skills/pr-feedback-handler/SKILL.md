@@ -115,7 +115,9 @@ ______________________________________________________________________
 
 5. **Launch Dashboard or Auto-Approve**:
 
-   - **Interactive Web Mode (Default)**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
+   - **Interactive Pane Mode (Preferred when `review-dashboards` MCP tools are available)**: Call `open_pr_feedback_dashboard` (native tool or via `call_mcp_tool` on the `review-dashboards` server) with `data_dir` (`<conversation-scratch-directory>`), `project_dir` (`<path-to-target-workspace-directory>`), `proposals_file` (`<conversation-scratch-directory>/proposals.json`), and `allow_dirty: true` only when the user explicitly asked for it (the tool refuses a dirty workspace otherwise, matching the launcher's pre-flight check). If the result reports `hosted: false`, fall back to Interactive Web Mode below.
+
+   - **Interactive Web Mode (Fallback when MCP tools are unavailable or `hosted: false`)**: Start the standalone dashboard app as a background task, pointing it to the target workspace directory and conversation scratch directory:
 
      ```bash
      env -u GITHUB_TOKEN python3 scripts/launch_dashboard.py \
@@ -141,7 +143,10 @@ ______________________________________________________________________
 
    - *Artifact Mode & A2UI Fallback*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`). When the dashboard is unavailable and the `a2ui-pane` plugin is installed, read the `genui` skill and render thread dispositions using `decision_batch` so the user can interactively review and confirm each thread's disposition.
 
-6. **Wait for Completion (Interactive Mode Only)**: In interactive mode, stop calling tools and go idle. The launcher will automatically merge `proposals.json` into the review UI, open the browser for the user (when local), and block until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status. In auto-approve mode, this step is skipped.
+6. **Wait for Completion (Interactive Mode Only)**: In interactive mode, stop calling tools and go idle.
+   - In **Interactive Pane Mode**, tell the user the dashboard is open in the side pane and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
+   - In **Interactive Web Mode**, the launcher automatically merges `proposals.json` into the review UI, opens the browser for the user (when local), and blocks until they click "Save & Apply Plan" or "Abort". Once submitted, you will receive a notification with the command's exit status.
+   - In auto-approve mode, this step is skipped.
 
 ______________________________________________________________________
 
@@ -149,10 +154,10 @@ ______________________________________________________________________
 
 Once the dashboard review completes (or auto-approved):
 
-1. **Verify Exit Status**:
+1. **Verify Status**:
 
-   - If the task exited with status `0` (success), proceed to implement the fixes.
-   - If the task exited with a non-zero status (e.g., `1` for Abort), stop and ask the user for further instructions.
+   - In **Interactive Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"` (equivalent to exit status `0`), proceed to implement the fixes; if `status` is `"aborted"` (equivalent to exit status `1`), stop and ask the user for further instructions.
+   - In **Interactive Web Mode**, if the task exited with status `0` (success), proceed to implement the fixes; if the task exited with a non-zero status (e.g., `1` for Abort), stop and ask the user for further instructions.
 
 2. **Read the Plan**: Read `feedback_state.json` from your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/feedback_state.json`).
 
@@ -205,5 +210,5 @@ ______________________________________________________________________
 
 - **`scripts/scaffold_proposals.py`**: Generates pre-populated `proposals.json` templates from `pr_comments.json` with terminal summary output.
 - **`scripts/update_thread.py`**: Bulk posts replies to and resolves approved PR review threads on GitHub.
-- **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, remote SSH/Cloud detection, URL file emission, and markdown artifact export.
+- **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, `--dump-json` and `--git-state-json` JSON modes for the MCP App host, remote SSH/Cloud detection, URL file emission, and markdown artifact export.
 - **`assets/pr_feedback.html`**: Interactive dark-themed web dashboard with tabs for inline comments, top-level reviews, conversation comments, CI failures (with check annotations), and active checks.

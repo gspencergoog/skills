@@ -275,6 +275,47 @@ class TestLaunchDashboard(unittest.TestCase):
         ])
         self.assertEqual(rc, 2)
 
+    def test_main_dump_json_prints_normalized_payload(self):
+        meta_file = self.tmp_path / "pr_meta.json"
+        meta_file.write_text(
+            json.dumps({
+                "owner": "octocat",
+                "repo": "hello-world",
+                "pull_number": 42,
+                "head_sha": "pinned_sha_123",
+                "title": "Fix bug",
+            }),
+            encoding="utf-8",
+        )
+        desc_file = self.tmp_path / "pr_description.md"
+        desc_file.write_text("## Intent Alignment: Matches Stated Purpose\n\nBody.", encoding="utf-8")
+
+        import io
+        from contextlib import redirect_stdout
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main([
+                "--dump-json",
+                "--findings-file", str(self.findings_file),
+                "--meta-file", str(meta_file),
+                "--description-file", str(desc_file),
+                "--output-file", str(self.output_file),
+            ])
+        self.assertEqual(rc, 0)
+        dumped = json.loads(buf.getvalue())
+        self.assertEqual(dumped["pr_metadata"]["owner"], "octocat")
+        self.assertEqual(dumped["pr_description"]["alignment"], "MATCHES")
+        self.assertEqual(dumped["_warnings"], [])
+        self.assertEqual(len(dumped["findings"]), 1)
+
+    def test_main_dump_json_returns_2_on_missing_findings(self):
+        rc = main([
+            "--dump-json",
+            "--findings-file", str(self.tmp_path / "missing.json"),
+        ])
+        self.assertEqual(rc, 2)
+
 
 class TestNormalizeReviewData(unittest.TestCase):
 

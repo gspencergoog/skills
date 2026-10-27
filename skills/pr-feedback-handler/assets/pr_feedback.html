@@ -595,6 +595,68 @@
     let feedbackData = null;
     const decisions = {};
 
+    function httpDashboardHost() {
+      return {
+        kind: 'http',
+        async load() {
+          const response = await fetch('/api/comments');
+          if (!response.ok) {
+            throw new Error('Failed to load comments');
+          }
+          return response.json();
+        },
+        async save(payload) {
+          const response = await fetch('/api/save', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+          if (!response.ok) {
+            throw new Error('Failed to save decisions to workspace');
+          }
+          return response.json();
+        },
+        async abort() {
+          const response = await fetch('/api/abort', {
+            method: 'POST'
+          });
+          if (!response.ok) {
+            throw new Error('Failed to abort');
+          }
+        },
+        subscribeGitState(onState) {
+          const eventSource = new EventSource('/api/git-events');
+          eventSource.onmessage = (event) => {
+            try {
+              const gitState = JSON.parse(event.data);
+              onState(gitState);
+            } catch (e) {
+              console.error("Error parsing git events:", e);
+            }
+          };
+          eventSource.onerror = (err) => {
+            console.error("EventSource failed:", err);
+          };
+          return () => eventSource.close();
+        }
+      };
+    }
+
+    const dashboardHost = window.__dashboardHost || httpDashboardHost();
+
+    function showDoneOverlay(innerHtml) {
+      let overlay = document.getElementById('dashboard-done');
+      if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'dashboard-done';
+        overlay.style.cssText = 'position: fixed; inset: 0; z-index: 9999; background-color: #0f1115; overflow-y: auto;';
+        document.body.appendChild(overlay);
+      }
+      overlay.innerHTML = innerHtml;
+    }
+
     // Allowed decision values. Unknown values from a hand-edited
     // proposals.json fall back to the first entry of each list.
     const ACTIONS = ['accept', 'clarify', 'decline'];
@@ -689,11 +751,7 @@
 
     async function loadComments() {
       try {
-        const response = await fetch('/api/comments');
-        if (!response.ok) {
-          throw new Error('Failed to load comments');
-        }
-        feedbackData = await response.json();
+        feedbackData = await dashboardHost.load();
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
         
         document.getElementById('comments-count').textContent = (feedbackData.threads || []).length;
@@ -702,6 +760,12 @@
         document.getElementById('checks-count').textContent = (feedbackData.checks || []).length;
         document.getElementById('pending-count').textContent = (feedbackData.pendingChecks || []).length;
         
+        if (feedbackData.gitState) {
+          checkGitState(feedbackData.gitState);
+        }
+        for (const k of Object.keys(decisions)) {
+          delete decisions[k];
+        }
         renderThreads(feedbackData.threads);
         renderReviews(feedbackData.reviews);
         renderGeneralComments(feedbackData.comments);
@@ -1088,7 +1152,8 @@
         unapprovedCardsHtml = `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">All feedback actions were approved.</p>`;
       }
       
-      document.body.innerHTML = `
+      const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
+      showDoneOverlay(`
         <div style="
           min-height: 100vh;
           background-color: #0f1115;
@@ -1104,7 +1169,7 @@
           <div style="text-align: center; margin-bottom: 2.5rem; max-width: 36rem;">
             <div style="font-size: 4.5rem; margin-bottom: 1rem; line-height: 1;">🎉</div>
             <h2 style="font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem 0; background: linear-gradient(135deg, #60a5fa, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Review Submitted!</h2>
-            <p style="color: #9ca3af; font-size: 0.95rem; line-height: 1.5; margin: 0;">You can close this tab now. The agent is resuming in the background to apply the approved changes. A summary is shown below.</p>
+            <p style="color: #9ca3af; font-size: 0.95rem; line-height: 1.5; margin: 0;">You can close this ${closeTarget} now. The agent is resuming in the background to apply the approved changes. A summary is shown below.</p>
           </div>
           
           <!-- Summary Content Grid -->
@@ -1134,7 +1199,7 @@
             
           </div>
         </div>
-      `;
+      `);
     }
 
     function updateResolve(threadId, val) {
@@ -1152,21 +1217,11 @@
       }));
       
       try {
-        const response = await fetch('/api/save', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            repo: feedbackData.repo,
-            pr: feedbackData.pr,
-            decisions: list
-          })
+        await dashboardHost.save({
+          repo: feedbackData.repo,
+          pr: feedbackData.pr,
+          decisions: list
         });
-        
-        if (!response.ok) {
-          throw new Error('Failed to save decisions to workspace');
-        }
         
         renderSummaryPage(list);
       } catch (err) {
@@ -1177,18 +1232,14 @@
     document.getElementById('abort-btn').addEventListener('click', async () => {
       if (confirm('Are you sure you want to abort the review? No changes will be applied.')) {
         try {
-          const response = await fetch('/api/abort', {
-            method: 'POST'
-          });
-          if (!response.ok) {
-            throw new Error('Failed to abort');
-          }
-          document.body.innerHTML = `
+          await dashboardHost.abort();
+          const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
+          showDoneOverlay(`
             <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
               <h1 style="color: var(--danger-color);">Review Aborted</h1>
-              <p>You can close this tab now. The agent has been notified.</p>
+              <p>You can close this ${closeTarget} now. The agent has been notified.</p>
             </div>
-          `;
+          `);
         } catch (err) {
           alert('Error aborting: ' + err.message);
         }
@@ -1386,20 +1437,17 @@
     }
 
     window.addEventListener('DOMContentLoaded', () => {
+      window.__dashboardReload = () => {
+        const done = document.getElementById('dashboard-done');
+        if (done) done.remove();
+        loadComments();
+      };
       loadComments();
-      
-      const eventSource = new EventSource('/api/git-events');
-      eventSource.onmessage = (event) => {
-        try {
-          const gitState = JSON.parse(event.data);
+      if (typeof dashboardHost.subscribeGitState === 'function') {
+        dashboardHost.subscribeGitState((gitState) => {
           checkGitState(gitState);
-        } catch (e) {
-          console.error("Error parsing git events:", e);
-        }
-      };
-      eventSource.onerror = (err) => {
-        console.error("EventSource failed:", err);
-      };
+        });
+      }
     });
   </script>
 </body>

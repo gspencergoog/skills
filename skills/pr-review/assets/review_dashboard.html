@@ -890,20 +890,71 @@
   let reviewData = /* __INITIAL_DATA__ */ null;
   const REVIEW_TOKEN = /* __REVIEW_TOKEN__ */ "";
 
+  function httpDashboardHost() {
+    return {
+      kind: 'http',
+      async load() {
+        const res = await fetch('/api/findings', {
+          headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
+        });
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+        return res.json();
+      },
+      async save(payload) {
+        const headers = { 'Content-Type': 'application/json' };
+        if (REVIEW_TOKEN) headers['X-Review-Token'] = REVIEW_TOKEN;
+        const res = await fetch('/api/save', {
+          method: 'POST',
+          headers: headers,
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+        return res.json();
+      },
+      async abort() {
+        const res = await fetch('/api/abort', {
+          method: 'POST',
+          headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
+        });
+        if (!res.ok) {
+          throw new Error(await res.text());
+        }
+      }
+    };
+  }
+
+  const dashboardHost = window.__dashboardHost || httpDashboardHost();
+
+  function showDoneOverlay(innerHtml) {
+    let overlay = document.getElementById('dashboard-done');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'dashboard-done';
+      overlay.style.cssText = 'position: fixed; inset: 0; z-index: 9999; background: var(--bg-color, #0d1117); overflow-y: auto;';
+      document.body.appendChild(overlay);
+    }
+    overlay.innerHTML = innerHtml;
+  }
+
   let activeFilters = {
     status: 'all',
     hunk: 'all'
   };
 
   async function init() {
+    window.__dashboardReload = () => {
+      const done = document.getElementById('dashboard-done');
+      if (done) done.remove();
+      reviewData = null;
+      init();
+    };
     if (!reviewData) {
       try {
-        const res = await fetch('/api/findings', {
-          headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
-        });
-        if (res.ok) {
-          reviewData = await res.json();
-        }
+        reviewData = await dashboardHost.load();
       } catch (e) {
         console.error("Failed to fetch /api/findings:", e);
       }
@@ -1468,44 +1519,37 @@
     };
 
     try {
-      const headers = { 'Content-Type': 'application/json' };
-      if (REVIEW_TOKEN) headers['X-Review-Token'] = REVIEW_TOKEN;
-      const res = await fetch('/api/save', {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(payload)
-      });
-      if (res.ok) {
-        document.body.innerHTML = `
-          <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
-            <h1 style="color: #3fb950; margin-bottom: 16px;">✓ Review Submitted!</h1>
-            <p>Your review decisions have been saved. The background process is submitting the batch review to GitHub.</p>
-            <p style="color: #8b949e; margin-top: 16px;">You can now safely close this browser window.</p>
-          </div>
-        `;
-      } else {
-        alert('Failed to save review decisions: ' + await res.text());
-      }
+      await dashboardHost.save(payload);
+      const closeCopy = dashboardHost.kind === 'mcp-app'
+        ? 'You can close this pane now.'
+        : 'You can now safely close this browser window.';
+      showDoneOverlay(`
+        <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
+          <h1 style="color: #3fb950; margin-bottom: 16px;">✓ Review Submitted!</h1>
+          <p>Your review decisions have been saved. The background process is submitting the batch review to GitHub.</p>
+          <p style="color: #8b949e; margin-top: 16px;">${closeCopy}</p>
+        </div>
+      `);
     } catch (e) {
-      alert('Error contacting review server: ' + e);
+      alert('Failed to save review decisions: ' + (e && e.message ? e.message : e));
     }
   }
 
   async function abortReview() {
     if (!confirm('Are you sure you want to abort? No review will be posted to GitHub.')) return;
     try {
-      await fetch('/api/abort', {
-        method: 'POST',
-        headers: REVIEW_TOKEN ? { 'X-Review-Token': REVIEW_TOKEN } : {}
-      });
+      await dashboardHost.abort();
     } catch (e) {}
-    document.body.innerHTML = `
+    const closeCopy = dashboardHost.kind === 'mcp-app'
+      ? 'You can close this pane now.'
+      : 'You can safely close this window.';
+    showDoneOverlay(`
       <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
         <h1 style="color: #ff7b72; margin-bottom: 16px;">Review Aborted</h1>
         <p>No changes or comments were posted to GitHub.</p>
-        <p style="color: #8b949e; margin-top: 16px;">You can safely close this window.</p>
+        <p style="color: #8b949e; margin-top: 16px;">${closeCopy}</p>
       </div>
-    `;
+    `);
   }
 
   function escapeHtml(str) {
