@@ -34,7 +34,7 @@ You are an expert Senior Software Engineer specializing in code review and in re
 
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
-| *(none)* | 1 Gemini reviewer; tier 1a static/remote checks always, plus tier 1b build dry-runs and repo scripts after the Pre-Execution Security Gate | Baseline |
+| *(none)* | Dynamic default determined by Ring classification (Ring 0: `--fast`; Ring 1-2: Standard; Ring 3: `--panel`; Ring 4: `--max`). Explicit depth flags skip Ring evaluation. | Scaled to blast radius |
 | `--fast` | Single-pass in-session review without subagents; tier 1a/1b checks only | Minimal latency / no subagents |
 | `--json [<path>]` | Emits `review_results.json` via `lint_review.py --export-json`, to `<path>` when given, otherwise to `<artifact-dir>/review_results.json` | Same as underlying mode |
 | `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code) | Uses 3P quota |
@@ -44,6 +44,18 @@ You are an expert Senior Software Engineer specializing in code review and in re
 | `--challenge` | After Step 5's citation audit, send refuting evidence back to the reviewer and require a withdrawal or new evidence; one round | One extra turn per disputed reviewer |
 
 `--fast` is mutually exclusive with `--claude`, `--panel`, `--verify`, and `--challenge`. If specified together, `--fast` takes precedence and the other flags are dropped (running strictly in-session without subagents). Expand `--max` first, before anything else runs. `--max` does not imply `--challenge`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
+
+### Automatic Review Scaling via Reuse Rings
+
+When no depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`) is specified, `code-review` evaluates the changed files against the five generalized blast-radius rings to select the scaled default review depth:
+
+- **Ring 0 (Private / Local)**: Personal dotfiles, ad-hoc scratch scripts, or local configs. Scales to `--fast` (single-pass in-session review, no subagents).
+- **Ring 1 (Internal Tooling & Repo Plumbing)**: CI workflows, linter configs, build scripts, development hooks, repo scripts, or test suites. Scales to **Standard** baseline review (1 Gemini reviewer, Tier 1a/1b checks).
+- **Ring 2 (Application / Service Logic)**: Internal application and service logic, endpoints, UI components, backend business logic, database queries. Scales to **Standard** baseline review (1 Gemini reviewer, Tier 1a/1b checks).
+- **Ring 3 (Shared Libraries & Public Contracts)**: Exported package surfaces, public APIs, schema or protocol contracts (`.proto`, `*.schema.json`), and package manifests (`package.json`, `pubspec.yaml`, `Cargo.toml`). Scales to `--panel` (2 parallel reviewers with non-overlapping criteria).
+- **Ring 4 (Foundational Runtimes & Core Engines)**: Engine internals, runtimes, virtual machines, compilers, memory allocators, or low-level systems code. Scales to `--max` (`--claude --panel --verify`, two-lane panel with deep verification in throwaway checkouts).
+
+When an explicit depth flag is provided by the user or caller (e.g. `--max`, `--fast`, `--panel`), ring evaluation is skipped and that depth is used directly.
 
 ## Workflow
 
@@ -83,15 +95,24 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
   ```
   This packs per-file diffs (splitting oversized files along hunk boundaries) into `diff_chunk_01.diff`, `diff_chunk_02.diff`, … where each chunk is $\le 35\text{ KB}$ and $\le 700$ lines (fitting in a single `view_file` call). It also writes `manifest.json`, `diff_lines.jsonl`, `diff_hunks.jsonl`, and `diff_entities.jsonl`. Retain `$diff_dir` for cleanup in Step 6.
 
-### Step 1b: Classify Artifacts
+### Step 1b: Classify Artifacts & Evaluate Reuse Ring
 
-Pipe the changed file list into the classifier:
+1. **Evaluate Reuse Ring (When No Depth Flag Is Specified)**:
+   - If an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`) was specified by the user or calling skill, skip ring evaluation and proceed with the specified depth.
+   - If no depth flag was specified, evaluate the file list with `classify_artifacts.py --ring`:
+     ```bash
+     <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --ring -
+     ```
+     This returns the highest matched ring (Ring 0 to 4), sets the active flags accordingly (e.g. `--fast` on Ring 0, `--panel` on Ring 3, `--max` on Ring 4, or baseline 1-reviewer Standard on Ring 1 and 2), and generates a ring summary banner.
+   - Record the ring banner in the review summary:
+     `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).
 
-```bash
-<file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> -
-```
-
-It prints each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), the `rule` that matched, and the `rubric` to use. Group the files into a code partition and a document partition. If a classification is clearly wrong, override it and note why. If there are no document files, skip every document-specific instruction below: code-only reviews work as before. The rules are described in [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
+2. **Classify Artifact Types**:
+   Pipe the changed file list into the classifier:
+   ```bash
+   <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> -
+   ```
+   It prints each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), the `rule` that matched, and the `rubric` to use. Group the files into a code partition and a document partition. If a classification is clearly wrong, override it and note why. If there are no document files, skip every document-specific instruction below: code-only reviews work as before. The rules are described in [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
 
 ### Step 2: Pre-Execution Security Gate, Context Enrichment, Tier 1 Verification, and Seed Hypotheses
 

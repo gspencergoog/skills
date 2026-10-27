@@ -7,7 +7,12 @@ import unittest
 from unittest.mock import patch
 
 import classify_artifacts
-from classify_artifacts import classify, main
+from classify_artifacts import (
+    classify,
+    classify_file_ring,
+    classify_ring,
+    main,
+)
 
 BLUEPRINT_FRONTMATTER = "---\nname: core\ntype: module\ndescription: x\n---\n\n# Core\n"
 MUST_LINES = "".join(f"- The parser MUST handle case {i}.\n" for i in range(17))
@@ -24,7 +29,10 @@ class TestClassify(unittest.TestCase):
     # One case per rank.
     def test_rank1_blueprint_by_frontmatter(self):
         self.assert_type(
-            "docs/core.md", BLUEPRINT_FRONTMATTER, "blueprint", "blueprint-frontmatter-or-name"
+            "docs/core.md",
+            BLUEPRINT_FRONTMATTER,
+            "blueprint",
+            "blueprint-frontmatter-or-name",
         )
 
     def test_rank1_blueprint_by_filename(self):
@@ -37,12 +45,16 @@ class TestClassify(unittest.TestCase):
         self.assert_type("docs/x.md", "# Title\n\ntype: module\n", "reference-doc")
 
     def test_rank2_schema_by_filename(self):
-        result = self.assert_type("specification/json/common.schema.json", "{}", "normative-spec")
+        result = self.assert_type(
+            "specification/json/common.schema.json", "{}", "normative-spec"
+        )
         self.assertEqual(result["rule"], "json-schema")
 
     def test_rank2_json_with_json_schema_meta_is_spec(self):
         content = '{\n  "$schema": "https://json-schema.org/draft/2020-12/schema",\n  "$defs": {}\n}'
-        self.assert_type("specification/v1_0/json/common_types.json", content, "normative-spec")
+        self.assert_type(
+            "specification/v1_0/json/common_types.json", content, "normative-spec"
+        )
 
     def test_rank2_config_json_pointing_at_schemastore_is_code(self):
         content = '{"$schema": "https://json.schemastore.org/tsconfig", "compilerOptions": {}}'
@@ -60,7 +72,9 @@ class TestClassify(unittest.TestCase):
         self.assert_type("docs/guide.md", content, "reference-doc")
 
     def test_design_headings_in_fenced_code_do_not_count(self):
-        content = "# Template\n\n~~~markdown\n## Non-goals\n## Alternatives considered\n~~~\n"
+        content = (
+            "# Template\n\n~~~markdown\n## Non-goals\n## Alternatives considered\n~~~\n"
+        )
         self.assert_type("docs/template.md", content, "reference-doc")
 
     def test_rank3_design_by_headings(self):
@@ -81,7 +95,12 @@ class TestClassify(unittest.TestCase):
 
     def test_rank4_normative_by_keywords(self):
         content = "A MUST do x.\nB SHOULD do y.\nC MAY do z.\n"
-        self.assert_type("docs/protocol.md", content, "normative-spec", "rfc2119-keywords-or-spec-dir")
+        self.assert_type(
+            "docs/protocol.md",
+            content,
+            "normative-spec",
+            "rfc2119-keywords-or-spec-dir",
+        )
 
     def test_rank4_lowercase_keywords_are_not_normative(self):
         content = "You must do x.\nYou should do y.\nYou may do z.\n"
@@ -91,23 +110,31 @@ class TestClassify(unittest.TestCase):
         self.assert_type("docs/guide.md", "A MUST x.\nB SHOULD y.\n", "reference-doc")
 
     def test_rank4_normative_by_dir(self):
-        self.assert_type("specification/v0_9_1/docs/sdks_spec.md", "# SDKs\n", "normative-spec")
+        self.assert_type(
+            "specification/v0_9_1/docs/sdks_spec.md", "# SDKs\n", "normative-spec"
+        )
 
     def test_rank5_changelog(self):
         self.assert_type("CHANGELOG.md", "## 1.0.0\n", "reference-doc", "changelog")
 
     def test_rank6_default(self):
-        result = self.assert_type("README.md", "# Hi\n", "reference-doc", "prose-default")
+        result = self.assert_type(
+            "README.md", "# Hi\n", "reference-doc", "prose-default"
+        )
         self.assertEqual(result["rubric"], "references/rubrics/reference_docs.md")
 
     # a2ui-shaped precedence cases.
     def test_blueprint_with_many_must_lines_is_blueprint(self):
         self.assert_type(
-            "blueprints/modules/x.blueprint.md", BLUEPRINT_FRONTMATTER + MUST_LINES, "blueprint"
+            "blueprints/modules/x.blueprint.md",
+            BLUEPRINT_FRONTMATTER + MUST_LINES,
+            "blueprint",
         )
 
     def test_blueprints_readme_is_reference_doc(self):
-        self.assert_type("blueprints/README.md", "# Blueprints\n\nHow to use.\n", "reference-doc")
+        self.assert_type(
+            "blueprints/README.md", "# Blueprints\n\nHow to use.\n", "reference-doc"
+        )
 
     def test_blueprint_skill_is_reference_doc(self):
         content = "---\nname: foo\ndescription: bar\n---\n\n# Foo\n"
@@ -151,8 +178,10 @@ class TestMain(unittest.TestCase):
 
     def run_main(self, argv, stdin_text=""):
         out = io.StringIO()
-        with patch("sys.stdout", out), patch("sys.stdin", io.StringIO(stdin_text)), patch(
-            "sys.stderr", io.StringIO()
+        with (
+            patch("sys.stdout", out),
+            patch("sys.stdin", io.StringIO(stdin_text)),
+            patch("sys.stderr", io.StringIO()),
         ):
             code = main(argv)
         return code, out.getvalue()
@@ -163,7 +192,9 @@ class TestMain(unittest.TestCase):
         self.assertEqual(json.loads(out)[0]["type"], "blueprint")
 
     def test_no_content_flag(self):
-        code, out = self.run_main(["--root", self.root, "--no-content", "blueprints/core.md"])
+        code, out = self.run_main(
+            ["--root", self.root, "--no-content", "blueprints/core.md"]
+        )
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)[0]["type"], "reference-doc")
 
@@ -189,6 +220,96 @@ class TestMain(unittest.TestCase):
         self.assertEqual(code, 2)
         code, _ = self.run_main(["--bogus", "x.md"])
         self.assertEqual(code, 2)
+
+
+class TestClassifyRing(unittest.TestCase):
+    def test_ring_0_dotfiles_and_scratch(self):
+        ring, rule = classify_file_ring(".bashrc")
+        self.assertEqual(ring, 0)
+        self.assertEqual(rule, "personal-dotfiles")
+
+        ring, rule = classify_file_ring("scratch/experiment.py")
+        self.assertEqual(ring, 0)
+        self.assertEqual(rule, "scratch-or-sandbox")
+
+    def test_ring_1_tooling_ci_and_tests(self):
+        ring, rule = classify_file_ring(".github/workflows/ci.yml")
+        self.assertEqual(ring, 1)
+        self.assertEqual(rule, "ci-workflow-or-pipeline")
+
+        ring, rule = classify_file_ring("tsconfig.json")
+        self.assertEqual(ring, 1)
+        self.assertEqual(rule, "build-or-linter-config")
+
+        ring, rule = classify_file_ring("scripts/build.sh")
+        self.assertEqual(ring, 1)
+        self.assertEqual(rule, "repo-tooling-or-scripts")
+
+        ring, rule = classify_file_ring("test/auth_test.dart")
+        self.assertEqual(ring, 1)
+        self.assertEqual(rule, "test-suite-or-fixture")
+
+    def test_ring_2_application_logic(self):
+        ring, rule = classify_file_ring("src/auth/service.py")
+        self.assertEqual(ring, 2)
+        self.assertEqual(rule, "application-logic")
+
+        ring, rule = classify_file_ring("lib/src/components/button.dart")
+        self.assertEqual(ring, 2)
+        self.assertEqual(rule, "application-logic")
+
+    def test_ring_3_exported_api_and_schemas(self):
+        ring, rule = classify_file_ring("lib/my_package.dart")
+        self.assertEqual(ring, 3)
+        self.assertEqual(rule, "dart-library-entrypoint")
+
+        ring, rule = classify_file_ring("protos/service.proto")
+        self.assertEqual(ring, 3)
+        self.assertEqual(rule, "schema-or-protocol-contract")
+
+        ring, rule = classify_file_ring("package.json")
+        self.assertEqual(ring, 3)
+        self.assertEqual(rule, "package-manifest-or-api-surface")
+
+    def test_ring_4_core_engine_and_runtimes(self):
+        ring, rule = classify_file_ring("engine/skwasm/core.cc")
+        self.assertEqual(ring, 4)
+        self.assertEqual(rule, "core-engine-or-runtime")
+
+        ring, rule = classify_file_ring("native/ffi_bridge.c")
+        self.assertEqual(ring, 4)
+        self.assertEqual(rule, "native-or-ffi-plumbing")
+
+    def test_changeset_highest_ring_wins(self):
+        files = [
+            "test/auth_test.dart",  # Ring 1
+            "src/auth/service.py",  # Ring 2
+            "protos/service.proto",  # Ring 3
+        ]
+        res = classify_ring(files)
+        self.assertEqual(res["ring"], 3)
+        self.assertEqual(res["review_level"], "panel")
+        self.assertEqual(res["flags"], ["--panel"])
+        self.assertEqual(res["highest_file"], "protos/service.proto")
+
+    def test_empty_paths_defaults_to_ring_2(self):
+        res = classify_ring([])
+        self.assertEqual(res["ring"], 2)
+        self.assertEqual(res["review_level"], "standard")
+        self.assertEqual(res["flags"], [])
+
+    def test_cli_ring_flag(self):
+        out = io.StringIO()
+        with (
+            patch("sys.stdout", out),
+            patch("sys.stdin", io.StringIO("src/app.py\n.github/ci.yml\n")),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            code = main(["--ring", "-"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["ring"], 2)
+        self.assertEqual(data["review_level"], "standard")
 
 
 if __name__ == "__main__":

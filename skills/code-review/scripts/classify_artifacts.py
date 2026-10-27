@@ -24,8 +24,9 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
-from typing import Callable, NamedTuple
+from typing import NamedTuple
 
 DOC_TYPES = ("normative-spec", "design", "blueprint", "reference-doc")
 PROSE_EXTENSIONS = (".md", ".rst", ".adoc", ".txt")
@@ -133,6 +134,293 @@ def is_document_eligible(path: str, content: str | None = None) -> bool:
     return name.endswith(".json") and bool(_JSON_SCHEMA_META.search(content or ""))
 
 
+# ---------------------------------------------------------------------------
+# Generalized Reuse Ring Classification (Blast Radius & Review Depth)
+# ---------------------------------------------------------------------------
+
+RING_LABELS: dict[int, str] = {
+    0: "Ring 0 (Private / Local)",
+    1: "Ring 1 (Internal Tooling & Repo Plumbing)",
+    2: "Ring 2 (Application / Service Logic)",
+    3: "Ring 3 (Shared Libraries & Public Contracts)",
+    4: "Ring 4 (Foundational Runtimes & Core Engines)",
+}
+
+RING_LEVELS: dict[int, tuple[str, list[str]]] = {
+    0: ("fast", ["--fast"]),
+    1: ("standard", []),
+    2: ("standard", []),
+    3: ("panel", ["--panel"]),
+    4: ("max", ["--max"]),
+}
+
+_CI_DIRS = frozenset({".github", ".gitlab", ".circleci", ".buildkite", "jenkins"})
+_CI_FILES = frozenset(
+    {
+        "jenkinsfile",
+        ".gitlab-ci.yml",
+        ".travis.yml",
+        ".cirrus.yml",
+    }
+)
+
+_TOOL_CONFIG_FILES = frozenset(
+    {
+        "makefile",
+        "cmakelists.txt",
+        "dockerfile",
+        "containerfile",
+        "taskfile.yml",
+        "taskfile.yaml",
+        "justfile",
+        "vagrantfile",
+    }
+)
+
+_TOOL_CONFIG_PREFIXES = (
+    ".eslintrc",
+    "eslint.config.",
+    "tsconfig",
+    ".prettierrc",
+    "analysis_options",
+    "ruff.",
+    ".flake8",
+    ".rubocop",
+    ".golangci",
+)
+
+_TOOL_SCRIPT_DIRS = frozenset({"scripts", "tools", "tool", "tasks", "dev"})
+
+_TEST_DIRS = frozenset(
+    {
+        "test",
+        "tests",
+        "__tests__",
+        "testing",
+        "fixtures",
+        "mocks",
+        "testdata",
+    }
+)
+
+_REPO_META_FILES = frozenset(
+    {
+        "readme.md",
+        "contributing.md",
+        "license",
+        "license.md",
+        "license.txt",
+        "code_of_conduct.md",
+        "agents.md",
+        "gemini.md",
+    }
+)
+
+_SCRATCH_DIRS = frozenset(
+    {
+        "scratch",
+        "tmp",
+        "temp",
+        "sandbox",
+        "experiments",
+        "playground",
+        "drafts",
+        "notes",
+        "personal",
+    }
+)
+
+_DOTFILE_DIRS = frozenset({".config", ".local", "dotfiles", "cheats"})
+
+_DOTFILE_NAMES = frozenset(
+    {
+        "bashrc",
+        ".bashrc",
+        "bash_profile",
+        ".bash_profile",
+        "zshrc",
+        ".zshrc",
+        "cheats",
+        ".cheats",
+    }
+)
+
+_ENGINE_DIRS = frozenset(
+    {
+        "engine",
+        "runtime",
+        "vm",
+        "compiler",
+        "kernel",
+        "allocator",
+        "gc",
+        "skwasm",
+        "wimp",
+    }
+)
+
+_NATIVE_DIRS = frozenset({"native", "ffi", "cbits", "jni"})
+
+_SCHEMA_DIRS = frozenset({"protos", "proto", "schemas", "schema"})
+
+_PUBLIC_EXPORT_DIRS = frozenset({"api", "public", "exports", "include"})
+
+_PACKAGE_MANIFESTS = frozenset(
+    {
+        "package.json",
+        "pubspec.yaml",
+        "cargo.toml",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "pom.xml",
+        "go.mod",
+        "api.txt",
+    }
+)
+
+
+def classify_file_ring(path: str) -> tuple[int, str]:
+    """Classifies a single file into a reuse ring (0 to 4) and reason rule."""
+    pure = PurePosixPath(path.replace("\\", "/"))
+    parts_lower = [p.lower() for p in pure.parts]
+    name_lower = pure.name.lower()
+
+    # 1. Scratch / Private / Personal (Ring 0)
+    if any(part in _SCRATCH_DIRS for part in parts_lower[:-1]):
+        return 0, "scratch-or-sandbox"
+    if (
+        ".scratch." in name_lower
+        or ".local." in name_lower
+        or ".private." in name_lower
+    ):
+        return 0, "scratch-or-private-file"
+    if (
+        any(part in _DOTFILE_DIRS for part in parts_lower[:-1])
+        or name_lower in _DOTFILE_NAMES
+    ):
+        return 0, "personal-dotfiles"
+    if (
+        name_lower.startswith(".")
+        and not any(part in _CI_DIRS for part in parts_lower)
+        and not any(name_lower.startswith(p) for p in _TOOL_CONFIG_PREFIXES)
+    ):
+        return 0, "dotfile"
+
+    # 2. Core Engine / Runtimes / Compilers (Ring 4)
+    if any(part in _ENGINE_DIRS for part in parts_lower[:-1]):
+        return 4, "core-engine-or-runtime"
+    if any(part in _NATIVE_DIRS for part in parts_lower[:-1]):
+        return 4, "native-or-ffi-plumbing"
+    if name_lower.endswith((".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs")) and any(
+        part in ("engine", "native", "runtime", "vm", "core") for part in parts_lower
+    ):
+        return 4, "native-core-code"
+
+    # 3. Shared Libraries, SDKs & Public Contracts (Ring 3)
+    if any(part in _SCHEMA_DIRS for part in parts_lower[:-1]) or name_lower.endswith(
+        (".proto", ".schema.json")
+    ):
+        return 3, "schema-or-protocol-contract"
+    if name_lower in _PACKAGE_MANIFESTS:
+        return 3, "package-manifest-or-api-surface"
+    if any(part in _PUBLIC_EXPORT_DIRS for part in parts_lower[:-1]):
+        return 3, "public-export-directory"
+    if (
+        len(pure.parts) == 2
+        and pure.parts[0].lower() == "lib"
+        and name_lower.endswith(".dart")
+    ):
+        return 3, "dart-library-entrypoint"
+    if (
+        name_lower in ("index.ts", "index.js", "public-api.ts", "mod.ts")
+        and len(pure.parts) <= 2
+    ):
+        return 3, "package-root-entrypoint"
+
+    # 4. Tooling, CI, Tests & Meta (Ring 1)
+    if any(part in _CI_DIRS for part in parts_lower[:-1]) or name_lower in _CI_FILES:
+        return 1, "ci-workflow-or-pipeline"
+    if name_lower in _TOOL_CONFIG_FILES or any(
+        name_lower.startswith(p) for p in _TOOL_CONFIG_PREFIXES
+    ):
+        return 1, "build-or-linter-config"
+    if any(part in _TOOL_SCRIPT_DIRS for part in parts_lower[:-1]):
+        return 1, "repo-tooling-or-scripts"
+    if (
+        any(part in _TEST_DIRS for part in parts_lower[:-1])
+        or name_lower.startswith("test_")
+        or name_lower.endswith(
+            (
+                "_test.dart",
+                "_test.py",
+                "_test.go",
+                ".test.ts",
+                ".test.js",
+                ".spec.ts",
+                ".spec.js",
+            )
+        )
+    ):
+        return 1, "test-suite-or-fixture"
+    if name_lower in _REPO_META_FILES:
+        return 1, "repo-documentation"
+
+    # 5. Application / Service Business Logic (Ring 2 - Default baseline)
+    return 2, "application-logic"
+
+
+def classify_ring(paths: list[str], root: Path | str | None = None) -> dict:
+    """Classifies a changeset into an effective ring and default review level."""
+    del root  # Reserved for future manifest inspection.
+    if not paths:
+        level, flags = RING_LEVELS[2]
+        return {
+            "ring": 2,
+            "label": RING_LABELS[2],
+            "review_level": level,
+            "flags": flags,
+            "summary": (
+                f"{RING_LABELS[2]} -> Review Level: {level.capitalize()} (1 reviewer)"
+            ),
+            "highest_file": None,
+            "highest_rule": "default-fallback",
+            "files": [],
+        }
+
+    scored_files = []
+    max_ring = -1
+    highest_file = None
+    highest_rule = None
+
+    for path in paths:
+        ring, rule = classify_file_ring(path)
+        scored_files.append({"path": path, "ring": ring, "rule": rule})
+        if ring > max_ring:
+            max_ring = ring
+            highest_file = path
+            highest_rule = rule
+
+    effective_ring = max(0, max_ring)
+    level, flags = RING_LEVELS[effective_ring]
+    summary_extra = f" ({' '.join(flags)})" if flags else " (1 reviewer)"
+    summary = (
+        f"{RING_LABELS[effective_ring]} -> Review Level:"
+        f" {level.capitalize()}{summary_extra}"
+    )
+
+    return {
+        "ring": effective_ring,
+        "label": RING_LABELS[effective_ring],
+        "review_level": level,
+        "flags": flags,
+        "summary": summary,
+        "highest_file": highest_file,
+        "highest_rule": highest_rule,
+        "files": scored_files,
+    }
+
+
 def classify(path: str, content: str | None = None) -> dict:
     """Classifies one file.
 
@@ -177,6 +465,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--no-content", action="store_true", help="Classify by path only."
     )
+    parser.add_argument(
+        "--ring",
+        action="store_true",
+        help="Classify changeset reuse ring (0-4) and default review level.",
+    )
     parser.add_argument("paths", nargs="+", help="File paths, or - to read stdin.")
     return parser.parse_args(argv)
 
@@ -192,6 +485,11 @@ def main(argv: list[str]) -> int:
     if paths == ["-"]:
         paths = [line.strip() for line in sys.stdin if line.strip()]
     root = Path(args.root)
+    if args.ring:
+        ring_result = classify_ring(paths, root)
+        json.dump(ring_result, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
     results = []
     for path in paths:
         content = None if args.no_content else _read_head(root, path)

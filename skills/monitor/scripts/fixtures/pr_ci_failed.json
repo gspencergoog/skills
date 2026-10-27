@@ -1,0 +1,172 @@
+{
+  "data": {
+    "viewer": {
+      "login": "alice"
+    },
+    "pr0": {
+      "pullRequest": {
+        "id": "PR_kwDO1",
+        "number": 3339,
+        "title": "feat: add decision planner format",
+        "url": "https://github.com/acme/widget/pull/3339",
+        "state": "OPEN",
+        "isDraft": false,
+        "merged": false,
+        "mergedAt": null,
+        "closedAt": null,
+        "updatedAt": "2026-10-27T21:08:00Z",
+        "author": {
+          "login": "alice",
+          "__typename": "User"
+        },
+        "headRefOid": "aaa111122223333444455556666777788889999",
+        "headRefName": "feat/decision-planner",
+        "baseRefName": "main",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "UNSTABLE",
+        "reviewDecision": "CHANGES_REQUESTED",
+        "autoMergeRequest": null,
+        "reviewRequests": {
+          "totalCount": 0,
+          "nodes": []
+        },
+        "assignees": {
+          "nodes": [
+            {
+              "login": "alice"
+            }
+          ]
+        },
+        "latestOpinionatedReviews": {
+          "nodes": [
+            {
+              "state": "APPROVED",
+              "author": {
+                "login": "carol"
+              },
+              "submittedAt": "2026-10-27T20:50:00Z"
+            },
+            {
+              "state": "CHANGES_REQUESTED",
+              "author": {
+                "login": "bob"
+              },
+              "submittedAt": "2026-10-27T21:07:30Z"
+            }
+          ]
+        },
+        "reviewThreads": {
+          "totalCount": 3,
+          "nodes": [
+            {
+              "id": "PRRT_bot_1",
+              "isResolved": false,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "gemini-code-assist",
+                      "__typename": "Bot"
+                    },
+                    "createdAt": "2026-10-27T21:01:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_human_1",
+              "isResolved": false,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "bob",
+                      "__typename": "User"
+                    },
+                    "createdAt": "2026-10-27T21:04:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_human_2",
+              "isResolved": false,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "bob",
+                      "__typename": "User"
+                    },
+                    "createdAt": "2026-10-27T21:07:30Z"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "commits": {
+          "nodes": [
+            {
+              "commit": {
+                "oid": "aaa111122223333444455556666777788889999",
+                "committedDate": "2026-10-27T21:00:00Z",
+                "committer": {
+                  "user": {
+                    "login": "alice"
+                  }
+                },
+                "statusCheckRollup": {
+                  "state": "FAILURE",
+                  "contexts": {
+                    "totalCount": 3,
+                    "nodes": [
+                      {
+                        "__typename": "CheckRun",
+                        "name": "test-web",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.com/acme/widget/actions/runs/500/job/601",
+                        "startedAt": "2026-10-27T21:00:10Z",
+                        "completedAt": "2026-10-27T21:07:02Z",
+                        "isRequired": true,
+                        "checkSuite": {
+                          "workflowRun": {
+                            "databaseId": 500
+                          }
+                        }
+                      },
+                      {
+                        "__typename": "CheckRun",
+                        "name": "lint-optional",
+                        "status": "COMPLETED",
+                        "conclusion": "FAILURE",
+                        "detailsUrl": "https://github.com/acme/widget/actions/runs/500/job/602",
+                        "startedAt": "2026-10-27T21:00:10Z",
+                        "completedAt": "2026-10-27T21:01:10Z",
+                        "isRequired": false,
+                        "checkSuite": {
+                          "workflowRun": {
+                            "databaseId": 500
+                          }
+                        }
+                      },
+                      {
+                        "__typename": "StatusContext",
+                        "context": "cla/google",
+                        "state": "SUCCESS",
+                        "targetUrl": "https://cla.developers.google.com/about",
+                        "createdAt": "2026-10-27T21:00:05Z",
+                        "isRequired": true
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

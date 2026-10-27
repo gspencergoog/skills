@@ -1,0 +1,101 @@
+{
+  "data": {
+    "viewer": {
+      "login": "alice"
+    },
+    "pr0": {
+      "pullRequest": {
+        "id": "PR_kwDO_parent",
+        "number": 3338,
+        "title": "feat: add store writer foundation",
+        "url": "https://github.com/acme/widget/pull/3338",
+        "state": "MERGED",
+        "isDraft": false,
+        "merged": true,
+        "mergedAt": "2026-10-27T21:10:00Z",
+        "closedAt": "2026-10-27T21:10:00Z",
+        "updatedAt": "2026-10-27T21:10:00Z",
+        "author": {
+          "login": "alice",
+          "__typename": "User"
+        },
+        "headRefOid": "parent999",
+        "headRefName": "feat/store-writer",
+        "baseRefName": "main",
+        "mergeable": "UNKNOWN",
+        "mergeStateStatus": "UNKNOWN",
+        "reviewDecision": "APPROVED",
+        "autoMergeRequest": null,
+        "reviewRequests": {
+          "totalCount": 0,
+          "nodes": []
+        },
+        "assignees": {
+          "nodes": []
+        },
+        "latestOpinionatedReviews": {
+          "nodes": []
+        },
+        "reviewThreads": {
+          "totalCount": 0,
+          "nodes": []
+        },
+        "commits": {
+          "nodes": []
+        }
+      }
+    },
+    "pr1": {
+      "pullRequest": {
+        "id": "PR_kwDO_child",
+        "number": 3339,
+        "title": "feat: add decision planner format",
+        "url": "https://github.com/acme/widget/pull/3339",
+        "state": "OPEN",
+        "isDraft": false,
+        "merged": false,
+        "mergedAt": null,
+        "closedAt": null,
+        "updatedAt": "2026-10-27T21:10:05Z",
+        "author": {
+          "login": "alice",
+          "__typename": "User"
+        },
+        "headRefOid": "child888",
+        "headRefName": "feat/decision-planner",
+        "baseRefName": "feat/store-writer",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "reviewDecision": "APPROVED",
+        "autoMergeRequest": {
+          "enabledAt": "2026-10-27T21:00:00Z"
+        },
+        "reviewRequests": {
+          "totalCount": 0,
+          "nodes": []
+        },
+        "assignees": {
+          "nodes": []
+        },
+        "latestOpinionatedReviews": {
+          "nodes": [
+            {
+              "state": "APPROVED",
+              "author": {
+                "login": "bob"
+              },
+              "submittedAt": "2026-10-27T20:55:00Z"
+            }
+          ]
+        },
+        "reviewThreads": {
+          "totalCount": 0,
+          "nodes": []
+        },
+        "commits": {
+          "nodes": []
+        }
+      }
+    }
+  }
+}

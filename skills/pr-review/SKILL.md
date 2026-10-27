@@ -34,7 +34,7 @@ This skill automates reviewing external GitHub Pull Requests (reviewing someone 
 
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
-| *(none)* | 1 Gemini reviewer; tier 1a static/remote checks always, plus tier 1b build dry-runs and repo scripts after the Pre-Execution Security Gate, and seed hypotheses | Baseline |
+| *(none)* | Dynamic default delegated to `code-review` via Ring classification (Ring 0: `--fast`; Ring 1-2: Standard; Ring 3: `--panel`; Ring 4: `--max`). Explicit depth flags skip Ring evaluation. | Scaled to blast radius |
 | `--fast` | Single-pass in-session review without subagents; tier 1a/1b checks only | Minimal latency / no subagents |
 | `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code). | Uses 3P quota |
 | `--panel` | 2 reviewers in parallel with non-overlapping criteria (lanes A and B) | About 2x reviewers |
@@ -44,7 +44,7 @@ This skill automates reviewing external GitHub Pull Requests (reviewing someone 
 
 Legacy `--mode <depth>` syntax maps to these flags for backward compatibility:
 - `--mode fast` or `--mode standard` maps to `--fast`.
-- `--mode deep` maps to the default (Gemini reviewer).
+- `--mode deep` maps to passing no flags (delegating to `code-review` Ring evaluation).
 - `--mode max` maps to `--max`.
 
 ---
@@ -53,16 +53,14 @@ Legacy `--mode <depth>` syntax maps to these flags for backward compatibility:
 
 Follow these steps in order when reviewing a pull request:
 
-### Step 1: Ingestion & Analysis Depth Selection
+### Step 1: Ingestion & Analysis Depth Handling
 
 1. **Identify the PR**:
    - Determine the target PR from the user prompt (URL, PR number, or head branch).
    - If no PR is specified, run `gh pr view --json number,url` (do NOT request `title`, `body`, `headRefName`, `comments`, or `reviews`) in the active workspace.
-2. **Select Analysis Depth**:
-   - If the user did not specify analysis flags or a legacy `--mode`, prompt the user to choose (using your interactive question tool if available, or by asking in chat and waiting for their reply):
-     - **(Recommended) Deep Review**: Delegate to a Gemini reviewer lane (`gemini-launch-candidate-high` via `swarm` on Tier 1) with Tier 1 static/CI checks, seeded hypotheses from Stage 1, and evidence/citation verification.
-     - **Fast Review (`--fast`)**: Single-pass in-session review without spawning swarm workers or subagents for rapid turnaround.
-     - **Max Review (`--max`)**: Two-lane panel (lane A Gemini `gemini-launch-candidate-high`, lane B Claude `opus-5.5-max` / `opus`) with Tier 2 test and mutation verification in isolated checkouts.
+2. **Analysis Depth Handling**:
+   - If the user specified explicit analysis flags (such as `--fast`, `--max`, `--panel`, `--verify`, `--claude`) or legacy `--mode`, record them to pass through to `code-review`. Explicit flags skip ring evaluation and enforce that depth directly.
+   - If no depth flag was specified, do not prompt the user. `pr-review` delegates analysis depth determination directly to `code-review`, which evaluates the PR's blast-radius ring (Ring 0 to 4) during its Step 1b and scales the review level automatically.
 
 ---
 
@@ -115,7 +113,8 @@ Follow these steps in order when reviewing a pull request:
    - Copy the text of `blind_description.md` verbatim into `<conversation-scratch-dir>/pr_description.md`: do not rewrite or soften the Stage 1 prose to match the author's framing. Prepend a top-level `## Intent Alignment: <Status>` section (`Matches Stated Purpose`, `Partial Divergence`, `Diverges from Stated Purpose`, or `Unstated Scope`) and weave inline GitHub callouts (`> [!WARNING]`, `> [!IMPORTANT]`, `> [!NOTE]`) directly beneath the relevant items in `## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, and `## Changes`. See [review_guidelines.md](references/review_guidelines.md) for callout rules.
    - If `pr_context.json` has a non-null `stack`, add a `## Stack Context` section right after `## Intent Alignment` following the template in [review_guidelines.md](references/review_guidelines.md). You may run `gh stack view --short` in the checkout (`workspace_dir.txt`) for the same information in `gh`'s own format. Treat the stack as review context, not as a finding: a predecessor that `needs_rebase` or is still a draft is a `> [!NOTE]`, a claim in the body that a later PR in the stack covers something is checked against that PR's diff (`gh pr diff <n>`) before it is accepted, and anything the diff builds on from a predecessor is reviewed in that predecessor's PR, not here.
 3. **Delegate Code Review Analysis to `code-review`**:
-   Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and the chosen flags (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`):
+   Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and any explicit flags passed by the user (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`):
+   - **Delegated Depth Determination**: If no depth flag was passed by the user, pass no depth flags to `code-review`. `code-review` will run `classify_artifacts.py --ring` in Step 1b to determine the PR's reuse ring and scale the review level automatically.
    - **Preserve Blindness Invariant**: Do not pass the PR number or URL directly to `code-review`. Run `code-review` strictly on the local checkout commit range `origin/<base_ref>...<head_sha>` in the temporary checkout directory.
    - **Checkout Ownership**: The `workspace_dir.txt` checkout belongs to `pr-review`. It is not `code-review`'s `$pr_review_dir_a`, even though both live under `/tmp/pr-review-*`. `code-review` reads it in place and never removes it; Step 3.4 reads it and Step 5.2 removes it. Any `--verify` checkout that `code-review` creates in its Step 2c (`$pr_review_dir_a` for lane A, `$pr_review_dir_b` for lane B per [verification.md](../code-review/references/verification.md#per-reviewer-checkouts)) is `code-review`'s own and is removed in its Step 6.
    - **Seed Hypotheses**: Pass the risks and security signals identified in Stage 1's `blind_description.md` (`## Security & Execution Gate` and `## Reviewer Focus & Risks`) into `code-review` as seed hypotheses.

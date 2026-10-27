@@ -1,0 +1,28 @@
+HTTP/2.0 200 OK
+Date: Tue, 27 Oct 2026 21:08:00 GMT
+Last-Modified: Tue, 27 Oct 2026 21:07:55 GMT
+X-Poll-Interval: 60
+Content-Type: application/json; charset=utf-8
+
+[
+  {
+    "id": "1001",
+    "reason": "ci_activity",
+    "updated_at": "2026-10-27T21:07:55Z",
+    "subject": {
+      "title": "feat: add decision planner format",
+      "url": "https://api.github.com/repos/acme/widget/pulls/3339",
+      "type": "PullRequest"
+    }
+  },
+  {
+    "id": "1002",
+    "reason": "review_requested",
+    "updated_at": "2026-10-27T21:07:50Z",
+    "subject": {
+      "title": "unrelated issue",
+      "url": "https://api.github.com/repos/other/repo/issues/99",
+      "type": "Issue"
+    }
+  }
+]
