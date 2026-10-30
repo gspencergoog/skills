@@ -12,8 +12,8 @@ This reference defines who reviews a change in the [`code-review`](../SKILL.md) 
 
 Naming and reuse rules:
 
-- Reuse a `waiting` worker by waking it with `post_message` and `swarm_wait{since: <last_seq>}`. Never `kill` and `add` between passes: `kill` burns the roster name permanently.
-- If a worker was killed, add its replacement with an incremented suffix (`rev-a-2`, `rev-f-2`).
+- Reuse a `waiting` worker by waking it with `post_message` and `swarm_wait{since: <last_seq>}` during Step 5 `--challenge` rounds and `ship-it` homeostasis loops. Never `kill` and `add` the same name: `kill` burns the roster name permanently.
+- On an external PR re-review (`pr-review` Round 2+ after new author commits) or if a worker was killed, spawn a fresh replacement with an incremented suffix (`rev-a-2`, `rev-b-2`, `rev-f-2`) via `swarm{action: "add"}` so the new review pass starts unanchored by Round 1's conversation history.
 - `--claude` and `--opus` pin only the single reviewer, or `rev-b` under `--panel`. Focus reviewers stay on Gemini to protect third-party quota.
 - Quota fallback order: `opus-5.5-max` to `gemini-launch-candidate-high`, then `gemini-launch-candidate-high` to `auto` (Gemini Pro Next, a separate bucket). Apply it at spawn when `swarm{action: "models"}` shows zero remaining quota, or in place with `swarm{action: "model"}` when a worker fails with `RESOURCE_EXHAUSTED`.
 - On Tier 2 (subagents), give each reviewer the role `Code Reviewer`, `Code Reviewer A`, `Code Reviewer B`, or `Focus Reviewer (<theme-id>)`.

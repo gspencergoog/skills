@@ -1085,6 +1085,243 @@ class TestStackDetection(unittest.TestCase):
                 scan["categories"].get("network_and_exfiltration", 0), 1
             )
 
+    @patch("review_engine.fetch_pr_stack", return_value=None)
+    @patch("review_engine.run_command")
+    @patch("review_engine.get_pr_diff")
+    @patch("review_engine.prepare_workspace")
+    @patch("review_engine.resolve_pr_coordinates")
+    def test_main_prepare_workspace_re_review_archives_prior_state(
+        self, mock_coords, mock_prep, mock_diff, mock_run, _mock_stack
+    ):
+        mock_coords.return_value = {
+            "owner": "octocat",
+            "repo": "hello-world",
+            "pull_number": 42,
+            "base_ref": "main",
+            "head_sha": "sha_round_1",
+            "pr_url": "https://github.com/octocat/hello-world/pull/42",
+            "state": "OPEN",
+        }
+        mock_prep.return_value = ("/tmp/pr-review-r1", True)
+        mock_diff.return_value = "diff --git a/a.py b/a.py\n+x = 1\n"
+        mock_run.return_value = (0, "sha_round_1", "")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            coords_file = tmp_path / "pr_coords.json"
+            diff_file = tmp_path / "pr.diff"
+            ws_file = tmp_path / "workspace_dir.txt"
+            blind_file = tmp_path / "blind_description.md"
+            results_file = tmp_path / "review_results.json"
+            decisions_file = tmp_path / "review_decisions.json"
+            meta_file = tmp_path / "pr_meta.json"
+            ctx_file = tmp_path / "pr_context.json"
+
+            # Round 1 prepare-workspace
+            rc1 = main(
+                [
+                    "--pr",
+                    "42",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-diff",
+                    str(diff_file),
+                    "--output-workspace",
+                    str(ws_file),
+                ]
+            )
+            self.assertEqual(rc1, 0)
+            coords1 = json.loads(coords_file.read_text(encoding="utf-8"))
+            self.assertEqual(coords1["review_round"], 1)
+            self.assertNotIn("prev_head_sha", coords1)
+
+            # Simulate Round 1 outputs
+            blind_file.write_text(
+                "## Summary\nRound 1 blind summary.\n", encoding="utf-8"
+            )
+            results_file.write_text('{"findings": [{"id": "H1"}]}', encoding="utf-8")
+            decisions_file.write_text(
+                '{"verdict": "REQUEST_CHANGES"}', encoding="utf-8"
+            )
+
+            # Round 2 prepare-workspace after author pushes sha_round_2
+            mock_prep.return_value = ("/tmp/pr-review-r2", True)
+            mock_diff.return_value = "diff --git a/a.py b/a.py\n+x = 2\n"
+
+            def side_effect_r2(cmd, cwd=None):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    return 0, "sha_round_2", ""
+                if "sha_round_1..sha_round_2" in cmd:
+                    return 0, "diff --git a/a.py b/a.py\n-x = 1\n+x = 2\n", ""
+                return 0, "", ""
+
+            mock_run.side_effect = side_effect_r2
+
+            rc2 = main(
+                [
+                    "--pr",
+                    "42",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-diff",
+                    str(diff_file),
+                    "--output-workspace",
+                    str(ws_file),
+                ]
+            )
+            self.assertEqual(rc2, 0)
+            coords2 = json.loads(coords_file.read_text(encoding="utf-8"))
+            self.assertEqual(coords2["review_round"], 2)
+            self.assertEqual(coords2["prev_head_sha"], "sha_round_1")
+            self.assertEqual(coords2["head_sha"], "sha_round_2")
+            inc_diff_path = tmp_path / "pr_incremental.diff"
+            self.assertEqual(coords2["incremental_diff_file"], str(inc_diff_path))
+            self.assertTrue(inc_diff_path.is_file())
+            self.assertIn("-x = 1\n+x = 2", inc_diff_path.read_text(encoding="utf-8"))
+
+            # Round 1 blind_description.md was moved to prev_blind_description.md
+            self.assertFalse(blind_file.exists())
+            self.assertTrue((tmp_path / "prev_blind_description.md").is_file())
+            self.assertTrue((tmp_path / "prev_review_results.json").is_file())
+            self.assertTrue((tmp_path / "prev_review_decisions.json").is_file())
+
+            with patch("review_engine.fetch_pr_context") as mock_fetch:
+                mock_fetch.return_value = (
+                    {
+                        "owner": "octocat",
+                        "repo": "hello-world",
+                        "pull_number": 42,
+                        "title": "PR 42",
+                        "head_sha": "sha_round_2",
+                    },
+                    {
+                        "title": "PR 42",
+                        "body": "Body",
+                        "comments": [],
+                        "reviews": [],
+                        "threads": [],
+                        "threads_complete": True,
+                    },
+                )
+                # Fails when Stage 1 did not recreate blind_description.md
+                rc_missing = main(
+                    [
+                        "--fetch-context",
+                        "--input-coords",
+                        str(coords_file),
+                        "--require-blind-description",
+                        str(blind_file),
+                        "--output-meta",
+                        str(meta_file),
+                        "--output-context",
+                        str(ctx_file),
+                    ]
+                )
+                self.assertEqual(rc_missing, 1)
+                mock_fetch.assert_not_called()
+
+                # Fails when Stage 1 copies Round 1's blind description after HEAD moved
+                blind_file.write_text(
+                    "## Summary\nRound 1 blind summary.\n", encoding="utf-8"
+                )
+                rc_stale = main(
+                    [
+                        "--fetch-context",
+                        "--input-coords",
+                        str(coords_file),
+                        "--require-blind-description",
+                        str(blind_file),
+                        "--output-meta",
+                        str(meta_file),
+                        "--output-context",
+                        str(ctx_file),
+                    ]
+                )
+                self.assertEqual(rc_stale, 1)
+                mock_fetch.assert_not_called()
+
+                # Succeeds once a fresh Round 2 blind description is written
+                blind_file.write_text(
+                    "## Summary\nRound 2 updated blind summary.\n", encoding="utf-8"
+                )
+                rc_fresh = main(
+                    [
+                        "--fetch-context",
+                        "--input-coords",
+                        str(coords_file),
+                        "--require-blind-description",
+                        str(blind_file),
+                        "--output-meta",
+                        str(meta_file),
+                        "--output-context",
+                        str(ctx_file),
+                    ]
+                )
+                self.assertEqual(rc_fresh, 0)
+                mock_fetch.assert_called_once()
+
+    @patch("review_engine.fetch_pr_stack", return_value=None)
+    @patch("review_engine.run_command")
+    @patch("review_engine.get_pr_diff")
+    @patch("review_engine.prepare_workspace")
+    @patch("review_engine.resolve_pr_coordinates")
+    def test_main_prepare_workspace_re_review_handles_unreachable_prev_sha_gracefully(
+        self, mock_coords, mock_prep, mock_diff, mock_run, _mock_stack
+    ):
+        mock_coords.return_value = {
+            "owner": "octocat",
+            "repo": "hello-world",
+            "pull_number": 42,
+            "base_ref": "main",
+            "head_sha": "sha_force_pushed",
+            "pr_url": "https://github.com/octocat/hello-world/pull/42",
+            "state": "OPEN",
+        }
+        mock_prep.return_value = ("/tmp/pr-review-fp", True)
+        mock_diff.return_value = "diff --git a/a.py b/a.py\n+x = 3\n"
+
+        def side_effect_fp(cmd, cwd=None):
+            if cmd[:2] == ["git", "rev-parse"]:
+                return 0, "sha_force_pushed", ""
+            return 128, "", "fatal: bad object sha_old"
+
+        mock_run.side_effect = side_effect_fp
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            coords_file = tmp_path / "pr_coords.json"
+            diff_file = tmp_path / "pr.diff"
+            coords_file.write_text(
+                json.dumps(
+                    {
+                        "owner": "octocat",
+                        "repo": "hello-world",
+                        "pull_number": 42,
+                        "head_sha": "sha_old",
+                        "review_round": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            rc = main(
+                [
+                    "--pr",
+                    "42",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-diff",
+                    str(diff_file),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            coords = json.loads(coords_file.read_text(encoding="utf-8"))
+            self.assertEqual(coords["review_round"], 2)
+            self.assertEqual(coords["prev_head_sha"], "sha_old")
+            self.assertNotIn("incremental_diff_file", coords)
+
 
 if __name__ == "__main__":
     unittest.main()

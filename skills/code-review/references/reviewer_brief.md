@@ -41,7 +41,7 @@ Try to prove each of these. Report every one as confirmed (a finding), disproved
 2. <seeded hypothesis 2>
 3. <seeded hypothesis 3>
 4. ...
-<Optional: Ruled out last pass: ... (re-test only if this diff touches the cited lines)>
+<Optional, ship-it homeostasis loops only (never on PR re-reviews): Ruled out last pass: ... (re-test only if this diff touches the cited lines)>
 <Optional, when a focus reviewer covers a theme: A focus reviewer covers <theme-id>; still report critical or high issues in it, tagged out-of-lane.>
 
 ### Review Mandate

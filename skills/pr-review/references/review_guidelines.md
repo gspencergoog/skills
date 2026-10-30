@@ -137,5 +137,23 @@ After running `review_engine.py --fetch-context`, compare `blind_description.md`
    - When the PR body says a later PR in the stack handles something, confirm it with `gh pr diff <n>` before accepting the claim; if it is not there, use a `> [!IMPORTANT]` callout.
    - A predecessor that is a draft, closed, or `needs_rebase` is a `> [!NOTE]`. A predecessor whose state is `CLOSED` (not merged) means this PR's base will not land; say so in `## Stack Context`.
    - Do not repeat findings that were already raised and resolved on a predecessor PR.
+5. **Add `## Prior Review Resolution` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**, directly after `## Intent Alignment` (or after `## Stack Context`). Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
+
+   ```markdown
+   ## Prior Review Resolution
+
+   Compared Round 1 (`4bd4b791`) against Round 2 (`312a49ba`).
+
+   | Prior Item | Location | Status | Notes |
+   | :--- | :--- | :--- | :--- |
+   | H1. Missing null guard on `catalogId` | `src/parser.ts:120` | Addressed | Fixed in `c7b42a27` with unit test |
+   | M1. Race in `dispose()` | `src/client.ts:88` | Partially Addressed | Lock added, but error path skips release |
+   | M2. Unused export ` LegacyConfig` | `src/index.ts:14` | Unaddressed | Still exported at `HEAD` (open thread) |
+   ```
+
+   When synthesizing `review_results.md` in Step 3.3, reconcile this table with the fresh full-diff review (`rev-a-2`) using the three-way merge rules:
+   - **Both Fresh Review and Prior Audit flag the same defect**: Merge into a single finding in `review_results.md` at the higher severity, keeping the fresh review's `HEAD` line anchor and `Evidence` tier. Prefix its heading with `[Unaddressed]`, `[Partially Addressed]`, or `[Unaddressed (open thread)]` and adapt `Body` and `Suggestion` to state what remains broken at `HEAD`.
+   - **Only Prior Audit flags an unaddressed or partially addressed item**: Verify it at `HEAD` with `Read` evidence and carry it forward into `review_results.md` as a single finding so reviewer variance never drops an unfixed defect.
+   - **Addressed items**: Record in `## Prior Review Resolution` (in `pr_description.md`) and `## Checked and Found Clean` (in `review_results.md`), never as findings.
 
 

@@ -852,6 +852,35 @@ def get_pr_diff(
     return ""
 
 
+def get_incremental_diff(
+    workspace_dir: str, prev_head_sha: str, head_sha: str
+) -> Optional[str]:
+    """Extracts the unified diff between prev_head_sha and head_sha when available."""
+    if not prev_head_sha or not head_sha or prev_head_sha == head_sha:
+        return None
+    diff_cmd = [
+        "git",
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        f"{prev_head_sha}..{head_sha}",
+    ]
+    ret, diff_out, _ = run_command(diff_cmd, cwd=workspace_dir)
+    if ret == 0:
+        return diff_out
+
+    fetch_ret, _, _ = run_command(
+        ["git", "fetch", "--no-tags", "origin", prev_head_sha],
+        cwd=workspace_dir,
+    )
+    if fetch_ret != 0:
+        return None
+    ret, diff_out, _ = run_command(diff_cmd, cwd=workspace_dir)
+    return diff_out if ret == 0 else None
+
+
 _RISKY_CONFIG_EXACT = frozenset(
     {
         "package.json",
@@ -1136,6 +1165,80 @@ def _run_security_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_matching_prior_coords(
+    output_coords_path: Optional[str], new_coords: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Loads existing coordinates when they belong to the same PR."""
+    if not output_coords_path:
+        return None
+    coords_path = Path(output_coords_path)
+    if not coords_path.is_file():
+        return None
+    try:
+        old_coords = json.loads(coords_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(old_coords, dict):
+        return None
+    prior_key = (
+        old_coords.get("owner"),
+        old_coords.get("repo"),
+        old_coords.get("pull_number"),
+    )
+    current_key = (
+        new_coords.get("owner"),
+        new_coords.get("repo"),
+        new_coords.get("pull_number"),
+    )
+    return old_coords if prior_key == current_key else None
+
+
+def _archive_prior_round_state(
+    output_coords_path: Optional[str], new_coords: Dict[str, Any]
+) -> Tuple[int, str]:
+    """Archives prior round state when output_coords_path matches the same PR.
+
+    Returns (review_round, prev_head_sha).
+    """
+    old_coords = _load_matching_prior_coords(output_coords_path, new_coords)
+    if not old_coords or not output_coords_path:
+        return 1, ""
+
+    prev_head_sha = str(old_coords.get("head_sha") or "")
+    review_round = int(old_coords.get("review_round") or 1) + 1
+    scratch_dir = Path(output_coords_path).parent
+    blind_path = scratch_dir / "blind_description.md"
+    if blind_path.is_file():
+        blind_path.replace(scratch_dir / "prev_blind_description.md")
+    for artifact_name in ("review_results.json", "review_decisions.json"):
+        src_path = scratch_dir / artifact_name
+        if src_path.is_file():
+            (scratch_dir / f"prev_{artifact_name}").write_text(
+                src_path.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+    return review_round, prev_head_sha
+
+
+def _write_incremental_diff_if_needed(
+    workspace_dir: str,
+    coords: Dict[str, Any],
+    prev_head_sha: str,
+    output_diff: Optional[str],
+) -> None:
+    """Writes pr_incremental.diff alongside output_diff when prev_head_sha moved."""
+    if not prev_head_sha or not output_diff:
+        return
+    inc_diff = get_incremental_diff(
+        workspace_dir, prev_head_sha, str(coords.get("head_sha") or "")
+    )
+    if inc_diff is None:
+        return
+    inc_path = Path(output_diff).parent / "pr_incremental.diff"
+    inc_path.parent.mkdir(parents=True, exist_ok=True)
+    inc_path.write_text(inc_diff, encoding="utf-8")
+    coords["incremental_diff_file"] = str(inc_path)
+
+
 def _run_prepare_workspace(args: argparse.Namespace) -> int:
     """Executes Stage 1: blind coordinate resolution, workspace checkout, and diff extraction."""
     if not args.pr:
@@ -1177,6 +1280,13 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
 
     security_prescan = scan_diff_execution_risks(diff_text)
     coords["security_prescan"] = security_prescan
+    review_round, prev_head_sha = _archive_prior_round_state(args.output_coords, coords)
+    coords["review_round"] = review_round
+    if prev_head_sha:
+        coords["prev_head_sha"] = prev_head_sha
+        _write_incremental_diff_if_needed(
+            workspace_dir, coords, prev_head_sha, args.output_diff
+        )
 
     if args.output_coords:
         _write_json_file(args.output_coords, coords)
@@ -1197,21 +1307,68 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
     return 0
 
 
-def _validate_blind_description(path_str: Optional[str]) -> bool:
-    """Checks that the Stage 1 blind description file was provided, exists, and is non-empty."""
+def _is_stale_re_review_blind_description(
+    blind_path: Path, current_text: str, input_coords_path: Optional[str]
+) -> bool:
+    """Returns True when a re-review reused the prior blind description after HEAD moved."""
+    if not input_coords_path:
+        return False
+    coords_path = Path(input_coords_path)
+    if not coords_path.is_file():
+        return False
+    try:
+        coords = json.loads(coords_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(coords, dict) or int(coords.get("review_round") or 1) <= 1:
+        return False
+    prev_sha = str(coords.get("prev_head_sha") or "")
+    head_sha = str(coords.get("head_sha") or "")
+    if not prev_sha or not head_sha or prev_sha == head_sha:
+        return False
+    prev_blind = blind_path.parent / "prev_blind_description.md"
+    if not prev_blind.is_file():
+        return False
+    if prev_blind.read_text(encoding="utf-8").strip() == current_text:
+        print(
+            f"Error: Blind diff description at '{blind_path}' is identical to the "
+            f"previous round's description even though HEAD moved "
+            f"({prev_sha} -> {head_sha}). "
+            "Draft a fresh Stage 1 description from the updated pr.diff.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
+def _validate_blind_description(
+    path_str: Optional[str], input_coords_path: Optional[str] = None
+) -> bool:
+    """Checks that the Stage 1 blind description file exists, is non-empty, and is fresh."""
     if not path_str:
         print(
-            "Error: --require-blind-description is required before fetching PR metadata or context.",
+            "Error: --require-blind-description is required before fetching "
+            "PR metadata or context.",
             file=sys.stderr,
         )
         return False
     path = Path(path_str)
-    if not path.is_file() or not path.read_text(encoding="utf-8").strip():
+    if not path.is_file():
         print(
             f"Error: Blind diff description is missing or empty at '{path_str}'. "
             "Draft the blind description from the diff before fetching PR context.",
             file=sys.stderr,
         )
+        return False
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        print(
+            f"Error: Blind diff description is missing or empty at '{path_str}'. "
+            "Draft the blind description from the diff before fetching PR context.",
+            file=sys.stderr,
+        )
+        return False
+    if _is_stale_re_review_blind_description(path, content, input_coords_path):
         return False
     return True
 
@@ -1249,7 +1406,9 @@ def _resolve_target_from_args(args: argparse.Namespace) -> Tuple[str, str, int, 
 
 def _run_fetch_context(args: argparse.Namespace) -> int:
     """Executes Stage 2: fetches PR title, description, reviews, and comments."""
-    if not _validate_blind_description(args.require_blind_description):
+    if not _validate_blind_description(
+        args.require_blind_description, args.input_coords
+    ):
         return 1
 
     try:
