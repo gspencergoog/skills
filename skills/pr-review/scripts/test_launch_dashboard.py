@@ -24,7 +24,6 @@ from launch_dashboard import (
 
 
 class TestLaunchDashboard(unittest.TestCase):
-
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.tmp_path = Path(self.temp_dir.name)
@@ -69,7 +68,9 @@ class TestLaunchDashboard(unittest.TestCase):
         ReviewDashboardHandler.description_file = None
         ReviewDashboardHandler.review_token = "test-secret-token"
 
-        self.server = http.server.HTTPServer(("127.0.0.1", self.port), ReviewDashboardHandler)
+        self.server = http.server.HTTPServer(
+            ("127.0.0.1", self.port), ReviewDashboardHandler
+        )
         self.server_thread = threading.Thread(target=self.server.serve_forever)
         self.server_thread.daemon = True
         self.server_thread.start()
@@ -152,7 +153,8 @@ class TestLaunchDashboard(unittest.TestCase):
         self.assertEqual(meta["title"], "fix: thing")
         self.assertEqual(meta["head_sha"], "010d93e")
         self.assertEqual(
-            data["review_summary"], {"overview": "Overall fine.", "verdict": "REQUEST_CHANGES"}
+            data["review_summary"],
+            {"overview": "Overall fine.", "verdict": "REQUEST_CHANGES"},
         )
         self.assertNotIn("pr_meta", data)
 
@@ -195,7 +197,12 @@ class TestLaunchDashboard(unittest.TestCase):
 
         # 1. Rejects missing X-Review-Token (M3)
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        conn.request("POST", "/api/save", json.dumps(decisions_payload), {"Content-Type": "application/json"})
+        conn.request(
+            "POST",
+            "/api/save",
+            json.dumps(decisions_payload),
+            {"Content-Type": "application/json"},
+        )
         resp = conn.getresponse()
         resp.read()
         self.assertEqual(resp.status, 403)
@@ -260,7 +267,9 @@ class TestLaunchDashboard(unittest.TestCase):
 
     def test_post_api_abort(self):
         conn = http.client.HTTPConnection("127.0.0.1", self.port)
-        conn.request("POST", "/api/abort", headers={"X-Review-Token": "test-secret-token"})
+        conn.request(
+            "POST", "/api/abort", headers={"X-Review-Token": "test-secret-token"}
+        )
         resp = conn.getresponse()
         self.assertEqual(resp.status, 200)
         res_data = json.loads(resp.read().decode("utf-8"))
@@ -269,39 +278,53 @@ class TestLaunchDashboard(unittest.TestCase):
         self.assertEqual(res_data["status"], "aborted")
 
     def test_main_returns_exit_code_2_on_missing_files(self):
-        rc = main([
-            "--findings-file", str(self.tmp_path / "nonexistent.json"),
-            "--output-file", str(self.output_file),
-        ])
+        rc = main(
+            [
+                "--findings-file",
+                str(self.tmp_path / "nonexistent.json"),
+                "--output-file",
+                str(self.output_file),
+            ]
+        )
         self.assertEqual(rc, 2)
 
     def test_main_dump_json_prints_normalized_payload(self):
         meta_file = self.tmp_path / "pr_meta.json"
         meta_file.write_text(
-            json.dumps({
-                "owner": "octocat",
-                "repo": "hello-world",
-                "pull_number": 42,
-                "head_sha": "pinned_sha_123",
-                "title": "Fix bug",
-            }),
+            json.dumps(
+                {
+                    "owner": "octocat",
+                    "repo": "hello-world",
+                    "pull_number": 42,
+                    "head_sha": "pinned_sha_123",
+                    "title": "Fix bug",
+                }
+            ),
             encoding="utf-8",
         )
         desc_file = self.tmp_path / "pr_description.md"
-        desc_file.write_text("## Intent Alignment: Matches Stated Purpose\n\nBody.", encoding="utf-8")
+        desc_file.write_text(
+            "## Intent Alignment: Matches Stated Purpose\n\nBody.", encoding="utf-8"
+        )
 
         import io
         from contextlib import redirect_stdout
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            rc = main([
-                "--dump-json",
-                "--findings-file", str(self.findings_file),
-                "--meta-file", str(meta_file),
-                "--description-file", str(desc_file),
-                "--output-file", str(self.output_file),
-            ])
+            rc = main(
+                [
+                    "--dump-json",
+                    "--findings-file",
+                    str(self.findings_file),
+                    "--meta-file",
+                    str(meta_file),
+                    "--description-file",
+                    str(desc_file),
+                    "--output-file",
+                    str(self.output_file),
+                ]
+            )
         self.assertEqual(rc, 0)
         dumped = json.loads(buf.getvalue())
         self.assertEqual(dumped["pr_metadata"]["owner"], "octocat")
@@ -310,15 +333,17 @@ class TestLaunchDashboard(unittest.TestCase):
         self.assertEqual(len(dumped["findings"]), 1)
 
     def test_main_dump_json_returns_2_on_missing_findings(self):
-        rc = main([
-            "--dump-json",
-            "--findings-file", str(self.tmp_path / "missing.json"),
-        ])
+        rc = main(
+            [
+                "--dump-json",
+                "--findings-file",
+                str(self.tmp_path / "missing.json"),
+            ]
+        )
         self.assertEqual(rc, 2)
 
 
 class TestNormalizeReviewData(unittest.TestCase):
-
     FULL_META = {
         "pull_number": 7,
         "owner": "o",
@@ -335,16 +360,25 @@ class TestNormalizeReviewData(unittest.TestCase):
 
     def test_preserves_draft_comment_without_prefixing_description(self):
         data, _ = normalize_review_data(
-            {"findings": [{"description": "Promise not awaited.", "draft_comment": "Add await."}]}
+            {
+                "findings": [
+                    {
+                        "description": "Promise not awaited.",
+                        "draft_comment": "Add await.",
+                    }
+                ]
+            }
         )
-        self.assertEqual(
-            data["findings"][0]["draft_comment"], "Add await."
-        )
+        self.assertEqual(data["findings"][0]["draft_comment"], "Add await.")
 
     def test_no_duplicate_description(self):
         comment = "The promise is not awaited, so errors are lost. Add await."
         data, _ = normalize_review_data(
-            {"findings": [{"description": "Promise is NOT awaited.", "draft_comment": comment}]}
+            {
+                "findings": [
+                    {"description": "Promise is NOT awaited.", "draft_comment": comment}
+                ]
+            }
         )
         self.assertEqual(data["findings"][0]["draft_comment"], comment)
 
@@ -353,12 +387,17 @@ class TestNormalizeReviewData(unittest.TestCase):
         self.assertEqual(data["findings"][0]["draft_comment"], "Add await.")
 
     def test_description_only(self):
-        data, _ = normalize_review_data({"findings": [{"description": "Unused import"}]})
+        data, _ = normalize_review_data(
+            {"findings": [{"description": "Unused import"}]}
+        )
         self.assertEqual(data["findings"][0]["draft_comment"], "Unused import")
 
     def test_pr_metadata_wins_over_pr_meta(self):
         data, _ = normalize_review_data(
-            {"pr_metadata": {"title": "canonical"}, "pr_meta": {"title": "alias", "repo": "r"}}
+            {
+                "pr_metadata": {"title": "canonical"},
+                "pr_meta": {"title": "alias", "repo": "r"},
+            }
         )
         self.assertEqual(data["pr_metadata"]["title"], "canonical")
         self.assertEqual(data["pr_metadata"]["repo"], "r")
@@ -372,7 +411,9 @@ class TestNormalizeReviewData(unittest.TestCase):
         self.assertEqual(warnings, [])
 
     def test_warns_on_missing_metadata(self):
-        _, warnings = normalize_review_data({"pr_metadata": {"title": "T"}, "findings": []})
+        _, warnings = normalize_review_data(
+            {"pr_metadata": {"title": "T"}, "findings": []}
+        )
         self.assertEqual(
             warnings,
             [
@@ -384,7 +425,9 @@ class TestNormalizeReviewData(unittest.TestCase):
         )
 
     def test_does_not_mutate_input(self):
-        raw = {"findings": [{"approved": True, "description": "d", "draft_comment": "c"}]}
+        raw = {
+            "findings": [{"approved": True, "description": "d", "draft_comment": "c"}]
+        }
         normalize_review_data(raw)
         self.assertTrue(raw["findings"][0]["approved"])
         self.assertEqual(raw["findings"][0]["draft_comment"], "c")
@@ -399,11 +442,15 @@ class TestNormalizeReviewData(unittest.TestCase):
             "PARTIAL",
         )
         self.assertEqual(
-            parse_alignment_status("## Intent Alignment - Diverges from PR Description"),
+            parse_alignment_status(
+                "## Intent Alignment - Diverges from PR Description"
+            ),
             "DIVERGES",
         )
         self.assertEqual(
-            parse_alignment_status("## Intent Alignment: Does Not Match Stated Purpose"),
+            parse_alignment_status(
+                "## Intent Alignment: Does Not Match Stated Purpose"
+            ),
             "DIVERGES",
         )
         self.assertEqual(
@@ -423,7 +470,10 @@ class TestNormalizeReviewData(unittest.TestCase):
         )
         self.assertEqual(
             data_str["pr_description"],
-            {"markdown": "## Intent Alignment: Matches\n\nBody text.", "alignment": "MATCHES"},
+            {
+                "markdown": "## Intent Alignment: Matches\n\nBody text.",
+                "alignment": "MATCHES",
+            },
         )
 
         # description_markdown parameter overrides inline findings JSON
@@ -433,24 +483,29 @@ class TestNormalizeReviewData(unittest.TestCase):
         )
         self.assertEqual(
             data_override["pr_description"],
-            {"markdown": "## Intent Alignment: Unstated Scope\n\nNew body.", "alignment": "UNSTATED"},
+            {
+                "markdown": "## Intent Alignment: Unstated Scope\n\nNew body.",
+                "alignment": "UNSTATED",
+            },
         )
 
     def test_normalizes_inline_findings_schema_in_launcher(self):
-        data, _ = normalize_review_data({
-            "summary": "Overall assessment.",
-            "verdict": "COMMENT",
-            "inline_findings": [
-                {
-                    "file": "src/app.py",
-                    "start_line": 10,
-                    "line": 12,
-                    "severity": "MEDIUM",
-                    "title": "Check bounds",
-                    "body": "Bounds are not checked.",
-                }
-            ],
-        })
+        data, _ = normalize_review_data(
+            {
+                "summary": "Overall assessment.",
+                "verdict": "COMMENT",
+                "inline_findings": [
+                    {
+                        "file": "src/app.py",
+                        "start_line": 10,
+                        "line": 12,
+                        "severity": "MEDIUM",
+                        "title": "Check bounds",
+                        "body": "Bounds are not checked.",
+                    }
+                ],
+            }
+        )
         self.assertEqual(data["review_summary"]["overview"], "Overall assessment.")
         self.assertEqual(len(data["findings"]), 1)
         f = data["findings"][0]
@@ -460,9 +515,13 @@ class TestNormalizeReviewData(unittest.TestCase):
         self.assertEqual(f["description"], "Check bounds")
         self.assertEqual(f["draft_comment"], "Bounds are not checked.")
 
-    @unittest.skipUnless(shutil.which("node"), "node is required for JS Markdown XSS tests")
+    @unittest.skipUnless(
+        shutil.which("node"), "node is required for JS Markdown XSS tests"
+    )
     def test_dashboard_markdown_renderer_xss_safety(self):
-        html_path = Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
         html = html_path.read_text(encoding="utf-8")
         script_match = re.search(r"<script>([\s\S]*?)</script>", html)
         self.assertIsNotNone(script_match)
@@ -582,8 +641,140 @@ console.log(out);
         self.assertEqual([f["id"] for f in normalized["findings"]], ["H1", "Q1"])
         self.assertNotIn("questions", normalized)
 
+    @unittest.skipUnless(shutil.which("node"), "node is required for JS tab tests")
+    def test_dashboard_write_preview_tabs_and_submission(self):
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        script_match = re.search(r"<script>([\s\S]*?)</script>", html)
+        self.assertIsNotNone(script_match)
+        js_code = script_match.group(1)
+
+        harness = (
+            """
+const elements = {};
+function makeEl(id, initial = {}) {
+  const classes = new Set(initial.classes || []);
+  const attrs = { ...(initial.attrs || {}) };
+  return {
+    id,
+    value: initial.value || '',
+    innerHTML: '',
+    textContent: '',
+    style: { display: initial.display || 'block', height: '' },
+    scrollHeight: 100,
+    clientHeight: 100,
+    classList: {
+      toggle(cls, force) {
+        if (force === undefined) {
+          if (classes.has(cls)) classes.delete(cls);
+          else classes.add(cls);
+        } else if (force) {
+          classes.add(cls);
+        } else {
+          classes.delete(cls);
+        }
+      },
+      add(cls) { classes.add(cls); },
+      remove(cls) { classes.delete(cls); },
+      contains(cls) { return classes.has(cls); }
+    },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    getAttribute(k) { return attrs[k]; }
+  };
+}
+elements['summary-tab-write'] = makeEl('summary-tab-write', { classes: ['active'], attrs: { 'aria-selected': 'true' } });
+elements['summary-tab-preview'] = makeEl('summary-tab-preview', { classes: [], attrs: { 'aria-selected': 'false' } });
+elements['review-summary-text'] = makeEl('review-summary-text', { value: 'Summary with [`fn`](file:///tmp/pr-review-123/a.ts#L1).' });
+elements['review-summary-preview'] = makeEl('review-summary-preview', { display: 'none' });
+elements['comment-tab-write-0'] = makeEl('comment-tab-write-0', { classes: ['active'], attrs: { 'aria-selected': 'true' } });
+elements['comment-tab-preview-0'] = makeEl('comment-tab-preview-0', { classes: [], attrs: { 'aria-selected': 'false' } });
+elements['comment-editor-0'] = makeEl('comment-editor-0', { value: 'Initial comment' });
+elements['comment-preview-0'] = makeEl('comment-preview-0', { display: 'none' });
+
+let savedPayload = null;
+const window = {
+  addEventListener: () => {},
+  __dashboardHost: {
+    kind: 'mcp-app',
+    save: async (p) => { savedPayload = p; }
+  }
+};
+const document = {
+  getElementById: (id) => elements[id] || null,
+  querySelector: (sel) => sel === 'input[name="verdict"]:checked' ? { value: 'APPROVE' } : null,
+  querySelectorAll: () => [],
+  createElement: () => ({ style: {}, appendChild: () => {} }),
+  body: { appendChild: () => {} }
+};
+"""
+            + js_code
+            + """
+reviewData = {
+  pr_metadata: { pull_number: 10, owner: 'o', repo: 'r', head_sha: 'abc1234' },
+  pr_description: { markdown: 'Appended **desc**' },
+  findings: [
+    {
+      id: 'L1',
+      file_path: 'a.ts',
+      line_start: 1,
+      line_end: 1,
+      draft_comment: 'Initial comment',
+      _initial_comment: 'Initial comment',
+      original_code: 'const a = 1;',
+      approved: true
+    }
+  ]
+};
+
+// 1. Empty preview renders placeholder
+const emptyHtml = renderCommentPreviewHtml('   ');
+if (!emptyHtml.includes('Nothing to preview')) throw new Error('Expected empty placeholder: ' + emptyHtml);
+
+// 2. Switch summary to preview -> strips file:// link and renders markdown
+switchSummaryTab('preview');
+if (elements['review-summary-text'].style.display !== 'none') throw new Error('Summary textarea should be hidden');
+if (elements['review-summary-preview'].style.display !== 'block') throw new Error('Summary preview should be visible');
+if (!elements['summary-tab-preview'].classList.contains('active')) throw new Error('Summary preview tab should be active');
+if (elements['review-summary-preview'].innerHTML.includes('file://')) throw new Error('file:// link leaked in preview');
+if (!elements['review-summary-preview'].innerHTML.includes('<code>fn</code>')) throw new Error('Expected inline code in preview');
+
+// 3. Insert description while summary is in preview mode updates preview in place
+insertDescriptionIntoSummary();
+if (!elements['review-summary-preview'].innerHTML.includes('<strong>desc</strong>')) {
+  throw new Error('Expected inserted description in summary preview');
+}
+
+// 4. Switch finding 0 to preview, insert suggestion, verify suggestion header in preview
+switchCommentTab(0, 'preview');
+if (reviewData.findings[0]._tab !== 'preview') throw new Error('Expected _tab=preview');
+insertSuggestion(0);
+if (!elements['comment-preview-0'].innerHTML.includes('suggestion-preview-header')) {
+  throw new Error('Expected Suggested change header in comment preview');
+}
+
+// 5. Submit while in preview mode preserves edited text and strips _tab / _initial_comment
+submitReview().then(() => {
+  console.log(JSON.stringify(savedPayload));
+});
+"""
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        saved = json.loads(proc.stdout.strip())
+        self.assertEqual(saved["verdict"], "APPROVE")
+        self.assertIn("Appended **desc**", saved["summary_comment"])
+        self.assertIn(
+            "```suggestion\nconst a = 1;\n```", saved["findings"][0]["draft_comment"]
+        )
+        self.assertNotIn("_tab", saved["findings"][0])
+        self.assertNotIn("_initial_comment", saved["findings"][0])
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

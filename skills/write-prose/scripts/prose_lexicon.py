@@ -5791,6 +5791,11 @@ PHRASAL_VERBS: tuple[tuple[re.Pattern[str], str, str], ...] = (
         "boil down to",
         "mean / reduce to",
     ),
+    (
+        re.compile(r"\b(?:spell(?:ing|s|ed)?|spelt) out\b", re.IGNORECASE),
+        "spell out",
+        "state / describe / expand",
+    ),
 )
 
 # Document-wide interchangeable action verb synonym groups (MIT ste_lint.py).

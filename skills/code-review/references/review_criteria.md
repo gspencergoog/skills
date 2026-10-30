@@ -4,7 +4,7 @@ This reference document outlines the criteria to prioritize when performing a co
 
 Sections 1–6 apply to code files. Document files (specs, design docs, blueprints, and reference docs, as classified in SKILL.md Step 1b) use [reviewing_documents.md](reviewing_documents.md) and its rubrics instead.
 
-Under `--panel`, each criterion belongs to one lane: **A** (does it work, and can it be verified?) or **B** (is it safe to ship and to maintain?). The lane is shown in each heading.
+Under `--panel`, each criterion belongs to one lane: **A** (does it work, and can it be verified?) or **B** (is it safe to ship and to maintain?). The lane is shown in each heading. The roster, lane blocks, and focus lanes are defined in [lanes.md](lanes.md).
 
 ## Prioritized Criteria
 

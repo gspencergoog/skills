@@ -27,17 +27,27 @@ class TestDiffEvents(unittest.TestCase):
                 make_check(
                     name="test-web", status="COMPLETED", conclusion="FAILURE", required=True
                 ),
-                make_check(name="opt", status="COMPLETED", conclusion="FAILURE", required=False),
+                make_check(
+                    name="python-ci", status="COMPLETED", conclusion="FAILURE", required=False
+                ),
+                make_check(
+                    name="cancelled-job", status="COMPLETED", conclusion="CANCELLED", required=False
+                ),
             ],
             threads=[
-                make_thread(thread_id="t_bot", last_author="bot", last_author_is_bot=True),
+                make_thread(
+                    thread_id="t_bot", last_author="gemini-code-assist", last_author_is_bot=True
+                ),
                 make_thread(thread_id="t_human", last_author="bob", last_author_is_bot=False),
+                make_thread(thread_id="t_self", last_author="alice", last_author_is_bot=False),
             ],
         )
         events = diff_snapshots(None, broken, DiffContext(viewer="alice"))
         kinds = [e.kind for e in events]
-        self.assertEqual(kinds, ["ci_check", "conflicts", "human_threads"])
+        self.assertEqual(kinds, ["ci_check", "ci_check", "conflicts", "human_threads"])
         self.assertTrue(all(e.actionable for e in events))
+        thread_ev = next(e for e in events if e.kind == "human_threads")
+        self.assertEqual(thread_ev.detail["thread_ids"], ["t_bot", "t_human"])
 
     def test_start_transitions_produce_no_events_and_completion_fires(self) -> None:
         ctx = DiffContext(viewer="alice")
@@ -121,15 +131,25 @@ class TestDiffEvents(unittest.TestCase):
         evs = diff_snapshots(s1, s2, ctx)
         self.assertEqual([e.kind for e in evs], ["human_threads"])
 
-        # Bot reply -> does not fire.
+        # Review bot comment (e.g. gemini-code-assist) also fires.
         t1_bot = make_thread(
             thread_id="t1",
-            last_author="bot",
+            last_author="gemini-code-assist",
             last_author_is_bot=True,
             last_comment_at="2026-10-27T21:15:00Z",
         )
         s3 = make_snapshot(threads=[t1_bot])
-        self.assertEqual(diff_snapshots(s1, s3, ctx), [])
+        self.assertEqual([e.kind for e in diff_snapshots(s1, s3, ctx)], ["human_threads"])
+
+        # Viewer's own reply -> does not fire.
+        t1_self = make_thread(
+            thread_id="t1",
+            last_author="alice",
+            last_author_is_bot=False,
+            last_comment_at="2026-10-27T21:20:00Z",
+        )
+        s4 = make_snapshot(threads=[t1_self])
+        self.assertEqual(diff_snapshots(s1, s4, ctx), [])
 
     def test_remaining_detectors_and_terminal_conditions(self) -> None:
         s1 = make_snapshot(

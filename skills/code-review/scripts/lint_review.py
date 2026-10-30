@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """Linter for synthesized code-review artifacts (review_results.md)."""
 
-from dataclasses import dataclass, field
 import json
 import pathlib
 import re
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
-_WRITE_PROSE_SCRIPTS = pathlib.Path(__file__).resolve().parents[2] / "write-prose" / "scripts"
+_WRITE_PROSE_SCRIPTS = (
+    pathlib.Path(__file__).resolve().parents[2] / "write-prose" / "scripts"
+)
 if str(_WRITE_PROSE_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_WRITE_PROSE_SCRIPTS))
 
@@ -24,12 +27,42 @@ MAX_COMMENT_SENTENCES = 4
 MAX_SENTENCE_WORDS = 25
 MAX_SENTENCE_PCC = 5
 
-_STOPWORDS = frozenset({
-    "that", "this", "with", "from", "into", "when", "where", "which",
-    "while", "will", "would", "could", "should", "have", "does", "were",
-    "been", "being", "than", "then", "them", "they", "their", "there",
-    "these", "those", "only", "also", "more", "most", "some", "such",
-})
+_STOPWORDS = frozenset(
+    {
+        "that",
+        "this",
+        "with",
+        "from",
+        "into",
+        "when",
+        "where",
+        "which",
+        "while",
+        "will",
+        "would",
+        "could",
+        "should",
+        "have",
+        "does",
+        "were",
+        "been",
+        "being",
+        "than",
+        "then",
+        "them",
+        "they",
+        "their",
+        "there",
+        "these",
+        "those",
+        "only",
+        "also",
+        "more",
+        "most",
+        "some",
+        "such",
+    }
+)
 _TRAILING_SEVERITY_TAG_RE = re.compile(
     r"\s*\(\s*`?(?:critical|high|medium|low)`?(?:\s+severity)?\s*\)\s*([.!?]?)\s*$",
     re.IGNORECASE,
@@ -39,7 +72,16 @@ HEADING_RE = re.compile(r"^###\s+([CHMLQ]\d+)\.\s*(.*)$")
 SECTION_RE = re.compile(r"^##\s+(.+?)\s*$")
 FIELD_RE = re.compile(r"^-\s+\*\*([^*]+)\*\*:\s*(.*)$")
 FENCE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
-EMPTY_SECTION_TOKENS = {"", "none", "none.", "no findings", "no findings.", "no issues", "no issues."}
+FOCUS_ID_RE = re.compile(r"^`[a-z0-9][a-z0-9-]*(?::[a-z0-9-]+)?`$")
+EMPTY_SECTION_TOKENS = {
+    "",
+    "none",
+    "none.",
+    "no findings",
+    "no findings.",
+    "no issues",
+    "no issues.",
+}
 
 
 @dataclass
@@ -92,6 +134,7 @@ class Report:
     review_comments_line: int = 1
     verified_lines: list[int] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
+    playbook_feedback_line: int = 0
 
 
 @dataclass
@@ -110,7 +153,9 @@ def _strip_ticks(value: str) -> str:
 def _extract_tier(evidence_value: str) -> str:
     if not evidence_value:
         return ""
-    first_part = re.split(r"\s*(?:—|--|-|:)\s*|\s+", evidence_value.strip(), maxsplit=1)[0]
+    first_part = re.split(
+        r"\s*(?:—|--|-|:)\s*|\s+", evidence_value.strip(), maxsplit=1
+    )[0]
     cleaned = first_part.strip("`*_ ")
     for tier in VALID_TIERS:
         if cleaned.lower() == tier.lower():
@@ -141,6 +186,8 @@ def _classify_section(title: str) -> str:
         return "clean"
     if lowered.startswith("recommendations"):
         return "recommendations"
+    if lowered.startswith("playbook feedback"):
+        return "playbook_feedback"
     return "other"
 
 
@@ -196,11 +243,13 @@ def _handle_fence_transition(state: _ParserState, raw_line: str) -> bool:
     if state.capture_field is not None:
         if old_fence and not state.fence_marker:
             if state.current is not None:
-                state.current.fields[state.capture_field] = "\n".join(state.captured_lines)
+                state.current.fields[state.capture_field] = "\n".join(
+                    state.captured_lines
+                )
             state.capture_field = None
             return True
         leading = len(raw_line) - len(raw_line.lstrip(" "))
-        state.captured_lines.append(raw_line[min(state.fence_indent, leading):])
+        state.captured_lines.append(raw_line[min(state.fence_indent, leading) :])
         return True
 
     if (
@@ -235,6 +284,8 @@ def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> No
         state.section = _classify_section(section_match.group(1))
         if state.section == "comments":
             state.report.review_comments_line = lineno
+        elif state.section == "playbook_feedback":
+            state.report.playbook_feedback_line = lineno
         state.current = None
         state.current_field = None
         return
@@ -248,7 +299,11 @@ def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> No
             line=lineno,
             title=heading_match.group(2).strip(),
         )
-        target = state.report.questions if state.section == "questions" else state.report.findings
+        target = (
+            state.report.questions
+            if state.section == "questions"
+            else state.report.findings
+        )
         target.append(finding)
         state.current = finding
         state.current_field = None
@@ -291,7 +346,9 @@ def _check_unparsed_comments(report: Report) -> list[Violation]:
     return []
 
 
-def _check_sequence_for_group(items: list[Finding], expected_prefix: str | None = None) -> list[Violation]:
+def _check_sequence_for_group(
+    items: list[Finding], expected_prefix: str | None = None
+) -> list[Violation]:
     violations: list[Violation] = []
     counts: dict[str, int] = {}
     last_order = -1
@@ -301,7 +358,11 @@ def _check_sequence_for_group(items: list[Finding], expected_prefix: str | None 
         number = int(item.id[1:])
         if expected_prefix and prefix != expected_prefix:
             violations.append(
-                Violation(item.line, "ids-sequential", f"Expected '{expected_prefix}' ID, got '{item.id}'.")
+                Violation(
+                    item.line,
+                    "ids-sequential",
+                    f"Expected '{expected_prefix}' ID, got '{item.id}'.",
+                )
             )
             continue
         if not expected_prefix:
@@ -330,7 +391,9 @@ def _check_sequence_for_group(items: list[Finding], expected_prefix: str | None 
 
 
 def _check_ids_sequential(report: Report) -> list[Violation]:
-    return _check_sequence_for_group(report.findings) + _check_sequence_for_group(report.questions, "Q")
+    return _check_sequence_for_group(report.findings) + _check_sequence_for_group(
+        report.questions, "Q"
+    )
 
 
 def _check_severity_matches_id(report: Report) -> list[Violation]:
@@ -364,9 +427,17 @@ def _check_evidence_and_caps(report: Report) -> list[Violation]:
             continue
         if tier == "Recalled":
             violations.append(
-                Violation(item.line, "evidence-recalled", f"'{item.id}' uses forbidden tier 'Recalled'.")
+                Violation(
+                    item.line,
+                    "evidence-recalled",
+                    f"'{item.id}' uses forbidden tier 'Recalled'.",
+                )
             )
-        if item in report.findings and item.severity in ("critical", "high") and tier in ("Speculation", "Recalled"):
+        if (
+            item in report.findings
+            and item.severity in ("critical", "high")
+            and tier in ("Speculation", "Recalled")
+        ):
             violations.append(
                 Violation(
                     item.line,
@@ -383,7 +454,11 @@ def _check_why_required(report: Report) -> list[Violation]:
         why = _strip_ticks(item.fields.get("Why", ""))
         if not why:
             violations.append(
-                Violation(item.line, "why-required", f"'{item.id}' is missing a non-empty 'Why' field.")
+                Violation(
+                    item.line,
+                    "why-required",
+                    f"'{item.id}' is missing a non-empty 'Why' field.",
+                )
             )
     return violations
 
@@ -401,7 +476,11 @@ def _check_questions(report: Report) -> list[Violation]:
     for q in report.questions:
         if not _strip_ticks(q.fields.get("To settle", "")):
             violations.append(
-                Violation(q.line, "question-fields", f"Question '{q.id}' is missing a 'To settle' field.")
+                Violation(
+                    q.line,
+                    "question-fields",
+                    f"Question '{q.id}' is missing a 'To settle' field.",
+                )
             )
     return violations
 
@@ -431,9 +510,43 @@ def _check_clean_section(report: Report) -> list[Violation]:
 
 def _check_verified_removed(report: Report) -> list[Violation]:
     return [
-        Violation(line, "verified-removed", "Deprecated '**Verified**:' field found; use '**Evidence**: `Executed`'.")
+        Violation(
+            line,
+            "verified-removed",
+            "Deprecated '**Verified**:' field found; use '**Evidence**: `Executed`'.",
+        )
         for line in report.verified_lines
     ]
+
+
+def _check_focus_field(report: Report) -> list[Violation]:
+    violations: list[Violation] = []
+    for item in report.findings + report.questions:
+        if "Focus" not in item.fields:
+            continue
+        raw_focus = item.fields["Focus"].strip()
+        if not FOCUS_ID_RE.match(raw_focus):
+            violations.append(
+                Violation(
+                    item.line,
+                    "focus-id-format",
+                    f"'{item.id}' has invalid 'Focus' value '{raw_focus}'; "
+                    "expected a single backticked id like `sync-to-async` or `adhoc:<slug>`.",
+                )
+            )
+    return violations
+
+
+def _check_no_playbook_feedback_section(report: Report) -> list[Violation]:
+    if report.playbook_feedback_line:
+        return [
+            Violation(
+                report.playbook_feedback_line,
+                "playbook-feedback-leaked",
+                "Playbook Feedback section must be stripped before writing review_results.md.",
+            )
+        ]
+    return []
 
 
 def _check_single_fence_per_field(report: Report) -> list[Violation]:
@@ -457,8 +570,7 @@ def _check_single_fence_per_field(report: Report) -> list[Violation]:
 
 def _content_words(text: str) -> set[str]:
     return {
-        w for w in re.findall(r"[a-z0-9_]{4,}", text.lower())
-        if w not in _STOPWORDS
+        w for w in re.findall(r"[a-z0-9_]{4,}", text.lower()) if w not in _STOPWORDS
     }
 
 
@@ -630,6 +742,8 @@ RULES: list[Callable[[Report], list[Violation]]] = [
     _check_questions,
     _check_clean_section,
     _check_verified_removed,
+    _check_focus_field,
+    _check_no_playbook_feedback_section,
     _check_single_fence_per_field,
     _check_comment_prose,
 ]
@@ -658,26 +772,66 @@ VERDICT_LINE_RE = re.compile(
 )
 
 # Process sentences that code-review's Summary carries for the orchestrator
-# (citation audit tally, flags in effect, trust limit, challenge tally, and
-# the closing Verdict label). They are parsed into structured fields and
+# (ring classification banner, Pre-Execution Security Gate status, citation
+# audit tally, flags in effect, trust/tier limit, clean check, challenge tally,
+# and the closing Verdict label). They are parsed into structured fields and
 # removed from the public overview. Each alternative is anchored to a
 # sentence start and bounded at a sentence end, so prose such as "New Flags:
 # `--dry-run` are wired" or text after the trust-limit sentence is left alone.
-_FLAG_TOKEN = r"(?:`[^`\n]*`|--[\w-]+)"
+_NESTED_PARENS = r"\((?:[^()\n]|\([^()\n]*\))*\)"
+_FLAG_TOKEN = (
+    r"(?:`[^`\n]*`|--[\w-]+|\*\(none\)\*|\(none\)|\b(?:none|default|standard)\b)"
+)
 _SENTENCE_END = r"(?:\.(?=\s|$)|[ \t]*$)"
 INTERNAL_SUMMARY_RE = re.compile(
-    r"(?:^|(?<=[.!?]))[ \t]*(?:"
-    r"Citation audit:[^\n]*?dropped(?: \((?:[^()\n]|\([^()\n]*\))*\))?\.?"
-    r"|Citation audit: none required(?: \([^()\n]*\))?\.?"
-    r"|Flags:\s*" + _FLAG_TOKEN
-    + r"(?:(?:\s*,\s*|\s+)(?:and\s+)?" + _FLAG_TOKEN + r")*"
-    r"(?:\s*\([^()\n]*\))?" + _SENTENCE_END
-    + r"|`--verify` limited to tier 1:[^\n]*?" + _SENTENCE_END
+    r"(?:^|(?<=[.!?;]))[ \t]*(?:"
+    r"(?:🛡️\s*)?(?:Ring Classification|Review Level):[^\n]*?"
+    + _SENTENCE_END
+    + r"|(?i:citation audit):[^\n.]*?(?:dropped|verified|none required)(?:\s*"
+    + _NESTED_PARENS
+    + r")?\.?"
+    + r"|Flags(?:\s+in\s+effect)?:\s*"
+    + _FLAG_TOKEN
+    + r"(?:(?:\s*,\s*|\s+)(?:and\s+)?"
+    + _FLAG_TOKEN
+    + r")*"
+    + r"(?:\s*"
+    + _NESTED_PARENS
+    + r")?(?:\*\*)?"
+    + _SENTENCE_END
+    + r"|Pre-Execution Security Gate:[^\n.]*?"
+    + _SENTENCE_END
+    + r"|Local execution blocked by Pre-Execution Security Gate[^\n.]*?"
+    + _SENTENCE_END
+    + r"|`--verify`(?: and (?i:tier) 1b)? (?:limited to|skipped)[^\n]*?"
+    + _SENTENCE_END
+    + r"|(?:Both reviewer checkouts|Reviewer checkout) passed the post-verification working-tree clean check(?:\s*"
+    + _NESTED_PARENS
+    + r")?\.?"
     + r"|\d+ disputed \([^)\n]*\)\.?"
-    r"|(?i:verdict)\W*(?i:critical blockers?|minor revisions? needed|ready)\b\.?"
-    r")",
+    + r"|(?:\*\*)?(?i:(?:overall\s+)?verdict)(?:\*\*)?\s*:\s*(?:\*\*)?(?i:critical blockers?|minor revisions? needed|ready|approved?)(?:\*\*)?(?:\s*"
+    + _NESTED_PARENS
+    + r")?(?:\*\*)?\.?"
+    + r")",
     re.MULTILINE,
 )
+
+FILE_LINK_RE = re.compile(r"\[([^\]]+)\]\(file://[^)\s]+\)")
+
+
+def _strip_file_links(text: str) -> str:
+    """Replaces local [label](file://...) links with peer-safe text or backticks."""
+
+    def _repl(match: re.Match[str]) -> str:
+        label = match.group(1)
+        if label.startswith("`") and label.endswith("`"):
+            return label
+        if "`" not in label and re.match(r"^[\w./:#-]+$", label):
+            return f"`{label}`"
+        return label
+
+    return FILE_LINK_RE.sub(_repl, text)
+
 
 # Fence info strings whose content is a patch, not a drop-in replacement.
 NON_SUGGESTION_FENCES = frozenset({"diff", "patch"})
@@ -715,7 +869,9 @@ def _parse_verdict(summary_text: str, findings: list[Finding]) -> str:
 
 
 def _parse_citation_audit(summary_text: str) -> dict[str, int]:
-    m = re.search(r"[Cc]itation audit:\s*(\d+)\s+checked,\s*(\d+)\s+dropped", summary_text)
+    m = re.search(
+        r"[Cc]itation audit:\s*(\d+)\s+checked,\s*(\d+)\s+dropped", summary_text
+    )
     if m:
         return {"checked": int(m.group(1)), "dropped": int(m.group(2))}
     return {"checked": 0, "dropped": 0}
@@ -725,8 +881,13 @@ def _parse_flags(summary_text: str) -> list[str]:
     m = re.search(r"[Ff]lags:\s*([^\n\.]+)", summary_text)
     if m:
         raw_flags = m.group(1)
-        return re.findall(r"--[a-z-]+", raw_flags)
+        return list(dict.fromkeys(re.findall(r"--[a-z-]+", raw_flags)))
     return []
+
+
+def _parse_focus_themes(summary_text: str) -> list[str]:
+    matches = re.findall(r"`--focus\s+([a-z0-9][a-z0-9:-]*)[^`\n]*`", summary_text)
+    return list(dict.fromkeys(matches))
 
 
 def _parse_structural_assessment(structural_text: str) -> dict[str, str]:
@@ -739,9 +900,11 @@ def _parse_structural_assessment(structural_text: str) -> dict[str, str]:
 
 
 def _clean_overview(summary_text: str) -> str:
-    """Strip process sentences paragraph by paragraph, keeping paragraph breaks."""
+    """Strip process sentences and local file:// links paragraph by paragraph."""
     paragraphs = re.split(r"\n[ \t]*\n", summary_text)
-    cleaned = (INTERNAL_SUMMARY_RE.sub("", p).strip() for p in paragraphs)
+    cleaned = (
+        _strip_file_links(INTERNAL_SUMMARY_RE.sub("", p)).strip() for p in paragraphs
+    )
     return "\n\n".join(p for p in cleaned if p)
 
 
@@ -780,15 +943,17 @@ def _format_repro_test(meta: FenceMeta, test: str) -> str:
     return test
 
 
-def _build_finding_draft_comment(f: Finding, body: str, why: str, sugg: str, repro: str) -> str:
+def _build_finding_draft_comment(
+    f: Finding, body: str, why: str, sugg: str, repro: str
+) -> str:
     """Assembles the peer-facing draft_comment for a finding."""
     sugg_meta = f.fence("Suggestion")
-    lead_in = sugg_meta.lead_in.strip()
+    lead_in = _strip_file_links(sugg_meta.lead_in.strip())
     repro_meta = f.fence("Repro test")
-    repro_lead_in = repro_meta.lead_in.strip()
+    repro_lead_in = _strip_file_links(repro_meta.lead_in.strip())
 
     draft_parts: list[str] = []
-    main_prose = _build_finding_prose(body, why)
+    main_prose = _strip_file_links(_build_finding_prose(body, why))
     if main_prose:
         draft_parts.append(main_prose)
     if lead_in:
@@ -796,7 +961,9 @@ def _build_finding_draft_comment(f: Finding, body: str, why: str, sugg: str, rep
     if sugg:
         draft_parts.append(_format_suggestion(sugg_meta, sugg))
     if repro:
-        heading = f"**Repro test**: {repro_lead_in}" if repro_lead_in else "**Repro test**"
+        heading = (
+            f"**Repro test**: {repro_lead_in}" if repro_lead_in else "**Repro test**"
+        )
         draft_parts.append(heading)
         draft_parts.append(_format_repro_test(repro_meta, repro))
     return "\n\n".join(draft_parts)
@@ -806,11 +973,13 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
     """Converts a parsed Finding into its exported JSON dictionary."""
     line_start, line_end = _parse_line_range(f.fields.get("Line", "1"))
     ev = f.fields.get("Evidence", "")
-    body = f.fields.get("Body", "").strip()
-    why = f.fields.get("Why", "").strip()
+    body = _strip_file_links(f.fields.get("Body", "").strip())
+    why = _strip_file_links(f.fields.get("Why", "").strip())
     sugg = f.fields.get("Suggestion", "").rstrip().lstrip("\n")
     repro = f.fields.get("Repro test", "").rstrip().lstrip("\n")
-    desc = f.title or (body.split(".")[0].strip() + "." if body else f.id)
+    desc = _strip_file_links(
+        f.title or (body.split(".")[0].strip() + "." if body else f.id)
+    )
 
     finding_dict: dict[str, Any] = {
         "id": f.id,
@@ -820,7 +989,7 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
         "line_end": line_end,
         "side": "RIGHT",
         "evidence_tier": _extract_tier(ev),
-        "evidence_detail": _extract_evidence_detail(ev),
+        "evidence_detail": _strip_file_links(_extract_evidence_detail(ev)),
         "description": desc,
         "body": body,
         "why": why,
@@ -828,6 +997,8 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
     }
     if "Category" in f.fields:
         finding_dict["category"] = f.fields["Category"].strip().lower()
+    if "Focus" in f.fields:
+        finding_dict["focus"] = _strip_ticks(f.fields["Focus"]).strip()
     if sugg:
         finding_dict["suggestion"] = sugg
     if repro:
@@ -839,9 +1010,9 @@ def _build_question_dict(q: Finding) -> dict[str, Any]:
     """Converts a parsed Question Finding into its exported JSON dictionary."""
     line_start, line_end = _parse_line_range(q.fields.get("Line", "1"))
     ev = q.fields.get("Evidence", "")
-    why = q.fields.get("Why", "").strip()
-    to_settle = q.fields.get("To settle", "").strip()
-    desc = q.title or q.fields.get("Body", "").strip()
+    why = _strip_file_links(q.fields.get("Why", "").strip())
+    to_settle = _strip_file_links(q.fields.get("To settle", "").strip())
+    desc = _strip_file_links(q.title or q.fields.get("Body", "").strip())
     return {
         "id": q.id,
         "severity": "question",
@@ -850,11 +1021,11 @@ def _build_question_dict(q: Finding) -> dict[str, Any]:
         "line_end": line_end,
         "side": "RIGHT",
         "evidence_tier": _extract_tier(ev),
-        "evidence_detail": _extract_evidence_detail(ev),
+        "evidence_detail": _strip_file_links(_extract_evidence_detail(ev)),
         "description": desc,
         "why": why,
         "to_settle": to_settle,
-        "draft_comment": _build_question_prose(q),
+        "draft_comment": _strip_file_links(_build_question_prose(q)),
     }
 
 
@@ -870,16 +1041,22 @@ def export_report_to_json(report: Report, output_path: pathlib.Path) -> dict[str
             "verdict": _parse_verdict(report.summary_text, report.findings),
             "citation_audit": _parse_citation_audit(report.summary_text),
             "flags": _parse_flags(report.summary_text),
-            "checked_clean": [cl.text for cl in report.clean_lines],
+            "focus_themes": _parse_focus_themes(report.summary_text),
+            "checked_clean": [_strip_file_links(cl.text) for cl in report.clean_lines],
         },
         "findings": findings_list,
         "questions": questions_list,
     }
-    structural = _parse_structural_assessment(report.structural_text)
+    structural = {
+        k: _strip_file_links(v)
+        for k, v in _parse_structural_assessment(report.structural_text).items()
+    }
     if structural:
         payload["review_summary"]["structural_assessment"] = structural
     if report.recommendations:
-        payload["recommendations"] = report.recommendations
+        payload["recommendations"] = [
+            _strip_file_links(rec) for rec in report.recommendations
+        ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

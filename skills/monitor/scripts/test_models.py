@@ -47,7 +47,7 @@ class TestModels(unittest.TestCase):
         running = make_snapshot(
             checks=[
                 make_check(name="req", status="IN_PROGRESS", conclusion=None, required=True),
-                make_check(name="opt", status="COMPLETED", conclusion="FAILURE", required=False),
+                make_check(name="can", status="COMPLETED", conclusion="CANCELLED", required=False),
             ]
         )
         self.assertEqual(running.required_summary(), "PENDING")
@@ -63,15 +63,15 @@ class TestModels(unittest.TestCase):
         green = make_snapshot(
             checks=[
                 make_check(name="req", status="COMPLETED", conclusion="SUCCESS", required=True),
-                make_check(name="opt", status="COMPLETED", conclusion="FAILURE", required=False),
+                make_check(name="can", status="COMPLETED", conclusion="CANCELLED", required=False),
             ]
         )
         self.assertEqual(green.required_summary(), "SUCCESS")
 
-        # Stacked PR where no check is marked required: all checks become effective required.
+        # Non-required check failure also marks summary as FAILURE so it matches rollup_state.
         unmarked_fail = make_snapshot(
             checks=[
-                make_check(name="c1", status="COMPLETED", conclusion="SUCCESS", required=False),
+                make_check(name="c1", status="COMPLETED", conclusion="SUCCESS", required=True),
                 make_check(name="c2", status="COMPLETED", conclusion="FAILURE", required=False),
             ]
         )

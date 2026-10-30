@@ -35,7 +35,7 @@ def _unread_human_threads(snap: PrSnapshot, ctx: DiffContext) -> list[str]:
     reported = ctx.reported_threads.get(snap.key) or {}
     unread: list[str] = []
     for thread in snap.threads:
-        if thread.resolved or thread.last_author_is_bot:
+        if thread.resolved:
             continue
         if ctx.viewer and thread.last_author == ctx.viewer:
             continue
@@ -47,9 +47,8 @@ def _unread_human_threads(snap: PrSnapshot, ctx: DiffContext) -> list[str]:
 
 def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
     events: list[Event] = []
-    required_names = {c.name for c in cur.effective_required_checks()}
-    for check in cur.checks:
-        if check.name in required_names and check.is_failed():
+    for check in cur.effective_required_checks():
+        if check.is_failed():
             rerun_done = _check_rerun_attempted(ctx, cur.key, check.name, cur.head_sha)
             events.append(
                 Event(
@@ -62,7 +61,7 @@ def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
                     summary=f"CI failed ({check.name})",
                     detail={
                         "check": check.name,
-                        "required": True,
+                        "required": check.required,
                         "run_id": check.run_id,
                         "url": check.url,
                         "rerun_attempted": rerun_done,
@@ -250,7 +249,7 @@ def _diff_threads(prev: PrSnapshot, cur: PrSnapshot, ctx: DiffContext) -> list[E
     baseline = {**prev_map, **reported}
     triggered: list[str] = []
     for thread in cur.threads:
-        if thread.resolved or thread.last_author_is_bot:
+        if thread.resolved:
             continue
         if ctx.viewer and thread.last_author == ctx.viewer:
             continue
@@ -387,7 +386,13 @@ def _check_completion_event(
     if same_head and prev_done and prev_check.conclusion == cur_check.conclusion:
         return None
     failed = cur_check.is_failed()
-    if not failed and not (same_head and prev_check is not None and prev_check.is_failed()):
+    recovered = (
+        same_head
+        and prev_check is not None
+        and prev_check.is_failed()
+        and cur_check.conclusion == "SUCCESS"
+    )
+    if not failed and not recovered:
         return None
     is_req = cur_check.name in required_names
     rerun_done = _check_rerun_attempted(ctx, cur.key, cur_check.name, cur.head_sha)
@@ -403,7 +408,7 @@ def _check_completion_event(
         summary=f"CI {verb} ({cur_check.name})",
         detail={
             "check": cur_check.name,
-            "required": is_req,
+            "required": cur_check.required,
             "run_id": cur_check.run_id,
             "url": cur_check.url,
             "rerun_attempted": rerun_done,
@@ -512,10 +517,10 @@ def summarize(events: list[Event]) -> str:
 
 
 def snapshot_thread_watermarks(snap: PrSnapshot, viewer: str = "") -> dict[str, str]:
-    """Returns ``{thread_id: last_comment_at}`` for unresolved human threads on ``snap``."""
+    """Returns ``{thread_id: last_comment_at}`` for unresolved non-viewer threads on ``snap``."""
     out: dict[str, str] = {}
     for thread in snap.threads:
-        if thread.resolved or thread.last_author_is_bot:
+        if thread.resolved:
             continue
         if viewer and thread.last_author == viewer:
             continue

@@ -379,7 +379,69 @@
       margin-top: 2px;
     }
 
-    /* Textarea */
+    /* Textarea & GitHub-style Tabbed Comment Box */
+    .comment-box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background-color: var(--bg-canvas);
+      overflow: hidden;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .comment-box:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+
+    .comment-tabs-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--bg-panel-hover);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 10px 0 8px;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .comment-tabs {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .comment-tab {
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      margin-bottom: -1px;
+      font-family: inherit;
+    }
+
+    .comment-tab:hover {
+      color: var(--text-bright);
+    }
+
+    .comment-tab.active {
+      background-color: var(--bg-canvas);
+      border-color: var(--border);
+      color: var(--text-bright);
+      font-weight: 600;
+    }
+
+    .comment-tab-actions {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding-bottom: 6px;
+    }
+
     textarea.markdown-editor {
       width: 100%;
       background-color: var(--bg-canvas);
@@ -394,10 +456,52 @@
       line-height: 1.5;
     }
 
+    .comment-box textarea.markdown-editor {
+      border: none;
+      border-radius: 0 0 6px 6px;
+      display: block;
+    }
+
     textarea.markdown-editor:focus {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+
+    .comment-box textarea.markdown-editor:focus {
+      box-shadow: none;
+    }
+
+    .comment-preview {
+      border: none;
+      border-radius: 0 0 6px 6px;
+      min-height: 180px;
+      padding: 12px 16px;
+      background-color: var(--bg-canvas);
+    }
+
+    .preview-empty {
+      color: var(--text-muted);
+      font-style: italic;
+      margin: 0;
+    }
+
+    .suggestion-preview-header {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      background-color: var(--bg-panel-hover);
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      padding: 4px 10px;
+      margin-top: 10px;
+    }
+
+    .suggestion-preview-header + pre.code-box {
+      margin-top: 0;
+      border-top-left-radius: 0;
+      border-top-right-radius: 0;
     }
 
     /* Filters Bar */
@@ -841,7 +945,16 @@
 
     <div style="margin-top: 12px;">
       <label for="review-summary-text" style="display: block; font-weight: 600; margin-bottom: 6px; color: var(--text-bright);">Review Summary Markdown</label>
-      <textarea id="review-summary-text" class="markdown-editor" rows="8" placeholder="Overall assessment and the reason for the verdict. Don't list individual issues; the inline comments carry them."></textarea>
+      <div class="comment-box" id="summary-comment-box">
+        <div class="comment-tabs-header">
+          <div class="comment-tabs" role="tablist" aria-label="Review Summary view mode">
+            <button type="button" id="summary-tab-write" class="comment-tab active" role="tab" aria-selected="true" onclick="switchSummaryTab('write')">Write</button>
+            <button type="button" id="summary-tab-preview" class="comment-tab" role="tab" aria-selected="false" onclick="switchSummaryTab('preview')">Preview</button>
+          </div>
+        </div>
+        <textarea id="review-summary-text" class="markdown-editor" rows="8" placeholder="Overall assessment and the reason for the verdict. Don't list individual issues; the inline comments carry them."></textarea>
+        <div id="review-summary-preview" class="markdown-rendered comment-preview" style="display: none;"></div>
+      </div>
       <div style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">
         💡 Any approved observations located outside diff hunks will automatically be appended to this summary on submission.
       </div>
@@ -945,7 +1058,10 @@
     hunk: 'all'
   };
 
+  let initSeq = 0;
+
   async function init() {
+    const seq = ++initSeq;
     window.__dashboardReload = () => {
       const done = document.getElementById('dashboard-done');
       if (done) done.remove();
@@ -954,8 +1070,11 @@
     };
     if (!reviewData) {
       try {
-        reviewData = await dashboardHost.load();
+        const loaded = await dashboardHost.load();
+        if (seq !== initSeq) return;
+        reviewData = loaded;
       } catch (e) {
+        if (seq !== initSeq) return;
         console.error("Failed to fetch /api/findings:", e);
       }
     }
@@ -969,6 +1088,7 @@
     (reviewData.findings || []).forEach(f => { f._initial_comment = f.draft_comment || ''; });
 
     renderPRMetadata();
+    switchSummaryTab('write');
     renderPRDescription();
     renderCleanAndStructural();
     checkMetadata();
@@ -992,10 +1112,13 @@
 
     let safe = escapeHtml(withPlaceholders);
 
-    // Markdown links restricted to http://, https://, or # anchors
+    // Markdown links restricted to http://, https://, or # anchors; strip local file:// links
     safe = safe.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
       if (/^(https?:\/\/|#)/i.test(url)) {
         return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      }
+      if (/^file:\/\//i.test(url)) {
+        return label;
       }
       return match;
     });
@@ -1017,8 +1140,12 @@
     // Step 1: Extract fenced code blocks before block-level line parsing.
     const withoutFences = normalized.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
       const idx = codeBlocks.length;
-      const langAttr = lang ? ` data-lang="${escapeHtml(lang)}"` : '';
-      codeBlocks.push(`<pre class="code-box"${langAttr}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+      const cleanLang = (lang || '').trim();
+      const langAttr = cleanLang ? ` data-lang="${escapeHtml(cleanLang)}"` : '';
+      const headerHtml = cleanLang.toLowerCase() === 'suggestion'
+        ? '<div class="suggestion-preview-header">Suggested change</div>'
+        : '';
+      codeBlocks.push(`${headerHtml}<pre class="code-box"${langAttr}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
       return `\n\u0000FENCE_${idx}\u0000\n`;
     });
 
@@ -1173,13 +1300,58 @@
     }
   }
 
+  let summaryTabMode = 'write';
+
+  function renderCommentPreviewHtml(markdown) {
+    const trimmed = String(markdown || '').trim();
+    if (!trimmed) {
+      return '<p class="preview-empty">Nothing to preview</p>';
+    }
+    return renderMarkdownSafe(trimmed);
+  }
+
+  function switchSummaryTab(mode) {
+    summaryTabMode = mode === 'preview' ? 'preview' : 'write';
+    const writeBtn = document.getElementById('summary-tab-write');
+    const previewBtn = document.getElementById('summary-tab-preview');
+    const editor = document.getElementById('review-summary-text');
+    const preview = document.getElementById('review-summary-preview');
+    const isPreview = summaryTabMode === 'preview';
+
+    if (writeBtn) {
+      writeBtn.classList.toggle('active', !isPreview);
+      writeBtn.setAttribute('aria-selected', isPreview ? 'false' : 'true');
+    }
+    if (previewBtn) {
+      previewBtn.classList.toggle('active', isPreview);
+      previewBtn.setAttribute('aria-selected', isPreview ? 'true' : 'false');
+    }
+    if (editor) {
+      editor.style.display = isPreview ? 'none' : 'block';
+    }
+    if (preview) {
+      preview.style.display = isPreview ? 'block' : 'none';
+      if (isPreview) {
+        preview.innerHTML = renderCommentPreviewHtml(editor ? editor.value : '');
+      }
+    }
+    if (!isPreview && editor) {
+      fitEditor(editor);
+    }
+  }
+
   function insertDescriptionIntoSummary() {
     const markdown = ((reviewData.pr_description || {}).markdown || '').trim();
     if (!markdown) return;
     const editor = document.getElementById('review-summary-text');
     const current = editor.value.trim();
     editor.value = current ? `${current}\n\n${markdown}` : markdown;
-    fitEditor(editor);
+    if (summaryTabMode === 'preview') {
+      const preview = document.getElementById('review-summary-preview');
+      if (preview) preview.innerHTML = renderCommentPreviewHtml(editor.value);
+    } else {
+      fitEditor(editor);
+    }
   }
 
   function toggleDescriptionView(btn) {
@@ -1400,23 +1572,67 @@
           <div class="code-box">${escapeHtml(finding.original_code)}</div>
         ` : ''}
 
-        <div class="comment-toolbar">
-          <label for="comment-editor-${index}" style="font-weight: 600; font-size: 12px; color: var(--text-bright);">Comment (posted as written):</label>
-          <div style="display: flex; gap: 6px;">
-            <button class="btn-tool" onclick="insertSuggestion(${index})">
-              <span>+ Insert \`\`\`suggestion</span>
-            </button>
-            <button class="btn-tool" onclick="resetComment(${index})">Reset</button>
+        <label for="comment-editor-${index}" style="display: block; font-weight: 600; font-size: 12px; margin-bottom: 6px; color: var(--text-bright);">Comment (posted as written):</label>
+        <div class="comment-box" id="comment-box-${index}">
+          <div class="comment-tabs-header">
+            <div class="comment-tabs" role="tablist" aria-label="Comment view mode">
+              <button type="button" id="comment-tab-write-${index}" class="comment-tab ${finding._tab === 'preview' ? '' : 'active'}" role="tab" aria-selected="${finding._tab === 'preview' ? 'false' : 'true'}" onclick="switchCommentTab(${index}, 'write')">Write</button>
+              <button type="button" id="comment-tab-preview-${index}" class="comment-tab ${finding._tab === 'preview' ? 'active' : ''}" role="tab" aria-selected="${finding._tab === 'preview' ? 'true' : 'false'}" onclick="switchCommentTab(${index}, 'preview')">Preview</button>
+            </div>
+            <div class="comment-tab-actions">
+              <button type="button" class="btn-tool" onclick="insertSuggestion(${index})">
+                <span>+ Insert \`\`\`suggestion</span>
+              </button>
+              <button type="button" class="btn-tool" onclick="resetComment(${index})">Reset</button>
+            </div>
           </div>
+          <textarea id="comment-editor-${index}"
+                    class="markdown-editor"
+                    rows="10"
+                    style="display: ${finding._tab === 'preview' ? 'none' : 'block'};"
+                    oninput="onCommentChange(${index}, this.value)">${escapeHtml(finding.draft_comment || '')}</textarea>
+          <div id="comment-preview-${index}"
+               class="markdown-rendered comment-preview"
+               style="display: ${finding._tab === 'preview' ? 'block' : 'none'};">${finding._tab === 'preview' ? renderCommentPreviewHtml(finding.draft_comment || '') : ''}</div>
         </div>
-        <textarea id="comment-editor-${index}"
-                  class="markdown-editor"
-                  rows="10"
-                  oninput="onCommentChange(${index}, this.value)">${escapeHtml(finding.draft_comment || '')}</textarea>
       </div>
     `;
 
     return card;
+  }
+
+  function switchCommentTab(index, mode) {
+    const finding = (reviewData.findings || [])[index];
+    if (!finding) return;
+    const isPreview = mode === 'preview';
+    finding._tab = isPreview ? 'preview' : 'write';
+
+    const writeBtn = document.getElementById(`comment-tab-write-${index}`);
+    const previewBtn = document.getElementById(`comment-tab-preview-${index}`);
+    const editor = document.getElementById(`comment-editor-${index}`);
+    const preview = document.getElementById(`comment-preview-${index}`);
+
+    if (writeBtn) {
+      writeBtn.classList.toggle('active', !isPreview);
+      writeBtn.setAttribute('aria-selected', isPreview ? 'false' : 'true');
+    }
+    if (previewBtn) {
+      previewBtn.classList.toggle('active', isPreview);
+      previewBtn.setAttribute('aria-selected', isPreview ? 'true' : 'false');
+    }
+    if (editor) {
+      editor.style.display = isPreview ? 'none' : 'block';
+    }
+    if (preview) {
+      preview.style.display = isPreview ? 'block' : 'none';
+      if (isPreview) {
+        const currentText = editor ? editor.value : (finding.draft_comment || '');
+        preview.innerHTML = renderCommentPreviewHtml(currentText);
+      }
+    }
+    if (!isPreview && editor) {
+      fitEditor(editor);
+    }
   }
 
   function setApproval(index, approved) {
@@ -1456,7 +1672,11 @@
     const editor = document.getElementById(`comment-editor-${index}`);
     // Restore the draft as it was when the dashboard loaded.
     finding.draft_comment = finding._initial_comment || '';
-    editor.value = finding.draft_comment;
+    if (editor) editor.value = finding.draft_comment;
+    if (finding._tab === 'preview') {
+      const preview = document.getElementById(`comment-preview-${index}`);
+      if (preview) preview.innerHTML = renderCommentPreviewHtml(finding.draft_comment);
+    }
   }
 
   function insertSuggestion(index) {
@@ -1465,18 +1685,21 @@
     const original = finding.original_code || finding.suggested_code || '// your replacement here';
     const fence = `\`\`\`suggestion\n${original}\n\`\`\``;
 
-    const currentVal = editor.value;
+    const currentVal = editor ? editor.value : (finding.draft_comment || '');
     if (currentVal.includes('```suggestion')) {
       alert('A suggestion fence is already present in this comment.');
       return;
     }
 
-    if (currentVal.trim().length > 0) {
-      editor.value = currentVal.trim() + '\n\n' + fence;
-    } else {
-      editor.value = fence;
+    const updated = currentVal.trim().length > 0
+      ? currentVal.trim() + '\n\n' + fence
+      : fence;
+    if (editor) editor.value = updated;
+    finding.draft_comment = updated;
+    if (finding._tab === 'preview') {
+      const preview = document.getElementById(`comment-preview-${index}`);
+      if (preview) preview.innerHTML = renderCommentPreviewHtml(finding.draft_comment);
     }
-    finding.draft_comment = editor.value;
   }
 
   function setFilter(type, value, btn) {
@@ -1515,7 +1738,7 @@
       head_sha: meta.head_sha || reviewData.head_sha,
       verdict: verdict,
       summary_comment: summaryText,
-      findings: reviewData.findings.map(({ _initial_comment, ...rest }) => rest)
+      findings: reviewData.findings.map(({ _initial_comment, _tab, ...rest }) => rest)
     };
 
     try {

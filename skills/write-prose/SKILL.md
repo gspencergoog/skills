@@ -82,7 +82,8 @@ Execute this mandatory two-pass procedure before finalizing output:
 2. Run `analyze_prose.py` on the draft in Pass 2 and rewrite any flagged violations before producing final output:
    - Pipe inline or chat drafts to stdin (`python3 ./scripts/analyze_prose.py - <<'EOF' ... EOF`), or pass the file path when writing a file (`python3 ./scripts/analyze_prose.py <file>`).
    - Replace banned AI filler verbs/adverbs (`delve`, `leverage`, `seamlessly`) and vague praise adjectives (`robust`, `seamless`, `pivotal`) with concrete technical behaviors.
-   - Replace archaic or formal words (`lieu`, `ergo`, `obviate`), light-verb nominalizations (`make a decision` $\rightarrow$ `decide`), and colloquial phrasal verbs (`spin up` $\rightarrow$ `start`) with plain verbs.
+   - Replace archaic or formal words (`lieu`, `ergo`, `obviate`), light-verb nominalizations (`make a decision` $\rightarrow$ `decide`), and colloquial phrasal verbs (`spin up` $\rightarrow$ `start`, `spell out` $\rightarrow$ `state`) with plain verbs.
+   - Never use `spell` or its derivatives (`spells`, `spelled`, `spelling`, `spellings`) to refer to code symbols, identifiers, syntax, concepts, or descriptions; use them only for the literal spelling of words ([references/standards.md](references/standards.md#52-lexical-familiarity-nominalizations-phrasal-verbs--synonym-rotation)).
    - Break up 4+ consecutive noun clusters, and use one consistent action verb per concept across the document.
    - Keep sentence cognitive complexity low ($\text{PCC} \le 5$): avoid center-embedded clauses between subject and verb, long subject-verb distances ($\text{DD}_{\text{SV}} > 6$), pre-verbal delays ($> 8$ words), and stacked negations.
    - Preserve epistemic modality hedges (`may`, `might`, `could`) when stating engineering uncertainty or root-cause hypotheses.

@@ -69,9 +69,11 @@ When evaluating public interfaces, methods, endpoints, or configuration surfaces
 - **Accidental complexity filter**: Drop suggestions that demand speculative design patterns (like builders, abstract factories, or intermediate wrapper classes) for simple interfaces unless concrete cognitive complexity warrants it.
 - **Systemic observations**: If an API change exposes a broader architectural flaw in the existing codebase that cannot be resolved within the diff, do not file it as a defect against the author. Convert it to a Question (`Q1...`) only if it directly settles whether the change is safe; otherwise drop it.
 
-## Panel Runs
+## Panel and Focus Runs
 
 Under `--panel`, each reviewer drops its own out-of-lane findings below `high`. Out-of-lane findings at `critical` or `high` are kept and tagged `out-of-lane` in their Body.
+
+A focus reviewer (Focus Mandate) applies the same rule to findings outside its theme. A reviewer with a Focus Priority block drops nothing on that basis, because its full mandate still applies. Every focus finding carries a `- **Focus**:` field; drop a `Focus` field whose value is not the assigned theme id. See [lanes.md](lanes.md#focus-blocks).
 
 ## Code Suggestion Quality
 

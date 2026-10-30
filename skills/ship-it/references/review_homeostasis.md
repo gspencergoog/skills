@@ -71,8 +71,8 @@ Execute the `code-review` skill on the working directory or branch diff (Steps 1
 3. Apply agreed-upon fixes.
 4. Run static analyzer and unit test suite to check fixes.
 5. Create git commit (e.g. `fix(review): address code review feedback - pass N`).
-6. If findings were addressed, run the next review pass (waking `@rev-a` via `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, or starting a subagent pass on Tier 2). Pass the previous `Checked and Found Clean` lines as `Ruled out last pass:` hypotheses so the reviewer re-tests them only when the new diff touches those lines.
-7. **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`, `high`, `medium`, and `low` findings (`Questions` excluded, or after max 5 iterations). **Kill any active swarm workers (`swarm{action: "kill", name: "rev-a"}` / `"rev-b"`) and subagents (`manage_subagents` with Action `'kill_all'`).**
+6. If findings were addressed, run the next review pass (waking `@rev-a` via `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, or starting a subagent pass on Tier 2). Pass the previous `Checked and Found Clean` lines as `Ruled out last pass:` hypotheses so the reviewer re-tests them only when the new diff touches those lines. Pass the focus flags pinned on pass 1 (`--focus <id>` per theme, or `--no-focus`) so the same focus reviewers (`@rev-f`, `@rev-f2`) are woken instead of re-running triage. `code-review` may write `focus_playbook_proposals.md` on any pass; the loop does not apply it.
+7. **Homeostasis Reached**: Stop looping when a review pass yields zero `critical`, `high`, `medium`, and `low` findings (`Questions` excluded, or after max 5 iterations). **Kill any active swarm workers (`swarm{action: "kill", name: "rev-a"}` / `"rev-b"` / `"rev-f"`) and subagents (`manage_subagents` with Action `'kill_all'`).**
 
 ______________________________________________________________________
 

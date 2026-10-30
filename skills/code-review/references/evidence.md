@@ -47,6 +47,8 @@ Each hypothesis is a specific claim that a file read or command can confirm or d
 
 Not a hypothesis: "the error handling could be better." Nothing falsifies that, so investigating it produces opinion rather than findings.
 
+Theme hypotheses instantiated from a focus playbook ([focus_areas/README.md](focus_areas/README.md)) are seeded hypotheses like any other: report each one as confirmed, disproved, or unresolved.
+
 Report the outcome of every seeded and self-added hypothesis:
 
 - **Confirmed** → a finding in `## Review Comments`.
@@ -106,6 +108,7 @@ Every finding in `## Review Comments` uses a `### <ID>. <short claim>` heading (
 - **Line**: `<line number in the new file on a changed line>`
 - **Severity**: `critical | high | medium | low`
 - **Category**: `<document category>` (document files only)
+- **Focus**: `<theme-id>` (focus reviewers only; see [lanes.md](lanes.md#focus-mandate-block))
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or a line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 25 words/sentence, PCC <= 5)>
 - **Why**: <1 short sentence (<= 25 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>

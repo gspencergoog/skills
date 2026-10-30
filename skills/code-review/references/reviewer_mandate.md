@@ -41,6 +41,20 @@ When the prompt includes an **API Review Mandate**, evaluate modified public API
 
 When the prompt includes a **Lane Assignment** block (`--panel`), evaluate only the criteria and lenses it lists. Another reviewer covers the remaining criteria in parallel. Report an issue outside your lane only at `critical` or `high`, and tag its Body with `out-of-lane`. In `## Structural Assessment`, fill in only your assigned lenses.
 
+When the prompt includes a **Focus Mandate** block, you are a focus reviewer working beside one or more general reviewers ([lanes.md](lanes.md#focus-mandate-block)):
+
+- Read the playbook the block names (or its inline `#### Ad hoc playbook`) before the diff. It is required reading.
+- Review the whole diff through that theme only, tracing the mechanism across callers, tests, and lifecycle boundaries.
+- Add `- **Focus**: `<theme-id>`` to every finding that belongs to the theme. Report an issue outside the theme only at `critical` or `high`, tagged `out-of-lane` in its Body.
+- End your report with `## Playbook Feedback`, opening with `Failure modes checked: <numbers>`.
+
+When the prompt includes a **Focus Priority** block, you are still a general or lane reviewer ([lanes.md](lanes.md#focus-priority-block)):
+
+- Read the named playbook before the diff and test the theme hypotheses first.
+- Then complete your full mandate. The theme sets the order of work; it never narrows what you report.
+- Your read budget outside the diff and listed context is 35 files instead of 25.
+- Do not add `- **Focus**:` fields or a `## Playbook Feedback` section.
+
 ## Evidence Standard
 
 Every finding states its evidence tier in `Evidence` ([evidence.md](evidence.md)), and severity is capped by that tier:
@@ -128,6 +142,7 @@ Format your report using these exact sections and field labels:
 - **Line**: `<line_number>`
 - **Severity**: `<critical | high | medium | low>`
 - **Category**: `<ambiguity | inconsistency | incompleteness | unverifiable | infeasible | rationale-gap | compatibility | traceability | drift | structure | wording>` (document files only)
+- **Focus**: `<theme-id>` (focus reviewers only, on findings that belong to the assigned theme)
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` -- <command and trimmed output (<=15 lines), quoted text with `path:line`, or line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 25 words/sentence, PCC <= 5).>
 - **Why**: <1 short sentence (<= 25 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences).>
@@ -148,4 +163,9 @@ Format your report using these exact sections and field labels:
 ## Recommendations
 - <Key actionable feedback 1>
 - <Key actionable feedback 2>
+
+## Playbook Feedback
+<Focus reviewers only. The orchestrator reads this section and removes it during synthesis.>
+Failure modes checked: <numbers from the playbook, for example 1, 2, 3, 5>
+- <At most 4 lines: failure modes the playbook lacks, noisy hypothesis templates, or cues that would have flagged the theme earlier. Write `None.` when nothing applies.>
 ```

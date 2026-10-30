@@ -45,7 +45,7 @@ When multiple conditions hold on the same tick, precedence is **terminal (`3`) >
 
 ## 3. Output JSON Payload
 
-To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries only the file path (`dsl_file`) and whether the live `a2ui-pane` JSONL conversation store was updated directly (`store_updated`), rather than embedding the full A2UI Express DSL string in `stdout`:
+To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries only the file path (`dsl_file`, which assigns `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/items`, and `$/ackLabel` for the `stack_board` template) and whether the live `a2ui-pane` JSONL conversation store was updated directly (`store_updated`), rather than embedding the full A2UI Express DSL string in `stdout`:
 
 ```json
 {
@@ -141,9 +141,9 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
 | Kind | Trigger condition | `actionable` | `suggested_action` |
 | :--- | :--- | :--- | :--- |
 | `review_decision` | `reviewDecision` changes to a non-null value | `true` on `CHANGES_REQUESTED` or `APPROVED` | `pr_feedback_handler` (`CHANGES_REQUESTED`), `celebrate` (`APPROVED` + CI green), else `null` |
-| `human_threads` | Unresolved non-bot, non-viewer thread is new or receives a newer human comment | `true` | `pr_feedback_handler` |
+| `human_threads` | Unresolved non-viewer review thread (human or inline review bot such as `gemini-code-assist`) is new or receives a newer comment | `true` | `pr_feedback_handler` |
 | `review_requests` | `requested_reviewers` or `assignees` list changes | `false` | `null` |
-| `ci_check` | Check reaches `COMPLETED` (failure, or recovery from failure on the same head), or required summary reaches `SUCCESS` (`to: "ALL_GREEN"`) | `true` when an effective required check fails, or when `ALL_GREEN` fires on an `APPROVED` PR | `rerun_ci`, `diagnose_ci`, `celebrate` (`ALL_GREEN` + `APPROVED`), or `null` |
+| `ci_check` | Non-cancelled check reaches `COMPLETED` (failure, or recovery from failure on the same head), or check summary reaches `SUCCESS` (`to: "ALL_GREEN"`) | `true` when any check fails (`FAILURE`, `ERROR`, `TIMED_OUT`, `ACTION_REQUIRED`, `STARTUP_FAILURE`), or when `ALL_GREEN` fires on an `APPROVED` PR | `rerun_ci`, `diagnose_ci`, `celebrate` (`ALL_GREEN` + `APPROVED`), or `null` |
 | `conflicts` | `mergeable` becomes `CONFLICTING` | `true` | `resolve_conflicts` |
 | `merge_state` | `mergeStateStatus` changes (ignoring transitions to `UNKNOWN`, and from `UNKNOWN` unless `DIRTY`, `CONFLICTING`, or `BEHIND`) | `true` on `BEHIND` or `DIRTY` | `update_branch` (`BEHIND`), `resolve_conflicts` (`DIRTY`), else `null` |
 | `head_push` | `head_sha` changes and matches neither `--pushed-sha` nor `last_committer == viewer` | `false` | `null` |
@@ -154,9 +154,9 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
 | `approval_dismissed` | Previous approver disappears from `approvals` without entering `changes_requested` when `head_sha` changes | `false` | `null` |
 | `auto_merge` | `auto_merge` boolean toggles | `false` | `null` |
 
-### Effective Required Checks
+### Monitored Checks and Conclusions
 
-On branches without branch-protection rules (for example stacked pull requests targeting a feature branch), GitHub returns `isRequired: false` for every check even when `statusCheckRollup.state` is `FAILURE`. When at least one check on a pull request has `required: true`, only those checks count toward `required_summary()` and `ci_check` actionability. When no check on a pull request has `required: true`, all checks on that pull request are treated as effectively required.
+GitHub repositories frequently run test and lint workflows (`python-ci`, `python-performance`, changelog or PR health checks) that are not listed in branch-protection rulesets (`isRequired: false`), yet their failure sets `statusCheckRollup.state` to `FAILURE`. `PrSnapshot.effective_required_checks()` therefore includes all checks on the pull request so `required_summary()`, `ALL_GREEN`, `_ci_badge()`, and `_detail_bullets()` always agree with GitHub's rollup state. Cancelled check runs (`conclusion: "CANCELLED"`) are treated as neutral rather than failed so superseded runs do not emit false failure alerts.
 
 ## 5. State File Layout (`--state`)
 

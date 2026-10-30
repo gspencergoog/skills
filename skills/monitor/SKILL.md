@@ -51,9 +51,10 @@ python3 <skill-dir>/scripts/monitor_prs.py \
   --once
 ```
 
-1. When `a2ui-pane` is installed, `--conversation-id` creates or updates the `stack_board` surface (`surfaceId: "monitor"`) directly in the conversation JSONL store (`payload.a2ui.store_updated == true`). If `store_updated` is `false` and `render_a2ui` is available, read `<conversation-scratch-dir>/monitor/board.a2ui` and call `render_a2ui` once with `template: "stack_board"`, `surfaceId: "monitor"`, `mode: "pane"`, and `stack: true`. Include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` in your reply whenever the pane is created or updated.
-2. If the initial pass already surfaced actionable events that require main-agent workspace work (`diagnose_ci`, `resolve_conflicts`, `update_branch`, `rebase_onto_base`, or `pr_feedback_handler`), handle them immediately under Step 4 before starting the watcher subagent.
-3. If the initial pass returned exit code `3` (`exit_reason == "terminal"`), finish under Step 5 without starting a watcher.
+1. When `a2ui-pane` is installed, `--conversation-id` creates or updates the `stack_board` surface (`surfaceId: "monitor"`) directly in the conversation JSONL store (`payload.a2ui.store_updated == true`) and deletes any stale surfaces (such as a prior `git-stack` or `progress_board` card) so `"monitor"` is the sole board in the pane. If `store_updated` is `false` and `render_a2ui` is available, read `<conversation-scratch-dir>/monitor/board.a2ui` and call `render_a2ui` once with `template: "stack_board"`, `surfaceId: "monitor"`, `mode: "pane"`, and `replace: true` (omitting `stack: true` so stale surfaces are cleared). Include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` in your reply whenever the pane is created or updated.
+2. While `/monitor` is active, never call `render_a2ui` to create a separate `progress_board`, `stack_board`, or `git-stack` surface during remediation or stack rebases. `monitor_prs.py` owns the pane and updates `surfaceId: "monitor"` directly on each `--once` pass and polling tick.
+3. If the initial pass already surfaced actionable events that require main-agent workspace work (`diagnose_ci`, `resolve_conflicts`, `update_branch`, `rebase_onto_base`, or `pr_feedback_handler`), handle them immediately under Step 4 before starting the watcher subagent.
+4. If the initial pass returned exit code `3` (`exit_reason == "terminal"`), finish under Step 5 without starting a watcher.
 
 ## 3. Delegate the Watch Loop to a `flash` Subagent
 

@@ -18,7 +18,11 @@ import webbrowser
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from diff_parser import normalize_findings_payload
+from diff_parser import (
+    _clean_overview_text,
+    _strip_file_links,
+    normalize_findings_payload,
+)
 
 # Global shutdown flags
 server_should_shutdown = False
@@ -56,7 +60,14 @@ def parse_alignment_status(markdown_text: str) -> str:
         return "PARTIAL"
     if any(
         k in heading_val
-        for k in ("diverge", "conflict", "mismatch", "not match", "n't match", "n\u2019t match")
+        for k in (
+            "diverge",
+            "conflict",
+            "mismatch",
+            "not match",
+            "n't match",
+            "n\u2019t match",
+        )
     ):
         return "DIVERGES"
     if "unstated" in heading_val:
@@ -104,10 +115,13 @@ def _normalize_finding(finding: dict) -> dict:
     item = dict(finding)
     # Approval is the user's decision in the dashboard, not the agent's.
     item["approved"] = False
-    description = (item.get("description") or "").strip()
-    comment = (item.get("draft_comment") or item.get("comment_body") or "").strip()
+    description = _strip_file_links((item.get("description") or "").strip())
+    comment = _strip_file_links(
+        (item.get("draft_comment") or item.get("comment_body") or "").strip()
+    )
     if not comment and description:
         comment = description
+    item["description"] = description
     item["draft_comment"] = comment
     return item
 
@@ -147,7 +161,11 @@ def normalize_review_data(
 
     summary = dict(canonical_input.get("review_summary") or {})
     if not summary.get("overview") and canonical_input.get("summary_comment"):
-        summary["overview"] = canonical_input["summary_comment"]
+        summary["overview"] = _clean_overview_text(
+            str(canonical_input["summary_comment"])
+        )
+    elif summary.get("overview"):
+        summary["overview"] = _clean_overview_text(str(summary["overview"]))
     if not summary.get("verdict") and canonical_input.get("verdict"):
         summary["verdict"] = canonical_input["verdict"]
     normalized["review_summary"] = summary
@@ -241,7 +259,9 @@ class ReviewDashboardHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(403, {"error": "Forbidden Host header"})
             return False
 
-        if not _is_allowed_origin(self.headers.get("Origin", ""), self.server.server_port):
+        if not _is_allowed_origin(
+            self.headers.get("Origin", ""), self.server.server_port
+        ):
             self.send_json(403, {"error": "Cross-origin request rejected"})
             return False
 
@@ -340,7 +360,11 @@ class ReviewDashboardHandler(http.server.BaseHTTPRequestHandler):
 
         path = urllib.parse.urlparse(self.path).path
         content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+        body = (
+            self.rfile.read(content_length).decode("utf-8")
+            if content_length > 0
+            else ""
+        )
 
         if path == "/api/save":
             self._handle_save(body)
@@ -393,7 +417,9 @@ def run_dashboard_server(
     url = f"http://127.0.0.1:{port}/"
 
     print(f"PR Review Dashboard running at: {url}")
-    print(f"Loaded {len(normalized.get('findings', []))} findings from: {findings_file}")
+    print(
+        f"Loaded {len(normalized.get('findings', []))} findings from: {findings_file}"
+    )
     if meta_file is not None:
         print(f"Reading PR metadata from: {meta_file}")
     if description_file is not None:
@@ -419,8 +445,12 @@ def run_dashboard_server(
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Launch interactive PR review dashboard.")
-    parser.add_argument("--findings-file", required=True, help="Path to review_findings.json.")
+    parser = argparse.ArgumentParser(
+        description="Launch interactive PR review dashboard."
+    )
+    parser.add_argument(
+        "--findings-file", required=True, help="Path to review_findings.json."
+    )
     parser.add_argument("--output-file", help="Path to save review_decisions.json.")
     parser.add_argument(
         "--meta-file",
@@ -435,16 +465,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Print normalized review payload (plus _warnings) as JSON to stdout and exit.",
     )
-    parser.add_argument("--port", type=int, default=0, help="Port to bind (default: random free port).")
-    parser.add_argument("--no-browser", action="store_true", help="Do not automatically open browser.")
+    parser.add_argument(
+        "--port", type=int, default=0, help="Port to bind (default: random free port)."
+    )
+    parser.add_argument(
+        "--no-browser", action="store_true", help="Do not automatically open browser."
+    )
     args = parser.parse_args(argv)
 
     if not args.dump_json and not args.output_file:
-        print("Error: --output-file is required unless --dump-json is set.", file=sys.stderr)
+        print(
+            "Error: --output-file is required unless --dump-json is set.",
+            file=sys.stderr,
+        )
         return 2
 
     findings_file = Path(args.findings_file)
-    output_file = Path(args.output_file) if args.output_file else Path("review_decisions.json")
+    output_file = (
+        Path(args.output_file) if args.output_file else Path("review_decisions.json")
+    )
     meta_file = Path(args.meta_file) if args.meta_file else None
     description_file = Path(args.description_file) if args.description_file else None
 
@@ -452,7 +491,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     html_template_path = script_dir.parent / "assets" / "review_dashboard.html"
 
     if not args.dump_json and not html_template_path.is_file():
-        print(f"Error: Dashboard HTML template does not exist: {html_template_path}", file=sys.stderr)
+        print(
+            f"Error: Dashboard HTML template does not exist: {html_template_path}",
+            file=sys.stderr,
+        )
         return 2
     if not findings_file.is_file():
         print(f"Error: Findings file does not exist: {findings_file}", file=sys.stderr)
@@ -461,10 +503,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: Meta file does not exist: {meta_file}", file=sys.stderr)
         return 2
     if description_file is not None and not description_file.is_file():
-        print(f"Error: Description file does not exist: {description_file}", file=sys.stderr)
+        print(
+            f"Error: Description file does not exist: {description_file}",
+            file=sys.stderr,
+        )
         return 2
     try:
-        normalized, warnings = load_review_data(findings_file, meta_file, description_file)
+        normalized, warnings = load_review_data(
+            findings_file, meta_file, description_file
+        )
     except (OSError, ValueError) as e:
         print(f"Error: Could not read review data: {e}", file=sys.stderr)
         return 2
@@ -489,5 +536,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 @dataclass
 class DiffHunk:
     """Represents a single unified diff hunk."""
+
     file_path: str
     old_start: int
     old_count: int
@@ -39,11 +40,15 @@ class DiffHunk:
             return self.old_start <= line < (self.old_start + self.old_count)
         return False
 
-    def contains_range(self, start_line: int, end_line: int, side: str = "RIGHT") -> bool:
+    def contains_range(
+        self, start_line: int, end_line: int, side: str = "RIGHT"
+    ) -> bool:
         """Checks if a 1-indexed line range [start_line, end_line] is fully within this hunk."""
         if start_line > end_line:
             start_line, end_line = end_line, start_line
-        return self.contains_line(start_line, side) and self.contains_line(end_line, side)
+        return self.contains_line(start_line, side) and self.contains_line(
+            end_line, side
+        )
 
 
 # Pattern matching git diff file headers (quoted or unquoted): diff --git a/path b/path
@@ -53,14 +58,13 @@ DIFF_HEADER_RE = re.compile(
 # Pattern matching +++ b/path headers (quoted or unquoted)
 PLUS_HEADER_RE = re.compile(r'^\+\+\+ (?:"b/((?:[^"\\]|\\.)+)"|b/([^\t\n]+))')
 # Pattern matching hunk header: @@ -old_start,old_count +new_start,new_count @@
-HUNK_HEADER_RE = re.compile(
-    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$"
-)
+HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 OCTAL_ESCAPE_RE = re.compile(r"(?:\\[0-3][0-7]{2})+")
 
 
 def _unescape_git_path(raw_path: str) -> str:
     """Unescapes C/octal-escaped paths emitted by git diff when quoting filenames."""
+
     def _decode_octal_run(match: re.Match[str]) -> str:
         octals = match.group(0).split("\\")[1:]
         raw_bytes = bytes(int(o, 8) for o in octals)
@@ -92,9 +96,7 @@ def _parse_file_header(line: str) -> Optional[tuple[bool, Optional[str]]]:
     if plus_match:
         quoted_b, plain_b = plus_match.group(1), plus_match.group(2)
         file_path = (
-            _unescape_git_path(quoted_b)
-            if quoted_b is not None
-            else plain_b.strip()
+            _unescape_git_path(quoted_b) if quoted_b is not None else plain_b.strip()
         )
         return True, file_path
 
@@ -181,7 +183,11 @@ def resolve_repo_dir(repo_dir: Optional[str]) -> Optional[str]:
     if raw.startswith("{"):
         try:
             data = json.loads(raw)
-            resolved = str(data.get("workspace_dir") or "").strip() if isinstance(data, dict) else ""
+            resolved = (
+                str(data.get("workspace_dir") or "").strip()
+                if isinstance(data, dict)
+                else ""
+            )
             return resolved or None
         except ValueError:
             return None
@@ -227,6 +233,70 @@ def extract_source_lines(
     return "".join(extracted).rstrip("\r\n")
 
 
+_NESTED_PARENS = r"\((?:[^()\n]|\([^()\n]*\))*\)"
+_FLAG_TOKEN = (
+    r"(?:`[^`\n]*`|--[\w-]+|\*\(none\)\*|\(none\)|\b(?:none|default|standard)\b)"
+)
+_SENTENCE_END = r"(?:\.(?=\s|$)|[ \t]*$)"
+INTERNAL_SUMMARY_RE = re.compile(
+    r"(?:^|(?<=[.!?;]))[ \t]*(?:"
+    r"(?:🛡️\s*)?(?:Ring Classification|Review Level):[^\n]*?"
+    + _SENTENCE_END
+    + r"|(?i:citation audit):[^\n.]*?(?:dropped|verified|none required)(?:\s*"
+    + _NESTED_PARENS
+    + r")?\.?"
+    + r"|Flags(?:\s+in\s+effect)?:\s*"
+    + _FLAG_TOKEN
+    + r"(?:(?:\s*,\s*|\s+)(?:and\s+)?"
+    + _FLAG_TOKEN
+    + r")*"
+    + r"(?:\s*"
+    + _NESTED_PARENS
+    + r")?(?:\*\*)?"
+    + _SENTENCE_END
+    + r"|Pre-Execution Security Gate:[^\n.]*?"
+    + _SENTENCE_END
+    + r"|Local execution blocked by Pre-Execution Security Gate[^\n.]*?"
+    + _SENTENCE_END
+    + r"|`--verify`(?: and (?i:tier) 1b)? (?:limited to|skipped)[^\n]*?"
+    + _SENTENCE_END
+    + r"|(?:Both reviewer checkouts|Reviewer checkout) passed the post-verification working-tree clean check(?:\s*"
+    + _NESTED_PARENS
+    + r")?\.?"
+    + r"|\d+ disputed \([^)\n]*\)\.?"
+    + r"|(?:\*\*)?(?i:(?:overall\s+)?verdict)(?:\*\*)?\s*:\s*(?:\*\*)?(?i:critical blockers?|minor revisions? needed|ready|approved?)(?:\*\*)?(?:\s*"
+    + _NESTED_PARENS
+    + r")?(?:\*\*)?\.?"
+    + r")",
+    re.MULTILINE,
+)
+
+FILE_LINK_RE = re.compile(r"\[([^\]]+)\]\(file://[^)\s]+\)")
+
+
+def _strip_file_links(text: str) -> str:
+    """Replaces local [label](file://...) links with peer-safe text or backticks."""
+
+    def _repl(match: re.Match[str]) -> str:
+        label = match.group(1)
+        if label.startswith("`") and label.endswith("`"):
+            return label
+        if "`" not in label and re.match(r"^[\w./:#-]+$", label):
+            return f"`{label}`"
+        return label
+
+    return FILE_LINK_RE.sub(_repl, text)
+
+
+def _clean_overview_text(summary_text: str) -> str:
+    """Strips internal process sentences and local file:// links paragraph by paragraph."""
+    paragraphs = re.split(r"\n[ \t]*\n", summary_text)
+    cleaned = (
+        _strip_file_links(INTERNAL_SUMMARY_RE.sub("", p)).strip() for p in paragraphs
+    )
+    return "\n\n".join(p for p in cleaned if p)
+
+
 def normalize_finding_entry(
     raw: Dict[str, Any],
     index: int,
@@ -235,25 +305,35 @@ def normalize_finding_entry(
 ) -> Dict[str, Any]:
     """Normalizes a single finding dictionary from canonical or alias keys."""
     item = dict(raw)
-    file_path = str(
-        item.get("file_path") or item.get("file") or item.get("path") or ""
-    ).strip().removeprefix("./")
+    file_path = (
+        str(item.get("file_path") or item.get("file") or item.get("path") or "")
+        .strip()
+        .removeprefix("./")
+    )
 
-    raw_start = item.get("line_start") or item.get("start_line") or item.get("line") or 1
-    raw_end = item.get("line_end") or item.get("end_line") or item.get("line") or raw_start
+    raw_start = (
+        item.get("line_start") or item.get("start_line") or item.get("line") or 1
+    )
+    raw_end = (
+        item.get("line_end") or item.get("end_line") or item.get("line") or raw_start
+    )
     start_line = int(raw_start)
     end_line = int(raw_end)
     if start_line > end_line:
         start_line, end_line = end_line, start_line
 
-    description = str(item.get("description") or item.get("title") or "").strip()
-    draft_comment = str(
-        item.get("draft_comment")
-        or item.get("comment_body")
-        or item.get("body")
-        or item.get("comment")
-        or ""
-    ).strip()
+    description = _strip_file_links(
+        str(item.get("description") or item.get("title") or "").strip()
+    )
+    draft_comment = _strip_file_links(
+        str(
+            item.get("draft_comment")
+            or item.get("comment_body")
+            or item.get("body")
+            or item.get("comment")
+            or ""
+        ).strip()
+    )
 
     item["id"] = str(item.get("id") or f"f{index}")
     item["file_path"] = file_path
@@ -300,6 +380,40 @@ def _collect_raw_findings_list(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return collected
 
 
+def _extract_raw_overview(
+    summary_dict: Dict[str, Any], normalized: Dict[str, Any]
+) -> str:
+    """Extracts the raw overview text from canonical or alias summary fields."""
+    summary_val = normalized.get("summary")
+    fallback_summary = summary_val if not isinstance(summary_val, dict) else ""
+    return str(
+        summary_dict.get("overview")
+        or normalized.get("summary_comment")
+        or fallback_summary
+        or normalized.get("overview")
+        or ""
+    ).strip()
+
+
+def _sanitize_summary_fields(
+    summary_dict: Dict[str, Any], normalized: Dict[str, Any]
+) -> None:
+    """Strips local file:// links from summary subfields and top-level recommendations."""
+    if isinstance(summary_dict.get("checked_clean"), list):
+        summary_dict["checked_clean"] = [
+            _strip_file_links(str(item)) for item in summary_dict["checked_clean"]
+        ]
+    if isinstance(summary_dict.get("structural_assessment"), dict):
+        summary_dict["structural_assessment"] = {
+            k: _strip_file_links(str(v))
+            for k, v in summary_dict["structural_assessment"].items()
+        }
+    if isinstance(normalized.get("recommendations"), list):
+        normalized["recommendations"] = [
+            _strip_file_links(str(item)) for item in normalized["recommendations"]
+        ]
+
+
 def normalize_findings_payload(data: Any) -> Dict[str, Any]:
     """Normalizes a findings JSON payload (canonical or alias keys) in-place or as a dict."""
     if isinstance(data, list):
@@ -319,20 +433,16 @@ def normalize_findings_payload(data: Any) -> Dict[str, Any]:
         normalized.pop(alias_key, None)
 
     raw_summary = normalized.get("review_summary")
-    if not isinstance(raw_summary, dict) and isinstance(normalized.get("summary"), dict):
+    if not isinstance(raw_summary, dict):
         raw_summary = normalized.get("summary")
-
     summary_dict = dict(raw_summary) if isinstance(raw_summary, dict) else {}
-    overview = str(
-        summary_dict.get("overview")
-        or normalized.get("summary_comment")
-        or (normalized.get("summary") if not isinstance(normalized.get("summary"), dict) else "")
-        or normalized.get("overview")
-        or ""
-    ).strip()
+
+    overview = _clean_overview_text(_extract_raw_overview(summary_dict, normalized))
     verdict = str(
         summary_dict.get("verdict") or normalized.get("verdict") or "COMMENT"
     ).upper()
+    _sanitize_summary_fields(summary_dict, normalized)
+
     if overview or "review_summary" in normalized or "summary" in normalized:
         summary_dict["overview"] = overview
         summary_dict["verdict"] = verdict
@@ -428,12 +538,16 @@ def _run_tag_findings(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Parse diffs and validate hunk lines.")
     parser.add_argument("--diff", required=True, help="Path to unified diff file.")
-    parser.add_argument("--findings", help="Optional path to review findings JSON to tag.")
+    parser.add_argument(
+        "--findings", help="Optional path to review findings JSON to tag."
+    )
     parser.add_argument(
         "--repo-dir",
         help="Path to repository checkout (or workspace_dir.txt / pr_coords.json) for source line extraction.",
     )
-    parser.add_argument("--output", help="Optional output path for tagged findings JSON.")
+    parser.add_argument(
+        "--output", help="Optional output path for tagged findings JSON."
+    )
     args = parser.parse_args()
 
     diff_path = Path(args.diff)
@@ -457,5 +571,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
-

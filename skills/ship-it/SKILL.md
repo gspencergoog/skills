@@ -93,6 +93,7 @@ Execute iterative review passes on the current branch/worktree:
 2. **Code Review Iterative Loop**:
    - Refer to [review_homeostasis.md](references/review_homeostasis.md) for reviewer prompt templates, oscillation handling rules, and homeostasis criteria.
    - Run the `code-review` skill from the root session on the working directory diff. On Jetski root sessions (`Tier 1`), `code-review` spawns `@rev-a` via `swarm` and wakes the warm `waiting` worker via `post_message` + `swarm_wait` across homeostasis passes; when `swarm` is unavailable, it falls back to a `self` subagent (`Workspace: "inherit"`).
+   - **Pin focus themes**: On pass 1, let `code-review` run its focus triage (Step 2d). Record the theme ids it chose from the Summary flags line (`--focus <id>`), and pass the same `--focus <id>` flags (or `--no-focus` when none were chosen) on every later pass, so the theme set does not change between passes and triage runs once.
    - Parse findings (`critical`, `high`, `medium`, and `low`); Questions are answered, not fixed, and do not block homeostasis.
    - Apply fixes, run unit tests, and commit changes (`git commit -m "fix(review): address review comments"`).
    - **Oscillation Detection**: If a finding touches lines previously modified in a prior review iteration, present the conflicting recommendations to the user via `consequence_cards` in `genui` (when `a2ui-pane` is available) or via your interactive question tool / chat prompt (waiting for their reply).

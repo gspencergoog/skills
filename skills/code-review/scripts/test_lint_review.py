@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
 """Unit tests for lint_review.py."""
 
+import importlib.util
 import json
 import pathlib
 import tempfile
@@ -207,7 +207,9 @@ None.
             self.assertEqual(main([str(clean_path)]), 0)
 
             bad_path = pathlib.Path(tmp) / "bad.md"
-            bad_path.write_text("## Review Comments\nSome unparsed text\n", encoding="utf-8")
+            bad_path.write_text(
+                "## Review Comments\nSome unparsed text\n", encoding="utf-8"
+            )
             self.assertEqual(main([str(bad_path)]), 1)
 
     def test_export_json_valid_report(self):
@@ -232,7 +234,10 @@ None.
             self.assertEqual(h1["line_end"], 50)
             self.assertEqual(h1["evidence_tier"], "Executed")
             self.assertIn("48,120 bytes", h1["evidence_detail"])
-            self.assertEqual(h1["description"], "`_fits_limits` measures code points instead of UTF-8 bytes")
+            self.assertEqual(
+                h1["description"],
+                "`_fits_limits` measures code points instead of UTF-8 bytes",
+            )
             self.assertIn("Multibyte diffs exceed", h1["why"])
             self.assertIn("return _byte_len(text) <= max_bytes", h1["suggestion"])
             self.assertIn(
@@ -254,7 +259,7 @@ None.
             self.assertIn("Check how `git diff`", q1["to_settle"])
             self.assertEqual(
                 q1["draft_comment"],
-                'Can `split_diff_grouped` receive surrogate-escaped text on stdin? '
+                "Can `split_diff_grouped` receive surrogate-escaped text on stdin? "
                 'If binary diffs contain non-UTF-8 bytes, `encode("utf-8")` raises `UnicodeEncodeError`.',
             )
             self.assertNotIn("**Question**", q1["draft_comment"])
@@ -266,7 +271,9 @@ None.
     def test_export_json_invalid_report_does_not_write_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             bad_path = pathlib.Path(tmp) / "bad.md"
-            bad_path.write_text("## Review Comments\nSome unparsed text\n", encoding="utf-8")
+            bad_path.write_text(
+                "## Review Comments\nSome unparsed text\n", encoding="utf-8"
+            )
             json_path = pathlib.Path(tmp) / "output.json"
 
             exit_code = main([str(bad_path), "--export-json", str(json_path)])
@@ -301,7 +308,9 @@ Verdict: Minor revisions needed.
             self.assertEqual(exit_code, 0)
             data = json.loads(json_path.read_text(encoding="utf-8"))
             sugg = data["findings"][0]["draft_comment"]
-            self.assertIn("```suggestion\n        if not items:\n            return []\n```", sugg)
+            self.assertIn(
+                "```suggestion\n        if not items:\n            return []\n```", sugg
+            )
 
     def test_export_json_overview_strips_internal_process_lines(self):
         report_text = """\
@@ -334,7 +343,7 @@ Citation audit: 4 checked, 0 dropped. Flags: `--max --claude`.
             self.assertEqual(data["review_summary"]["flags"], ["--max", "--claude"])
 
     def test_parse_verdict_word_boundaries(self):
-        from lint_review import _parse_verdict, Finding
+        from lint_review import Finding, _parse_verdict
 
         # Contains 'already' (should not match 'ready') and 'no critical blockers'
         text = "These changes are already tested. There are no critical blockers in the implementation."
@@ -416,7 +425,9 @@ Verdict: Minor revisions needed.
     def test_export_json_bare_fence_becomes_suggestion(self):
         report_text = self._finding_report("\n```\nx = compute()\n```")
         data = self._export(report_text)
-        self.assertIn("```suggestion\nx = compute()\n```", data["findings"][0]["draft_comment"])
+        self.assertIn(
+            "```suggestion\nx = compute()\n```", data["findings"][0]["draft_comment"]
+        )
 
     def test_export_json_bare_fence_with_lead_in_becomes_suggestion(self):
         report_text = self._finding_report(
@@ -429,7 +440,9 @@ Verdict: Minor revisions needed.
         )
 
     def test_export_json_diff_fence_is_not_committable(self):
-        report_text = self._finding_report("\n```diff\n-    send()\n+    await send()\n```")
+        report_text = self._finding_report(
+            "\n```diff\n-    send()\n+    await send()\n```"
+        )
         data = self._export(report_text)
         comment = data["findings"][0]["draft_comment"]
         self.assertIn("```diff\n-    send()\n+    await send()\n```", comment)
@@ -468,21 +481,16 @@ Verdict: Minor revisions needed.
             # "Flags:" inside prose is not a process sentence; the closing
             # Verdict label is a process label and is stripped.
             "Adds CLI parsing. New Flags: `--dry-run` and `--json` are wired into argparse. "
-            "Verdict: Minor Revisions Needed.":
-                "Adds CLI parsing. New Flags: `--dry-run` and `--json` are wired into argparse.",
+            "Verdict: Minor Revisions Needed.": "Adds CLI parsing. New Flags: `--dry-run` and `--json` are wired into argparse.",
             # Nested parentheses inside the citation audit parenthetical.
             "Refactors the parser. Citation audit: 3 checked, 1 dropped (H2 cited `parse()` "
-            "which does not exist). Flags: `--max`.":
-                "Refactors the parser.",
+            "which does not exist). Flags: `--max`.": "Refactors the parser.",
             # Prose after the flags sentence survives; Verdict is stripped.
-            "Verdict: Ready. Flags: `--claude`. The remaining risk is the untested retry path.":
-                "The remaining risk is the untested retry path.",
+            "Verdict: Ready. Flags: `--claude`. The remaining risk is the untested retry path.": "The remaining risk is the untested retry path.",
             # "none required" variant is stripped.
-            "Looks good. Citation audit: none required (no critical or high findings).":
-                "Looks good.",
+            "Looks good. Citation audit: none required (no critical or high findings).": "Looks good.",
             # Two paragraphs are preserved as two paragraphs.
-            "First paragraph.\n\nSecond paragraph. Flags: `--fast`.":
-                "First paragraph.\n\nSecond paragraph.",
+            "First paragraph.\n\nSecond paragraph. Flags: `--fast`.": "First paragraph.\n\nSecond paragraph.",
             # One backtick span per flag, comma separated.
             "Refactors X. Flags: `--json`, `--verify`.": "Refactors X.",
             # One backtick span per flag, space separated.
@@ -491,15 +499,34 @@ Verdict: Minor revisions needed.
             "Refactors X. Flags: `--fast` (`--claude` ignored).": "Refactors X.",
             # Prose after the trust-limit sentence survives.
             "Refactors X. `--verify` limited to tier 1: PR author is not a repo collaborator. "
-            "The retry path remains untested.":
-                "Refactors X. The retry path remains untested.",
+            "The retry path remains untested.": "Refactors X. The retry path remains untested.",
             # A paragraph that starts with a process sentence keeps its prose
             # as its own paragraph.
-            "First paragraph.\n\nCitation audit: 3 checked, 0 dropped. Second paragraph prose.":
-                "First paragraph.\n\nSecond paragraph prose.",
+            "First paragraph.\n\nCitation audit: 3 checked, 0 dropped. Second paragraph prose.": "First paragraph.\n\nSecond paragraph prose.",
             # A paragraph that is only process text disappears entirely.
-            "First paragraph.\n\nFlags: `--max`.\n\nThird paragraph.":
-                "First paragraph.\n\nThird paragraph.",
+            "First paragraph.\n\nFlags: `--max`.\n\nThird paragraph.": "First paragraph.\n\nThird paragraph.",
+            # Ring Classification and Review Level banners are stripped.
+            "🛡️ Ring Classification: Ring 3 (Shared Libraries & Public Contracts) -> Review Level: Panel (`--panel`)\n\n"
+            "Updates the generator.\n\n"
+            "Pre-Execution Security Gate: `SAFE_FOR_LOCAL_EXECUTION`.": "Updates the generator.",
+            "🛡️ Review Level: Fast (`--fast` specified, ring evaluation skipped)\n\n"
+            "Minor doc fix.": "Minor doc fix.",
+            # Exact user repro with Ring 3, file:// links, Citation audit, Flags, and Pre-Execution Security Gate.
+            "🛡️ Ring Classification: Ring 3 (Shared Libraries & Public Contracts) -> Review Level: Panel (`--panel`)\n\n"
+            "This change fixes [#3485](https://github.com/a2ui-project/a2ui/issues/3485) by updating "
+            "[`prepareRef`](file:///tmp/pr-review-bfp9czs1/typescript/core/web_core/scripts/zod-generator-core.mjs#L245-L295) "
+            "in [zod-generator-core.mjs](file:///tmp/pr-review-bfp9czs1/typescript/core/web_core/scripts/zod-generator-core.mjs#L185-L234).\n\n"
+            "Citation audit: 2 checked, 0 dropped (`M2` from Lane A was filtered out). "
+            "Flags: `--panel` (Ring 3 auto-scaled). Pre-Execution Security Gate: `SAFE_FOR_LOCAL_EXECUTION`.\n\n"
+            "Verdict: Ready": "This change fixes [#3485](https://github.com/a2ui-project/a2ui/issues/3485) by updating "
+            "`prepareRef` in `zod-generator-core.mjs`.",
+            # Tier 1a/1b limit, skipped security gate, clean check, and Flags: none / *(none)* / Flags in effect.
+            "Refactors X. `--verify` limited to tier 1a/1b: PR author is not a repo collaborator. "
+            "`--verify` and tier 1b skipped: blocked by Pre-Execution Security Gate. "
+            "Both reviewer checkouts passed the post-verification working-tree clean check (`0` tracked modifications). "
+            "Flags: none (one Gemini reviewer, tier 1 verification).": "Refactors X.",
+            "Refactors Y. Flags in effect: `(none)` (baseline 1-reviewer standard mode). "
+            "Overall verdict: **Ready**.": "Refactors Y.",
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
@@ -685,6 +712,182 @@ Verdict: Minor revisions needed.
 ```
 """
         self.assertEqual(check_report(parse_report(report_text)), [])
+
+    @staticmethod
+    def _focus_report(focus_line: str, summary: str = "Verdict: Ready.") -> str:
+        return f"""\
+## Summary
+{summary}
+
+## Review Comments (Ordered by Severity)
+
+### M1. Blocking call left inside async handler
+- **File**: `handler.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Category**: `correctness`
+{focus_line}
+- **Evidence**: `Read` - `handler.py:10`
+- **Body**: `fetch()` is called without `await`.
+- **Why**: The handler returns before the fetch completes.
+"""
+
+    def test_focus_field_valid_passes_and_exports(self):
+        cases = {
+            "- **Focus**: `sync-to-async`": "sync-to-async",
+            "- **Focus**: `adhoc:retry-storm-on-new-client`": "adhoc:retry-storm-on-new-client",
+        }
+        for focus_line, expected in cases.items():
+            with self.subTest(focus_line=focus_line):
+                report_text = self._focus_report(focus_line)
+                self.assertEqual(check_report(parse_report(report_text)), [])
+                data = self._export(report_text)
+                self.assertEqual(data["findings"][0]["focus"], expected)
+                self.assertIn("category", data["findings"][0])
+
+    def test_focus_field_absent_is_not_exported(self):
+        data = self._export(self._finding_report(" Fix it."))
+        self.assertNotIn("focus", data["findings"][0])
+        self.assertEqual(data["review_summary"]["focus_themes"], [])
+
+    def test_focus_field_invalid_fails(self):
+        for focus_line in (
+            "- **Focus**: sync-to-async",
+            "- **Focus**: `sync to async`",
+            "- **Focus**: `sync-to-async` `adhoc:other`",
+        ):
+            with self.subTest(focus_line=focus_line):
+                report = parse_report(self._focus_report(focus_line))
+                violations = [
+                    v for v in check_report(report) if v.rule == "focus-id-format"
+                ]
+                self.assertEqual(len(violations), 1)
+                self.assertEqual(violations[0].line, report.findings[0].line)
+
+    def test_focus_field_invalid_on_question_fails(self):
+        bad = """\
+## Questions
+### Q1. Is the retry bounded?
+- **Focus**: adhoc:retry-storm
+- **Evidence**: `Speculation` - unchecked
+- **Why**: Could loop.
+- **To settle**: Read `retry.py`.
+"""
+        rules = [v.rule for v in check_report(parse_report(bad))]
+        self.assertIn("focus-id-format", rules)
+
+    def test_focus_themes_parsed_from_flags_line(self):
+        from lint_review import _parse_focus_themes
+
+        cases = {
+            "Flags: `--panel`, `--focus sync-to-async (auto)`.": ["sync-to-async"],
+            "Flags: `--focus adhoc:retry-storm`, `--focus sync-to-async (auto)`.": [
+                "adhoc:retry-storm",
+                "sync-to-async",
+            ],
+            "Flags: `--focus sync-to-async`, `--focus sync-to-async (auto)`.": [
+                "sync-to-async"
+            ],
+            "Flags: `--panel`.": [],
+            "Looks good.": [],
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_parse_focus_themes(raw), expected)
+
+    def test_focus_themes_exported_in_review_summary(self):
+        report_text = self._focus_report(
+            "- **Focus**: `sync-to-async`",
+            summary="Flags: `--panel`, `--focus sync-to-async (auto)`. Verdict: Ready.",
+        )
+        data = self._export(report_text)
+        self.assertEqual(data["review_summary"]["focus_themes"], ["sync-to-async"])
+        self.assertEqual(data["review_summary"]["flags"], ["--panel", "--focus"])
+
+    def test_flags_deduplicated_for_two_themes(self):
+        from lint_review import _parse_flags
+
+        self.assertEqual(
+            _parse_flags(
+                "Flags: `--panel`, `--focus sync-to-async (auto)`, "
+                "`--focus adhoc:retry-storm`."
+            ),
+            ["--panel", "--focus"],
+        )
+
+    def test_overview_strips_focus_flag_token(self):
+        from lint_review import _clean_overview
+
+        cases = {
+            "Refactors X. Flags: `--panel`, `--focus sync-to-async (auto)`.": "Refactors X.",
+            "Refactors X. Flags: `--focus adhoc:retry-storm`, "
+            "`--focus sync-to-async (auto)`. Verdict: Ready.": "Refactors X.",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_clean_overview(raw), expected)
+
+    def test_playbook_feedback_section_fails_lint(self):
+        leaked = self._focus_report("- **Focus**: `sync-to-async`") + (
+            "\n## Playbook Feedback\n"
+            "Failure modes checked: 1, 2, 4\n"
+            "- Missing failure mode: cancellation during shutdown.\n"
+            "\n## Recommendations\n"
+            "- Await `fetch()`.\n"
+        )
+        report = parse_report(leaked)
+        violations = [
+            v for v in check_report(report) if v.rule == "playbook-feedback-leaked"
+        ]
+        self.assertEqual(len(violations), 1)
+        heading_line = leaked.splitlines().index("## Playbook Feedback") + 1
+        self.assertEqual(violations[0].line, heading_line)
+        self.assertEqual(len(report.findings), 1)
+        self.assertEqual(report.recommendations, ["Await `fetch()`."])
+
+    def test_playbook_feedback_lines_are_not_parsed(self):
+        leaked = """\
+## Review Comments (Ordered by Severity)
+None.
+
+## Playbook Feedback
+Failure modes checked: 1, 2
+### H1. Not a finding
+- **Severity**: `high`
+- Not a recommendation.
+"""
+        report = parse_report(leaked)
+        self.assertEqual(report.findings, [])
+        self.assertEqual(report.recommendations, [])
+        rules = [v.rule for v in check_report(report)]
+        self.assertEqual(rules, ["playbook-feedback-leaked"])
+
+    def test_focus_fields_survive_pr_review_normalization(self):
+        diff_parser_path = (
+            pathlib.Path(__file__).resolve().parents[2]
+            / "pr-review"
+            / "scripts"
+            / "diff_parser.py"
+        )
+        spec = importlib.util.spec_from_file_location("diff_parser", diff_parser_path)
+        if spec is None or spec.loader is None:
+            self.skipTest(f"diff_parser.py not found at {diff_parser_path}")
+        try:
+            diff_parser = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(diff_parser)
+        except Exception as exc:  # noqa: BLE001 - skip on any import failure
+            self.skipTest(f"diff_parser.py import failed: {exc}")
+
+        report_text = self._focus_report(
+            "- **Focus**: `adhoc:retry-storm`",
+            summary="Flags: `--focus adhoc:retry-storm`. Verdict: Ready.",
+        )
+        payload = self._export(report_text)
+        normalized = diff_parser.normalize_findings_payload(payload)
+        self.assertEqual(normalized["findings"][0]["focus"], "adhoc:retry-storm")
+        self.assertEqual(
+            normalized["review_summary"]["focus_themes"], ["adhoc:retry-storm"]
+        )
 
 
 if __name__ == "__main__":

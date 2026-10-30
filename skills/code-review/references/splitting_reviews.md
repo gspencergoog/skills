@@ -31,13 +31,17 @@ The most common approach is to review files in logical groups:
 
 ### 3. By Concern (`--panel`)
 
-Splitting the same changes by concern is what `--panel` does: two reviewers get the full diff, each with its own lane. Lane A covers correctness, concurrency and failure modes, edge cases, tests, and the Implementer and Tester lenses. Lane B covers security, maintainability, efficiency, API soundness, and the Consumer and Operator lenses. The orchestrator assigns its seeded hypotheses by lane as well: correctness, state, and test hypotheses go to lane A; wiring, security, API, performance, and dependency hypotheses go to lane B. See SKILL.md Step 3, "Panel Review", for the lane blocks.
+Splitting the same changes by concern is what `--panel` does: two reviewers get the full diff, each with its own lane. The lane table, the Lane Assignment blocks, and the hypothesis lane labels are in [lanes.md](lanes.md#lane-specs).
 
 When a component split and `--panel` both apply, each partition gets an A/B pair (`rev-a-1` / `rev-b-1` on Tier 1, or subagents on Tier 2). State the total reviewer count in chat before launching.
 
+#### By Theme (focus reviewers)
+
+A focus reviewer splits by mechanism instead: it reads the whole diff through one cross-cutting theme ([lanes.md](lanes.md#focus-blocks)). When a large diff carries three strong themes in different components, consider a component split where each partition carries its own theme, so each focus reviewer reads only the chunks where its mechanism lives.
+
 ### 4. Deletion-Heavy Diffs
 
-When a diff mostly deletes, moves, or consolidates files, seed hypotheses of the form "deleted symbol `X` is still referenced in the tree" and "deleted test coverage for `Y` does not exist elsewhere in `HEAD`", and assign them to lane A (or the single reviewer). The reviewer checks them with `rg` against `HEAD` and records disproved ones in `## Checked and Found Clean`.
+Treat a diff that mostly deletes, moves, or consolidates files as the `deletion-and-consolidation` focus theme. Its playbook, [deletion-and-consolidation.md](focus_areas/deletion-and-consolidation.md), lists the failure modes and hypothesis templates, such as "deleted symbol `X` is still referenced in the tree" and "deleted test coverage for `Y` does not exist elsewhere in `HEAD`". Assign those hypotheses to lane A (or the single reviewer), checked with `rg` against `HEAD`.
 
 ## Tooling Support
 

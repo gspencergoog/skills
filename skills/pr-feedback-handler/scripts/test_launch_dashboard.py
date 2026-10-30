@@ -1044,6 +1044,35 @@ class TestAutoApproveMode(unittest.TestCase):
                 main()
             self.assertEqual(cm3.exception.code, 1)
 
+    def test_pr_feedback_html_caps_code_context_and_has_valid_js(self):
+        import re
+        import subprocess
+        import tempfile
+
+        html_path = os.path.join(os.path.dirname(__file__), "../assets/pr_feedback.html")
+        with open(html_path, "r", encoding="utf-8") as f:
+            html = f.read()
+
+        self.assertIn(".code-snippet-scroll", html)
+        self.assertIn("max-height: calc(20 * 1.5em + 16px);", html)
+        self.assertIn("max-height: calc(20lh + 16px);", html)
+        self.assertIn("overflow-y: auto;", html)
+        self.assertIn('class="code-snippet-scroll"', html)
+        self.assertIn("scrollCodeSnippetsToTarget", html)
+
+        node_bin = shutil.which("node")
+        if node_bin:
+            scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", html, flags=re.DOTALL)
+            self.assertEqual(len(scripts), 1)
+            with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as tmp:
+                tmp.write(scripts[0])
+                tmp_path = tmp.name
+            try:
+                proc = subprocess.run([node_bin, "--check", tmp_path], capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            finally:
+                os.unlink(tmp_path)
+
 
 if __name__ == '__main__':
     unittest.main()

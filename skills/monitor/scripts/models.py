@@ -25,7 +25,7 @@ EVENT_KINDS: tuple[str, ...] = (
 )
 
 FAILED_CONCLUSIONS: frozenset[str] = frozenset(
-    {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"}
+    {"FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 )
 
 _PR_KEY_RE = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#(\d+)$")
@@ -155,9 +155,8 @@ class PrSnapshot:
     updated_at: str = ""
 
     def effective_required_checks(self) -> list[CheckRun]:
-        """Returns explicitly required checks, or all checks if none are marked required."""
-        explicit = [c for c in self.checks if c.required]
-        return explicit if explicit else list(self.checks)
+        """Returns all checks on the pull request so status and rollup stay consistent."""
+        return list(self.checks)
 
     def required_summary(self) -> str:
         """Summarizes required checks as ``NONE``, ``FAILURE``, ``PENDING``, or ``SUCCESS``."""

@@ -54,7 +54,7 @@ $GIT_STACK view --repo-dir /path/to/repo --target 123
 $GIT_STACK view --json
 ```
 
-When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render the inspected stack as a `stack_board` surface in the pane (`surfaceId: "git-stack"`). Each change displays its PR identifier, clickable title link, wave, base branch, status badges, and 5-step lifecycle Stepper.
+When the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render the inspected stack as a `stack_board` surface in the pane (`surfaceId: "git-stack"`). Each change displays its PR identifier, clickable title link, wave, base branch, status badges, Markdown bullet list in `detail` (`- ...`), and 5-step lifecycle Stepper.
 
 Output highlights:
 - `✓ UP TO DATE`: Head commit contains base branch tip.

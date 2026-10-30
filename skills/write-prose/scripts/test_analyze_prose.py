@@ -179,7 +179,7 @@ class AnalyzeProseTests(unittest.TestCase):
     def test_detects_nominalizations_phrasal_verbs_noun_clusters_and_synonyms(self):
         report = self._run_on_text(
             "We perform an investigation and make a decision on the request.\n"
-            "Next we spin up a worker and dive into the container cluster configuration file parser.\n"
+            "Next we spin up a worker, spell out the rules, and dive into the container cluster configuration file parser.\n"
             "First check the input, then verify the output.\n"
         )
         v = report["violations"]
@@ -189,6 +189,7 @@ class AnalyzeProseTests(unittest.TestCase):
 
         phrasals = {m["phrasal_verb"] for m in v["phrasal_verbs_found"]}
         self.assertIn("spin up", phrasals)
+        self.assertIn("spell out", phrasals)
         self.assertIn("dive into", phrasals)
 
         clusters = v["noun_clusters_found"]

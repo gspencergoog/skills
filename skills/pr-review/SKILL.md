@@ -41,6 +41,8 @@ This skill automates reviewing external GitHub Pull Requests (reviewing someone 
 | `--verify` | Adds tier 2 (targeted tests, repro tests, and reverted mutations in throwaway checkouts) for trusted authors after the Pre-Execution Security Gate passes | Test runtime and dependency installs |
 | `--max` | Same as `--claude --panel --verify` | All of the above |
 | `--challenge` | Challenge protocol sending refuting evidence back to reviewers | One extra turn per disputed reviewer |
+| `--focus [<theme>]` | Forces a focus reviewer on the top triage theme, or pins a theme (catalog id or quoted free text); repeatable up to 3 | +1 reviewer per theme |
+| `--no-focus` | Skips `code-review` focus triage and never launches a focus reviewer | None |
 
 Legacy `--mode <depth>` syntax maps to these flags for backward compatibility:
 - `--mode fast` or `--mode standard` maps to `--fast`.
@@ -86,7 +88,7 @@ Follow these steps in order when reviewing a pull request:
    python3 scripts/diff_parser.py --diff <conversation-scratch-dir>/pr.diff
    ```
 3. **Draft the Blind Diff Description & Pre-Execution Security Gate**:
-   - Inspect `<conversation-scratch-dir>/pr.diff`, `pr_coords.json.security_prescan`, and surrounding code in the temporary checkout (`workspace_dir.txt`) using only read-only file reads (`view_file` / `read_file` and `rg`) or Tier 1a checks ([verification.md](../code-review/references/verification.md#tier-1-commands)).
+   - Inspect `<conversation-scratch-dir>/pr.diff`, `pr_coords.json.security_prescan`, and surrounding code in the temporary checkout (`workspace_dir.txt`) using only read-only file reads (`view_file` / `read_file` and `rg`) or Tier 1a checks ([verification.md](../code-review/references/verification.md#tier-1a-and-tier-1b-commands)).
    - Do **not** read the PR title, description, commit messages, branch names, or GitHub comments during this step. Do **not** read `pr_stack.json` or run `gh stack view` yet.
    - Audit every file and line flagged in `pr_coords.json.security_prescan.signals`, plus any modified build manifests, git/shell hooks, linter plugin configs, or test files, and determine the Pre-Execution Security Gate verdict per [verification.md](../code-review/references/verification.md#pre-execution-security-gate): `SAFE_FOR_LOCAL_EXECUTION`, `REQUIRES_USER_CONFIRMATION`, or `BLOCKED_UNSAFE`.
    - Write `<conversation-scratch-dir>/blind_description.md` following the **Blind-First PR Description Template** in [review_guidelines.md](references/review_guidelines.md) (`## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, `## Changes`, and `## Reviewer Focus & Risks`).
@@ -113,11 +115,12 @@ Follow these steps in order when reviewing a pull request:
    - Copy the text of `blind_description.md` verbatim into `<conversation-scratch-dir>/pr_description.md`: do not rewrite or soften the Stage 1 prose to match the author's framing. Prepend a top-level `## Intent Alignment: <Status>` section (`Matches Stated Purpose`, `Partial Divergence`, `Diverges from Stated Purpose`, or `Unstated Scope`) and weave inline GitHub callouts (`> [!WARNING]`, `> [!IMPORTANT]`, `> [!NOTE]`) directly beneath the relevant items in `## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, and `## Changes`. See [review_guidelines.md](references/review_guidelines.md) for callout rules.
    - If `pr_context.json` has a non-null `stack`, add a `## Stack Context` section right after `## Intent Alignment` following the template in [review_guidelines.md](references/review_guidelines.md). You may run `gh stack view --short` in the checkout (`workspace_dir.txt`) for the same information in `gh`'s own format. Treat the stack as review context, not as a finding: a predecessor that `needs_rebase` or is still a draft is a `> [!NOTE]`, a claim in the body that a later PR in the stack covers something is checked against that PR's diff (`gh pr diff <n>`) before it is accepted, and anything the diff builds on from a predecessor is reviewed in that predecessor's PR, not here.
 3. **Delegate Code Review Analysis to `code-review`**:
-   Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and any explicit flags passed by the user (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`):
+   Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and any explicit flags passed by the user (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`, `--focus`, `--no-focus`):
    - **Delegated Depth Determination**: If no depth flag was passed by the user, pass no depth flags to `code-review`. `code-review` will run `classify_artifacts.py --ring` in Step 1b to determine the PR's reuse ring and scale the review level automatically.
    - **Preserve Blindness Invariant**: Do not pass the PR number or URL directly to `code-review`. Run `code-review` strictly on the local checkout commit range `origin/<base_ref>...<head_sha>` in the temporary checkout directory.
    - **Checkout Ownership**: The `workspace_dir.txt` checkout belongs to `pr-review`. It is not `code-review`'s `$pr_review_dir_a`, even though both live under `/tmp/pr-review-*`. `code-review` reads it in place and never removes it; Step 3.4 reads it and Step 5.2 removes it. Any `--verify` checkout that `code-review` creates in its Step 2c (`$pr_review_dir_a` for lane A, `$pr_review_dir_b` for lane B per [verification.md](../code-review/references/verification.md#per-reviewer-checkouts)) is `code-review`'s own and is removed in its Step 6.
    - **Seed Hypotheses**: Pass the risks and security signals identified in Stage 1's `blind_description.md` (`## Security & Execution Gate` and `## Reviewer Focus & Risks`) into `code-review` as seed hypotheses.
+   - **Focus Candidates**: Also pass the Stage 1 `## Reviewer Focus & Risks` bullets as focus theme candidates for `code-review` Step 2d (focus triage), along with any `--focus` or `--no-focus` flag the user gave. Triage still makes its own call from the diff. Do not pass the PR title or body: the blindness invariant holds for triage too.
    - **Execution Modes, Pre-Execution Security Gate & Trust Gate**:
      - Pass the Stage 1 `## Security & Execution Gate` verdict (`SAFE_FOR_LOCAL_EXECUTION`, `REQUIRES_USER_CONFIRMATION`, or `BLOCKED_UNSAFE`) and `pr_coords.json.security_prescan` into `code-review` Step 2a:
        - **Tier 1a** checks (remote GitHub CI status/logs, isolated `python3 -I -c "import ast..."`, and static analyzers/linters such as `ruff`, `dart format`, `dart analyze`, `tsc --noEmit`, and `eslint` whose executable config/plugin files are untouched by the PR) are always allowed.
@@ -148,7 +151,7 @@ Follow these steps in order when reviewing a pull request:
 ### Step 4: Emit Annotated Description in Chat & Launch Dashboard
 
 1. **Emit the Annotated PR Description in Chat**:
-   Output the full contents of `<conversation-scratch-dir>/pr_description.md` directly in your conversation response so the user can read the unbiased summary, intent alignment verdict, quality assessment, and inline annotations in chat before reviewing the findings. In **Pane Mode**, always include a link to open the side panel (e.g. `[Open PR Review](sidecar://review-dashboards/pr-review)`) in this chat response so the user can easily open or bring the dashboard pane into view.
+   Output the full contents of `<conversation-scratch-dir>/pr_description.md` directly in your conversation response so the user can read the unbiased summary, intent alignment verdict, quality assessment, and inline annotations in chat before reviewing the findings.
 2. **Open the Dashboard**:
    - **Pane Mode (Preferred when `review-dashboards` MCP tools are available)**:
      Call `open_pr_review_dashboard` (native tool or via `call_mcp_tool` on the `review-dashboards` server) with:
@@ -156,7 +159,7 @@ Follow these steps in order when reviewing a pull request:
      - `meta_file`: `<conversation-scratch-dir>/pr_meta.json`
      - `description_file`: `<conversation-scratch-dir>/pr_description.md`
      - `output_file`: `<conversation-scratch-dir>/review_decisions.json`
-     If the returned `warnings` array lists missing `pr_metadata` fields, fix `pr_meta.json` or the findings file and call `open_pr_review_dashboard` again. If `hosted` is `false`, fall back to Browser Mode below. Always accompany the chat response with a clickable link to open or toggle the side panel: `[Open PR Review](sidecar://review-dashboards/pr-review)`.
+     If the returned `warnings` array lists missing `pr_metadata` fields, fix `pr_meta.json` or the findings file and call `open_pr_review_dashboard` again. If `hosted` is `false`, fall back to Browser Mode below.
    - **Browser Mode (Fallback when MCP tools are unavailable or `hosted: false`)**:
      Launch `launch_dashboard.py` with `--description-file`:
      ```bash
@@ -169,10 +172,11 @@ Follow these steps in order when reviewing a pull request:
      Set `WaitMsBeforeAsync` to `1000` so the server runs in the background.
      If the output shows `Warning: pr_metadata.<field> is missing`, stop the task, fix `pr_meta.json` or the findings file, and relaunch. The dashboard disables Submit until `owner`, `repo`, `pull_number`, and `head_sha` are present.
    - The annotated PR description appears in a formatted Markdown card at the top of the dashboard for reviewer context only (`apply_review.py` never posts it; its text is included only if the user clicks **+ Insert into Review Summary**).
+   - Both the Review Summary field and every per-finding comment field provide GitHub-style **Write** and **Preview** tabs (defaulting to **Write**) so the reviewer can switch between editing raw Markdown and previewing rendered Markdown (including ```` ```suggestion ```` blocks).
    - Every finding starts unchecked. The user checks the ones to post, one at a time or with **Approve all shown**.
 3. **Wait for Completion**:
    Stop calling tools and go idle.
-   - In **Pane Mode**, tell the user the dashboard is open in the side pane, include the clickable side panel link (`[Open PR Review](sidecar://review-dashboards/pr-review)`), and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
+   - In **Pane Mode**, tell the user the **PR Review** dashboard is open in the side pane (or can be opened from the `open_pr_review_dashboard` tool step's **Open in side pane** button or the AuxPane `+` menu) and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
    - In **Browser Mode**, the launcher opens the review UI in the user's browser and waits until they click **"Submit Review to GitHub"** or **"Abort Review"**.
 4. **Verify Status**:
    - In **Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"`, proceed to Step 5; if `status` is `"aborted"`, clean up the temporary workspace and stop without contacting GitHub.
@@ -210,6 +214,6 @@ Follow these steps in order when reviewing a pull request:
 - **`scripts/diff_parser.py`**: Unified diff parser and diff hunk line validator.
 - **`scripts/review_engine.py`**: Two-stage workspace preparer (`--prepare-workspace`, with hardened git config, static execution-risk pre-scanning into `pr_coords.json.security_prescan` or `--security-scan`, and GitHub stack detection via `gh stack view --json` into `--output-stack`), context fetcher (`--fetch-context` with `--require-blind-description` and `--input-stack`), and cleanup utility.
 - **`scripts/launch_dashboard.py`**: Local HTTP server and `--dump-json` data normalizer for the interactive review dashboard. Normalizes findings and merges `--meta-file` and `--description-file`.
-- **`assets/review_dashboard.html`**: Interactive dark-themed single-page review dashboard with a top-level Blind Diff Description & Intent Alignment card.
+- **`assets/review_dashboard.html`**: Interactive dark-themed single-page review dashboard with a top-level Blind Diff Description & Intent Alignment card and GitHub-style `Write` / `Preview` tabbed Markdown editors for the Review Summary and per-finding comment fields.
 - **`scripts/apply_review.py`**: Submits batched review payloads to the GitHub Reviews API with hybrid comment routing.
 

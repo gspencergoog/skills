@@ -483,6 +483,7 @@
       overflow: hidden;
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
       font-size: 0.85rem;
+      line-height: 1.5;
     }
 
     .code-snippet-header {
@@ -493,8 +494,22 @@
       border-bottom: 1px solid var(--border-color);
       display: flex;
       justify-content: space-between;
+      align-items: center;
       letter-spacing: 0.05em;
       font-weight: 600;
+    }
+
+    .code-snippet-meta {
+      font-weight: 400;
+      letter-spacing: normal;
+      opacity: 0.8;
+    }
+
+    .code-snippet-scroll {
+      max-height: calc(20 * 1.5em + 16px);
+      max-height: calc(20lh + 16px);
+      overflow-y: auto;
+      overflow-x: auto;
     }
 
     .code-snippet-lines {
@@ -502,11 +517,20 @@
       width: 100%;
       padding: 8px 0;
       margin: 0;
-      overflow-x: auto;
     }
 
     .code-snippet-line {
       display: table-row;
+    }
+
+    .code-snippet-line.target-line .code-snippet-number {
+      color: #9cdcfe;
+      font-weight: 600;
+      background-color: rgba(56, 139, 253, 0.18);
+    }
+
+    .code-snippet-line.target-line .code-snippet-content {
+      background-color: rgba(56, 139, 253, 0.12);
     }
 
     .code-snippet-number {
@@ -749,9 +773,14 @@
       }
     }
 
+    let loadSeq = 0;
+
     async function loadComments() {
+      const seq = ++loadSeq;
       try {
-        feedbackData = await dashboardHost.load();
+        const loaded = await dashboardHost.load();
+        if (seq !== loadSeq) return;
+        feedbackData = loaded;
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
         
         document.getElementById('comments-count').textContent = (feedbackData.threads || []).length;
@@ -772,6 +801,7 @@
         renderChecks(feedbackData.checks);
         renderPendingChecks(feedbackData.pendingChecks);
       } catch (err) {
+        if (seq !== loadSeq) return;
         document.getElementById('content-comments').innerHTML = `
           <div class="empty-state" style="border-color: var(--danger-color); color: var(--danger-color);">
             Error loading feedback comments: ${err.message}
@@ -848,20 +878,34 @@
         
         let codeBlockHtml = '';
         if (thread.rightRefCodeBlock && thread.rightRefCodeBlock.length > 0) {
-          const linesHtml = thread.rightRefCodeBlock.map(line => `
-            <div class="code-snippet-line">
-              <div class="code-snippet-number">${line.line !== null ? line.line : ''}</div>
+          const rawLine = Number.isInteger(thread.line) ? thread.line : null;
+          const rawOrigLine = Number.isInteger(thread.originalLine) ? thread.originalLine : null;
+          const hasLine = (ln) => ln !== null && thread.rightRefCodeBlock.some(item => item.line === ln);
+          const matchLine = hasLine(rawLine) ? rawLine : (hasLine(rawOrigLine) ? rawOrigLine : null);
+
+          const linesHtml = thread.rightRefCodeBlock.map(line => {
+            const lineNum = Number.isInteger(line.line) ? line.line : null;
+            const isTarget = matchLine !== null && lineNum === matchLine;
+            return `
+            <div class="code-snippet-line${isTarget ? ' target-line' : ''}"${isTarget ? ' data-target-line="true"' : ''}>
+              <div class="code-snippet-number">${lineNum !== null ? lineNum : ''}</div>
               <div class="code-snippet-content">${escapeHtml(line.content)}</div>
             </div>
-          `).join('');
+          `;
+          }).join('');
           
+          const totalLines = thread.rightRefCodeBlock.length;
+          const lineCountLabel = `${totalLines} ${totalLines === 1 ? 'line' : 'lines'}`;
           codeBlockHtml = `
             <div class="code-snippet-box">
               <div class="code-snippet-header">
                 <span>ORIGINAL CODE CONTEXT</span>
+                <span class="code-snippet-meta">${lineCountLabel}</span>
               </div>
-              <div class="code-snippet-lines">
-                ${linesHtml}
+              <div class="code-snippet-scroll">
+                <div class="code-snippet-lines">
+                  ${linesHtml}
+                </div>
               </div>
             </div>
           `;
@@ -948,6 +992,31 @@
         `;
         
         container.appendChild(card);
+      });
+
+      scrollCodeSnippetsToTarget(container);
+      if (typeof requestAnimationFrame === 'function') {
+        requestAnimationFrame(() => scrollCodeSnippetsToTarget(container));
+      }
+    }
+
+    function scrollCodeSnippetsToTarget(root) {
+      if (!root) return;
+      root.querySelectorAll('.code-snippet-scroll').forEach(scrollEl => {
+        if (scrollEl.dataset.scrolled === 'true') return;
+        if (scrollEl.clientHeight === 0) return;
+        if (scrollEl.scrollHeight > scrollEl.clientHeight) {
+          const targetRow = scrollEl.querySelector('[data-target-line="true"]');
+          if (targetRow) {
+            const scrollRect = scrollEl.getBoundingClientRect();
+            const rowRect = targetRow.getBoundingClientRect();
+            const rowBottomInScroll = (rowRect.bottom - scrollRect.top) + scrollEl.scrollTop;
+            scrollEl.scrollTop = Math.max(0, rowBottomInScroll - scrollEl.clientHeight + 16);
+          } else {
+            scrollEl.scrollTop = scrollEl.scrollHeight;
+          }
+        }
+        scrollEl.dataset.scrolled = 'true';
       });
     }
 
@@ -1255,7 +1324,11 @@
       });
       
       document.getElementById(`tab-${tabName}`).classList.add('active');
-      document.getElementById(`content-${tabName}`).classList.add('active');
+      const activeContent = document.getElementById(`content-${tabName}`);
+      activeContent.classList.add('active');
+      if (tabName === 'comments') {
+        scrollCodeSnippetsToTarget(activeContent);
+      }
     }
 
     function checkGitState(gitState) {

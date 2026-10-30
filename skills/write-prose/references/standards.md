@@ -102,7 +102,8 @@ Even a short sentence made of common words becomes hard to read when its syntax 
 - **Short obscure and archaic words**: Word length alone does not measure familiarity. Avoid archaic or formal words (`lieu`, `dint`, `ergo`, `obviate`, `heretofore`; full table in `scripts/prose_lexicon.py`), while keeping standard software terms (`mutex`, `idempotent`, `inode`).
 - **Rare domain nouns (advisory)**: Specialized non-CS nouns (`epistemology`, `malfeasance`) appear in `rare_domain_nouns_advisory` so you can define them on first use.
 - **Light-verb nominalizations**: Replace phrases like `perform an investigation` or `make a decision` with direct verbs (`investigate`, `decide`).
-- **Soft phrasal verbs**: Replace colloquial phrasal verbs (`spin up`, `dive into`, `boil down to`) with literal verbs (`start`, `examine`, `mean`).
+- **Soft phrasal verbs**: Replace colloquial phrasal verbs (`spin up`, `dive into`, `boil down to`, `spell out`) with literal verbs (`start`, `examine`, `mean`, `state`).
+- **Literal orthography only for `spell` and its derivatives**: Do not use `spell`, `spells`, `spelled`, `spelling`, or `spellings` when referring to symbols, identifiers, key names, syntax forms, concepts, or descriptions (write `"both key names"` or `"written as"`, never `"both spellings"` or `"spelled as"`). Reserve `spell` and its derivatives strictly for the actual spelling of words (e.g., `"The term 'spull' is misspelled."` or `"Actually, 'spell' is spelled with an 'e'."`).
 - **STE100 one-word-per-meaning consistency**: Do not rotate between interchangeable action verbs (`check`, `verify`, `confirm`, `validate`) across a document. Pick one verb per action so readers do not wonder whether a different word implies a different procedure.
 
 ### 5.3 Epistemic modality protection

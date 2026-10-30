@@ -8,6 +8,7 @@ Check `prs[pr].mine` before taking any action:
 
 - When `mine` is `true` (the authenticated GitHub user authored the pull request), the `flash` watcher subagent handles mechanical pre-triage (`rerun_ci`, log capture, and `convo` badges), and the main agent handles all code edits, branch rebases, merge conflict resolutions, and review feedback dashboards.
 - When `mine` is `false`, the pull request is watch-only. `monitor_prs.py` updates the `stack_board` pane in place, and neither agent ever pushes commits, reruns workflows, or modifies branches on that pull request.
+- While `/monitor` is active, `monitor_prs.py` owns the `stack_board` surface (`surfaceId: "monitor"`) in the A2UI Pane and clears stale surfaces on each sync. Neither agent may call `render_a2ui` to open a separate `progress_board`, `stack_board`, or `git-stack` surface during CI remediation or stack rebases.
 
 ## 2. Routing by `suggested_action`
 
@@ -67,7 +68,7 @@ Suggested when a pull request has `review_decision == "APPROVED"` and all requir
 
 ## 3. Confirmation Gates
 
-Pause and ask the user for confirmation in the main agent (using `render_a2ui` with `template: "confirm_gate"`, or `ask_question` when `a2ui-pane` is unavailable) before pushing when any of the following conditions hold:
+Pause and ask the user for confirmation in the main agent (using `render_a2ui` with `template: "confirm_gate"`, `surfaceId: "monitor-confirm"`, and `stack: true`, or `ask_question` when `a2ui-pane` is unavailable) before pushing when any of the following conditions hold:
 
 1. The push requires `--force` or `--force-with-lease`.
 2. The proposed fix modifies files outside the pull request's existing diff against `base_ref`.

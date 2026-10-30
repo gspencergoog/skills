@@ -4,13 +4,11 @@ test_diff_parser.py - Unit tests for diff_parser.py.
 """
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
 
 from diff_parser import (
-    DiffHunk,
     extract_source_lines,
     is_line_in_diff,
     is_range_in_diff,
@@ -49,7 +47,6 @@ index 0000000..1111111
 
 
 class TestDiffParser(unittest.TestCase):
-
     def test_parse_diff_hunks(self):
         hunks = parse_diff_hunks(SAMPLE_DIFF)
         self.assertIn("lib/parser.dart", hunks)
@@ -160,8 +157,12 @@ class TestDiffParser(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             wf_dir = Path(tmpdir) / ".github" / "workflows"
             wf_dir.mkdir(parents=True)
-            (wf_dir / "ci.yml").write_text("line1\nline2\nmake test\n", encoding="utf-8")
-            extracted = extract_source_lines(".github/workflows/ci.yml", 3, 3, repo_dir=tmpdir)
+            (wf_dir / "ci.yml").write_text(
+                "line1\nline2\nmake test\n", encoding="utf-8"
+            )
+            extracted = extract_source_lines(
+                ".github/workflows/ci.yml", 3, 3, repo_dir=tmpdir
+            )
             self.assertEqual(extracted, "make test")
 
     def test_quoted_diff_paths_not_attributed_to_previous_file(self):
@@ -219,8 +220,12 @@ class TestDiffParser(unittest.TestCase):
         self.assertEqual(inline_item["line_start"], 12)
         self.assertEqual(inline_item["line_end"], 15)
         self.assertEqual(inline_item["severity"], "medium")
-        self.assertEqual(inline_item["description"], "Handleleading bracket in character class")
-        self.assertEqual(inline_item["draft_comment"], "Unescaped `]` right after `[` is literal.")
+        self.assertEqual(
+            inline_item["description"], "Handleleading bracket in character class"
+        )
+        self.assertEqual(
+            inline_item["draft_comment"], "Unescaped `]` right after `[` is literal."
+        )
         self.assertTrue(inline_item["is_diff_hunk"])
 
         general_item = tagged[1]
@@ -258,7 +263,9 @@ class TestDiffParser(unittest.TestCase):
                     "draft_comment": "Check this",
                 }
             ]
-            tagged = tag_findings_with_hunk_status(findings, hunks, repo_dir=str(coords_json))
+            tagged = tag_findings_with_hunk_status(
+                findings, hunks, repo_dir=str(coords_json)
+            )
             self.assertEqual(tagged[0]["original_code"], "line 12\nline 13")
 
     def test_normalize_findings_preserves_enriched_metadata(self):
@@ -307,7 +314,9 @@ class TestDiffParser(unittest.TestCase):
         self.assertEqual(summary["overview"], "Adds async handling.")
         self.assertEqual(summary["verdict"], "REQUEST_CHANGES")
         self.assertEqual(len(summary["checked_clean"]), 1)
-        self.assertEqual(summary["structural_assessment"]["implementer"], "Clean interface")
+        self.assertEqual(
+            summary["structural_assessment"]["implementer"], "Clean interface"
+        )
 
         findings = normalized["findings"]
         self.assertEqual(len(findings), 2)
@@ -322,7 +331,9 @@ class TestDiffParser(unittest.TestCase):
         self.assertEqual(q1["line_end"], 40)
         self.assertEqual(q1["to_settle"], "Check timeout in client.dart")
 
-    def test_normalize_findings_double_pass_deduplicates_questions_and_preserves_summary(self):
+    def test_normalize_findings_double_pass_deduplicates_questions_and_preserves_summary(
+        self,
+    ):
         raw_payload = {
             "review_summary": {
                 "overview": "Adds async handling.",
@@ -362,7 +373,12 @@ class TestDiffParser(unittest.TestCase):
         raw_payload = {
             "findings": [],
             "questions": [
-                {"id": "Q1", "file_path": "a.py", "line_start": 3, "draft_comment": "Needed?"},
+                {
+                    "id": "Q1",
+                    "file_path": "a.py",
+                    "line_start": 3,
+                    "draft_comment": "Needed?",
+                },
                 {"id": "Q2", "file_path": "a.py", "line_start": 9, "severity": "LOW"},
             ],
         }
@@ -381,7 +397,9 @@ class TestDiffParser(unittest.TestCase):
             "findings": [],
         }
         normalized = normalize_findings_payload(raw_payload)
-        self.assertEqual(normalized["review_summary"]["overview"], "Legacy summary dict.")
+        self.assertEqual(
+            normalized["review_summary"]["overview"], "Legacy summary dict."
+        )
         self.assertEqual(normalized["review_summary"]["verdict"], "APPROVE")
         self.assertEqual(normalized["review_summary"]["checked_clean"], ["All clean"])
         self.assertNotIn("summary", normalized)
@@ -392,9 +410,7 @@ class TestDiffParser(unittest.TestCase):
         import tempfile
 
         code_review_scripts = (
-            pathlib.Path(__file__).resolve().parents[2]
-            / "code-review"
-            / "scripts"
+            pathlib.Path(__file__).resolve().parents[2] / "code-review" / "scripts"
         )
         if str(code_review_scripts) not in sys.path:
             sys.path.insert(0, str(code_review_scripts))
@@ -465,7 +481,47 @@ await client.send();
                 "Reviewed 2 files. Overall structure is solid.",
             )
 
+    def test_normalize_findings_payload_strips_ring_security_gate_and_file_links(self):
+        raw = {
+            "review_summary": {
+                "overview": (
+                    "🛡️ Ring Classification: Ring 3 (Shared Libraries & Public Contracts) -> "
+                    "Review Level: Panel (`--panel`)\n\n"
+                    "Updates [`prepareRef`](file:///tmp/pr-review-bfp9czs1/scripts/gen.mjs#L10-L20) "
+                    "in [gen.mjs](file:///tmp/pr-review-bfp9czs1/scripts/gen.mjs).\n\n"
+                    "Pre-Execution Security Gate: `SAFE_FOR_LOCAL_EXECUTION`."
+                ),
+                "verdict": "APPROVE",
+            },
+            "findings": [
+                {
+                    "id": "L1",
+                    "severity": "low",
+                    "file_path": "scripts/gen.mjs",
+                    "line_start": 12,
+                    "line_end": 12,
+                    "description": "Guard [`node.properties`](file:///tmp/pr-review-bfp9czs1/scripts/gen.mjs#L12)",
+                    "draft_comment": (
+                        "Check [`node.properties`](file:///tmp/pr-review-bfp9czs1/scripts/gen.mjs#L12) "
+                        "in [gen.mjs](file:///tmp/pr-review-bfp9czs1/scripts/gen.mjs) before spreading."
+                    ),
+                }
+            ],
+        }
+        normalized = normalize_findings_payload(raw)
+        self.assertEqual(
+            normalized["review_summary"]["overview"],
+            "Updates `prepareRef` in `gen.mjs`.",
+        )
+        self.assertEqual(
+            normalized["findings"][0]["description"],
+            "Guard `node.properties`",
+        )
+        self.assertEqual(
+            normalized["findings"][0]["draft_comment"],
+            "Check `node.properties` in `gen.mjs` before spreading.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -171,8 +171,8 @@ class TestMonitorPrs(unittest.TestCase):
                 .read_text(encoding="utf-8")
                 .splitlines()
             )
-            # 1 createSurface + 2 updateDataModel (passive tick) + 2 updateDataModel (actionable emit) = 5 lines
-            self.assertEqual(len(conv_lines), 5)
+            # 1 createSurface + 5 updateDataModel (passive tick) + 5 updateDataModel (actionable emit) = 11 lines
+            self.assertEqual(len(conv_lines), 11)
 
     def test_no_a2ui_omits_board_file_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
