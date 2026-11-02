@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from db_store import PackratStore, render_init_sql
+from db_store import BACKFILL_COLUMNS, PackratStore, render_init_sql
 from models import (
+    BACKFILL_STREAMS,
     EMBEDDING_DIM,
     CodeSymbolRecord,
     CommentRecord,
@@ -24,6 +26,7 @@ from models import (
     ReviewRecord,
     ReviewThreadRecord,
     StoredEmbeddingRecord,
+    StreamBackfill,
     TextChunk,
     compute_content_sha256,
     l2_normalize,
@@ -408,6 +411,68 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
             self.store.rename_repo("new-org/widgets", "octo-org", "widgets-extra")
         with self.assertRaises(ValueError):
             self.store.rename_repo("missing/repo", "new-org", "repo")
+
+    def test_migrates_repos_table_missing_backfill_columns(self) -> None:
+        old_db = self.tmp_dir / "old.sqlite"
+        conn = sqlite3.connect(old_db)
+        conn.execute(
+            """
+            CREATE TABLE repos (
+              repo_id INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT NOT NULL, name TEXT NOT NULL,
+              full_name TEXT NOT NULL UNIQUE, local_path TEXT, default_branch TEXT NOT NULL DEFAULT 'main',
+              events_etag TEXT, events_last_modified TEXT, poll_interval_sec INTEGER NOT NULL DEFAULT 60,
+              last_events_check_at TEXT, issues_watermark TEXT, prs_watermark TEXT,
+              discussions_watermark TEXT, last_full_sweep_at TEXT, last_indexed_sha TEXT,
+              created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO repos (owner, name, full_name, prs_watermark, created_at, updated_at) "
+            "VALUES ('octo-org', 'widgets', 'octo-org/widgets', '2026-10-01T00:00:00Z', 'now', 'now')"
+        )
+        conn.commit()
+        conn.close()
+
+        for _ in range(2):  # Re-opening an already migrated database must be a no-op.
+            store = PackratStore(old_db)
+            try:
+                cols = {str(r["name"]) for r in store.conn.execute("PRAGMA table_info(repos)")}
+                self.assertTrue(set(BACKFILL_COLUMNS) <= cols)
+                repo = store.get_repo("octo-org/widgets")
+                assert repo is not None
+                self.assertEqual(repo.prs_watermark, "2026-10-01T00:00:00Z")
+                for stream in BACKFILL_STREAMS:
+                    self.assertEqual(repo.backfill(stream), StreamBackfill(stream, None, None))
+            finally:
+                store.close()
+
+    def test_set_and_reset_backfill_state(self) -> None:
+        repo = self.store.register_repo("octo-org", "widgets")
+        self.store.update_repo_sync_state(repo.repo_id, issues_watermark="2026-10-30T00:00:00Z")
+
+        self.store.set_backfill_state(repo.repo_id, "prs", cursor="CUR_4", done_at=None)
+        loaded = self.store.get_repo_by_id(repo.repo_id)
+        assert loaded is not None
+        self.assertEqual(loaded.backfill("prs"), StreamBackfill("prs", "CUR_4", None))
+        self.assertFalse(loaded.backfill("prs").complete)
+
+        self.store.set_backfill_state(repo.repo_id, "prs", cursor=None, done_at="2026-11-02T00:00:00Z")
+        loaded = self.store.get_repo_by_id(repo.repo_id)
+        assert loaded is not None
+        self.assertEqual(loaded.backfill("prs"), StreamBackfill("prs", None, "2026-11-02T00:00:00Z"))
+        self.assertTrue(loaded.backfill("prs").complete)
+
+        self.store.reset_backfill_state(repo.repo_id)
+        loaded = self.store.get_repo_by_id(repo.repo_id)
+        assert loaded is not None
+        self.assertEqual(loaded.backfill("prs"), StreamBackfill("prs", None, None))
+        self.assertIsNone(loaded.issues_watermark)
+
+        with self.assertRaises(ValueError):
+            self.store.set_backfill_state(repo.repo_id, "wikis", cursor=None, done_at=None)
+        with self.assertRaises(ValueError):
+            loaded.backfill("wikis")
 
     def test_remove_repo_deletes_rows_and_fts(self) -> None:
         repo = self.store.register_repo("octo-org", "widgets")

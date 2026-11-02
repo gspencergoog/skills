@@ -111,10 +111,10 @@ def _normalize_pr_metadata(data: dict, meta: Optional[dict]) -> dict:
 
 
 def _normalize_finding(finding: dict) -> dict:
-    """Normalizes a single finding dict and resets `approved` to False."""
+    """Normalizes a single finding dict and sets `approved` to True by default."""
     item = dict(finding)
-    # Approval is the user's decision in the dashboard, not the agent's.
-    item["approved"] = False
+    # Every finding starts approved in the dashboard; the user unchecks any to omit.
+    item["approved"] = True
     description = _strip_file_links((item.get("description") or "").strip())
     comment = _strip_file_links(
         (item.get("draft_comment") or item.get("comment_body") or "").strip()
@@ -149,7 +149,7 @@ def normalize_review_data(
     Returns:
       A (normalized, warnings) tuple. `normalized` has `pr_metadata`,
       `review_summary`, `pr_description`, and `findings`. Every finding starts
-      with `approved: False`, and falls back to `description` only when
+      with `approved: True`, and falls back to `description` only when
       `draft_comment` is empty.
       `warnings` names each required metadata field that is still missing.
     """

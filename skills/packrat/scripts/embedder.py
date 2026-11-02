@@ -27,6 +27,7 @@ from models import (
     l2_normalize,
     utc_now_iso,
 )
+from progress import NULL_REPORTER, ProgressReporter
 
 DEFAULT_MODEL_DIR = DEFAULT_DATA_DIR / "models" / "bge-small-en-v1.5"
 BGE_MODEL_ID = "bge-small-en-v1.5"
@@ -366,7 +367,12 @@ def _find_onnx_model_files(model_dir: Path) -> tuple[Path, Path] | None:
     return None
 
 
-def ensure_bge_model(model_dir: Path = DEFAULT_MODEL_DIR, allow_download: bool = False) -> bool:
+def ensure_bge_model(
+    model_dir: Path = DEFAULT_MODEL_DIR,
+    allow_download: bool = False,
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> bool:
     """Checks if BAAI/bge-small-en-v1.5 ONNX files exist, optionally downloading them."""
     if _find_onnx_model_files(model_dir) is not None:
         return True
@@ -380,12 +386,17 @@ def ensure_bge_model(model_dir: Path = DEFAULT_MODEL_DIR, allow_download: bool =
         model_dir / "tokenizer.json": f"{base_url}/tokenizer.json",
         onnx_dir / "model_quantized.onnx": f"{base_url}/onnx/model_quantized.onnx",
     }
+    reporter.start_phase("packrat", "download BGE model", total=len(files))
     try:
-        for dest, url in files.items():
+        for idx, (dest, url) in enumerate(files.items(), start=1):
             if not dest.exists():
                 urllib.request.urlretrieve(url, dest)
+            reporter.advance(idx, len(files), detail=dest.name)
+        reporter.finish_phase()
         return _find_onnx_model_files(model_dir) is not None
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        reporter.finish_phase()
+        reporter.warn("packrat", f"BGE ONNX download failed ({exc}); falling back to {DETERMINISTIC_MODEL_ID}")
         return False
 
 
@@ -450,12 +461,15 @@ class OnnxBgeEmbedder:
 def get_default_embedder(
     model_dir: Path = DEFAULT_MODEL_DIR,
     prefer_onnx: bool = True,
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
 ) -> Embedder:
     """Returns OnnxBgeEmbedder when model files and runtime exist, else DeterministicHashEmbedder."""
     if prefer_onnx and _find_onnx_model_files(model_dir) is not None and _ensure_onnx_deps():
         try:
             return OnnxBgeEmbedder(model_dir=model_dir)
-        except (ImportError, OSError, RuntimeError, ValueError):
+        except Exception as exc:  # noqa: BLE001
+            reporter.warn("packrat", f"ONNX runtime init failed ({exc}); using {DETERMINISTIC_MODEL_ID}")
             return DeterministicHashEmbedder()
     return DeterministicHashEmbedder()
 
@@ -474,16 +488,21 @@ def sync_repo_embeddings(
     repo_id: int | None,
     embedder: Embedder | None = None,
     batch_size: int = 64,
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
+    repo_label: str = "packrat",
 ) -> int:
     """Incremental embedding sync: embeds only chunks whose content_sha256 has changed."""
-    active_embedder = embedder or get_default_embedder()
+    active_embedder = embedder or get_default_embedder(reporter=reporter)
     pending = store.get_unembedded_chunks(repo_id, active_embedder.model_id)
     if not pending:
         return 0
 
     now = utc_now_iso()
+    total_pending = len(pending)
     total_embedded = 0
-    for start in range(0, len(pending), batch_size):
+    reporter.start_phase(repo_label, f"embeddings ({active_embedder.model_id})", total=total_pending)
+    for start in range(0, total_pending, batch_size):
         batch = pending[start : start + batch_size]
         texts = [_format_chunk_for_embedding(ch) for ch in batch]
         vectors = active_embedder.embed_texts(texts)
@@ -499,4 +518,6 @@ def sync_repo_embeddings(
         ]
         store.upsert_embeddings(records)
         total_embedded += len(records)
+        reporter.advance(total_embedded, total_pending)
+    reporter.finish_phase()
     return total_embedded

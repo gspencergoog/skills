@@ -157,11 +157,9 @@ Follow these steps in order when reviewing a pull request:
 
 ---
 
-### Step 4: Emit Annotated Description in Chat & Launch Dashboard
+### Step 4: Launch Dashboard & Emit Terse Summary in Chat
 
-1. **Emit the Annotated PR Description in Chat**:
-   Output the full contents of `<conversation-scratch-dir>/pr_description.md` directly in your conversation response so the user can read the unbiased summary, intent alignment verdict, quality assessment, and inline annotations in chat before reviewing the findings.
-2. **Open the Dashboard**:
+1. **Open the Dashboard**:
    - **Pane Mode (Preferred when `review-dashboards` MCP tools are available)**:
      Call `open_pr_review_dashboard` (native tool or via `call_mcp_tool` on the `review-dashboards` server) with:
      - `findings_file`: `<conversation-scratch-dir>/review_findings.json`
@@ -182,12 +180,12 @@ Follow these steps in order when reviewing a pull request:
      If the output shows `Warning: pr_metadata.<field> is missing`, stop the task, fix `pr_meta.json` or the findings file, and relaunch. The dashboard disables Submit until `owner`, `repo`, `pull_number`, and `head_sha` are present.
    - The annotated PR description appears in a formatted Markdown card at the top of the dashboard for reviewer context only (`apply_review.py` never posts it; its text is included only if the user clicks **+ Insert into Review Summary**).
    - Both the Review Summary field and every per-finding comment field provide GitHub-style **Write** and **Preview** tabs (defaulting to **Write**) so the reviewer can switch between editing raw Markdown and previewing rendered Markdown (including GFM pipe tables, LaTeX math, Mermaid diagrams, and ```` ```suggestion ```` blocks).
-   - Every finding starts unchecked. The user checks the ones to post, one at a time or with **Approve all shown**.
-3. **Wait for Completion**:
-   Stop calling tools and go idle.
+   - Every finding starts checked (approved). The user unchecks any to omit, or uses **Clear all** / **Approve all shown**.
+2. **Emit a Terse Summary in Chat & Wait for Completion**:
+   Write a brief summary (about a paragraph) in chat stating what the PR changes, its intent alignment, the overall verdict and finding counts, and that the dashboard is ready, then stop calling tools and go idle. Do **not** paste the full contents of `pr_description.md`, `review_results.md`, or the individual review comments into the chat window, because they are already written to the dashboard files and shown in the dashboard UI.
    - In **Pane Mode**, tell the user the **PR Review** dashboard is open in the side pane (or can be opened from the `open_pr_review_dashboard` tool step's **Open in side pane** button or the AuxPane `+` menu) and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
    - In **Browser Mode**, the launcher opens the review UI in the user's browser and waits until they click **"Submit Review to GitHub"** or **"Abort Review"**.
-4. **Verify Status**:
+3. **Verify Status**:
    - In **Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"`, proceed to Step 5; if `status` is `"aborted"`, clean up the temporary workspace and stop without contacting GitHub.
    - In **Browser Mode**, check the background task exit code: if `0` (saved), proceed to Step 5; if `1` (aborted by user), clean up the temporary workspace and stop without contacting GitHub; if `2` (startup or file validation error), inspect `stderr`, fix the missing or malformed file, and relaunch the dashboard.
 

@@ -122,7 +122,7 @@ class TestLaunchDashboard(unittest.TestCase):
 
         self.assertEqual(data["pr_metadata"]["pull_number"], 42)
         self.assertEqual(len(data["findings"]), 1)
-        self.assertFalse(data["findings"][0]["approved"])
+        self.assertTrue(data["findings"][0]["approved"])
 
     def test_get_api_findings_normalizes_aliases_and_meta_file(self):
         self.findings_file.write_text(
@@ -352,11 +352,11 @@ class TestNormalizeReviewData(unittest.TestCase):
         "title": "T",
     }
 
-    def test_forces_unapproved(self):
+    def test_defaults_findings_to_approved(self):
         data, _ = normalize_review_data(
-            {"pr_metadata": self.FULL_META, "findings": [{"approved": True}, {}]}
+            {"pr_metadata": self.FULL_META, "findings": [{"approved": False}, {}]}
         )
-        self.assertEqual([f["approved"] for f in data["findings"]], [False, False])
+        self.assertEqual([f["approved"] for f in data["findings"]], [True, True])
 
     def test_preserves_draft_comment_without_prefixing_description(self):
         data, _ = normalize_review_data(

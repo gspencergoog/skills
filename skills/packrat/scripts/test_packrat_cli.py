@@ -59,12 +59,14 @@ class TestPackratCli(unittest.TestCase):
             self.assertEqual(len(status_data["repos"]), 1)
             self.assertEqual(status_data["repos"][0]["full_name"], "octo-org/widgets")
 
-            # 4. search --json (empty DB returns [])
+            # 4. search --json (empty DB returns [] on stdout and emits unsynced hint on stderr)
             buf = io.StringIO()
-            with mock.patch("sys.stdout", buf):
+            err_search = io.StringIO()
+            with mock.patch("sys.stdout", buf), mock.patch("sys.stderr", err_search):
                 rc = packrat.main(["--db", db_path, "search", "surface controller", "--json"])
             self.assertEqual(rc, 0)
             self.assertEqual(json.loads(buf.getvalue()), [])
+            self.assertIn("0 indexed chunks in packrat", err_search.getvalue())
 
             # 5. sql --format json
             buf = io.StringIO()
@@ -125,6 +127,115 @@ class TestPackratCli(unittest.TestCase):
             with mock.patch("sys.stdout", buf):
                 packrat.main(["--db", db_path, "repo", "list", "--json"])
             self.assertEqual([r["full_name"] for r in json.loads(buf.getvalue())], ["new-org/widgets"])
+
+    def test_status_reports_incomplete_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "repos.sqlite")
+            store = packrat.PackratStore(Path(db_path))
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                store.set_backfill_state(repo.repo_id, "issues", cursor=None, done_at="2026-11-01T00:00:00Z")
+                store.set_backfill_state(repo.repo_id, "prs", cursor="CUR_9", done_at=None)
+            finally:
+                store.close()
+
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                self.assertEqual(packrat.main(["--db", db_path, "status"]), 0)
+            text = buf.getvalue()
+            self.assertIn("Warning: prs backfill incomplete; resumes on next packrat sync", text)
+            self.assertIn("Warning: discussions backfill incomplete; history not fetched yet", text)
+            self.assertNotIn("Warning: issues", text)
+
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                self.assertEqual(packrat.main(["--db", db_path, "status", "--json"]), 0)
+            item = json.loads(buf.getvalue())["repos"][0]
+            self.assertEqual(
+                item["backfill"]["issues"], {"complete": True, "done_at": "2026-11-01T00:00:00Z", "resumable": False}
+            )
+            self.assertEqual(item["backfill"]["prs"], {"complete": False, "done_at": None, "resumable": True})
+            self.assertEqual(len(item["warnings"]), 2)
+
+            store = packrat.PackratStore(Path(db_path))
+            try:
+                for stream in ("prs", "discussions"):
+                    store.set_backfill_state(repo.repo_id, stream, cursor=None, done_at="2026-11-02T00:00:00Z")
+            finally:
+                store.close()
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                packrat.main(["--db", db_path, "status"])
+            self.assertNotIn("Warning:", buf.getvalue())
+
+    def test_sync_help_lists_backfill_cap(self) -> None:
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf), self.assertRaises(SystemExit):
+            packrat.main(["sync", "--help"])
+        self.assertIn("--backfill-max-pages", buf.getvalue())
+        self.assertIn("--progress", buf.getvalue())
+        self.assertIn("--quiet", buf.getvalue())
+
+    def test_degraded_multi_repo_sync_streams_output_and_exits_one(self) -> None:
+        from models import SyncStats
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = str(Path(tmp) / "repos.sqlite")
+            store = packrat.PackratStore(Path(db_path))
+            try:
+                store.register_repo("octo-org", "widgets")
+                store.register_repo("octo-org", "gadgets")
+            finally:
+                store.close()
+
+            def fake_gh_sync(store_obj: object, repo: object, **kwargs: object) -> SyncStats:
+                full_name = getattr(repo, "full_name", "")
+                reporter = kwargs.get("reporter")
+                stats = SyncStats(repo_full_name=full_name)
+                if full_name == "octo-org/widgets":
+                    stats.issues_upserted = 3
+                    err_msg = "github prs sync failed after 0 page(s) (http_error: HTTP 502 Bad Gateway)"
+                    stats.errors.append(err_msg)
+                    if reporter is not None:
+                        reporter.error(full_name, err_msg)
+                else:
+                    stats.prs_upserted = 5
+                return stats
+
+            out_human = io.StringIO()
+            err_human = io.StringIO()
+            with (
+                mock.patch("packrat.sync_github_metadata", side_effect=fake_gh_sync),
+                mock.patch("sys.stdout", out_human),
+                mock.patch("sys.stderr", err_human),
+            ):
+                rc = packrat.main(["--db", db_path, "sync", "--github-only", "--progress", "off"])
+
+            self.assertEqual(rc, 1)
+            human_lines = out_human.getvalue().strip().splitlines()
+            self.assertEqual(len(human_lines), 2)
+            self.assertIn("[octo-org/widgets]", human_lines[0])
+            self.assertIn("issues=+3", human_lines[0])
+            self.assertIn("[octo-org/gadgets]", human_lines[1])
+            self.assertIn("prs=+5", human_lines[1])
+            self.assertIn("HTTP 502 Bad Gateway", err_human.getvalue())
+
+            # Verify --json mode keeps stdout valid JSON while returning exit code 1
+            out_json = io.StringIO()
+            err_json = io.StringIO()
+            with (
+                mock.patch("packrat.sync_github_metadata", side_effect=fake_gh_sync),
+                mock.patch("sys.stdout", out_json),
+                mock.patch("sys.stderr", err_json),
+            ):
+                rc_json = packrat.main(["--db", db_path, "sync", "--github-only", "--quiet", "--json"])
+
+            self.assertEqual(rc_json, 1)
+            payload = json.loads(out_json.getvalue())
+            self.assertEqual(len(payload["results"]), 2)
+            self.assertEqual(len(payload["results"][0]["errors"]), 1)
+            self.assertEqual(payload["results"][1]["prs_upserted"], 5)
+            self.assertIn("HTTP 502 Bad Gateway", err_json.getvalue())
 
     def test_auto_sync_enable_status_and_disable(self) -> None:
         from auto_sync import (

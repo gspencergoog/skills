@@ -171,6 +171,57 @@ class TestGitIndexer(unittest.TestCase):
         self.assertIsNone(records[2].old_path)
         self.assertEqual(records[2].change_type, "M")
 
+    def test_failed_git_fetch_warns_and_file_scan_reports_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+            _git(work_dir, "remote", "add", "upstream", str(tmp_path / "nonexistent-remote.git"))
+
+            (work_dir / "src").mkdir()
+            (work_dir / "src" / "widget.py").write_text("def build_widget() -> int:\n    return 1\n", encoding="utf-8")
+            (work_dir / "README.md").write_text("# Widget\n\nDoc text.\n", encoding="utf-8")
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: add widget")
+
+            warnings_seen: list[tuple[str, str]] = []
+            advances_seen: list[tuple[int, int | None, str]] = []
+
+            class SpyReporter:
+                def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+                    pass
+
+                def advance(self, completed: int, total: int | None = None, *, detail: str = "") -> None:
+                    advances_seen.append((completed, total, detail))
+
+                def finish_phase(self, summary: str = "") -> None:
+                    pass
+
+                def warn(self, repo: str, message: str) -> None:
+                    warnings_seen.append((repo, message))
+
+                def error(self, repo: str, message: str) -> None:
+                    pass
+
+                def clear_active_line(self) -> None:
+                    pass
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
+                stats = sync_git_codebase(store, repo, fetch=True, reporter=SpyReporter())
+                self.assertEqual(len(stats.warnings), 1)
+                self.assertIn("git fetch upstream/main failed", stats.warnings[0])
+                self.assertEqual(len(warnings_seen), 1)
+                self.assertEqual(stats.commits_upserted, 1)
+                self.assertEqual(len(advances_seen), 2)
+                self.assertEqual(advances_seen[-1][0], 2)
+                self.assertEqual(advances_seen[-1][1], 2)
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

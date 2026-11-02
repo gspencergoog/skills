@@ -10,6 +10,7 @@ from typing import Any
 
 try:
     from .models import (
+        BACKFILL_STREAMS,
         EMBEDDING_DIM,
         CodeSymbolRecord,
         CommentRecord,
@@ -28,6 +29,7 @@ try:
     )
 except ImportError:
     from models import (  # type: ignore[no-redef]
+        BACKFILL_STREAMS,
         EMBEDDING_DIM,
         CodeSymbolRecord,
         CommentRecord,
@@ -73,7 +75,13 @@ CREATE TABLE IF NOT EXISTS repos (
   last_full_sweep_at TEXT,
   last_indexed_sha TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  issues_backfill_cursor TEXT,
+  issues_backfill_done_at TEXT,
+  prs_backfill_cursor TEXT,
+  prs_backfill_done_at TEXT,
+  discussions_backfill_cursor TEXT,
+  discussions_backfill_done_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS issues (
@@ -304,6 +312,11 @@ def render_init_sql(db_path: Path = DEFAULT_DB_PATH) -> str:
     return template.replace("{{DB_PATH}}", escaped_path)
 
 
+BACKFILL_COLUMNS: tuple[str, ...] = tuple(
+    f"{stream}_backfill_{suffix}" for stream in BACKFILL_STREAMS for suffix in ("cursor", "done_at")
+)
+
+
 def _row_to_repo(row: sqlite3.Row) -> RepoConfig:
     """Converts a sqlite3.Row from the repos table into a RepoConfig."""
     return RepoConfig(
@@ -324,6 +337,7 @@ def _row_to_repo(row: sqlite3.Row) -> RepoConfig:
         last_indexed_sha=row["last_indexed_sha"],
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
+        **{col: row[col] for col in BACKFILL_COLUMNS},
     )
 
 
@@ -353,6 +367,17 @@ class PackratStore:
         self.conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA_SQL)
+        self._migrate_repos_columns()
+
+    def _migrate_repos_columns(self) -> None:
+        """Adds backfill columns missing from `repos` tables created by older packrat versions."""
+        existing = {str(row["name"]) for row in self.conn.execute("PRAGMA table_info(repos)")}
+        missing = [col for col in BACKFILL_COLUMNS if col not in existing]
+        if not missing:
+            return
+        with self.conn:
+            for col in missing:
+                self.conn.execute(f"ALTER TABLE repos ADD COLUMN {col} TEXT")
 
     def close(self) -> None:
         """Closes the underlying SQLite connection."""
@@ -514,6 +539,40 @@ class PackratStore:
                     now,
                     repo_id,
                 ),
+            )
+
+    def set_backfill_state(
+        self,
+        repo_id: int,
+        stream: str,
+        *,
+        cursor: str | None,
+        done_at: str | None,
+    ) -> None:
+        """Sets the backfill cursor and completion time for one stream, including clearing them to NULL.
+
+        Raises:
+            ValueError: if `stream` is not one of BACKFILL_STREAMS.
+        """
+        if stream not in BACKFILL_STREAMS:
+            raise ValueError(f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}.")
+        with self.conn:
+            self.conn.execute(
+                f"""
+                UPDATE repos SET {stream}_backfill_cursor = ?, {stream}_backfill_done_at = ?, updated_at = ?
+                WHERE repo_id = ?
+                """,
+                (cursor, done_at, utc_now_iso(), repo_id),
+            )
+
+    def reset_backfill_state(self, repo_id: int) -> None:
+        """Clears every stream's watermark and backfill state so the next sync refetches full history."""
+        cleared = [f"{col} = NULL" for col in BACKFILL_COLUMNS]
+        cleared += [f"{stream}_watermark = NULL" for stream in BACKFILL_STREAMS]
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE repos SET {', '.join(cleared)}, updated_at = ? WHERE repo_id = ?",
+                (utc_now_iso(), repo_id),
             )
 
     def get_repo(self, full_name: str) -> RepoConfig | None:

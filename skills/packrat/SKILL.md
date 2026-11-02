@@ -41,6 +41,7 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
    ```bash
    python3 agents/skills/packrat/scripts/packrat.py status
    ```
+   A `Warning: <stream> backfill incomplete` line means the issue, PR, or discussion history for that repository has not been fully fetched, so search and SQL results may be missing older items. Mention this to the user when it affects their question, and run `packrat sync` to continue the backfill.
 
 2. Register repositories and configure their local git checkout paths. `packrat` tracks no repositories by default and does not assume a directory layout for local clones:
    - If `packrat repo list` is empty (or `packrat sync` exits with code `2` because no repositories are registered), register the repository the user is working in. Infer `<owner>/<name>` from the canonical remote of the active checkout (`git remote get-url upstream`, falling back to `origin`), and use the checkout's root directory as `--path`.
@@ -66,6 +67,9 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
    # Sync only GitHub issues, PRs, reviews, and discussions (no local git checkout required)
    python3 agents/skills/packrat/scripts/packrat.py sync --repo <owner>/<name> --github-only
    ```
+   The first sync of a repository backfills its full issue, PR, and discussion history, paging until GitHub reports no more pages. This can take 15 minutes or more for repositories with thousands of PRs. Each page is saved as it arrives. `--backfill-max-pages` (default 1000 pages of 25 items per stream) caps a single run, and an unfinished backfill resumes from its saved cursor on the next sync. Later syncs fetch only items updated since the last run, limited by `--max-pages` (default 10). `--force` discards the sync state and backfills everything again.
+
+   Progress and diagnostics write strictly to `stderr` (preserving valid JSON on `stdout` under `--json`). Runs finishing within `2s` stay quiet; longer runs update a single status line once per second on interactive terminals (`--progress=auto`) or emit a plain heartbeat line every `15s` in non-TTY logs (`--progress=plain`), with `--progress=off` or `-q` / `--quiet` to silence progress and warnings. Exit codes for `packrat sync` are `0` when all streams succeed, `1` when one or more streams or repositories encounter a sync error (after completing all remaining streams/repositories and persisting fetched pages), and `2` for CLI usage or configuration errors.
 
 4. Search with Reciprocal Rank Fusion over `FTS5` BM25 and 384-dim cosine similarity ($k = 60$):
    ```bash

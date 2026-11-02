@@ -6,7 +6,7 @@ All tables are partitioned by `repo_id` (foreign key to `repos.repo_id`).
 
 | Table | Primary Key | Key Columns |
 | :--- | :--- | :--- |
-| `repos` | `repo_id` | `owner`, `name`, `full_name`, `local_path`, `default_branch`, `events_etag`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_indexed_sha`, `last_full_sweep_at` |
+| `repos` | `repo_id` | `owner`, `name`, `full_name`, `local_path`, `default_branch`, `events_etag`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_indexed_sha`, `last_full_sweep_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at` |
 | `issues` | `(repo_id, number)` | `state`, `author`, `author_association`, `title`, `body`, `labels_json`, `assignees_json`, `created_at`, `updated_at`, `closed_at` |
 | `pull_requests` | `(repo_id, number)` | `state`, `is_draft`, `author`, `title`, `body`, `labels_json`, `base_ref`, `head_ref`, `head_sha`, `merge_commit_sha`, `review_decision`, `additions`, `deletions`, `changed_files`, `updated_at`, `merged_at` |
 | `pr_files` | `(repo_id, pr_number, file_path)` | `change_type`, `additions`, `deletions` |

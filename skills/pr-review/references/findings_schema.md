@@ -92,7 +92,7 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
 | `findings[].draft_comment` | agent / `code-review` | The concise peer-facing comment body ($\le 80$ prose words, $\le 4$ sentences): the defect and its consequence first, followed by a suggestion block (or a natural 1–2 sentence question for `Q1…`). If `draft_comment` is empty, the launcher falls back to `description`. |
 | `findings[].is_diff_hunk` | `diff_parser.py` | `true` for an inline comment. `false` means the comment goes under "Broader Context" in the summary. |
 | `findings[].original_code` | `diff_parser.py` | The source lines the finding covers, shown in the dashboard. |
-| `findings[].approved` | dashboard only | Don't write it. The launcher sets every finding to `false`, and the user checks the ones to post. |
+| `findings[].approved` | dashboard only | Don't write it. The launcher sets every finding to `true`, and the user unchecks any to omit. |
 
 `diff_parser.py` and `launch_dashboard.py` also accept and normalize these legacy/alias names: `pr_meta` for `pr_metadata`, a top-level `head_sha`, top-level `summary_comment` / `summary` / `overview` and `verdict` for `review_summary` (a dict-valued `summary` is treated as `review_summary`), a string value for `pr_description`, top-level `inline_findings` / `general_findings` / `comments` for `findings`, a top-level `questions` list (merged into `findings` and then removed; entries without a `severity` default to `"question"`), and per-finding `file` / `path` (`file_path`), `start_line` / `line` (`line_start`), `end_line` / `line` (`line_end`), `title` (`description`), and `body` / `comment_body` (`draft_comment`). Always use the canonical names in new files.
 

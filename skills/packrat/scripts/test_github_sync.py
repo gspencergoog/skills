@@ -16,6 +16,13 @@ from github_sync import (
     poll_repo_events,
     sync_github_metadata,
 )
+from models import BACKFILL_STREAMS, RepoConfig
+
+
+def _mark_backfill_complete(store: PackratStore, repo_id: int) -> None:
+    """Marks every stream's history as fetched so syncs exercise incremental paging only."""
+    for stream in BACKFILL_STREAMS:
+        store.set_backfill_state(repo_id, stream, cursor=None, done_at="2026-10-01T00:00:00Z")
 
 
 class TestGithubSync(unittest.TestCase):
@@ -74,6 +81,7 @@ class TestGithubSync(unittest.TestCase):
                     prs_watermark="2026-10-20T00:00:00Z",
                     discussions_watermark="2026-10-20T00:00:00Z",
                 )
+                _mark_backfill_complete(store, repo.repo_id)
                 repo = store.get_repo("octo-org/widgets")
                 assert repo is not None
 
@@ -323,6 +331,7 @@ class TestGithubSync(unittest.TestCase):
                     repo.repo_id,
                     issues_watermark="2026-10-20T00:00:00Z",
                 )
+                _mark_backfill_complete(store, repo.repo_id)
                 repo = store.get_repo("octo-org/widgets")
                 assert repo is not None
 
@@ -431,6 +440,255 @@ class TestGithubSync(unittest.TestCase):
                 self.assertEqual(stats_force.issues_upserted, 1)
             finally:
                 store.close()
+
+
+def _issue_node(number: int, updated_at: str) -> dict[str, object]:
+    """Builds a minimal GraphQL issue node."""
+    return {
+        "id": f"I_{number}",
+        "number": number,
+        "title": f"Issue {number}",
+        "state": "OPEN",
+        "updatedAt": updated_at,
+        "createdAt": updated_at,
+        "body": "Body",
+        "author": {"login": "alice"},
+        "labels": {"nodes": []},
+        "assignees": {"nodes": []},
+        "comments": {"nodes": []},
+    }
+
+
+class PagedIssuesRunner:
+    """Fake gh runner that serves issue pages keyed by request cursor.
+
+    `pages` maps a request cursor (None for the first page) to
+    (issue numbers, hasNextPage, endCursor). Issue N gets updatedAt day N of
+    October 2026, so higher numbers are newer. Cursors listed in `failing`
+    answer with HTTP 502 at every page size. PR and discussion connections are
+    always empty.
+    """
+
+    def __init__(
+        self,
+        pages: dict[str | None, tuple[list[int], bool, str | None]],
+        *,
+        failing: frozenset[str] = frozenset(),
+        events_status: int = 200,
+    ) -> None:
+        self.pages = pages
+        self.failing = failing
+        self.events_status = events_status
+        self.issue_cursors: list[str | None] = []
+
+    def __call__(self, args: Sequence[str], timeout: int) -> GhCommandResult:
+        cmd = " ".join(args)
+        if "/events" in cmd:
+            status = "304 Not Modified" if self.events_status == 304 else "200 OK"
+            body = "" if self.events_status == 304 else "[]"
+            return GhCommandResult(returncode=0, stdout=f'HTTP/2.0 {status}\r\nETag: "e1"\r\n\r\n{body}', stderr="")
+        if "issues(first:" not in cmd:
+            empty = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}
+            payload = {"data": {"repository": {"pullRequests": empty, "discussions": empty}}}
+            return GhCommandResult(returncode=0, stdout=json.dumps(payload), stderr="")
+        cursor = next((a.split("=", 1)[1] for a in args if a.startswith("cursor=")), None)
+        self.issue_cursors.append(cursor)
+        if cursor in self.failing:
+            return GhCommandResult(returncode=1, stdout="", stderr="HTTP 502 Bad Gateway")
+        numbers, has_next, end_cursor = self.pages[cursor]
+        nodes = [_issue_node(n, f"2026-10-{n:02d}T00:00:00Z") for n in numbers]
+        conn = {"pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor}, "nodes": nodes}
+        return GhCommandResult(returncode=0, stdout=json.dumps({"data": {"repository": {"issues": conn}}}), stderr="")
+
+
+THREE_ISSUE_PAGES: dict[str | None, tuple[list[int], bool, str | None]] = {
+    None: ([30, 29], True, "C1"),
+    "C1": ([20, 19], True, "C2"),
+    "C2": ([10, 9], False, "C3"),
+}
+
+
+class TestGithubBackfill(unittest.TestCase):
+    """Tests full-history backfill paging, resume cursors, and safety stops."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = PackratStore(Path(self.tmp.name) / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _reload(self) -> RepoConfig:
+        repo = self.store.get_repo_by_id(self.repo.repo_id)
+        assert repo is not None
+        return repo
+
+    def test_first_sync_pages_until_has_next_page_false(self) -> None:
+        runner = PagedIssuesRunner(THREE_ISSUE_PAGES)
+        stats = sync_github_metadata(self.store, self.repo, max_pages=1, runner=runner)
+
+        self.assertEqual(stats.issues_upserted, 6)
+        self.assertEqual(stats.backfill_incomplete, [])
+        repo = self._reload()
+        self.assertTrue(repo.backfill("issues").complete)
+        self.assertIsNone(repo.backfill("issues").cursor)
+        self.assertEqual(repo.issues_watermark, "2026-10-30T00:00:00Z")
+        self.assertTrue(all(repo.backfill(s).complete for s in BACKFILL_STREAMS))
+
+    def test_backfill_cap_saves_cursor_and_next_sync_resumes(self) -> None:
+        runner = PagedIssuesRunner(THREE_ISSUE_PAGES)
+        stats = sync_github_metadata(self.store, self.repo, backfill_max_pages=2, runner=runner)
+
+        self.assertEqual(stats.issues_upserted, 4)
+        self.assertEqual(stats.backfill_incomplete, ["issues"])
+        repo = self._reload()
+        self.assertEqual(repo.backfill("issues").cursor, "C2")
+        self.assertFalse(repo.backfill("issues").complete)
+        self.assertEqual(repo.issues_watermark, "2026-10-30T00:00:00Z")
+
+        # A quiet repository (HTTP 304) must still resume the pending backfill.
+        resume_runner = PagedIssuesRunner(THREE_ISSUE_PAGES, events_status=304)
+        stats2 = sync_github_metadata(self.store, repo, backfill_max_pages=2, runner=resume_runner)
+
+        self.assertFalse(stats2.events_not_modified)
+        self.assertEqual(resume_runner.issue_cursors, [None, "C2"])  # incremental pass, then resume
+        self.assertEqual(stats2.backfill_incomplete, [])
+        self.assertEqual(self.store.table_counts(repo.repo_id)["issues"], 6)
+        repo = self._reload()
+        self.assertTrue(repo.backfill("issues").complete)
+        self.assertIsNone(repo.backfill("issues").cursor)
+
+        # Once every stream is complete, HTTP 304 skips GraphQL again.
+        quiet_runner = PagedIssuesRunner(THREE_ISSUE_PAGES, events_status=304)
+        stats3 = sync_github_metadata(self.store, repo, runner=quiet_runner)
+        self.assertTrue(stats3.events_not_modified)
+        self.assertEqual(quiet_runner.issue_cursors, [])
+
+    def test_backfill_error_keeps_saved_pages_and_cursor(self) -> None:
+        runner = PagedIssuesRunner(THREE_ISSUE_PAGES, failing=frozenset({"C1"}))
+        stats = sync_github_metadata(self.store, self.repo, runner=runner)
+
+        self.assertEqual(stats.issues_upserted, 2)
+        self.assertEqual(stats.backfill_incomplete, ["issues"])
+        repo = self._reload()
+        self.assertEqual(repo.backfill("issues").cursor, "C1")
+        self.assertIsNone(repo.backfill("issues").done_at)
+        self.assertEqual(self.store.table_counts(repo.repo_id)["issues"], 2)
+
+    def test_repeated_end_cursor_stops_walk(self) -> None:
+        runner = PagedIssuesRunner({None: ([30], True, "C1"), "C1": ([29], True, "C1")})
+        stats = sync_github_metadata(self.store, self.repo, runner=runner)
+
+        self.assertEqual(runner.issue_cursors, [None, "C1"])
+        self.assertEqual(stats.backfill_incomplete, ["issues"])
+        self.assertEqual(self._reload().backfill("issues").cursor, "C1")
+
+    def test_force_restarts_backfill_from_newest_item(self) -> None:
+        sync_github_metadata(self.store, self.repo, runner=PagedIssuesRunner(THREE_ISSUE_PAGES))
+        self.assertTrue(self._reload().backfill("issues").complete)
+
+        runner = PagedIssuesRunner(THREE_ISSUE_PAGES, events_status=304)
+        stats = sync_github_metadata(self.store, self._reload(), force=True, runner=runner)
+
+        self.assertEqual(runner.issue_cursors, [None, "C1", "C2"])
+        self.assertEqual(stats.issues_upserted, 6)
+        self.assertTrue(self._reload().backfill("issues").complete)
+
+    def test_existing_watermark_without_backfill_record_backfills_from_newest_item(self) -> None:
+        self.store.update_repo_sync_state(self.repo.repo_id, issues_watermark="2026-10-25T00:00:00Z")
+        runner = PagedIssuesRunner(THREE_ISSUE_PAGES)
+        stats = sync_github_metadata(self.store, self._reload(), runner=runner)
+
+        self.assertEqual(runner.issue_cursors, [None, "C1", "C2"])
+        self.assertEqual(stats.issues_upserted, 6)
+        repo = self._reload()
+        self.assertTrue(repo.backfill("issues").complete)
+        self.assertEqual(repo.issues_watermark, "2026-10-30T00:00:00Z")
+
+    def test_total_count_progress_halving_warnings_and_sibling_stream_isolation(self) -> None:
+        events_recorded: list[tuple[str, object]] = []
+
+        class RecordingReporter:
+            def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+                events_recorded.append(("start", (repo, phase, total)))
+
+            def advance(self, completed: int, total: int | None = None, *, detail: str = "") -> None:
+                events_recorded.append(("advance", (completed, total, detail)))
+
+            def finish_phase(self, summary: str = "") -> None:
+                events_recorded.append(("finish", summary))
+
+            def warn(self, repo: str, message: str) -> None:
+                events_recorded.append(("warn", (repo, message)))
+
+            def error(self, repo: str, message: str) -> None:
+                events_recorded.append(("error", (repo, message)))
+
+            def clear_active_line(self) -> None:
+                pass
+
+        def fake_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
+            cmd = " ".join(args)
+            if "/events" in cmd:
+                return GhCommandResult(returncode=0, stdout='HTTP/2.0 200 OK\r\nETag: "e9"\r\n\r\n[]', stderr="")
+            if "issues(first:" in cmd:
+                if "pageSize=25" in cmd:
+                    return GhCommandResult(returncode=1, stdout="", stderr="HTTP 502 Bad Gateway")
+                conn = {
+                    "totalCount": 42,
+                    "pageInfo": {"hasNextPage": False, "endCursor": "I_END"},
+                    "nodes": [_issue_node(10, "2026-10-10T00:00:00Z")],
+                }
+                return GhCommandResult(
+                    returncode=0,
+                    stdout=json.dumps({"data": {"repository": {"issues": conn}}}),
+                    stderr="",
+                )
+            if "pullRequests(first:" in cmd:
+                return GhCommandResult(returncode=1, stdout="", stderr="HTTP 401 Bad credentials")
+            disc_conn = {
+                "totalCount": 1,
+                "pageInfo": {"hasNextPage": False, "endCursor": "D_END"},
+                "nodes": [
+                    {
+                        "id": "D_1",
+                        "number": 1,
+                        "title": "Architecture Q&A",
+                        "updatedAt": "2026-10-12T00:00:00Z",
+                        "createdAt": "2026-10-12T00:00:00Z",
+                        "url": "https://example.com/d/1",
+                        "body": "Body",
+                        "author": {"login": "carol"},
+                        "category": {"name": "General"},
+                        "answer": None,
+                    }
+                ],
+            }
+            return GhCommandResult(
+                returncode=0,
+                stdout=json.dumps({"data": {"repository": {"discussions": disc_conn}}}),
+                stderr="",
+            )
+
+        reporter = RecordingReporter()
+        stats = sync_github_metadata(self.store, self.repo, runner=fake_runner, reporter=reporter)
+
+        self.assertEqual(stats.issues_upserted, 1)
+        self.assertEqual(stats.discussions_upserted, 1)
+        self.assertEqual(len(stats.errors), 1)
+        self.assertIn("github prs sync failed", stats.errors[0])
+        self.assertIn("auth_error", stats.errors[0])
+        self.assertIsNone(self._reload().last_full_sweep_at)
+
+        warns = [payload for kind, payload in events_recorded if kind == "warn"]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("pageSize=25", str(warns[0]))
+        self.assertIn("pageSize=12", str(warns[0]))
+
+        advances = [payload for kind, payload in events_recorded if kind == "advance"]
+        self.assertIn((1, 42, "oldest 2026-10-10"), advances)
 
 
 if __name__ == "__main__":

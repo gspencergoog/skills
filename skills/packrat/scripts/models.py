@@ -68,6 +68,28 @@ def wrap_untrusted_text(source_ref: str, text: str) -> str:
     return f'<untrusted_repo_content source="{safe_ref}">\n{safe_body}\n</untrusted_repo_content>'
 
 
+BACKFILL_STREAMS: tuple[str, ...] = ("issues", "prs", "discussions")
+
+
+@dataclass(frozen=True)
+class StreamBackfill:
+    """Backfill progress for one GitHub stream of a repository.
+
+    A non-None `cursor` means a backfill is in progress and resumes from that
+    GraphQL `endCursor`. `done_at` records when the backfill reached the last
+    page; while it is None, the stream's older history may be missing.
+    """
+
+    stream: str
+    cursor: str | None
+    done_at: str | None
+
+    @property
+    def complete(self) -> bool:
+        """Whether the stream's full history has been fetched at least once."""
+        return self.done_at is not None
+
+
 @dataclass(frozen=True)
 class RepoConfig:
     """Configuration and sync watermarks for a tracked repository."""
@@ -89,6 +111,26 @@ class RepoConfig:
     last_indexed_sha: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    issues_backfill_cursor: str | None = None
+    issues_backfill_done_at: str | None = None
+    prs_backfill_cursor: str | None = None
+    prs_backfill_done_at: str | None = None
+    discussions_backfill_cursor: str | None = None
+    discussions_backfill_done_at: str | None = None
+
+    def backfill(self, stream: str) -> StreamBackfill:
+        """Returns the backfill progress for `stream`.
+
+        Raises:
+            ValueError: if `stream` is not one of BACKFILL_STREAMS.
+        """
+        if stream not in BACKFILL_STREAMS:
+            raise ValueError(f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}.")
+        return StreamBackfill(
+            stream=stream,
+            cursor=getattr(self, f"{stream}_backfill_cursor"),
+            done_at=getattr(self, f"{stream}_backfill_done_at"),
+        )
 
 
 @dataclass(frozen=True)
@@ -370,3 +412,7 @@ class SyncStats:
     embeddings_updated: int = 0
     indexed_ref: str | None = None
     indexed_sha: str | None = None
+    backfill_incomplete: list[str] = field(default_factory=list)
+    duration_sec: float = 0.0
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)

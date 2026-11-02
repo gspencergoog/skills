@@ -13,6 +13,7 @@ from typing import Any
 
 from db_store import PackratStore
 from models import (
+    BACKFILL_STREAMS,
     CommentRecord,
     DiscussionRecord,
     IssuePrLink,
@@ -27,6 +28,7 @@ from models import (
     compute_content_sha256,
     utc_now_iso,
 )
+from progress import NULL_REPORTER, ProgressReporter
 
 SAFETY_SWEEP_INTERVAL_SEC = 600
 PAGE_SIZE_LADDER = (25, 12, 5)
@@ -41,6 +43,7 @@ ISSUES_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     issues(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
         id
@@ -77,6 +80,7 @@ PRS_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequests(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
         id
@@ -157,6 +161,7 @@ DISCUSSIONS_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
   repository(owner: $owner, name: $name) {
     discussions(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
       pageInfo { hasNextPage endCursor }
       nodes {
         id
@@ -723,6 +728,64 @@ def _is_fatal_auth_error(stderr: str) -> bool:
     return "401" in lowered or "403" in lowered or "locked" in lowered
 
 
+@dataclass(frozen=True)
+class PageFetchOutcome:
+    """Structured result of fetching a single GraphQL page across halving steps."""
+
+    connection: dict[str, Any] | None
+    error_kind: str | None = None
+    error_detail: str | None = None
+
+
+@dataclass(frozen=True)
+class PageBatch:
+    """Parsed page payload delivered to on_page callbacks."""
+
+    nodes: list[dict[str, Any]]
+    cursor: str | None
+    items_fetched: int
+    total_count: int | None
+    oldest_date: str | None
+
+
+def _classify_gh_failure(res: GhCommandResult) -> tuple[str, str]:
+    """Classifies a failed GraphQL subprocess result into (error_kind, short_reason)."""
+    raw_err = (res.stderr or res.stdout or "").strip()
+    first_line = raw_err.splitlines()[0].strip() if raw_err else f"gh exited with {res.returncode}"
+    if res.timed_out or res.returncode == 124:
+        return "timeout", first_line
+    if _is_fatal_auth_error(raw_err):
+        return "auth_error", first_line
+    if res.returncode == 0:
+        return "parse_error", "invalid or empty GraphQL JSON response"
+    return "http_error", first_line
+
+
+def _build_graphql_args(
+    owner: str,
+    name: str,
+    query: str,
+    page_size: int,
+    cursor: str | None,
+) -> list[str]:
+    """Builds the gh api graphql argument list for a single page request."""
+    args = [
+        "api",
+        "graphql",
+        "-F",
+        f"owner={owner}",
+        "-F",
+        f"name={name}",
+        "-F",
+        f"pageSize={page_size}",
+        "-f",
+        f"query={query}",
+    ]
+    if cursor:
+        args.extend(["-F", f"cursor={cursor}"])
+    return args
+
+
 def _fetch_graphql_page_with_halving(
     owner: str,
     name: str,
@@ -730,31 +793,31 @@ def _fetch_graphql_page_with_halving(
     field_name: str,
     cursor: str | None,
     runner: GhRunner,
-) -> dict[str, Any] | None:
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
+    repo_full_name: str = "",
+    stream: str = "",
+) -> PageFetchOutcome:
     """Executes a GraphQL page query, halving pageSize (25 -> 12 -> 5) on 5xx/timeouts."""
-    for page_size in PAGE_SIZE_LADDER:
-        args = [
-            "api",
-            "graphql",
-            "-F",
-            f"owner={owner}",
-            "-F",
-            f"name={name}",
-            "-F",
-            f"pageSize={page_size}",
-            "-f",
-            f"query={query}",
-        ]
-        if cursor:
-            args.extend(["-F", f"cursor={cursor}"])
+    last_kind = "http_error"
+    last_detail = "GraphQL page fetch failed"
+    for idx, page_size in enumerate(PAGE_SIZE_LADDER):
+        args = _build_graphql_args(owner, name, query, page_size, cursor)
         res = runner(args, 25)
         if res.returncode == 0:
             conn = _extract_graphql_connection(res.stdout, field_name)
             if conn is not None:
-                return conn
-        if _is_fatal_auth_error(res.stderr):
-            return None
-    return None
+                return PageFetchOutcome(connection=conn)
+        last_kind, last_detail = _classify_gh_failure(res)
+        if last_kind == "auth_error":
+            break
+        if idx + 1 < len(PAGE_SIZE_LADDER):
+            next_size = PAGE_SIZE_LADDER[idx + 1]
+            reporter.warn(
+                repo_full_name,
+                f"github {stream}: page request failed at pageSize={page_size} ({last_detail}); retrying at pageSize={next_size}",
+            )
+    return PageFetchOutcome(connection=None, error_kind=last_kind, error_detail=last_detail)
 
 
 def _filter_nodes_above_watermark(
@@ -777,57 +840,170 @@ def _filter_nodes_above_watermark(
     return accepted, newest, reached_watermark
 
 
-def _collect_delta_nodes(
-    repo: RepoConfig,
-    query: str,
-    field_name: str,
-    watermark: str | None,
-    max_pages: int,
-    runner: GhRunner,
-) -> tuple[list[dict[str, Any]], str | None, bool]:
-    """Pages a GraphQL connection in UPDATED_AT DESC order until watermark is reached."""
-    collected: list[dict[str, Any]] = []
-    newest_updated: str | None = watermark
-    cursor: str | None = None
-    complete = max_pages <= 0
+DEFAULT_BACKFILL_MAX_PAGES = 1000
 
-    for _ in range(max_pages):
-        conn = _fetch_graphql_page_with_halving(repo.owner, repo.name, query, field_name, cursor, runner)
-        if conn is None:
-            return collected, newest_updated, False
-        nodes = [n for n in (conn.get("nodes") or []) if isinstance(n, dict) and n.get("number")]
-        if not nodes:
-            complete = True
-            break
-        accepted, newest_updated, reached_wm = _filter_nodes_above_watermark(
-            nodes, watermark, newest_updated
-        )
-        collected.extend(accepted)
-        page_info = conn.get("pageInfo") or {}
-        if reached_wm or not page_info.get("hasNextPage"):
-            complete = True
-            break
-        cursor = page_info.get("endCursor")
-        if not cursor:
-            complete = True
-            break
-
-    return collected, newest_updated, complete
+StreamPersister = Callable[[PackratStore, RepoConfig, list[dict[str, Any]], SyncStats], None]
+PageHandler = Callable[[PageBatch], None]
 
 
-def _sync_issues_stream(
-    store: PackratStore,
-    repo: RepoConfig,
-    max_pages: int,
-    runner: GhRunner,
+@dataclass(frozen=True)
+class StreamSpec:
+    """Describes how to fetch and persist one GitHub stream."""
+
+    stream: str
+    query: str
+    field_name: str
+    persist: StreamPersister
+
+
+@dataclass
+class PageWalk:
+    """Outcome of paging through one GraphQL connection."""
+
+    pages: int = 0
+    items_fetched: int = 0
+    total_count: int | None = None
+    newest_updated: str | None = None
+    reached_end: bool = False
+    failed: bool = False
+    error_kind: str | None = None
+    error_detail: str | None = None
+
+
+def _max_timestamp(a: str | None, b: str | None) -> str | None:
+    """Returns the later of two ISO-8601 timestamps, ignoring None."""
+    if a is None or b is None:
+        return a or b
+    return max(a, b)
+
+
+def _newest_updated(nodes: Sequence[dict[str, Any]]) -> str | None:
+    """Returns the newest non-empty updatedAt value among nodes."""
+    stamps = [str(n.get("updatedAt")) for n in nodes if n.get("updatedAt")]
+    return max(stamps) if stamps else None
+
+
+def _extract_page_metadata(
+    conn: dict[str, Any],
+    stop_watermark: str | None,
+    newest_updated: str | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, bool, int | None, str | None]:
+    """Unpacks a GraphQL connection page into (nodes, accepted, newest, reached_wm, total_count, oldest_date)."""
+    nodes = [n for n in (conn.get("nodes") or []) if isinstance(n, dict) and n.get("number")]
+    accepted, newest, reached_wm = _filter_nodes_above_watermark(nodes, stop_watermark, newest_updated)
+    raw_total = conn.get("totalCount")
+    total_count = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else None
+    sample = accepted or nodes
+    stamps = [str(n.get("updatedAt"))[:10] for n in sample if n.get("updatedAt")]
+    oldest_date = min(stamps) if stamps else None
+    return nodes, accepted, newest, reached_wm, total_count, oldest_date
+
+
+def _record_walk_failure(
+    walk: PageWalk,
+    repo_name: str,
+    stream: str,
     stats: SyncStats,
-) -> str | None:
-    """Syncs modified issues and their comments, returning the new issues_watermark."""
-    nodes, newest, ok = _collect_delta_nodes(
-        repo, ISSUES_DELTA_QUERY, "issues", repo.issues_watermark, max_pages, runner
-    )
-    if not ok and not nodes:
-        return repo.issues_watermark
+    reporter: ProgressReporter,
+) -> None:
+    """Appends a structured walk failure message to stats.errors and notifies reporter."""
+    if not walk.failed:
+        return
+    kind = walk.error_kind or "graphql_error"
+    detail = walk.error_detail or "page fetch failed"
+    msg = f"github {stream} sync failed after {walk.pages} page(s) ({kind}: {detail})"
+    stats.errors.append(msg)
+    reporter.error(repo_name, msg)
+
+
+def _classify_page_end(
+    conn: dict[str, Any],
+    cursor: str | None,
+    stop_here: bool,
+) -> tuple[str | None, bool, bool]:
+    """Returns (endCursor, reached_end, bad_cursor) for a fetched page.
+
+    `bad_cursor` is True when more pages exist but GitHub returned no endCursor
+    or repeated the cursor that was requested.
+    """
+    page_info = conn.get("pageInfo") or {}
+    end_cursor = page_info.get("endCursor")
+    reached_end = stop_here or not page_info.get("hasNextPage")
+    bad_cursor = not reached_end and (not end_cursor or end_cursor == cursor)
+    return end_cursor, reached_end, bad_cursor
+
+
+def _walk_pages(
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    start_cursor: str | None,
+    stop_watermark: str | None,
+    max_pages: int,
+    runner: GhRunner,
+    on_page: PageHandler,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> PageWalk:
+    """Pages a GraphQL connection in UPDATED_AT DESC order, handing each page to on_page.
+
+    Stops when GitHub reports no further pages, when stop_watermark is reached,
+    after max_pages pages, when a page fetch fails, or when GitHub returns a
+    missing or repeated endCursor (which would otherwise loop forever).
+    """
+    walk = PageWalk()
+    cursor = start_cursor
+    while walk.pages < max_pages:
+        outcome = _fetch_graphql_page_with_halving(
+            repo.owner,
+            repo.name,
+            spec.query,
+            spec.field_name,
+            cursor,
+            runner,
+            reporter=reporter,
+            repo_full_name=repo.full_name,
+            stream=spec.stream,
+        )
+        if outcome.connection is None:
+            walk.failed = True
+            walk.error_kind = outcome.error_kind
+            walk.error_detail = outcome.error_detail
+            return walk
+        nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = _extract_page_metadata(
+            outcome.connection, stop_watermark, walk.newest_updated
+        )
+        if total_count is not None:
+            walk.total_count = total_count
+        end_cursor, reached_end, bad_cursor = _classify_page_end(
+            outcome.connection, cursor, reached_wm or not nodes
+        )
+        walk.pages += 1
+        walk.items_fetched += len(accepted)
+        on_page(
+            PageBatch(
+                nodes=accepted,
+                cursor=cursor if bad_cursor else end_cursor,
+                items_fetched=walk.items_fetched,
+                total_count=walk.total_count,
+                oldest_date=oldest_date,
+            )
+        )
+        if reached_end:
+            walk.reached_end = True
+            return walk
+        if bad_cursor:
+            walk.failed = True
+            walk.error_kind = "bad_cursor"
+            walk.error_detail = "GitHub returned a missing or repeated endCursor"
+            return walk
+        cursor = end_cursor
+    return walk
+
+
+def _persist_issues(store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats) -> None:
+    """Upserts issue nodes with their comments and search chunks."""
+    if not nodes:
+        return
     issues: list[IssueRecord] = []
     comments: list[CommentRecord] = []
     chunks: list[TextChunk] = []
@@ -836,66 +1012,178 @@ def _sync_issues_stream(
         issues.append(iss)
         comments.extend(cms)
         chunks.extend(chs)
-    if issues:
-        store.upsert_issues(issues, comments)
-        store.upsert_chunks(chunks)
+    store.upsert_issues(issues, comments)
+    store.upsert_chunks(chunks)
     stats.issues_upserted += len(issues)
     stats.chunks_upserted += len(chunks)
-    return newest if ok else repo.issues_watermark
 
 
-def _sync_prs_stream(
-    store: PackratStore,
-    repo: RepoConfig,
-    max_pages: int,
-    runner: GhRunner,
-    stats: SyncStats,
-) -> str | None:
-    """Syncs modified pull requests, threads, and links, returning the new prs_watermark."""
-    nodes, newest, ok = _collect_delta_nodes(
-        repo, PRS_DELTA_QUERY, "pullRequests", repo.prs_watermark, max_pages, runner
-    )
-    if not ok and not nodes:
-        return repo.prs_watermark
+def _persist_prs(store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats) -> None:
+    """Upserts pull request nodes with their threads, links, and search chunks."""
+    if not nodes:
+        return
     prs: list[PrRecord] = []
     chunks: list[TextChunk] = []
     for node in nodes:
         pr, chs = _parse_pr_node(repo, node)
         prs.append(pr)
         chunks.extend(chs)
-    if prs:
-        store.upsert_pull_requests(prs)
-        store.upsert_chunks(chunks)
+    store.upsert_pull_requests(prs)
+    store.upsert_chunks(chunks)
     stats.prs_upserted += len(prs)
     stats.chunks_upserted += len(chunks)
-    return newest if ok else repo.prs_watermark
 
 
-def _sync_discussions_stream(
-    store: PackratStore,
-    repo: RepoConfig,
-    max_pages: int,
-    runner: GhRunner,
-    stats: SyncStats,
-) -> str | None:
-    """Syncs modified discussions, returning the new discussions_watermark."""
-    nodes, newest, ok = _collect_delta_nodes(
-        repo, DISCUSSIONS_DELTA_QUERY, "discussions", repo.discussions_watermark, max_pages, runner
-    )
-    if not ok and not nodes:
-        return repo.discussions_watermark
+def _persist_discussions(
+    store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats
+) -> None:
+    """Upserts discussion nodes and their search chunks."""
+    if not nodes:
+        return
     discussions: list[DiscussionRecord] = []
     chunks: list[TextChunk] = []
     for node in nodes:
         disc, ch = _parse_discussion_node(repo, node)
         discussions.append(disc)
         chunks.append(ch)
-    if discussions:
-        store.upsert_discussions(discussions)
-        store.upsert_chunks(chunks)
+    store.upsert_discussions(discussions)
+    store.upsert_chunks(chunks)
     stats.discussions_upserted += len(discussions)
     stats.chunks_upserted += len(chunks)
-    return newest if ok else repo.discussions_watermark
+
+
+STREAM_SPECS: tuple[StreamSpec, ...] = (
+    StreamSpec("issues", ISSUES_DELTA_QUERY, "issues", _persist_issues),
+    StreamSpec("prs", PRS_DELTA_QUERY, "pullRequests", _persist_prs),
+    StreamSpec("discussions", DISCUSSIONS_DELTA_QUERY, "discussions", _persist_discussions),
+)
+
+
+def _store_watermark(store: PackratStore, repo: RepoConfig, stream: str, value: str | None) -> None:
+    """Persists a stream's UPDATED_AT watermark (None leaves the stored value unchanged)."""
+    store.update_repo_sync_state(repo.repo_id, **{f"{stream}_watermark": value})
+
+
+def _run_incremental_walk(
+    store: PackratStore,
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    max_pages: int,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> None:
+    """Fetches items updated since the stream's watermark.
+
+    The watermark only advances when the walk reaches it (or the last page), so a
+    walk cut short by max_pages or an error never leaves a gap behind it.
+    """
+    watermark = getattr(repo, f"{spec.stream}_watermark")
+    wm_short = str(watermark)[:10] if watermark else "start"
+    reporter.start_phase(repo.full_name, f"github {spec.stream}", total=None)
+
+    def on_page(batch: PageBatch) -> None:
+        spec.persist(store, repo, batch.nodes, stats)
+        oldest = batch.oldest_date or "-"
+        reporter.advance(
+            batch.items_fetched,
+            None,
+            detail=f"oldest {oldest}, target >= {wm_short}",
+        )
+
+    walk = _walk_pages(
+        repo,
+        spec,
+        start_cursor=None,
+        stop_watermark=watermark,
+        max_pages=max_pages,
+        runner=runner,
+        on_page=on_page,
+        reporter=reporter,
+    )
+    reporter.finish_phase()
+    _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
+    if walk.reached_end:
+        _store_watermark(store, repo, spec.stream, _max_timestamp(watermark, walk.newest_updated))
+
+
+def _run_backfill_walk(
+    store: PackratStore,
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    start_cursor: str | None,
+    max_pages: int,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> None:
+    """Fetches a stream's older history until the last page, saving progress after every page.
+
+    A walk that starts from the newest item (start_cursor is None) also moves the
+    watermark to the newest updatedAt on its first page, so later incremental
+    walks pick up newer changes while the saved cursor covers older items.
+    """
+    watermark_pending = start_cursor is None
+    old_watermark = getattr(repo, f"{spec.stream}_watermark")
+    reporter.start_phase(repo.full_name, f"github {spec.stream}", total=None)
+
+    def on_page(batch: PageBatch) -> None:
+        nonlocal watermark_pending
+        spec.persist(store, repo, batch.nodes, stats)
+        if watermark_pending:
+            _store_watermark(store, repo, spec.stream, _max_timestamp(old_watermark, _newest_updated(batch.nodes)))
+            watermark_pending = False
+        store.set_backfill_state(repo.repo_id, spec.stream, cursor=batch.cursor, done_at=None)
+        detail = f"oldest {batch.oldest_date}" if batch.oldest_date else ""
+        reporter.advance(batch.items_fetched, batch.total_count, detail=detail)
+
+    walk = _walk_pages(
+        repo,
+        spec,
+        start_cursor=start_cursor,
+        stop_watermark=None,
+        max_pages=max_pages,
+        runner=runner,
+        on_page=on_page,
+        reporter=reporter,
+    )
+    reporter.finish_phase()
+    _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
+    if walk.reached_end:
+        store.set_backfill_state(repo.repo_id, spec.stream, cursor=None, done_at=utc_now_iso())
+    else:
+        stats.backfill_incomplete.append(spec.stream)
+
+
+def _sync_stream(
+    store: PackratStore,
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    max_pages: int,
+    backfill_max_pages: int,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> None:
+    """Syncs one GitHub stream, backfilling its history until the last page if needed.
+
+    - Backfill complete: incremental walk only.
+    - Backfill never started (or no watermark yet): backfill from the newest item.
+    - Backfill in progress: incremental walk, then resume the backfill from its cursor.
+    """
+    state = repo.backfill(spec.stream)
+    walk_args: dict[str, Any] = {"runner": runner, "stats": stats, "reporter": reporter}
+    if state.complete:
+        _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
+        return
+    if state.cursor is None or getattr(repo, f"{spec.stream}_watermark") is None:
+        _run_backfill_walk(store, repo, spec, start_cursor=None, max_pages=backfill_max_pages, **walk_args)
+        return
+    _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
+    _run_backfill_walk(store, repo, spec, start_cursor=state.cursor, max_pages=backfill_max_pages, **walk_args)
 
 
 def sync_github_metadata(
@@ -903,18 +1191,34 @@ def sync_github_metadata(
     repo: RepoConfig,
     force: bool = False,
     max_pages: int = 10,
+    backfill_max_pages: int = DEFAULT_BACKFILL_MAX_PAGES,
     runner: GhRunner = run_gh_command,
+    reporter: ProgressReporter = NULL_REPORTER,
 ) -> SyncStats:
-    """Polls /events with ETag and runs incremental GraphQL delta sync when needed."""
+    """Polls /events with ETag and syncs issues, PRs, and discussions via GraphQL.
+
+    Args:
+        max_pages: page budget per stream for incremental updates.
+        backfill_max_pages: safety cap on pages per stream while backfilling
+            history; an unfinished backfill resumes on the next sync.
+        force: refetch every stream's full history, ignoring ETags and watermarks.
+    """
     stats = SyncStats(repo_full_name=repo.full_name)
     now_iso = utc_now_iso()
     poll = poll_repo_events(repo, runner=runner)
     if poll.error:
         stats.skipped_reason = f"github_poll_error: {poll.error}"
+        msg = f"github events poll failed: {poll.error}"
+        stats.errors.append(msg)
+        reporter.error(repo.full_name, msg)
         return stats
 
+    if force:
+        store.reset_backfill_state(repo.repo_id)
+        repo = store.get_repo_by_id(repo.repo_id) or repo
     sweep_due = needs_safety_sweep(repo, now_iso=now_iso)
-    if poll.not_modified and not force and not sweep_due:
+    backfill_pending = not all(repo.backfill(s).complete for s in BACKFILL_STREAMS)
+    if poll.not_modified and not force and not sweep_due and not backfill_pending:
         stats.events_not_modified = True
         store.update_repo_sync_state(
             repo.repo_id,
@@ -925,31 +1229,26 @@ def sync_github_metadata(
         )
         return stats
 
-    stream_repo = (
-        RepoConfig(
-            **{
-                **repo.__dict__,
-                "issues_watermark": None,
-                "prs_watermark": None,
-                "discussions_watermark": None,
-            }
+    for spec in STREAM_SPECS:
+        _sync_stream(
+            store,
+            repo,
+            spec,
+            max_pages=max_pages,
+            backfill_max_pages=backfill_max_pages,
+            runner=runner,
+            stats=stats,
+            reporter=reporter,
         )
-        if force
-        else repo
-    )
-    new_issues_wm = _sync_issues_stream(store, stream_repo, max_pages, runner, stats)
-    new_prs_wm = _sync_prs_stream(store, stream_repo, max_pages, runner, stats)
-    new_disc_wm = _sync_discussions_stream(store, stream_repo, max_pages, runner, stats)
 
+    done_iso = utc_now_iso()
+    sweep_ts = repo.last_full_sweep_at if stats.errors else done_iso
     store.update_repo_sync_state(
         repo.repo_id,
         events_etag=poll.etag,
         events_last_modified=poll.last_modified,
         poll_interval_sec=poll.poll_interval_sec,
-        last_events_check_at=now_iso,
-        issues_watermark=new_issues_wm,
-        prs_watermark=new_prs_wm,
-        discussions_watermark=new_disc_wm,
-        last_full_sweep_at=now_iso,
+        last_events_check_at=done_iso,
+        last_full_sweep_at=sweep_ts,
     )
     return stats

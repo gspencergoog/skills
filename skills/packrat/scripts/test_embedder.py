@@ -151,6 +151,74 @@ class TestEmbedder(unittest.TestCase):
             self.assertEqual(len(q_vec), EMBEDDING_DIM)
             self.assertTrue(_ensure_onnx_deps())
 
+    def test_batch_progress_and_onnx_init_warning(self) -> None:
+        warns: list[tuple[str, str]] = []
+        advances: list[tuple[int, int | None]] = []
+
+        class SpyReporter:
+            def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+                pass
+
+            def advance(self, completed: int, total: int | None = None, *, detail: str = "") -> None:
+                advances.append((completed, total))
+
+            def finish_phase(self, summary: str = "") -> None:
+                pass
+
+            def warn(self, repo: str, message: str) -> None:
+                warns.append((repo, message))
+
+            def error(self, repo: str, message: str) -> None:
+                pass
+
+            def clear_active_line(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            # Create corrupt ONNX files to trigger fallback warning
+            (tmp_path / "tokenizer.json").write_text("not-json", encoding="utf-8")
+            (tmp_path / "model.onnx").write_bytes(b"corrupt")
+            spy = SpyReporter()
+            emb = get_default_embedder(model_dir=tmp_path, prefer_onnx=True, reporter=spy)
+            self.assertEqual(emb.model_id, DETERMINISTIC_MODEL_ID)
+            self.assertEqual(len(warns), 1)
+            self.assertIn("ONNX runtime init failed", warns[0][1])
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                now = utc_now_iso()
+                chunks = [
+                    TextChunk(
+                        chunk_id=f"octo-org/widgets:symbol:src/f{i}.ts:1",
+                        repo_id=repo.repo_id,
+                        source_kind="code_symbol",
+                        source_ref=f"src/f{i}.ts#L1",
+                        file_path=f"src/f{i}.ts",
+                        item_number=None,
+                        title=f"Sym{i}",
+                        text=f"Function body {i}",
+                        content_sha256=compute_content_sha256(f"Sym{i}", f"Function body {i}"),
+                        is_untrusted=False,
+                        updated_at=now,
+                    )
+                    for i in range(5)
+                ]
+                store.upsert_chunks(chunks)
+                count = sync_repo_embeddings(
+                    store,
+                    repo.repo_id,
+                    embedder=emb,
+                    batch_size=2,
+                    reporter=spy,
+                    repo_label="octo-org/widgets",
+                )
+                self.assertEqual(count, 5)
+                self.assertEqual(advances, [(2, 5), (4, 5), (5, 5)])
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

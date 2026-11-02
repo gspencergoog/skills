@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
@@ -30,8 +31,14 @@ from embedder import (
     sync_repo_embeddings,
 )
 from git_indexer import sync_git_codebase
-from github_sync import sync_github_metadata
-from models import RepoConfig, SearchFilters, SyncStats
+from github_sync import DEFAULT_BACKFILL_MAX_PAGES, sync_github_metadata
+from models import BACKFILL_STREAMS, RepoConfig, SearchFilters, SyncStats
+from progress import (
+    NULL_REPORTER,
+    ProgressReporter,
+    StderrProgressReporter,
+    format_duration,
+)
 from search_engine import hybrid_rrf_search
 
 
@@ -69,9 +76,10 @@ def _merge_sync_stats(
     git_stats: SyncStats | None,
     gh_stats: SyncStats | None,
     embedded_count: int,
+    duration_sec: float = 0.0,
 ) -> dict[str, Any]:
     """Combines git, GitHub, and embedding sync metrics into a single dictionary."""
-    combined = SyncStats(repo_full_name=repo_name)
+    combined = SyncStats(repo_full_name=repo_name, duration_sec=round(duration_sec, 2))
     if git_stats is not None:
         combined.indexed_ref = git_stats.indexed_ref
         combined.indexed_sha = git_stats.indexed_sha
@@ -79,6 +87,8 @@ def _merge_sync_stats(
         combined.symbols_upserted = git_stats.symbols_upserted
         combined.doc_sections_upserted = git_stats.doc_sections_upserted
         combined.chunks_upserted += git_stats.chunks_upserted
+        combined.warnings.extend(git_stats.warnings)
+        combined.errors.extend(git_stats.errors)
         if git_stats.skipped_reason:
             combined.skipped_reason = git_stats.skipped_reason
     if gh_stats is not None:
@@ -87,10 +97,40 @@ def _merge_sync_stats(
         combined.prs_upserted = gh_stats.prs_upserted
         combined.discussions_upserted = gh_stats.discussions_upserted
         combined.chunks_upserted += gh_stats.chunks_upserted
+        combined.backfill_incomplete = list(gh_stats.backfill_incomplete)
+        combined.warnings.extend(gh_stats.warnings)
+        combined.errors.extend(gh_stats.errors)
         if gh_stats.skipped_reason:
             combined.skipped_reason = gh_stats.skipped_reason
     combined.embeddings_updated = embedded_count
     return asdict(combined)
+
+
+def _backfill_summary(repo: RepoConfig) -> dict[str, dict[str, Any]]:
+    """Returns per-stream backfill progress for `packrat status --json`."""
+    summary: dict[str, dict[str, Any]] = {}
+    for stream in BACKFILL_STREAMS:
+        state = repo.backfill(stream)
+        summary[stream] = {
+            "complete": state.complete,
+            "done_at": state.done_at,
+            "resumable": state.cursor is not None,
+        }
+    return summary
+
+
+def _backfill_warnings(repo: RepoConfig) -> list[str]:
+    """Returns one warning per stream whose full history has not been fetched yet."""
+    warnings: list[str] = []
+    for stream in BACKFILL_STREAMS:
+        state = repo.backfill(stream)
+        if state.complete:
+            continue
+        if state.cursor is not None:
+            warnings.append(f"{stream} backfill incomplete; resumes on next packrat sync")
+        else:
+            warnings.append(f"{stream} backfill incomplete; history not fetched yet, run packrat sync")
+    return warnings
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -122,6 +162,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "discussions_watermark": r.discussions_watermark,
                     "last_full_sweep_at": r.last_full_sweep_at,
                     "counts": store.table_counts(r.repo_id),
+                    "backfill": _backfill_summary(r),
+                    "warnings": _backfill_warnings(r),
                 }
             )
         if args.json:
@@ -154,6 +196,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                 f"docs={c['doc_sections']} chunks={c['chunks']} "
                 f"embeddings={c['chunk_embeddings']}"
             )
+            for warning in item["warnings"]:
+                print(f"  Warning: {warning}")
         return 0
     finally:
         store.close()
@@ -164,8 +208,10 @@ def _sync_single_repo(
     repo: RepoConfig,
     args: argparse.Namespace,
     embedder: Any,
+    reporter: ProgressReporter = NULL_REPORTER,
 ) -> dict[str, Any]:
     """Executes git, GitHub, and embedding sync for a single repository."""
+    started = time.monotonic()
     git_stats: SyncStats | None = None
     gh_stats: SyncStats | None = None
 
@@ -176,6 +222,7 @@ def _sync_single_repo(
             force=args.force,
             fetch=args.fetch,
             max_commits=args.max_commits,
+            reporter=reporter,
         )
     if not args.git_only:
         fresh_repo = store.get_repo(repo.full_name) or repo
@@ -184,9 +231,18 @@ def _sync_single_repo(
             fresh_repo,
             force=args.force,
             max_pages=args.max_pages,
+            backfill_max_pages=args.backfill_max_pages,
+            reporter=reporter,
         )
-    embedded_count = sync_repo_embeddings(store, repo.repo_id, embedder=embedder)
-    return _merge_sync_stats(repo.full_name, git_stats, gh_stats, embedded_count)
+    embedded_count = sync_repo_embeddings(
+        store,
+        repo.repo_id,
+        embedder=embedder,
+        reporter=reporter,
+        repo_label=repo.full_name,
+    )
+    elapsed = max(0.0, time.monotonic() - started)
+    return _merge_sync_stats(repo.full_name, git_stats, gh_stats, embedded_count, duration_sec=elapsed)
 
 
 def _validate_git_sync_paths(
@@ -217,10 +273,36 @@ def _validate_git_sync_paths(
     return None
 
 
+def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) -> None:
+    """Prints a single repository's sync summary and notes immediately to stdout."""
+    reporter.clear_active_line()
+    sha_disp = (res.get("indexed_sha") or "unchanged")[:10]
+    ref_disp = res.get("indexed_ref") or "-"
+    etag_note = "304-not-modified" if res.get("events_not_modified") else "checked"
+    dur_sec = float(res.get("duration_sec") or 0.0)
+    dur_suffix = f" ({format_duration(dur_sec)})" if dur_sec >= 2.0 else ""
+    print(
+        f"[{res['repo_full_name']}] ref={ref_disp} ({sha_disp}) events={etag_note} "
+        f"commits=+{res['commits_upserted']} symbols=+{res['symbols_upserted']} "
+        f"docs=+{res['doc_sections_upserted']} issues=+{res['issues_upserted']} "
+        f"prs=+{res['prs_upserted']} discussions=+{res['discussions_upserted']} "
+        f"embeddings=+{res['embeddings_updated']}{dur_suffix}",
+        flush=True,
+    )
+    if res.get("skipped_reason"):
+        print(f"  note: {res['skipped_reason']}", flush=True)
+    for stream in res.get("backfill_incomplete") or []:
+        print(f"  note: {stream} backfill incomplete; run packrat sync again to continue", flush=True)
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """Handles `packrat sync`."""
+    reporter = StderrProgressReporter(
+        mode=getattr(args, "progress", "auto"),
+        quiet=bool(getattr(args, "quiet", False)),
+    )
     if args.download_model:
-        ensure_bge_model(allow_download=True)
+        ensure_bge_model(allow_download=True, reporter=reporter)
     store = _open_store(args.db)
     try:
         repos = _select_repos(store, args.repo)
@@ -231,27 +313,37 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if path_err is not None:
             sys.stderr.write(f"{path_err}\n")
             return 2
-        embedder = get_default_embedder()
-        results = [_sync_single_repo(store, r, args, embedder) for r in repos]
+        embedder = get_default_embedder(reporter=reporter)
+        results: list[dict[str, Any]] = []
+        for repo in repos:
+            res = _sync_single_repo(store, repo, args, embedder, reporter=reporter)
+            results.append(res)
+            if not args.json:
+                _print_repo_sync_summary(res, reporter)
+        reporter.clear_active_line()
         if args.json:
             print(json.dumps({"embedder": embedder.model_id, "results": results}, indent=2))
-            return 0
-        for res in results:
-            sha_disp = (res.get("indexed_sha") or "unchanged")[:10]
-            ref_disp = res.get("indexed_ref") or "-"
-            etag_note = "304-not-modified" if res.get("events_not_modified") else "checked"
-            print(
-                f"[{res['repo_full_name']}] ref={ref_disp} ({sha_disp}) events={etag_note} "
-                f"commits=+{res['commits_upserted']} symbols=+{res['symbols_upserted']} "
-                f"docs=+{res['doc_sections_upserted']} issues=+{res['issues_upserted']} "
-                f"prs=+{res['prs_upserted']} discussions=+{res['discussions_upserted']} "
-                f"embeddings=+{res['embeddings_updated']}"
-            )
-            if res.get("skipped_reason"):
-                print(f"  note: {res['skipped_reason']}")
-        return 0
+        return 1 if any(r.get("errors") for r in results) else 0
     finally:
         store.close()
+
+
+def _empty_search_hint(store: PackratStore, repo_arg: str | None) -> str | None:
+    """Returns a concise stderr diagnostic hint when a 0-hit search runs against an unsynced or incomplete DB."""
+    try:
+        repos = _select_repos(store, repo_arg)
+    except ValueError:
+        return None
+    if not repos:
+        return "Note: no repositories are registered in packrat; run `packrat repo add <owner>/<name>`."
+    total_chunks = sum(store.table_counts(r.repo_id).get("chunks", 0) for r in repos)
+    if total_chunks == 0:
+        return "Note: 0 indexed chunks in packrat; run `packrat sync` to populate the mirror."
+    incomplete = [r.full_name for r in repos if _backfill_warnings(r)]
+    if incomplete:
+        joined = ", ".join(incomplete)
+        return f"Note: history backfill is incomplete for {joined}; run `packrat status` or `packrat sync`."
+    return None
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -272,6 +364,10 @@ def cmd_search(args: argparse.Namespace) -> int:
             mode=args.mode,
             limit=args.limit,
         )
+        if not hits:
+            hint = _empty_search_hint(store, args.repo)
+            if hint:
+                sys.stderr.write(f"{hint}\n")
         if args.json:
             print(json.dumps([asdict(h) for h in hits], indent=2))
             return 0
@@ -474,9 +570,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--git-only", action="store_true", help="Sync local git commits/code only.")
     p_sync.add_argument("--github-only", action="store_true", help="Sync GitHub metadata only.")
     p_sync.add_argument("--fetch", action="store_true", help="Run git fetch on canonical remote first.")
-    p_sync.add_argument("--max-pages", type=int, default=10, help="Max GraphQL pages per stream.")
+    p_sync.add_argument(
+        "--max-pages", type=int, default=10, help="Max GraphQL pages per stream for incremental updates."
+    )
+    p_sync.add_argument(
+        "--backfill-max-pages",
+        type=int,
+        default=DEFAULT_BACKFILL_MAX_PAGES,
+        help="Safety cap on GraphQL pages per stream while backfilling history; "
+        "an unfinished backfill resumes on the next sync.",
+    )
     p_sync.add_argument("--max-commits", type=int, default=300, help="Max git commits to ingest.")
     p_sync.add_argument("--download-model", action="store_true", help="Download BGE ONNX model if missing.")
+    p_sync.add_argument(
+        "--progress",
+        choices=("auto", "plain", "off"),
+        default="auto",
+        help="Progress display mode on stderr (default: auto).",
+    )
+    p_sync.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress and warnings on stderr (errors are still printed).",
+    )
     p_sync.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_sync.set_defaults(func=cmd_sync)
 

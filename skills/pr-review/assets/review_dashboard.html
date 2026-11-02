@@ -1144,7 +1144,10 @@
       return;
     }
 
-    (reviewData.findings || []).forEach(f => { f._initial_comment = f.draft_comment || ''; });
+    (reviewData.findings || []).forEach(f => {
+      f._initial_comment = f.draft_comment || '';
+      if (f.approved === undefined) f.approved = true;
+    });
 
     renderPRMetadata();
     switchSummaryTab('write');

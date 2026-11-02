@@ -28,6 +28,7 @@ from models import (
     compute_content_sha256,
     utc_now_iso,
 )
+from progress import NULL_REPORTER, ProgressReporter
 
 CODE_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -162,18 +163,45 @@ def _candidate_canonical_refs(repo_dir: Path, repo: RepoConfig) -> list[str]:
     return candidates
 
 
+def _fetch_remote_ref(
+    repo_dir: Path,
+    repo_full_name: str,
+    remote_spec: str,
+    reporter: ProgressReporter,
+    stats: SyncStats | None,
+) -> None:
+    """Runs git fetch on the candidate remote branch and records a warning if it fails."""
+    rem_name, rem_branch = remote_spec.split("/", 1)
+    try:
+        res = run_git_command(repo_dir, ["fetch", "--quiet", rem_name, rem_branch], timeout=15)
+    except subprocess.TimeoutExpired:
+        msg = f"git fetch {rem_name}/{rem_branch} timed out; indexing local ref"
+        if stats is not None:
+            stats.warnings.append(msg)
+        reporter.warn(repo_full_name, msg)
+        return
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or f"exit {res.returncode}").strip().splitlines()[0]
+        msg = f"git fetch {rem_name}/{rem_branch} failed ({detail}); indexing local ref"
+        if stats is not None:
+            stats.warnings.append(msg)
+        reporter.warn(repo_full_name, msg)
+
+
 def resolve_canonical_ref(
     repo_dir: Path,
     repo: RepoConfig,
     fetch: bool = False,
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
+    stats: SyncStats | None = None,
 ) -> tuple[str, str] | None:
     """Resolves the canonical main-repository ref and its commit SHA."""
     if not repo_dir.exists() or not (repo_dir / ".git").exists():
         return None
     candidates = _candidate_canonical_refs(repo_dir, repo)
     if fetch and candidates and "/" in candidates[0]:
-        rem_name, rem_branch = candidates[0].split("/", 1)
-        run_git_command(repo_dir, ["fetch", "--quiet", rem_name, rem_branch], timeout=15)
+        _fetch_remote_ref(repo_dir, repo.full_name, candidates[0], reporter, stats)
 
     for ref in candidates:
         res = run_git_command(repo_dir, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
@@ -541,15 +569,20 @@ def index_files_at_sha(
     repo: RepoConfig,
     target_sha: str,
     modified_files: Sequence[str],
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
 ) -> tuple[list[CodeSymbolRecord], list[DocSectionRecord], list[TextChunk]]:
     """Extracts symbols, Markdown sections, and chunks for modified_files at target_sha."""
     all_symbols: list[CodeSymbolRecord] = []
     all_sections: list[DocSectionRecord] = []
     all_chunks: list[TextChunk] = []
+    total_files = len(modified_files)
+    reporter.start_phase(repo.full_name, "git files", total=total_files)
 
-    for file_path in modified_files:
+    for idx, file_path in enumerate(modified_files, start=1):
         blob = _read_blob_at_sha(repo_dir, target_sha, file_path)
         if not blob:
+            reporter.advance(idx, total_files, detail=file_path)
             continue
         ext = Path(file_path).suffix.lower()
         if ext in MARKDOWN_EXTENSIONS:
@@ -560,6 +593,8 @@ def index_files_at_sha(
             syms, chs = _extract_code_symbols_from_blob(repo, target_sha, file_path, blob)
             all_symbols.extend(syms)
             all_chunks.extend(chs)
+        reporter.advance(idx, total_files, detail=file_path)
+    reporter.finish_phase()
     return all_symbols, all_sections, all_chunks
 
 
@@ -569,6 +604,7 @@ def sync_git_codebase(
     force: bool = False,
     fetch: bool = False,
     max_commits: int = 300,
+    reporter: ProgressReporter = NULL_REPORTER,
 ) -> SyncStats:
     """Incrementally indexes canonical git commits, AST symbols, and Markdown sections."""
     stats = SyncStats(repo_full_name=repo.full_name)
@@ -577,7 +613,7 @@ def sync_git_codebase(
         return stats
 
     repo_dir = Path(repo.local_path).expanduser()
-    resolved = resolve_canonical_ref(repo_dir, repo, fetch=fetch)
+    resolved = resolve_canonical_ref(repo_dir, repo, fetch=fetch, reporter=reporter, stats=stats)
     if resolved is None:
         stats.skipped_reason = f"missing_git_repo:{repo_dir}"
         return stats
@@ -612,7 +648,9 @@ def sync_git_codebase(
         deleted_files = tuple(
             sorted(str(r["file_path"]) for r in indexed_rows if str(r["file_path"]) not in live_set)
         )
-    symbols, sections, file_chunks = index_files_at_sha(repo_dir, repo, target_sha, modified_files)
+    symbols, sections, file_chunks = index_files_at_sha(
+        repo_dir, repo, target_sha, modified_files, reporter=reporter
+    )
     if modified_files or deleted_files:
         store.replace_code_index_for_files(
             repo_id=repo.repo_id,
