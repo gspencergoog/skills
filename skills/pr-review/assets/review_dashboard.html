@@ -198,7 +198,9 @@
     .markdown-rendered h1,
     .markdown-rendered h2,
     .markdown-rendered h3,
-    .markdown-rendered h4 {
+    .markdown-rendered h4,
+    .markdown-rendered h5,
+    .markdown-rendered h6 {
       color: var(--text-bright);
       margin-top: 16px;
       margin-bottom: 8px;
@@ -207,7 +209,10 @@
 
     .markdown-rendered h1:first-child,
     .markdown-rendered h2:first-child,
-    .markdown-rendered h3:first-child {
+    .markdown-rendered h3:first-child,
+    .markdown-rendered h4:first-child,
+    .markdown-rendered h5:first-child,
+    .markdown-rendered h6:first-child {
       margin-top: 0;
     }
 
@@ -320,6 +325,60 @@
 
     .callout-caution .md-callout-title {
       color: #ff7b72;
+    }
+
+    .markdown-rendered .md-table-wrap {
+      margin: 10px 0;
+      overflow-x: auto;
+    }
+
+    .markdown-rendered table.md-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+      border: 1px solid var(--border);
+    }
+
+    .markdown-rendered .md-table th,
+    .markdown-rendered .md-table td {
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+    }
+
+    .markdown-rendered .md-table th {
+      background-color: var(--bg-panel-hover);
+      color: var(--text-bright);
+      font-weight: 600;
+    }
+
+    .markdown-rendered .md-table tbody tr:nth-child(even) {
+      background-color: rgba(110, 118, 129, 0.05);
+    }
+
+    .markdown-rendered .md-math-block {
+      margin: 12px 0;
+      padding: 8px 12px;
+      overflow-x: auto;
+      text-align: center;
+      background: rgba(110, 118, 129, 0.06);
+      border-radius: 6px;
+    }
+
+    .markdown-rendered .md-mermaid {
+      margin: 12px 0;
+      padding: 12px;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow-x: auto;
+      text-align: center;
+    }
+
+    .markdown-rendered .md-mermaid-svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
     }
 
     .markdown-raw {
@@ -1100,17 +1159,1103 @@
     return reviewData.pr_metadata || reviewData.pr_meta || {};
   }
 
-  // Safely formats inline Markdown after extracting inline code spans first.
+  const GREEK_AND_SYMBOLS = {
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ϵ', varepsilon: 'ε',
+    zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ',
+    lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ',
+    varsigma: 'ς', tau: 'τ', upsilon: 'υ', phi: 'ϕ', varphi: 'φ', chi: 'χ',
+    psi: 'ψ', omega: 'ω', ell: 'ℓ', hbar: 'ℏ',
+    Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π',
+    Sigma: 'Σ', Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+    infty: '∞', pm: '±', mp: '∓', times: '×', div: '÷', cdot: '⋅', ast: '∗',
+    star: '⋆', circ: '∘', bullet: '∙', oplus: '⊕', otimes: '⊗',
+    le: '≤', leq: '≤', ge: '≥', geq: '≥', ne: '≠', neq: '≠', approx: '≈',
+    equiv: '≡', sim: '∼', simeq: '≃', cong: '≅', propto: '∝', ll: '≪', gg: '≫',
+    to: '→', rightarrow: '→', leftarrow: '←', leftrightarrow: '↔',
+    Rightarrow: '⇒', Leftarrow: '⇐', Leftrightarrow: '⇔',
+    implies: '⇒', iff: '⇔', mapsto: '↦',
+    in: '∈', notin: '∉', ni: '∋', subset: '⊂', subseteq: '⊆', supset: '⊃',
+    supseteq: '⊇', cup: '∪', cap: '∩', setminus: '∖', emptyset: '∅', nothing: '∅',
+    forall: '∀', exists: '∃', nexists: '∄', neg: '¬', lnot: '¬',
+    land: '∧', wedge: '∧', lor: '∨', vee: '∨', top: '⊤', bot: '⊥', perp: '⊥',
+    parallel: '∥', mid: '∣', langle: '⟨', rangle: '⟩',
+    lfloor: '⌊', rfloor: '⌋', lceil: '⌈', rceil: '⌉',
+    nabla: '∇', partial: '∂', sum: '∑', prod: '∏', coprod: '∐',
+    int: '∫', iint: '∬', iiint: '∭', oint: '∮',
+    dots: '…', ldots: '…', cdots: '⋯', vdots: '⋮', ddots: '⋱'
+  };
+
+  const MATHCAL_MAP = {
+    A: '𝒜', B: 'ℬ', C: '𝒞', D: '𝒟', E: 'ℰ', F: 'ℱ', G: '𝒢', H: 'ℋ', I: 'ℐ',
+    J: '𝒥', K: '𝒦', L: 'ℒ', M: 'ℳ', N: '𝒩', O: '𝒪', P: '𝒫', Q: '𝒬', R: 'ℛ',
+    S: '𝒮', T: '𝒯', U: '𝒰', V: '𝒱', W: '𝒲', X: '𝒳', Y: '𝒴', Z: '𝒵'
+  };
+
+  const MATHBB_MAP = {
+    A: '𝔸', B: '𝔹', C: 'ℂ', D: '𝔻', E: '𝔼', F: '𝔽', G: '𝔾', H: 'ℍ', I: '𝕀',
+    J: '𝕁', K: '𝕂', L: '𝕃', M: '𝕄', N: 'ℕ', O: '𝕆', P: 'ℙ', Q: 'ℚ', R: 'ℝ',
+    S: '𝕊', T: '𝕋', U: '𝕌', V: '𝕍', W: '𝕎', X: '𝕏', Y: '𝕐', Z: 'ℤ'
+  };
+
+  const UPRIGHT_FUNCTIONS = new Set([
+    'min', 'max', 'sup', 'inf', 'lim', 'limsup', 'liminf', 'log', 'ln', 'lg',
+    'exp', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos',
+    'arctan', 'sinh', 'cosh', 'tanh', 'det', 'dim', 'ker', 'deg', 'gcd',
+    'Pr', 'arg', 'mod', 'argmin', 'argmax', 'tr', 'rank', 'diag'
+  ]);
+
+  const LATEX_OPERATORS = new Set([
+    '+', '-', '=', '<', '>', '/', '*', ',', ';', ':', '!', '?', '|', '(', ')', '[', ']'
+  ]);
+
+  const LATEX_ACCENTS = {
+    hat: 'ˆ', widehat: 'ˆ', bar: '¯', overline: '¯', vec: '→',
+    tilde: '˜', widetilde: '˜', dot: '˙', ddot: '¨'
+  };
+
+  const LATEX_STYLE_VARIANTS = {
+    mathbf: 'bold', boldsymbol: 'bold', bf: 'bold',
+    mathtt: 'monospace', mathsf: 'sans-serif', mathit: 'italic'
+  };
+
+  const LATEX_TEXT_COMMANDS = new Set(['text', 'textrm', 'textbf', 'textit', 'texttt', 'mathrm', 'operatorname']);
+
+  const MERMAID_CHART_COLORS = [
+    '#58a6ff', '#3fb950', '#d29922', '#a371f7',
+    '#f85149', '#39d353', '#db61a2', '#79c0ff'
+  ];
+
+  function readBracedGroup(src, startIndex) {
+    let i = startIndex;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] !== '{') {
+      const ch = src[i] || '';
+      return { content: ch, nextIndex: ch ? i + 1 : i };
+    }
+    let depth = 0;
+    const contentStart = i + 1;
+    while (i < src.length) {
+      if (src[i] === '{' && src[i - 1] !== '\\') {
+        depth++;
+      } else if (src[i] === '}' && src[i - 1] !== '\\') {
+        depth--;
+        if (depth === 0) return { content: src.slice(contentStart, i), nextIndex: i + 1 };
+      }
+      i++;
+    }
+    return { content: src.slice(contentStart), nextIndex: src.length };
+  }
+
+  function renderMatrixEnvironment(envName, body) {
+    const rows = body.trim().split(/\\\\/).map(r => r.trim()).filter(r => r.length > 0);
+    const rowsHtml = rows.map(row => {
+      const cells = row.split('&').map(c => `<mtd>${parseLatexTokens(c.trim())}</mtd>`);
+      return `<mtr>${cells.join('')}</mtr>`;
+    }).join('');
+    const table = `<mtable>${rowsHtml}</mtable>`;
+    const fences = {
+      pmatrix: ['(', ')'],
+      bmatrix: ['[', ']'],
+      Bmatrix: ['{', '}'],
+      vmatrix: ['|', '|'],
+      Vmatrix: ['‖', '‖']
+    };
+    if (fences[envName]) {
+      return `<mrow><mo>${fences[envName][0]}</mo>${table}<mo>${fences[envName][1]}</mo></mrow>`;
+    }
+    if (envName === 'cases') {
+      return `<mrow><mo>{</mo>${table}</mrow>`;
+    }
+    return table;
+  }
+
+  function renderLatexSqrt(src, end) {
+    let i = end;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] === '[') {
+      const closeBracket = src.indexOf(']', i + 1);
+      if (closeBracket !== -1) {
+        const rootContent = src.slice(i + 1, closeBracket);
+        const arg = readBracedGroup(src, closeBracket + 1);
+        return {
+          html: `<mroot><mrow>${parseLatexTokens(arg.content)}</mrow><mrow>${parseLatexTokens(rootContent)}</mrow></mroot>`,
+          nextIndex: arg.nextIndex
+        };
+      }
+    }
+    const arg = readBracedGroup(src, end);
+    return {
+      html: `<msqrt><mrow>${parseLatexTokens(arg.content)}</mrow></msqrt>`,
+      nextIndex: arg.nextIndex
+    };
+  }
+
+  function renderMappedAlphabet(src, end, charMap) {
+    const arg = readBracedGroup(src, end);
+    const converted = Array.from(arg.content.trim()).map(ch => charMap[ch] || ch).join('');
+    return { html: `<mi>${escapeHtml(converted)}</mi>`, nextIndex: arg.nextIndex };
+  }
+
+  function renderBeginEnvironment(src, end) {
+    const env = readBracedGroup(src, end);
+    const endMarker = `\\end{${env.content}}`;
+    const closeIdx = src.indexOf(endMarker, env.nextIndex);
+    if (closeIdx === -1) {
+      return { html: `<mi>${escapeHtml(env.content)}</mi>`, nextIndex: env.nextIndex };
+    }
+    const body = src.slice(env.nextIndex, closeIdx);
+    return {
+      html: renderMatrixEnvironment(env.content, body),
+      nextIndex: closeIdx + endMarker.length
+    };
+  }
+
+  const LATEX_NOOP_COMMANDS = new Set(['left', 'right', 'displaystyle', 'textstyle']);
+  const LATEX_FRAC_COMMANDS = new Set(['frac', 'dfrac', 'tfrac']);
+
+  function dispatchBracedLatexCommand(cmd, src, end) {
+    if (LATEX_FRAC_COMMANDS.has(cmd)) {
+      const num = readBracedGroup(src, end);
+      const den = readBracedGroup(src, num.nextIndex);
+      return {
+        html: `<mfrac><mrow>${parseLatexTokens(num.content)}</mrow><mrow>${parseLatexTokens(den.content)}</mrow></mfrac>`,
+        nextIndex: den.nextIndex
+      };
+    }
+    if (cmd === 'sqrt') return renderLatexSqrt(src, end);
+    if (LATEX_TEXT_COMMANDS.has(cmd)) {
+      const arg = readBracedGroup(src, end);
+      return { html: `<mtext>${escapeHtml(arg.content)}</mtext>`, nextIndex: arg.nextIndex };
+    }
+    if (LATEX_STYLE_VARIANTS[cmd]) {
+      const arg = readBracedGroup(src, end);
+      return {
+        html: `<mstyle mathvariant="${LATEX_STYLE_VARIANTS[cmd]}"><mrow>${parseLatexTokens(arg.content)}</mrow></mstyle>`,
+        nextIndex: arg.nextIndex
+      };
+    }
+    if (LATEX_ACCENTS[cmd]) {
+      const arg = readBracedGroup(src, end);
+      return {
+        html: `<mover><mrow>${parseLatexTokens(arg.content)}</mrow><mo>${LATEX_ACCENTS[cmd]}</mo></mover>`,
+        nextIndex: arg.nextIndex
+      };
+    }
+    if (cmd === 'mathcal') return renderMappedAlphabet(src, end, MATHCAL_MAP);
+    if (cmd === 'mathbb') return renderMappedAlphabet(src, end, MATHBB_MAP);
+    if (cmd === 'begin') return renderBeginEnvironment(src, end);
+    return null;
+  }
+
+  function dispatchNamedLatexCommand(cmd, src, end) {
+    if (LATEX_NOOP_COMMANDS.has(cmd)) return { html: '', nextIndex: end };
+    const braced = dispatchBracedLatexCommand(cmd, src, end);
+    if (braced) return braced;
+    if (UPRIGHT_FUNCTIONS.has(cmd)) {
+      return { html: `<mi mathvariant="normal">${escapeHtml(cmd)}</mi>`, nextIndex: end };
+    }
+    const mapped = GREEK_AND_SYMBOLS[cmd];
+    if (mapped) {
+      const tag = /^[α-ωϑςϕφΑ-Ωℓℏ∂∇∞∅]$/.test(mapped) ? 'mi' : 'mo';
+      return { html: `<${tag}>${escapeHtml(mapped)}</${tag}>`, nextIndex: end };
+    }
+    return { html: `<mi>${escapeHtml(cmd)}</mi>`, nextIndex: end };
+  }
+
+  function parseLatexCommand(src, cmdStart) {
+    const afterSlash = cmdStart + 1;
+    if (afterSlash >= src.length) return { html: '', nextIndex: afterSlash };
+    const firstChar = src[afterSlash];
+    if (!/[a-zA-Z]/.test(firstChar)) {
+      if (firstChar === '|') return { html: '<mo>‖</mo>', nextIndex: afterSlash + 1 };
+      if ('{}%$&#_'.includes(firstChar)) {
+        return { html: `<mo>${escapeHtml(firstChar)}</mo>`, nextIndex: afterSlash + 1 };
+      }
+      return { html: '<mspace width="0.2em"></mspace>', nextIndex: afterSlash + 1 };
+    }
+    let end = afterSlash;
+    while (end < src.length && /[a-zA-Z]/.test(src[end])) end++;
+    return dispatchNamedLatexCommand(src.slice(afterSlash, end), src, end);
+  }
+
+  function parseLatexAtom(src, index) {
+    let i = index;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (i >= src.length) return { html: '', nextIndex: i };
+    const ch = src[i];
+    if (ch === '{') {
+      const group = readBracedGroup(src, i);
+      return { html: `<mrow>${parseLatexTokens(group.content)}</mrow>`, nextIndex: group.nextIndex };
+    }
+    if (ch === '\\') return parseLatexCommand(src, i);
+    if (/[0-9]/.test(ch)) {
+      let end = i;
+      while (end < src.length && /[0-9.]/.test(src[end])) end++;
+      return { html: `<mn>${escapeHtml(src.slice(i, end))}</mn>`, nextIndex: end };
+    }
+    if (/[a-zA-Z]/.test(ch)) return { html: `<mi>${escapeHtml(ch)}</mi>`, nextIndex: i + 1 };
+    if (LATEX_OPERATORS.has(ch)) return { html: `<mo>${escapeHtml(ch)}</mo>`, nextIndex: i + 1 };
+    return { html: `<mtext>${escapeHtml(ch)}</mtext>`, nextIndex: i + 1 };
+  }
+
+  function consumeLatexSubSup(src, startIndex) {
+    let i = startIndex;
+    let subHtml;
+    let supHtml;
+    for (let pass = 0; pass < 2; pass++) {
+      while (i < src.length && /\s/.test(src[i])) i++;
+      if (src[i] === '_' && subHtml === undefined) {
+        const subAtom = parseLatexAtom(src, i + 1);
+        subHtml = subAtom.html || '<mrow></mrow>';
+        i = subAtom.nextIndex;
+      } else if (src[i] === '^' && supHtml === undefined) {
+        const supAtom = parseLatexAtom(src, i + 1);
+        supHtml = supAtom.html || '<mrow></mrow>';
+        i = supAtom.nextIndex;
+      }
+    }
+    return { subHtml, supHtml, nextIndex: i };
+  }
+
+  function wrapWithSubSup(baseHtml, subHtml, supHtml) {
+    if (subHtml !== undefined && supHtml !== undefined) {
+      return `<msubsup>${baseHtml}${subHtml}${supHtml}</msubsup>`;
+    }
+    if (subHtml !== undefined) return `<msub>${baseHtml}${subHtml}</msub>`;
+    if (supHtml !== undefined) return `<msup>${baseHtml}${supHtml}</msup>`;
+    return baseHtml;
+  }
+
+  function parseLatexTokens(src) {
+    const parts = [];
+    let i = 0;
+    while (i < src.length) {
+      const atom = parseLatexAtom(src, i);
+      if (!atom.html && atom.nextIndex >= src.length) break;
+      const scripts = consumeLatexSubSup(src, atom.nextIndex);
+      i = scripts.nextIndex;
+      const wrapped = wrapWithSubSup(atom.html, scripts.subHtml, scripts.supHtml);
+      if (wrapped) parts.push(wrapped);
+    }
+    return parts.join('');
+  }
+
+  function renderLatexToMathMl(tex, displayMode = false) {
+    const displayAttr = displayMode ? ' display="block"' : ' display="inline"';
+    const inner = parseLatexTokens(String(tex || '').trim());
+    const mathEl = `<math xmlns="http://www.w3.org/1998/Math/MathML"${displayAttr}><mrow>${inner}</mrow></math>`;
+    return displayMode ? `<div class="md-math-block">${mathEl}</div>` : mathEl;
+  }
+
+  function resolveSeriesColor(index) {
+    return MERMAID_CHART_COLORS[Math.abs(index) % MERMAID_CHART_COLORS.length];
+  }
+
+  function formatTickNumber(value) {
+    if (!Number.isFinite(value) || Math.abs(value) === 0) return '0';
+    const abs = Math.abs(value);
+    if (abs >= 1000000) return `${Number((value / 1000000).toFixed(1))}M`;
+    if (abs >= 10000) return `${Number((value / 1000).toFixed(1))}k`;
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+  }
+
+  function niceFractionFor(fraction, round) {
+    const thresholds = round ? [1.5, 3, 7] : [1, 2, 5];
+    const values = [1, 2, 5, 10];
+    for (let i = 0; i < thresholds.length; i++) {
+      if (round ? fraction < thresholds[i] : fraction <= thresholds[i]) return values[i];
+    }
+    return 10;
+  }
+
+  function niceNum(range, round) {
+    if (range <= 0 || !Number.isFinite(range)) return 1;
+    const exponent = Math.floor(Math.log10(range));
+    const fraction = range / Math.pow(10, exponent);
+    return niceFractionFor(fraction, round) * Math.pow(10, exponent);
+  }
+
+  function computeNiceTicks(minVal, maxVal, maxTicks = 5, includeZero = true) {
+    let lo = Number.isFinite(minVal) ? minVal : 0;
+    let hi = Number.isFinite(maxVal) ? maxVal : 0;
+    if (includeZero) {
+      lo = Math.min(0, lo);
+      hi = Math.max(0, hi);
+    }
+    if (lo === hi) {
+      if (lo === 0) return { min: 0, max: 10, step: 2, ticks: [0, 2, 4, 6, 8, 10] };
+      const pad = Math.abs(lo) * 0.2 || 1;
+      lo -= pad;
+      hi += pad;
+    }
+    const tickCount = Math.max(2, maxTicks);
+    const range = niceNum(hi - lo, false);
+    const step = niceNum(range / (tickCount - 1), true);
+    const niceMin = Math.floor(lo / step) * step;
+    const niceMax = Math.ceil(hi / step) * step;
+    const ticks = [];
+    const count = Math.round((niceMax - niceMin) / step);
+    for (let i = 0; i <= count && i <= 20; i++) {
+      ticks.push(Number((niceMin + i * step).toFixed(10)));
+    }
+    return { min: niceMin, max: niceMax, step, ticks };
+  }
+
+  function polarToCartesian(cx, cy, radius, angleInDegrees) {
+    const rad = ((angleInDegrees - 90) * Math.PI) / 180.0;
+    return {
+      x: Number((cx + radius * Math.cos(rad)).toFixed(3)),
+      y: Number((cy + radius * Math.sin(rad)).toFixed(3))
+    };
+  }
+
+  function describeSectorPath(cx, cy, outerRadius, innerRadius, startAngle, endAngle) {
+    const clampedSpan = Math.min(359.999, Math.max(0, endAngle - startAngle));
+    const actualEnd = startAngle + clampedSpan;
+    const largeArcFlag = clampedSpan > 180 ? 1 : 0;
+    const outerStart = polarToCartesian(cx, cy, outerRadius, startAngle);
+    const outerEnd = polarToCartesian(cx, cy, outerRadius, actualEnd);
+    if (innerRadius <= 0) {
+      return `M ${cx} ${cy} L ${outerStart.x} ${outerStart.y} A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x} ${outerEnd.y} Z`;
+    }
+    const innerEnd = polarToCartesian(cx, cy, innerRadius, actualEnd);
+    const innerStart = polarToCartesian(cx, cy, innerRadius, startAngle);
+    return `M ${outerStart.x} ${outerStart.y} A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x} ${outerEnd.y} L ${innerEnd.x} ${innerEnd.y} A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x} ${innerStart.y} Z`;
+  }
+
+  function renderMermaidFallback(rawText) {
+    return `<pre class="code-box md-mermaid-fallback" data-lang="mermaid"><code>${escapeHtml(String(rawText || '').trim())}</code></pre>`;
+  }
+
+  function parseNodeToken(raw, nodes, defaultShape = 'rect') {
+    const trimmed = raw.trim();
+    const match = /^([A-Za-z0-9_.-]+)\s*(?:\[\s*"?([^"\]]*)"?\s*\]|\(\s*"?([^")]*)"?\s*\)|\{\s*"?([^"}]*)?"?\s*\})?$/.exec(trimmed);
+    if (!match) {
+      const fallbackId = trimmed.replace(/\s+/g, '_') || 'node';
+      if (!nodes.has(fallbackId)) {
+        nodes.set(fallbackId, { id: fallbackId, label: trimmed, shape: defaultShape, order: nodes.size });
+      }
+      return fallbackId;
+    }
+    const id = match[1];
+    const existingOrder = nodes.has(id) ? nodes.get(id).order : nodes.size;
+    if (match[2] !== undefined) {
+      nodes.set(id, { id, label: match[2].trim(), shape: 'rect', order: existingOrder });
+    } else if (match[3] !== undefined) {
+      nodes.set(id, { id, label: match[3].trim(), shape: 'round', order: existingOrder });
+    } else if (match[4] !== undefined) {
+      nodes.set(id, { id, label: match[4].trim(), shape: 'diamond', order: existingOrder });
+    } else if (!nodes.has(id)) {
+      nodes.set(id, { id, label: id, shape: defaultShape, order: existingOrder });
+    }
+    return id;
+  }
+
+  function parseFlowchartLines(lines) {
+    const nodes = new Map();
+    const edges = [];
+    const edgePattern = /^(.+?)\s*(?:--\s*([^>-][^>]*?)\s*-->|(-\.->|==>|--+>\s*))(?:\|([^|]*)\|\s*)?(.+)$/;
+    for (const rawLine of lines) {
+      const line = rawLine.trim().replace(/;$/, '');
+      if (!line || line.startsWith('%%') || /^(?:subgraph|end|style|classDef|class)\b/i.test(line)) continue;
+      const edgeMatch = edgePattern.exec(line);
+      if (edgeMatch) {
+        const fromId = parseNodeToken(edgeMatch[1], nodes);
+        const inlineLabel = edgeMatch[2] ? edgeMatch[2].trim() : undefined;
+        const arrowToken = edgeMatch[3] || '-->';
+        const pipeLabel = edgeMatch[4] ? edgeMatch[4].trim() : undefined;
+        const toId = parseNodeToken(edgeMatch[5], nodes);
+        edges.push({ from: fromId, to: toId, label: pipeLabel || inlineLabel, dashed: arrowToken.includes('.') });
+      } else {
+        parseNodeToken(line, nodes);
+      }
+    }
+    return { nodes, edges };
+  }
+
+  function ensureStateNode(nodes, token, isSource) {
+    if (token === '[*]') {
+      const id = isSource ? '__start__' : '__end__';
+      const shape = isSource ? 'start' : 'end';
+      if (!nodes.has(id)) nodes.set(id, { id, label: '', shape, order: nodes.size });
+      return id;
+    }
+    if (!nodes.has(token)) {
+      nodes.set(token, { id: token, label: token, shape: 'round', order: nodes.size });
+    }
+    return token;
+  }
+
+  function applyStateDiagramLine(line, nodes, edges) {
+    const stateAliasPattern = /^state\s+"([^"]+)"\s+as\s+([A-Za-z0-9_.-]+)$/i;
+    const transitionPattern = /^(\[\*\]|[A-Za-z0-9_.-]+)\s*(-->|--\.->)\s*(\[\*\]|[A-Za-z0-9_.-]+)(?:\s*:\s*(.+))?$/;
+    const stateDescPattern = /^([A-Za-z0-9_.-]+)\s*:\s*(.+)$/;
+    const aliasMatch = stateAliasPattern.exec(line);
+    if (aliasMatch) {
+      const id = aliasMatch[2].trim();
+      const existingOrder = nodes.has(id) ? nodes.get(id).order : nodes.size;
+      nodes.set(id, { id, label: aliasMatch[1].trim(), shape: 'round', order: existingOrder });
+      return;
+    }
+    const transMatch = transitionPattern.exec(line);
+    if (transMatch) {
+      const fromId = ensureStateNode(nodes, transMatch[1].trim(), true);
+      const toId = ensureStateNode(nodes, transMatch[3].trim(), false);
+      edges.push({
+        from: fromId,
+        to: toId,
+        label: transMatch[4] ? transMatch[4].trim() : undefined,
+        dashed: transMatch[2].includes('.')
+      });
+      return;
+    }
+    const descMatch = stateDescPattern.exec(line);
+    if (descMatch) {
+      const id = descMatch[1].trim();
+      const desc = descMatch[2].trim();
+      const existing = nodes.get(id);
+      const label = existing && existing.label !== id ? existing.label : `${id}: ${desc}`;
+      nodes.set(id, { id, label, shape: 'round', order: existing ? existing.order : nodes.size });
+    }
+  }
+
+  function parseStateDiagramLines(lines) {
+    const nodes = new Map();
+    const edges = [];
+    let direction = 'TD';
+    for (const rawLine of lines) {
+      const line = rawLine.trim().replace(/;$/, '');
+      if (!line || line.startsWith('%%') || /^(?:note\b|end\s+note\b|\}|\{)/i.test(line)) continue;
+      const dirMatch = /^direction\s+(TD|TB|LR|RL|BT)\b/i.exec(line);
+      if (dirMatch) {
+        direction = dirMatch[1].toUpperCase();
+      } else {
+        applyStateDiagramLine(line, nodes, edges);
+      }
+    }
+    return { nodes, edges, direction };
+  }
+
+  function relaxForwardEdgeRank(ranks, nodes, edge) {
+    const fromNode = nodes.get(edge.from);
+    const toNode = nodes.get(edge.to);
+    if (!fromNode || !toNode || fromNode.order >= toNode.order || edge.from === edge.to) return;
+    const fromRank = ranks.get(edge.from) || 0;
+    const toRank = ranks.get(edge.to) || 0;
+    if (toRank <= fromRank) ranks.set(edge.to, fromRank + 1);
+  }
+
+  function computeNodeRanks(nodes, edges) {
+    const ranks = new Map();
+    for (const id of nodes.keys()) ranks.set(id, 0);
+    for (let iter = 0; iter < nodes.size; iter++) {
+      for (const edge of edges) relaxForwardEdgeRank(ranks, nodes, edge);
+    }
+    const byRank = new Map();
+    for (const [id, rank] of ranks.entries()) {
+      const group = byRank.get(rank) || [];
+      group.push(id);
+      byRank.set(rank, group);
+    }
+    const positions = new Map();
+    for (const [rank, group] of byRank.entries()) {
+      group.forEach((id, idx) => positions.set(id, { rank, row: idx, groupSize: group.length }));
+    }
+    return positions;
+  }
+
+  function computeNodeDimensions(n) {
+    if (n.shape === 'start' || n.shape === 'end') return { w: 22, h: 22 };
+    const textWidth = Math.ceil(n.label.length * 7.4) + 28;
+    return { w: Math.max(116, textWidth), h: 34 };
+  }
+
+  function layoutHorizontalGraph(positions, dims, edges, maxRank, maxGroupSize, hasBackEdge) {
+    const padX = 16;
+    const padY = 16;
+    const gapY = 54;
+    const colWidths = new Array(maxRank + 1).fill(116);
+    for (const [id, pos] of positions.entries()) {
+      colWidths[pos.rank] = Math.max(colWidths[pos.rank], dims.get(id).w);
+    }
+    const colGap = new Array(maxRank + 1).fill(46);
+    for (const e of edges) {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      if (f && t && t.rank > f.rank && e.label) {
+        colGap[f.rank] = Math.max(colGap[f.rank], Math.ceil(e.label.length * 6.4) + 28);
+      }
+    }
+    const colCenterX = [];
+    let cursorX = padX;
+    for (let r = 0; r <= maxRank; r++) {
+      colCenterX[r] = cursorX + colWidths[r] / 2;
+      cursorX += colWidths[r] + colGap[r];
+    }
+    const maxX = cursorX - (colGap[maxRank] || 46) + padX;
+    const maxY = padY * 2 + (maxGroupSize - 1) * gapY + 34 + (hasBackEdge ? 28 : 0);
+    const coords = new Map();
+    for (const [id, pos] of positions.entries()) {
+      const d = dims.get(id);
+      const rowOffset = (maxGroupSize - pos.groupSize) / 2;
+      const cy = padY + (hasBackEdge ? 20 : 0) + (pos.row + rowOffset) * gapY + 17;
+      coords.set(id, { cx: colCenterX[pos.rank], cy, w: d.w, h: d.h, rank: pos.rank, row: pos.row });
+    }
+    return { coords, maxX, maxY };
+  }
+
+  function computeVerticalLabelMetrics(edges, positions) {
+    const incomingLabelWidth = new Map();
+    const labeledEdgesByRank = new Map();
+    for (const e of edges) {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      if (f && t && f.rank < t.rank && e.label) {
+        const labelW = Math.ceil(e.label.length * 6.2) + 22;
+        incomingLabelWidth.set(e.to, Math.max(incomingLabelWidth.get(e.to) || 0, labelW));
+        labeledEdgesByRank.set(f.rank, (labeledEdgesByRank.get(f.rank) || 0) + 1);
+      }
+    }
+    return { incomingLabelWidth, labeledEdgesByRank };
+  }
+
+  function layoutVerticalGraph(positions, dims, edges, maxRank, hasBackEdge) {
+    const leftMargin = hasBackEdge ? 96 : 16;
+    const rightMargin = 24;
+    const padY = 16;
+    const colGapX = 28;
+    const byRank = new Map();
+    for (const [id, pos] of positions.entries()) {
+      const list = byRank.get(pos.rank) || [];
+      list.push(id);
+      byRank.set(pos.rank, list);
+    }
+    const { incomingLabelWidth, labeledEdgesByRank } = computeVerticalLabelMetrics(edges, positions);
+    const getSlotWidth = (id, rankSize) => {
+      const baseW = dims.get(id).w;
+      return rankSize <= 1 ? baseW : Math.max(baseW, incomingLabelWidth.get(id) || 0);
+    };
+    let maxRowWidth = 220;
+    for (const list of byRank.values()) {
+      const rowW = list.reduce((sum, id) => sum + getSlotWidth(id, list.length), 0) + Math.max(0, list.length - 1) * colGapX;
+      maxRowWidth = Math.max(maxRowWidth, rowW);
+    }
+    const rankCenterY = [];
+    let cursorY = padY + 17;
+    for (let r = 0; r <= maxRank; r++) {
+      rankCenterY[r] = cursorY;
+      cursorY += (labeledEdgesByRank.get(r) || 0) >= 2 ? 88 : 66;
+    }
+    const coords = new Map();
+    for (const [rank, list] of byRank.entries()) {
+      const rowW = list.reduce((sum, id) => sum + getSlotWidth(id, list.length), 0) + Math.max(0, list.length - 1) * colGapX;
+      let startX = leftMargin + (maxRowWidth - rowW) / 2;
+      const cy = rankCenterY[rank];
+      list.forEach((id, idx) => {
+        const d = dims.get(id);
+        const slotW = getSlotWidth(id, list.length);
+        coords.set(id, { cx: startX + slotW / 2, cy, w: d.w, h: d.h, rank, row: idx });
+        startX += slotW + colGapX;
+      });
+    }
+    return {
+      coords,
+      maxX: leftMargin + maxRowWidth + rightMargin,
+      maxY: (rankCenterY[maxRank] || padY + 17) + 17 + padY
+    };
+  }
+
+  function groupForwardEdgesBySource(edges, coords, isHorizontal) {
+    const forwardOut = new Map();
+    for (const e of edges) {
+      const f = coords.get(e.from);
+      const t = coords.get(e.to);
+      if (!f || !t || f.rank >= t.rank || e.from === e.to) continue;
+      const list = forwardOut.get(e.from) || [];
+      list.push(e);
+      forwardOut.set(e.from, list);
+    }
+    for (const list of forwardOut.values()) {
+      list.sort((a, b) => {
+        const ca = coords.get(a.to);
+        const cb = coords.get(b.to);
+        return isHorizontal ? ca.cy - cb.cy : ca.cx - cb.cx;
+      });
+    }
+    return forwardOut;
+  }
+
+  function renderBackEdgeSvg(e, from, to, isHorizontal, dash, halo) {
+    if (isHorizontal) {
+      const x1 = from.cx;
+      const y1 = from.cy - from.h / 2;
+      const x2 = to.cx;
+      const y2 = to.cy - to.h / 2 - 4;
+      const ctrlY = Math.min(y1, y2) - 26;
+      const midX = (x1 + x2) / 2;
+      const line = `<path d="M ${x1} ${y1} Q ${midX} ${ctrlY} ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+      const label = e.label ? `<text x="${midX}" y="${ctrlY + 4}" text-anchor="middle" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+      return { line, label };
+    }
+    const x1 = from.cx - from.w / 2;
+    const y1 = from.cy;
+    const x2 = to.cx - to.w / 2 - 4;
+    const y2 = to.cy;
+    const arcX = Math.min(x1, x2) - 44;
+    const midY = (y1 + y2) / 2;
+    const line = `<path d="M ${x1} ${y1} C ${arcX} ${y1}, ${arcX} ${y2}, ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    const label = e.label ? `<text x="${arcX - 4}" y="${midY + 3}" text-anchor="end" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+    return { line, label };
+  }
+
+  function renderFanOutEdgeSvg(e, from, to, outIdx, outCount, dash, halo) {
+    const spread = Math.min(44, from.w * 0.36);
+    const x1 = from.cx + ((outIdx - (outCount - 1) / 2) / Math.max(1, outCount - 1)) * spread;
+    const y1 = from.cy + from.h / 2;
+    const x2 = to.cx;
+    const y2 = to.cy - to.h / 2 - 4;
+    const ctrlY = y1 + (y2 - y1) * 0.45;
+    const line = Math.abs(x1 - x2) > 6
+      ? `<path d="M ${x1} ${y1} C ${x1} ${ctrlY}, ${x2} ${ctrlY}, ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`
+      : `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    let label = '';
+    if (e.label) {
+      const yFraction = outCount >= 3 ? (outIdx % 2 === 0 ? 0.46 : 0.76) : 0.58;
+      const labelX = x1 + 0.76 * (x2 - x1);
+      const labelY = y1 + yFraction * (y2 - y1) + 3;
+      label = `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>`;
+    }
+    return { line, label };
+  }
+
+  function renderDirectEdgeSvg(e, from, to, isHorizontal, dash, halo) {
+    const x1 = isHorizontal ? from.cx + from.w / 2 : from.cx;
+    const y1 = isHorizontal ? from.cy : from.cy + from.h / 2;
+    const x2 = isHorizontal ? to.cx - to.w / 2 - 4 : to.cx;
+    const y2 = isHorizontal ? to.cy : to.cy - to.h / 2 - 4;
+    const midX = (x1 + x2) / 2;
+    const midY = isHorizontal ? (y1 + y2) / 2 - 6 : (y1 + y2) / 2 + 3;
+    const textOffset = !isHorizontal && Math.abs(x1 - x2) < 8 ? 8 : 0;
+    const anchor = textOffset > 0 ? 'start' : 'middle';
+    const line = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    const label = e.label ? `<text x="${midX + textOffset}" y="${midY}" text-anchor="${anchor}" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+    return { line, label };
+  }
+
+  function renderGraphNodeSvg(n, c) {
+    if (n.shape === 'start') {
+      return `<g class="md-mermaid-node"><circle cx="${c.cx}" cy="${c.cy}" r="8" fill="var(--accent, #58a6ff)" /></g>`;
+    }
+    if (n.shape === 'end') {
+      return `<g class="md-mermaid-node"><circle cx="${c.cx}" cy="${c.cy}" r="9" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5" /><circle cx="${c.cx}" cy="${c.cy}" r="5" fill="var(--accent, #58a6ff)" /></g>`;
+    }
+    const x = c.cx - c.w / 2;
+    const y = c.cy - c.h / 2;
+    const rx = n.shape === 'round' ? 14 : 6;
+    const shapeEl = n.shape === 'diamond'
+      ? `<polygon points="${c.cx},${y} ${x + c.w},${c.cy} ${c.cx},${y + c.h} ${x},${c.cy}" fill="var(--bg-panel-hover, #21262d)" stroke="var(--accent, #58a6ff)" stroke-width="1.5" />`
+      : `<rect x="${x}" y="${y}" width="${c.w}" height="${c.h}" rx="${rx}" fill="var(--bg-panel-hover, #21262d)" stroke="var(--border, #30363d)" stroke-width="1.5" />`;
+    return `<g class="md-mermaid-node">${shapeEl}<text x="${c.cx}" y="${c.cy + 4}" text-anchor="middle" font-size="12" font-weight="500" fill="var(--text-bright, #f0f6fc)">${escapeHtml(n.label)}</text></g>`;
+  }
+
+  function renderSingleGraphEdge(e, coords, forwardOutBySource, isHorizontal, halo) {
+    const from = coords.get(e.from);
+    const to = coords.get(e.to);
+    if (!from || !to) return { line: '', label: '' };
+    const isBackEdge = from.rank >= to.rank && e.from !== e.to;
+    const dash = e.dashed || isBackEdge ? ' stroke-dasharray="4 3"' : '';
+    if (isBackEdge) return renderBackEdgeSvg(e, from, to, isHorizontal, dash, halo);
+    const siblings = forwardOutBySource.get(e.from) || [e];
+    if (!isHorizontal && siblings.length > 1) {
+      return renderFanOutEdgeSvg(e, from, to, Math.max(0, siblings.indexOf(e)), siblings.length, dash, halo);
+    }
+    return renderDirectEdgeSvg(e, from, to, isHorizontal, dash, halo);
+  }
+
+  function renderGraphSvg(nodes, edges, direction, rawLinesForFallback) {
+    if (nodes.size === 0) return renderMermaidFallback(rawLinesForFallback.join('\n'));
+    const isHorizontal = direction === 'LR' || direction === 'RL';
+    const positions = computeNodeRanks(nodes, edges);
+    const dims = new Map();
+    for (const [id, n] of nodes.entries()) dims.set(id, computeNodeDimensions(n));
+    let maxRank = 0;
+    let maxGroupSize = 1;
+    for (const pos of positions.values()) {
+      maxRank = Math.max(maxRank, pos.rank);
+      maxGroupSize = Math.max(maxGroupSize, pos.groupSize);
+    }
+    const hasBackEdge = edges.some(e => {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      return Boolean(f && t && f.rank >= t.rank && e.from !== e.to);
+    });
+    const layout = isHorizontal
+      ? layoutHorizontalGraph(positions, dims, edges, maxRank, maxGroupSize, hasBackEdge)
+      : layoutVerticalGraph(positions, dims, edges, maxRank, hasBackEdge);
+    const forwardOutBySource = groupForwardEdgesBySource(edges, layout.coords, isHorizontal);
+    const halo = 'paint-order="stroke fill" stroke="var(--bg-code, #0b0e14)" stroke-width="4" stroke-linejoin="round"';
+    const edgeParts = edges.map(e => renderSingleGraphEdge(e, layout.coords, forwardOutBySource, isHorizontal, halo));
+    const edgeSvg = edgeParts.map(p => p.line).join('');
+    const edgeLabelSvg = edgeParts.map(p => p.label).join('');
+    const nodeSvg = Array.from(nodes.values()).map(n => renderGraphNodeSvg(n, layout.coords.get(n.id))).join('');
+    const maxH = isHorizontal ? 220 : 320;
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${layout.maxX} ${layout.maxY}" width="100%" style="max-width:${layout.maxX}px;max-height:${maxH}px"><defs><marker id="md-mermaid-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent, #58a6ff)" /></marker></defs>${edgeSvg}${nodeSvg}${edgeLabelSvg}</svg></div>`;
+  }
+
+  function renderFlowchartSvg(lines, direction) {
+    const { nodes, edges } = parseFlowchartLines(lines);
+    return renderGraphSvg(nodes, edges, direction, lines);
+  }
+
+  function renderStateDiagramSvg(lines) {
+    const { nodes, edges, direction } = parseStateDiagramLines(lines);
+    return renderGraphSvg(nodes, edges, direction, lines);
+  }
+
+  function parseSequenceLines(lines) {
+    const participants = new Map();
+    const messages = [];
+    const pRegex = /^(?:participant|actor)\s+([A-Za-z0-9_.-]+)(?:\s+as\s+(.+))?$/i;
+    const mRegex = /^([A-Za-z0-9_.-]+)\s*(--?>?>?|-x)\s*([A-Za-z0-9_.-]+)\s*:\s*(.+)$/;
+    for (const raw of lines) {
+      const line = raw.trim();
+      const pm = pRegex.exec(line);
+      if (pm) {
+        participants.set(pm[1], (pm[2] || pm[1]).trim());
+        continue;
+      }
+      const mm = mRegex.exec(line);
+      if (mm) {
+        if (!participants.has(mm[1])) participants.set(mm[1], mm[1]);
+        if (!participants.has(mm[3])) participants.set(mm[3], mm[3]);
+        messages.push({ from: mm[1], to: mm[3], text: mm[4].trim(), dashed: mm[2].startsWith('--') });
+      }
+    }
+    return { participants, messages };
+  }
+
+  function renderSequenceSvg(lines) {
+    const { participants, messages } = parseSequenceLines(lines);
+    if (participants.size === 0) return renderMermaidFallback(lines.join('\n'));
+    const ids = Array.from(participants.keys());
+    const colW = 150;
+    const pad = 20;
+    const boxW = 110;
+    const boxH = 32;
+    const width = pad * 2 + ids.length * colW;
+    const height = pad * 2 + boxH + Math.max(1, messages.length) * 44 + 16;
+    const lifelines = ids.map((id, idx) => {
+      const cx = pad + idx * colW + colW / 2;
+      const label = participants.get(id);
+      return `<g class="md-mermaid-actor"><line x1="${cx}" y1="${pad + boxH}" x2="${cx}" y2="${height - pad}" stroke="var(--border, #30363d)" stroke-dasharray="4 3" /><rect x="${cx - boxW / 2}" y="${pad}" width="${boxW}" height="${boxH}" rx="6" fill="var(--bg-panel-hover, #21262d)" stroke="var(--border, #30363d)" /><text x="${cx}" y="${pad + 20}" text-anchor="middle" font-size="12" font-weight="600" fill="var(--text-bright, #f0f6fc)">${escapeHtml(label)}</text></g>`;
+    }).join('');
+    const msgSvg = messages.map((m, idx) => {
+      const x1 = pad + ids.indexOf(m.from) * colW + colW / 2;
+      const x2 = pad + ids.indexOf(m.to) * colW + colW / 2;
+      const y = pad + boxH + 30 + idx * 44;
+      const dash = m.dashed ? ' stroke-dasharray="4 3"' : '';
+      return `<g class="md-mermaid-msg"><line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" /><text x="${(x1 + x2) / 2}" y="${y - 6}" text-anchor="middle" font-size="11" fill="var(--text-bright, #f0f6fc)">${escapeHtml(m.text)}</text></g>`;
+    }).join('');
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" style="max-width:${width}px;max-height:240px"><defs><marker id="md-mermaid-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent, #58a6ff)" /></marker></defs>${lifelines}${msgSvg}</svg></div>`;
+  }
+
+  function parsePieSlices(header, lines) {
+    let title = '';
+    const showData = /\bshowData\b/i.test(header);
+    const inlineTitle = /^pie(?:\s+showData)?\s+title\s+(.+)$/i.exec(header);
+    if (inlineTitle) title = inlineTitle[1].trim().replace(/^"(.*)"$/, '$1');
+    const slices = [];
+    for (const raw of lines) {
+      const line = raw.trim();
+      const titleMatch = /^title\s+(.+)$/i.exec(line);
+      if (titleMatch) {
+        title = titleMatch[1].trim().replace(/^"(.*)"$/, '$1');
+        continue;
+      }
+      const sliceMatch = /^"([^"]+)"\s*:\s*([+-]?\d+(?:\.\d+)?)$/.exec(line);
+      if (sliceMatch && Number(sliceMatch[2]) >= 0) {
+        slices.push({ label: sliceMatch[1], value: Number(sliceMatch[2]) });
+      }
+    }
+    return { title, showData, slices };
+  }
+
+  function renderPieSvg(header, lines) {
+    const { title, showData, slices } = parsePieSlices(header, lines);
+    if (slices.length === 0) return renderMermaidFallback([header, ...lines].join('\n'));
+    const total = slices.reduce((acc, s) => acc + s.value, 0) || 1;
+    const width = 440;
+    const titleOffset = title ? 26 : 6;
+    const cx = 130;
+    const cy = titleOffset + 100;
+    const radius = 82;
+    const height = titleOffset + 200;
+    let angle = 0;
+    const paths = [];
+    const legendItems = [];
+    slices.forEach((s, idx) => {
+      const span = (s.value / total) * 360;
+      const start = angle;
+      angle += span;
+      const color = resolveSeriesColor(idx);
+      const d = describeSectorPath(cx, cy, radius, 0, start, angle);
+      const pct = Math.round((s.value / total) * 100);
+      const labelPos = polarToCartesian(cx, cy, radius * 0.65, start + span / 2);
+      paths.push(`<path d="${d}" fill="${color}" stroke="var(--bg-code, #0b0e14)" stroke-width="1.5" />`);
+      if (pct >= 8) {
+        paths.push(`<text x="${labelPos.x}" y="${labelPos.y + 4}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="600">${pct}%</text>`);
+      }
+      const suffix = showData ? ` (${formatTickNumber(s.value)})` : ` (${pct}%)`;
+      const ly = titleOffset + 28 + idx * 22;
+      legendItems.push(
+        `<rect x="242" y="${ly - 9}" width="11" height="11" rx="2" fill="${color}" />` +
+        `<text x="259" y="${ly}" fill="var(--text-main, #c9d1d9)" font-size="12">${escapeHtml(s.label + suffix)}</text>`
+      );
+    });
+    const titleEl = title ? `<text x="${width / 2}" y="18" text-anchor="middle" fill="var(--text-bright, #f0f6fc)" font-size="13" font-weight="600">${escapeHtml(title)}</text>` : '';
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeHtml(title || 'Pie chart')}">${titleEl}${paths.join('')}${legendItems.join('')}</svg></div>`;
+  }
+
+  function parseBracketList(raw) {
+    const inner = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
+    if (!inner.trim()) return [];
+    return inner.split(',').map(item => item.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
+  }
+
+  function applyXyChartLine(line, state) {
+    const titleMatch = /^title\s+(.+)$/i.exec(line);
+    if (titleMatch) {
+      state.title = titleMatch[1].trim().replace(/^"(.*)"$/, '$1');
+      return;
+    }
+    const xAxisMatch = /^x-axis\s+(?:"[^"]*"\s+)?(\[.*\])$/i.exec(line);
+    if (xAxisMatch) {
+      state.xCategories = parseBracketList(xAxisMatch[1]);
+      return;
+    }
+    const yAxisMatch = /^y-axis\s+(?:"([^"]*)"\s*)?(?:([+-]?\d+(?:\.\d+)?)\s*-->\s*([+-]?\d+(?:\.\d+)?))?$/i.exec(line);
+    if (yAxisMatch) {
+      if (yAxisMatch[1]) state.yAxisTitle = yAxisMatch[1];
+      if (yAxisMatch[2] !== undefined && yAxisMatch[3] !== undefined) {
+        state.explicitMin = Number(yAxisMatch[2]);
+        state.explicitMax = Number(yAxisMatch[3]);
+      }
+      return;
+    }
+    const seriesMatch = /^(bar|line)\s+(?:"[^"]*"\s+)?(\[.*\])$/i.exec(line);
+    if (seriesMatch) {
+      const vals = parseBracketList(seriesMatch[2]).map(v => Number(v)).filter(n => Number.isFinite(n));
+      if (vals.length > 0) state.series.push({ kind: seriesMatch[1].toLowerCase(), values: vals });
+    }
+  }
+
+  function parseXyChartLines(lines) {
+    const state = { title: '', xCategories: [], yAxisTitle: '', explicitMin: undefined, explicitMax: undefined, series: [] };
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (line) applyXyChartLine(line, state);
+    }
+    return state;
+  }
+
+  function renderXySeriesSvg(series, padLeft, slotW, barWidth, yFor, zeroY) {
+    const parts = [];
+    let barIdx = 0;
+    series.forEach((s, sIdx) => {
+      const color = resolveSeriesColor(sIdx);
+      if (s.kind === 'bar') {
+        const bOffset = barIdx++;
+        s.values.forEach((v, idx) => {
+          const x = padLeft + idx * slotW + slotW * 0.175 + bOffset * barWidth;
+          const yTop = v >= 0 ? yFor(v) : zeroY;
+          const yBot = v >= 0 ? zeroY : yFor(v);
+          const h = Math.max(2, Math.abs(yBot - yTop));
+          parts.push(`<rect x="${Number(x.toFixed(2))}" y="${Number(Math.min(yTop, yBot).toFixed(2))}" width="${Number(barWidth.toFixed(2))}" height="${Number(h.toFixed(2))}" rx="2" fill="${color}" />`);
+        });
+      } else {
+        const pts = s.values.map((v, idx) => ({
+          x: Number((padLeft + (idx + 0.5) * slotW).toFixed(2)),
+          y: Number(yFor(v).toFixed(2))
+        }));
+        parts.push(`<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${pts.map(p => `${p.x},${p.y}`).join(' ')}" />`);
+        pts.forEach(p => parts.push(`<circle cx="${p.x}" cy="${p.y}" r="3.5" fill="${color}" />`));
+      }
+    });
+    return parts;
+  }
+
+  function renderXyChartSvg(lines) {
+    const state = parseXyChartLines(lines);
+    if (state.series.length === 0) return renderMermaidFallback(['xychart-beta', ...lines].join('\n'));
+    const allVals = state.series.flatMap(s => s.values);
+    const minVal = state.explicitMin !== undefined ? state.explicitMin : Math.min(0, ...allVals);
+    const maxVal = state.explicitMax !== undefined ? state.explicitMax : Math.max(0, ...allVals);
+    const scale = computeNiceTicks(minVal, maxVal, 5, state.explicitMin === undefined);
+    const span = scale.max - scale.min || 1;
+    const width = 480;
+    const height = 230;
+    const padLeft = state.yAxisTitle ? 54 : 42;
+    const padTop = state.title ? 30 : 14;
+    const plotW = width - padLeft - 18;
+    const plotH = height - padTop - 30;
+    const yFor = v => padTop + plotH - ((v - scale.min) / span) * plotH;
+    const zeroY = yFor(Math.max(0, scale.min));
+    const maxPoints = Math.max(state.xCategories.length, ...state.series.map(s => s.values.length), 1);
+    const slotW = plotW / maxPoints;
+    const barCount = state.series.filter(s => s.kind === 'bar').length;
+    const barWidth = Math.max(6, (slotW * 0.65) / Math.max(1, barCount));
+    const parts = [];
+    if (state.title) {
+      parts.push(`<text x="${width / 2}" y="18" text-anchor="middle" fill="var(--text-bright, #f0f6fc)" font-size="13" font-weight="600">${escapeHtml(state.title)}</text>`);
+    }
+    for (const tick of scale.ticks) {
+      const y = Number(yFor(tick).toFixed(2));
+      parts.push(
+        `<line x1="${padLeft}" y1="${y}" x2="${padLeft + plotW}" y2="${y}" stroke="rgba(139,148,158,0.22)" stroke-dasharray="3 3" />`,
+        `<text x="${padLeft - 6}" y="${y + 4}" text-anchor="end" fill="var(--text-muted, #8b949e)" font-size="11">${formatTickNumber(tick)}</text>`
+      );
+    }
+    parts.push(
+      `<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotH}" stroke="var(--border, #30363d)" />`,
+      `<line x1="${padLeft}" y1="${Number(zeroY.toFixed(2))}" x2="${padLeft + plotW}" y2="${Number(zeroY.toFixed(2))}" stroke="var(--border, #30363d)" />`,
+      ...renderXySeriesSvg(state.series, padLeft, slotW, barWidth, yFor, zeroY)
+    );
+    for (let i = 0; i < maxPoints; i++) {
+      const lbl = state.xCategories[i] !== undefined ? state.xCategories[i] : String(i + 1);
+      const cx = Number((padLeft + (i + 0.5) * slotW).toFixed(2));
+      parts.push(`<text x="${cx}" y="${padTop + plotH + 16}" text-anchor="middle" fill="var(--text-muted, #8b949e)" font-size="11">${escapeHtml(lbl)}</text>`);
+    }
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeHtml(state.title || 'XY chart')}">${parts.join('')}</svg></div>`;
+  }
+
+  function renderMermaidSvg(code) {
+    const rawLines = String(code || '')
+      .trim()
+      .split(/\r?\n/)
+      .filter(l => !l.trim().startsWith('%%'));
+    const header = (rawLines[0] || '').trim();
+    const flowMatch = /^(?:flowchart|graph)(?:\s+(TD|TB|LR|RL|BT))?\b/i.exec(header);
+    if (flowMatch) {
+      return renderFlowchartSvg(rawLines.slice(1), (flowMatch[1] || 'TD').toUpperCase());
+    }
+    if (/^stateDiagram(?:-v2)?\b/i.test(header)) {
+      return renderStateDiagramSvg(rawLines.slice(1));
+    }
+    if (/^sequenceDiagram\b/i.test(header)) {
+      return renderSequenceSvg(rawLines.slice(1));
+    }
+    if (/^pie\b/i.test(header)) {
+      return renderPieSvg(header, rawLines.slice(1));
+    }
+    if (/^xychart(?:-beta)?\b/i.test(header)) {
+      return renderXyChartSvg(rawLines.slice(1));
+    }
+    return renderMermaidFallback(code);
+  }
+
+  function isTableSeparatorLine(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed.includes('|')) return false;
+    const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|');
+    return cells.length > 0 && cells.every(c => /^:?-{1,}:?$/.test(c.trim()));
+  }
+
+  function splitTableRow(line) {
+    const masks = [];
+    const storeMask = match => {
+      const idx = masks.length;
+      masks.push(match);
+      return `\u0000TBL_MASK_${idx}\u0000`;
+    };
+    const masked = String(line || '')
+      .replace(/`[^`]+`/g, storeMask)
+      .replace(/\\\([\s\S]+?\\\)/g, storeMask)
+      .replace(/(^|[^\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, pre, body) => `${pre}${storeMask(`$${body}$`)}`)
+      .replace(/\\\|/g, '\u0000ESC_PIPE\u0000');
+    const stripped = masked.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return stripped.split('|').map(cell =>
+      cell
+        .replace(/\u0000TBL_MASK_(\d+)\u0000/g, (_, idx) => masks[Number(idx)] || '')
+        .replace(/\u0000ESC_PIPE\u0000/g, '|')
+        .trim()
+    );
+  }
+
+  function isTableHeaderAt(lines, index) {
+    if (index + 1 >= lines.length) return false;
+    const headerLine = lines[index].trim();
+    if (!headerLine || !headerLine.includes('|') || !isTableSeparatorLine(lines[index + 1])) return false;
+    return splitTableRow(headerLine).length === splitTableRow(lines[index + 1]).length;
+  }
+
+  function parseTableAlignments(sepLine) {
+    return splitTableRow(sepLine).map(cell => {
+      const c = cell.trim();
+      if (c.startsWith(':') && c.endsWith(':')) return 'center';
+      if (c.endsWith(':')) return 'right';
+      if (c.startsWith(':')) return 'left';
+      return '';
+    });
+  }
+
+  function renderTableRowCells(cells, alignments, tag, colCount) {
+    const out = [];
+    for (let c = 0; c < colCount; c++) {
+      const align = alignments[c] ? ` style="text-align:${alignments[c]}"` : '';
+      const rawCell = c < cells.length ? cells[c] : '';
+      out.push(`<${tag}${align}>${renderInlineMarkdown(rawCell)}</${tag}>`);
+    }
+    return `<tr>${out.join('')}</tr>`;
+  }
+
+  function isTableBodyLine(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || !trimmed.includes('|')) return false;
+    if (/^\u0000(?:FENCE|MATH_BLOCK)_\d+\u0000$/.test(trimmed)) return false;
+    return !/^(?:#{1,6}\s+|>\s?|[-*]\s+|\d+\.\s+)/.test(trimmed);
+  }
+
+  function renderTableBlock(lines, startIndex) {
+    const headers = splitTableRow(lines[startIndex]);
+    const alignments = parseTableAlignments(lines[startIndex + 1]);
+    const colCount = headers.length;
+    const theadHtml = `<thead>${renderTableRowCells(headers, alignments, 'th', colCount)}</thead>`;
+    const bodyRows = [];
+    let idx = startIndex + 2;
+    while (idx < lines.length && isTableBodyLine(lines[idx])) {
+      bodyRows.push(renderTableRowCells(splitTableRow(lines[idx]), alignments, 'td', colCount));
+      idx++;
+    }
+    const tbodyHtml = bodyRows.length > 0 ? `<tbody>${bodyRows.join('')}</tbody>` : '';
+    return {
+      html: `<div class="md-table-wrap"><table class="md-table">${theadHtml}${tbodyHtml}</table></div>`,
+      nextIndex: idx
+    };
+  }
+
+  // Safely formats inline Markdown after extracting inline code and inline LaTeX math spans first.
   function renderInlineMarkdown(text) {
     if (!text) return '';
     const codeSpans = [];
-    const withPlaceholders = String(text).replace(/`([^`]+)`/g, (_, code) => {
+    const mathSpans = [];
+    const withCodeMasked = String(text).replace(/`([^`]+)`/g, (_, code) => {
       const idx = codeSpans.length;
       codeSpans.push(`<code>${escapeHtml(code)}</code>`);
       return `\u0000CODE_${idx}\u0000`;
     });
 
-    let safe = escapeHtml(withPlaceholders);
+    const storeInlineMath = tex => {
+      const idx = mathSpans.length;
+      mathSpans.push(renderLatexToMathMl(tex, false));
+      return `\u0000MATH_INLINE_${idx}\u0000`;
+    };
+
+    const withMathMasked = withCodeMasked
+      .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => storeInlineMath(tex))
+      .replace(/(^|[^\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, pre, tex) => `${pre}${storeInlineMath(tex)}`)
+      .replace(/\\\$/g, '$');
+
+    let safe = escapeHtml(withMathMasked);
 
     // Markdown links restricted to http://, https://, or # anchors; strip local file:// links
     safe = safe.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
@@ -1123,131 +2268,153 @@
       return match;
     });
 
-    // Bold and italic
+    // Bold, italic, and strikethrough
     safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
     safe = safe.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    safe = safe.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
 
-    return safe.replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
+    return safe
+      .replace(/\u0000MATH_INLINE_(\d+)\u0000/g, (_, idx) => mathSpans[Number(idx)] || '')
+      .replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
   }
 
-  // Converts Markdown into safe HTML (supports fenced code blocks, GitHub alert
-  // callouts > [!WARNING|IMPORTANT|NOTE|CAUTION], headings, lists, and paragraphs).
-  function renderMarkdownSafe(md) {
-    if (!md) return '';
-    const codeBlocks = [];
-    const normalized = String(md).replace(/\r\n/g, '\n');
-
-    // Step 1: Extract fenced code blocks before block-level line parsing.
-    const withoutFences = normalized.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
+  function extractTopLevelFences(normalized, codeBlocks) {
+    return normalized.replace(/(^|\n)([ \t]*)```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lead, indent, lang, code) => {
       const idx = codeBlocks.length;
       const cleanLang = (lang || '').trim();
+      if (cleanLang.toLowerCase() === 'mermaid') {
+        codeBlocks.push(renderMermaidSvg(code));
+        return `${lead}\n\u0000FENCE_${idx}\u0000\n`;
+      }
       const langAttr = cleanLang ? ` data-lang="${escapeHtml(cleanLang)}"` : '';
       const headerHtml = cleanLang.toLowerCase() === 'suggestion'
         ? '<div class="suggestion-preview-header">Suggested change</div>'
         : '';
       codeBlocks.push(`${headerHtml}<pre class="code-box"${langAttr}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
-      return `\n\u0000FENCE_${idx}\u0000\n`;
+      return `${lead}\n\u0000FENCE_${idx}\u0000\n`;
     });
+  }
 
-    // Step 2: Parse block-level structures on raw lines.
-    const lines = withoutFences.split('\n');
+  function isInsideBlockquoteLine(source, matchIndex, matchBody) {
+    const lineStart = source.lastIndexOf('\n', matchIndex - 1) + 1;
+    const linePrefix = source.slice(lineStart, matchIndex);
+    return /^\s*>/.test(linePrefix) || /\n\s*>/.test(matchBody);
+  }
+
+  function extractTopLevelDisplayMath(text, mathBlocks) {
+    const tickMasks = [];
+    const maskedTicks = text.replace(/`[^`\n]+`/g, m => {
+      const idx = tickMasks.length;
+      tickMasks.push(m);
+      return `\u0000INLINE_TICK_${idx}\u0000`;
+    });
+    const storeDisplay = (fullMatch, tex, offset, fullStr) => {
+      if (isInsideBlockquoteLine(fullStr, offset, fullMatch)) return fullMatch;
+      const idx = mathBlocks.length;
+      mathBlocks.push(renderLatexToMathMl(tex, true));
+      return `\n\u0000MATH_BLOCK_${idx}\u0000\n`;
+    };
+    const withMath = maskedTicks
+      .replace(/\$\$([\s\S]+?)\$\$/g, storeDisplay)
+      .replace(/\\\[([\s\S]+?)\\\]/g, storeDisplay);
+    return withMath.replace(/\u0000INLINE_TICK_(\d+)\u0000/g, (_, idx) => tickMasks[Number(idx)] || '');
+  }
+
+  function consumeBlockquoteOrCallout(lines, startIndex) {
+    const quoteLines = [];
+    let i = startIndex;
+    while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+      quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
+      i++;
+    }
+    const firstLine = quoteLines[0] || '';
+    const alertMatch = firstLine.match(/^\[!(WARNING|IMPORTANT|NOTE|CAUTION)\]\s*(.*)$/i);
+    if (alertMatch) {
+      const kind = alertMatch[1].toLowerCase();
+      const titleText = alertMatch[1].toUpperCase();
+      const inlineFirst = alertMatch[2].trim();
+      const innerLines = (inlineFirst ? [inlineFirst, ''] : []).concat(quoteLines.slice(1));
+      const bodyHtml = renderMarkdownSafe(innerLines.join('\n'));
+      return {
+        html: `<div class="md-callout callout-${kind}"><div class="md-callout-title">${titleText}</div>${bodyHtml}</div>`,
+        nextIndex: i
+      };
+    }
+    const quoteHtml = renderMarkdownSafe(quoteLines.join('\n'));
+    return { html: `<blockquote>${quoteHtml}</blockquote>`, nextIndex: i };
+  }
+
+  function consumeListBlock(lines, startIndex, ordered) {
+    const pattern = ordered ? /^\s*\d+\.\s+/ : /^\s*[-*]\s+/;
+    const tag = ordered ? 'ol' : 'ul';
+    const items = [];
+    let i = startIndex;
+    while (i < lines.length && pattern.test(lines[i])) {
+      items.push(`<li>${renderInlineMarkdown(lines[i].replace(pattern, '').trim())}</li>`);
+      i++;
+    }
+    return { html: `<${tag}>${items.join('')}</${tag}>`, nextIndex: i };
+  }
+
+  function isParagraphBreakLine(lines, index) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (/^\u0000(?:FENCE|MATH_BLOCK)_\d+\u0000$/.test(trimmed)) return true;
+    if (/^(?:#{1,6}\s+|\s*>\s?|\s*[-*]\s+|\s*\d+\.\s+)/.test(line)) return true;
+    return isTableHeaderAt(lines, index);
+  }
+
+  function consumeParagraphBlock(lines, startIndex) {
+    const paraLines = [];
+    let i = startIndex;
+    while (i < lines.length && !isParagraphBreakLine(lines, i)) {
+      paraLines.push(renderInlineMarkdown(lines[i].trim()));
+      i++;
+    }
+    return {
+      html: paraLines.length > 0 ? `<p>${paraLines.join('<br>')}</p>` : '',
+      nextIndex: i
+    };
+  }
+
+  function consumeNextMarkdownBlock(lines, index, codeBlocks, mathBlocks) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) return { html: '', nextIndex: index + 1 };
+    const fenceMatch = trimmed.match(/^\u0000FENCE_(\d+)\u0000$/);
+    if (fenceMatch) return { html: codeBlocks[Number(fenceMatch[1])] || '', nextIndex: index + 1 };
+    const mathMatch = trimmed.match(/^\u0000MATH_BLOCK_(\d+)\u0000$/);
+    if (mathMatch) return { html: mathBlocks[Number(mathMatch[1])] || '', nextIndex: index + 1 };
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      return { html: `<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`, nextIndex: index + 1 };
+    }
+    if (/^\s*>\s?/.test(line)) return consumeBlockquoteOrCallout(lines, index);
+    if (isTableHeaderAt(lines, index)) return renderTableBlock(lines, index);
+    if (/^\s*[-*]\s+/.test(line)) return consumeListBlock(lines, index, false);
+    if (/^\s*\d+\.\s+/.test(line)) return consumeListBlock(lines, index, true);
+    return consumeParagraphBlock(lines, index);
+  }
+
+  // Converts Markdown into safe HTML (supports fenced code blocks, Mermaid SVG,
+  // LaTeX MathML, GFM pipe tables, GitHub alert callouts, headings, lists, and paragraphs).
+  function renderMarkdownSafe(md) {
+    if (!md) return '';
+    const codeBlocks = [];
+    const mathBlocks = [];
+    const normalized = String(md).replace(/\r\n/g, '\n');
+    const withoutFences = extractTopLevelFences(normalized, codeBlocks);
+    const withoutDisplayMath = extractTopLevelDisplayMath(withoutFences, mathBlocks);
+    const lines = withoutDisplayMath.split('\n');
     const htmlParts = [];
     let i = 0;
-
     while (i < lines.length) {
-      const line = lines[i];
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        i++;
-        continue;
-      }
-
-      const fenceMatch = trimmed.match(/^\u0000FENCE_(\d+)\u0000$/);
-      if (fenceMatch) {
-        htmlParts.push(codeBlocks[Number(fenceMatch[1])] || '');
-        i++;
-        continue;
-      }
-
-      const headingMatch = line.match(/^(#{1,4})\s+(.*)$/);
-      if (headingMatch) {
-        const level = headingMatch[1].length;
-        htmlParts.push(`<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`);
-        i++;
-        continue;
-      }
-
-      if (/^\s*>\s?/.test(line)) {
-        const quoteLines = [];
-        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-          quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
-          i++;
-        }
-        const firstLine = quoteLines[0] || '';
-        const alertMatch = firstLine.match(/^\[!(WARNING|IMPORTANT|NOTE|CAUTION)\]\s*(.*)$/i);
-        if (alertMatch) {
-          const kind = alertMatch[1].toLowerCase();
-          const titleText = alertMatch[1].toUpperCase();
-          const bodyLines = [];
-          if (alertMatch[2].trim()) bodyLines.push(alertMatch[2].trim());
-          for (let j = 1; j < quoteLines.length; j++) {
-            if (quoteLines[j].trim()) bodyLines.push(quoteLines[j].trim());
-          }
-          const bodyHtml = bodyLines.map(l => `<p>${renderInlineMarkdown(l)}</p>`).join('');
-          htmlParts.push(
-            `<div class="md-callout callout-${kind}">` +
-            `<div class="md-callout-title">${titleText}</div>` +
-            `${bodyHtml}</div>`
-          );
-        } else {
-          const quoteHtml = quoteLines
-            .filter(l => l.trim().length > 0)
-            .map(l => `<p>${renderInlineMarkdown(l)}</p>`)
-            .join('');
-          htmlParts.push(`<blockquote>${quoteHtml}</blockquote>`);
-        }
-        continue;
-      }
-
-      if (/^\s*[-*]\s+/.test(line)) {
-        const items = [];
-        while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-          items.push(`<li>${renderInlineMarkdown(lines[i].replace(/^\s*[-*]\s+/, '').trim())}</li>`);
-          i++;
-        }
-        htmlParts.push(`<ul>${items.join('')}</ul>`);
-        continue;
-      }
-
-      if (/^\s*\d+\.\s+/.test(line)) {
-        const items = [];
-        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-          items.push(`<li>${renderInlineMarkdown(lines[i].replace(/^\s*\d+\.\s+/, '').trim())}</li>`);
-          i++;
-        }
-        htmlParts.push(`<ol>${items.join('')}</ol>`);
-        continue;
-      }
-
-      const paraLines = [];
-      while (
-        i < lines.length &&
-        lines[i].trim() &&
-        !/^\u0000FENCE_\d+\u0000$/.test(lines[i].trim()) &&
-        !/^(#{1,4})\s+/.test(lines[i]) &&
-        !/^\s*>\s?/.test(lines[i]) &&
-        !/^\s*[-*]\s+/.test(lines[i]) &&
-        !/^\s*\d+\.\s+/.test(lines[i])
-      ) {
-        paraLines.push(renderInlineMarkdown(lines[i].trim()));
-        i++;
-      }
-      if (paraLines.length > 0) {
-        htmlParts.push(`<p>${paraLines.join('<br>')}</p>`);
-      }
+      const step = consumeNextMarkdownBlock(lines, i, codeBlocks, mathBlocks);
+      if (step.html) htmlParts.push(step.html);
+      i = step.nextIndex > i ? step.nextIndex : i + 1;
     }
-
     return htmlParts.join('\n');
   }
 
@@ -1310,6 +2477,23 @@
     return renderMarkdownSafe(trimmed);
   }
 
+  function setTabButtonState(btn, active) {
+    if (!btn) return;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-selected', active ? 'true' : 'false');
+  }
+
+  function applyTabToggleDom(writeBtn, previewBtn, editor, preview, isPreview, markdownText) {
+    setTabButtonState(writeBtn, !isPreview);
+    setTabButtonState(previewBtn, isPreview);
+    if (editor) editor.style.display = isPreview ? 'none' : 'block';
+    if (preview) {
+      preview.style.display = isPreview ? 'block' : 'none';
+      if (isPreview) preview.innerHTML = renderCommentPreviewHtml(markdownText);
+    }
+    if (!isPreview && editor) fitEditor(editor);
+  }
+
   function switchSummaryTab(mode) {
     summaryTabMode = mode === 'preview' ? 'preview' : 'write';
     const writeBtn = document.getElementById('summary-tab-write');
@@ -1317,27 +2501,7 @@
     const editor = document.getElementById('review-summary-text');
     const preview = document.getElementById('review-summary-preview');
     const isPreview = summaryTabMode === 'preview';
-
-    if (writeBtn) {
-      writeBtn.classList.toggle('active', !isPreview);
-      writeBtn.setAttribute('aria-selected', isPreview ? 'false' : 'true');
-    }
-    if (previewBtn) {
-      previewBtn.classList.toggle('active', isPreview);
-      previewBtn.setAttribute('aria-selected', isPreview ? 'true' : 'false');
-    }
-    if (editor) {
-      editor.style.display = isPreview ? 'none' : 'block';
-    }
-    if (preview) {
-      preview.style.display = isPreview ? 'block' : 'none';
-      if (isPreview) {
-        preview.innerHTML = renderCommentPreviewHtml(editor ? editor.value : '');
-      }
-    }
-    if (!isPreview && editor) {
-      fitEditor(editor);
-    }
+    applyTabToggleDom(writeBtn, previewBtn, editor, preview, isPreview, editor ? editor.value : '');
   }
 
   function insertDescriptionIntoSummary() {
@@ -1399,7 +2563,7 @@
     const cleanSection = document.getElementById('checked-clean-section');
     const cleanUl = document.getElementById('checked-clean-list');
     if (Array.isArray(cleanList) && cleanList.length > 0) {
-      cleanUl.innerHTML = cleanList.map(item => `<li>${escapeHtml(item)}</li>`).join('');
+      cleanUl.innerHTML = cleanList.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('');
       cleanSection.style.display = 'block';
     } else {
       cleanSection.style.display = 'none';
@@ -1411,7 +2575,7 @@
     if (structKeys.length > 0) {
       structTable.innerHTML = structKeys.map(k => {
         const val = structural[k];
-        return `<div style="margin-bottom: 4px;"><strong>${escapeHtml(k.toUpperCase())}:</strong> ${escapeHtml(val)}</div>`;
+        return `<div style="margin-bottom: 4px;"><strong>${escapeHtml(k.toUpperCase())}:</strong> ${renderInlineMarkdown(val)}</div>`;
       }).join('');
       structSection.style.display = 'block';
     } else {
@@ -1511,6 +2675,36 @@
       `/blob/${encodeURIComponent(sha)}/${path}${anchor}`;
   }
 
+  function formatFindingLocationHtml(finding) {
+    const hasRange = finding.line_end && finding.line_end !== finding.line_start;
+    const locationText = hasRange
+      ? `${finding.file_path}:${finding.line_start}-${finding.line_end}`
+      : `${finding.file_path}:${finding.line_start}`;
+    const url = fileUrl(finding);
+    return url
+      ? `<a class="file-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open on GitHub at the PR head commit">${escapeHtml(locationText)}</a>`
+      : `<span>${escapeHtml(locationText)}</span>`;
+  }
+
+  function formatFindingDetailsHtml(finding) {
+    const lineRange = finding.line_start === finding.line_end
+      ? `Line ${finding.line_start}`
+      : `Lines ${finding.line_start}-${finding.line_end}`;
+    const descHtml = finding.description
+      ? `<div class="finding-desc"><strong>${renderInlineMarkdown(finding.description)}</strong></div>`
+      : '';
+    const whyHtml = finding.why
+      ? `<div class="finding-why"><strong>Impact:</strong> ${renderInlineMarkdown(finding.why)}</div>`
+      : '';
+    const settleHtml = finding.to_settle
+      ? `<div class="finding-settle"><strong>To Settle:</strong> ${renderInlineMarkdown(finding.to_settle)}</div>`
+      : '';
+    const codeHtml = finding.original_code
+      ? `<div class="code-label">Original Code (${lineRange}):</div><div class="code-box">${escapeHtml(finding.original_code)}</div>`
+      : '';
+    return `${descHtml}${whyHtml}${settleHtml}${codeHtml}`;
+  }
+
   function createFindingCard(finding, index) {
     const card = document.createElement('div');
     card.className = `finding-card ${finding.approved ? 'approved' : ''}`;
@@ -1518,27 +2712,16 @@
 
     const sev = (finding.severity || 'medium').toLowerCase();
     const sevClass = `sev-${escapeHtml(sev)}`;
-    const isInDiff = Boolean(finding.is_diff_hunk);
-    const hunkBadge = isInDiff
+    const hunkBadge = finding.is_diff_hunk
       ? '<span class="hunk-pill hunk-in">IN DIFF</span>'
       : '<span class="hunk-pill hunk-out" title="Will append to top-level review summary">OUTSIDE DIFF</span>';
-
     const tier = (finding.evidence_tier || '').toLowerCase();
     const tierBadge = finding.evidence_tier
       ? `<span class="evidence-pill tier-${escapeHtml(tier)}" title="${escapeHtml(finding.evidence_detail || '')}">${escapeHtml(finding.evidence_tier)}</span>`
       : '';
-
-    const lineRange = finding.line_start === finding.line_end
-      ? `Line ${finding.line_start}`
-      : `Lines ${finding.line_start}-${finding.line_end}`;
-
-    const locationText = finding.line_end && finding.line_end !== finding.line_start
-      ? `${finding.file_path}:${finding.line_start}-${finding.line_end}`
-      : `${finding.file_path}:${finding.line_start}`;
-    const url = fileUrl(finding);
-    const location = url
-      ? `<a class="file-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer" title="Open on GitHub at the PR head commit">${escapeHtml(locationText)}</a>`
-      : `<span>${escapeHtml(locationText)}</span>`;
+    const location = formatFindingLocationHtml(finding);
+    const detailsHtml = formatFindingDetailsHtml(finding);
+    const isPreview = finding._tab === 'preview';
 
     card.innerHTML = `
       <div class="finding-header">
@@ -1557,27 +2740,13 @@
         </div>
       </div>
       <div class="finding-body">
-        ${finding.description ? `<div class="finding-desc"><strong>${escapeHtml(finding.description)}</strong></div>` : ''}
-
-        ${finding.why ? `
-          <div class="finding-why"><strong>Impact:</strong> ${escapeHtml(finding.why)}</div>
-        ` : ''}
-
-        ${finding.to_settle ? `
-          <div class="finding-settle"><strong>To Settle:</strong> ${escapeHtml(finding.to_settle)}</div>
-        ` : ''}
-
-        ${finding.original_code ? `
-          <div class="code-label">Original Code (${lineRange}):</div>
-          <div class="code-box">${escapeHtml(finding.original_code)}</div>
-        ` : ''}
-
+        ${detailsHtml}
         <label for="comment-editor-${index}" style="display: block; font-weight: 600; font-size: 12px; margin-bottom: 6px; color: var(--text-bright);">Comment (posted as written):</label>
         <div class="comment-box" id="comment-box-${index}">
           <div class="comment-tabs-header">
             <div class="comment-tabs" role="tablist" aria-label="Comment view mode">
-              <button type="button" id="comment-tab-write-${index}" class="comment-tab ${finding._tab === 'preview' ? '' : 'active'}" role="tab" aria-selected="${finding._tab === 'preview' ? 'false' : 'true'}" onclick="switchCommentTab(${index}, 'write')">Write</button>
-              <button type="button" id="comment-tab-preview-${index}" class="comment-tab ${finding._tab === 'preview' ? 'active' : ''}" role="tab" aria-selected="${finding._tab === 'preview' ? 'true' : 'false'}" onclick="switchCommentTab(${index}, 'preview')">Preview</button>
+              <button type="button" id="comment-tab-write-${index}" class="comment-tab ${isPreview ? '' : 'active'}" role="tab" aria-selected="${isPreview ? 'false' : 'true'}" onclick="switchCommentTab(${index}, 'write')">Write</button>
+              <button type="button" id="comment-tab-preview-${index}" class="comment-tab ${isPreview ? 'active' : ''}" role="tab" aria-selected="${isPreview ? 'true' : 'false'}" onclick="switchCommentTab(${index}, 'preview')">Preview</button>
             </div>
             <div class="comment-tab-actions">
               <button type="button" class="btn-tool" onclick="insertSuggestion(${index})">
@@ -1589,11 +2758,11 @@
           <textarea id="comment-editor-${index}"
                     class="markdown-editor"
                     rows="10"
-                    style="display: ${finding._tab === 'preview' ? 'none' : 'block'};"
+                    style="display: ${isPreview ? 'none' : 'block'};"
                     oninput="onCommentChange(${index}, this.value)">${escapeHtml(finding.draft_comment || '')}</textarea>
           <div id="comment-preview-${index}"
                class="markdown-rendered comment-preview"
-               style="display: ${finding._tab === 'preview' ? 'block' : 'none'};">${finding._tab === 'preview' ? renderCommentPreviewHtml(finding.draft_comment || '') : ''}</div>
+               style="display: ${isPreview ? 'block' : 'none'};">${isPreview ? renderCommentPreviewHtml(finding.draft_comment || '') : ''}</div>
         </div>
       </div>
     `;
@@ -1611,28 +2780,8 @@
     const previewBtn = document.getElementById(`comment-tab-preview-${index}`);
     const editor = document.getElementById(`comment-editor-${index}`);
     const preview = document.getElementById(`comment-preview-${index}`);
-
-    if (writeBtn) {
-      writeBtn.classList.toggle('active', !isPreview);
-      writeBtn.setAttribute('aria-selected', isPreview ? 'false' : 'true');
-    }
-    if (previewBtn) {
-      previewBtn.classList.toggle('active', isPreview);
-      previewBtn.setAttribute('aria-selected', isPreview ? 'true' : 'false');
-    }
-    if (editor) {
-      editor.style.display = isPreview ? 'none' : 'block';
-    }
-    if (preview) {
-      preview.style.display = isPreview ? 'block' : 'none';
-      if (isPreview) {
-        const currentText = editor ? editor.value : (finding.draft_comment || '');
-        preview.innerHTML = renderCommentPreviewHtml(currentText);
-      }
-    }
-    if (!isPreview && editor) {
-      fitEditor(editor);
-    }
+    const currentText = editor ? editor.value : (finding.draft_comment || '');
+    applyTabToggleDom(writeBtn, previewBtn, editor, preview, isPreview, currentText);
   }
 
   function setApproval(index, approved) {

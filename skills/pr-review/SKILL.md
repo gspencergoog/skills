@@ -181,7 +181,7 @@ Follow these steps in order when reviewing a pull request:
      Set `WaitMsBeforeAsync` to `1000` so the server runs in the background.
      If the output shows `Warning: pr_metadata.<field> is missing`, stop the task, fix `pr_meta.json` or the findings file, and relaunch. The dashboard disables Submit until `owner`, `repo`, `pull_number`, and `head_sha` are present.
    - The annotated PR description appears in a formatted Markdown card at the top of the dashboard for reviewer context only (`apply_review.py` never posts it; its text is included only if the user clicks **+ Insert into Review Summary**).
-   - Both the Review Summary field and every per-finding comment field provide GitHub-style **Write** and **Preview** tabs (defaulting to **Write**) so the reviewer can switch between editing raw Markdown and previewing rendered Markdown (including ```` ```suggestion ```` blocks).
+   - Both the Review Summary field and every per-finding comment field provide GitHub-style **Write** and **Preview** tabs (defaulting to **Write**) so the reviewer can switch between editing raw Markdown and previewing rendered Markdown (including GFM pipe tables, LaTeX math, Mermaid diagrams, and ```` ```suggestion ```` blocks).
    - Every finding starts unchecked. The user checks the ones to post, one at a time or with **Approve all shown**.
 3. **Wait for Completion**:
    Stop calling tools and go idle.
@@ -223,6 +223,6 @@ Follow these steps in order when reviewing a pull request:
 - **`scripts/diff_parser.py`**: Unified diff parser and diff hunk line validator.
 - **`scripts/review_engine.py`**: Two-stage workspace preparer (`--prepare-workspace`, with hardened git config, static execution-risk pre-scanning into `pr_coords.json.security_prescan` or `--security-scan`, and GitHub stack detection via `gh stack view --json` into `--output-stack`), context fetcher (`--fetch-context` with `--require-blind-description` and `--input-stack`), and cleanup utility.
 - **`scripts/launch_dashboard.py`**: Local HTTP server and `--dump-json` data normalizer for the interactive review dashboard. Normalizes findings and merges `--meta-file` and `--description-file`.
-- **`assets/review_dashboard.html`**: Interactive dark-themed single-page review dashboard with a top-level Blind Diff Description & Intent Alignment card and GitHub-style `Write` / `Preview` tabbed Markdown editors for the Review Summary and per-finding comment fields.
+- **`assets/review_dashboard.html`**: Interactive dark-themed single-page review dashboard with a top-level Blind Diff Description & Intent Alignment card and GitHub-style `Write` / `Preview` tabbed Markdown editors (rendering GFM pipe tables, LaTeX MathML, and Mermaid SVG diagrams) for the Review Summary and per-finding comment fields.
 - **`scripts/apply_review.py`**: Submits batched review payloads to the GitHub Reviews API with hybrid comment routing.
 

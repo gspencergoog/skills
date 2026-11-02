@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 test_launch_dashboard.py - Unit tests for launch_dashboard.py.
 """
@@ -13,6 +12,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 from launch_dashboard import (
     ReviewDashboardHandler,
@@ -344,7 +344,7 @@ class TestLaunchDashboard(unittest.TestCase):
 
 
 class TestNormalizeReviewData(unittest.TestCase):
-    FULL_META = {
+    FULL_META: ClassVar[dict[str, object]] = {
         "pull_number": 7,
         "owner": "o",
         "repo": "r",
@@ -537,7 +537,9 @@ const payloads = [
   "# Heading <img src=x onerror=alert(1)>",
   "Click [here](javascript:alert(1)) or [ok](https://example.com/a\\"onmouseover=\\"alert(1))",
   "> [!WARNING] <script>alert(1)</script>\\n> Body `<b>code</b>` **bold**",
-  "```js\\"><img src=x>\\nconst x = 1 < 2;\\n```"
+  "```js\\"><img src=x>\\nconst x = 1 < 2;\\n```",
+  "| Col <script>alert(1)</script> | Val |\\n| --- | --- |\\n| <img src=x onerror=alert(1)> | $\\\\text{<script>evil()</script>}$ |",
+  "```mermaid\\nflowchart LR\\n  A[\\"<img src=x onerror=alert(1)>\\"] -->|<script>alert(1)</script>| B\\n```"
 ];
 const out = payloads.map(p => renderMarkdownSafe(p)).join("\\n---\\n");
 console.log(out);
@@ -557,6 +559,196 @@ console.log(out);
         self.assertIn("&lt;img src=x onerror=alert(1)&gt;", rendered)
         self.assertIn("callout-warning", rendered)
         self.assertIn("<code>&lt;b&gt;code&lt;/b&gt;</code>", rendered)
+        self.assertIn('<table class="md-table">', rendered)
+        self.assertIn("<mtext>&lt;script&gt;evil()&lt;/script&gt;</mtext>", rendered)
+        self.assertIn('<svg class="md-mermaid-svg"', rendered)
+
+    @unittest.skipUnless(
+        shutil.which("node"), "node is required for JS Markdown table tests"
+    )
+    def test_dashboard_markdown_tables_rendering(self):
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        script_match = re.search(r"<script>([\s\S]*?)</script>", html)
+        self.assertIsNotNone(script_match)
+        js_code = script_match.group(1)
+        harness = (
+            "const window = { addEventListener: () => {} };\n"
+            "const document = {};\n"
+            + js_code
+            + "\n"
+            + r"""
+const md = [
+  "Intro paragraph before table",
+  "| Metric | Formula | Complexity | Notes |",
+  "| :--- | :---: | ---: | --- |",
+  "| Latency | $|x| + \\|y\\| \\le 1$ | `a | b` | Escaped \\| pipe and **bold** |",
+  "",
+  "> [!NOTE]",
+  "> | Inside | Callout |",
+  "> | --- | --- |",
+  "> | Yes | `ok` |"
+].join("\n");
+console.log(renderMarkdownSafe(md));
+"""
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rendered = proc.stdout
+        self.assertIn('<div class="md-table-wrap"><table class="md-table">', rendered)
+        self.assertIn('<th style="text-align:left">Metric</th>', rendered)
+        self.assertIn('<th style="text-align:center">Formula</th>', rendered)
+        self.assertIn('<th style="text-align:right">Complexity</th>', rendered)
+        self.assertIn("<code>a | b</code>", rendered)
+        self.assertIn("Escaped | pipe and <strong>bold</strong>", rendered)
+        self.assertIn("<mo>‖</mo>", rendered)
+        self.assertIn("callout-note", rendered)
+        self.assertEqual(rendered.count('<table class="md-table">'), 2)
+
+    @unittest.skipUnless(
+        shutil.which("node"), "node is required for JS LaTeX math tests"
+    )
+    def test_dashboard_markdown_latex_math_rendering(self):
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        script_match = re.search(r"<script>([\s\S]*?)</script>", html)
+        self.assertIsNotNone(script_match)
+        js_code = script_match.group(1)
+        harness = (
+            "const window = { addEventListener: () => {} };\n"
+            "const document = {};\n"
+            + js_code
+            + "\n"
+            + r"""
+const md = [
+  "Inline $\\frac{\\alpha_1 + \\beta^2}{\\sqrt[3]{x}}$ and \\(\\mathcal{O}(n \\log n) \\in \\mathbb{R}\\).",
+  "Price is \\$100 to \\$200 and shell var is `$HOME` or `$1`.",
+  "",
+  "$$",
+  "A = \\begin{pmatrix} 1 & 2 \\\\ 3 & 4 \\end{pmatrix}, \\quad \\hat{y} = \\mathbf{W}x",
+  "$$",
+  "",
+  "\\[",
+  "\\sum_{i=1}^{n} x_i \\ge 0",
+  "\\]"
+].join("\n");
+console.log(renderMarkdownSafe(md));
+"""
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rendered = proc.stdout
+        self.assertIn(
+            '<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline">',
+            rendered,
+        )
+        self.assertIn(
+            '<div class="md-math-block"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block">',
+            rendered,
+        )
+        self.assertIn("<mfrac>", rendered)
+        self.assertIn("<mroot>", rendered)
+        self.assertIn("<mtable>", rendered)
+        self.assertIn("<mover>", rendered)
+        self.assertIn("𝒪", rendered)
+        self.assertIn("ℝ", rendered)
+        self.assertIn("Price is $100 to $200", rendered)
+        self.assertIn("<code>$HOME</code>", rendered)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for JS Mermaid tests")
+    def test_dashboard_markdown_mermaid_rendering(self):
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        script_match = re.search(r"<script>([\s\S]*?)</script>", html)
+        self.assertIsNotNone(script_match)
+        js_code = script_match.group(1)
+        harness = (
+            "const window = { addEventListener: () => {} };\n"
+            "const document = {};\n"
+            + js_code
+            + "\n"
+            + r"""
+const md = [
+  "```mermaid",
+  "flowchart LR",
+  "  A[Client] -->|HTTP| B(Server)",
+  "  B --> C{Valid?}",
+  "```",
+  "",
+  "```mermaid",
+  "stateDiagram-v2",
+  "  [*] --> Idle",
+  "  Idle --> Active : start",
+  "  Active --> [*]",
+  "```",
+  "",
+  "```mermaid",
+  "sequenceDiagram",
+  "  participant U as User",
+  "  participant S as Service",
+  "  U->>S: Request",
+  "  S-->>U: Response",
+  "```",
+  "",
+  "```mermaid",
+  "pie showData title Latency Budget",
+  "  \"Parse\" : 30",
+  "  \"Render\" : 70",
+  "```",
+  "",
+  "```mermaid",
+  "xychart-beta",
+  "  title \"Throughput\"",
+  "  x-axis [\"Q1\", \"Q2\"]",
+  "  y-axis \"req/s\" 0 --> 100",
+  "  bar [40, 85]",
+  "  line [35, 80]",
+  "```",
+  "",
+  "> [!NOTE]",
+  "> ```mermaid",
+  "> graph TD",
+  ">   X --> Y",
+  "> ```",
+  "",
+  "```mermaid",
+  "gantt",
+  "  title Unsupported Diagram",
+  "```"
+].join("\n");
+console.log(renderMarkdownSafe(md));
+"""
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        rendered = proc.stdout
+        self.assertEqual(rendered.count('<svg class="md-mermaid-svg"'), 6)
+        self.assertIn("md-mermaid-node", rendered)
+        self.assertIn("md-mermaid-actor", rendered)
+        self.assertIn('aria-label="Latency Budget"', rendered)
+        self.assertIn('aria-label="Throughput"', rendered)
+        self.assertIn(
+            '<pre class="code-box md-mermaid-fallback" data-lang="mermaid">',
+            rendered,
+        )
 
     def test_normalize_review_data_preserves_enriched_fields(self):
         data = {
@@ -587,7 +779,7 @@ console.log(out);
                 }
             ],
         }
-        normalized, warnings = normalize_review_data(data)
+        normalized, _warnings = normalize_review_data(data)
         summary = normalized["review_summary"]
         self.assertEqual(summary["checked_clean"], ["Memory leak: Executed - clean"])
         self.assertEqual(summary["structural_assessment"], {"implementer": "Clean"})
@@ -637,7 +829,7 @@ console.log(out);
             ],
         }
         pass1 = normalize_findings_payload(raw)
-        normalized, warnings = normalize_review_data(pass1)
+        normalized, _warnings = normalize_review_data(pass1)
         self.assertEqual([f["id"] for f in normalized["findings"]], ["H1", "Q1"])
         self.assertNotIn("questions", normalized)
 

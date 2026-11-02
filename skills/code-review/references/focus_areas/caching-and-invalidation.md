@@ -22,6 +22,10 @@ Theme id: `caching-and-invalidation`. Lane for merges: B.
    Look at: how the cache handles exceptions, rejected futures, or error returns from the loader. Settles it: trace the cache state after the loader throws or rejects; `Deduction`.
 6. Concurrent misses for the same cold or expired key trigger duplicate expensive loads instead of coalescing or locking per key.
    Look at: the miss path when the loader is asynchronous or releases the lock during fetch. Settles it: trace two concurrent calls missing on the same key; `Deduction`.
+7. A cursor or timestamp watermark advances when a bounded pagination loop (`max_pages`) stops before reaching the previous watermark or the end of the stream, permanently skipping older pages on future incremental runs.
+   Look at: pagination loops that cap iterations (`for _ in range(max_pages)`) and return the newest timestamp or cursor to the watermark store. Settles it: trace what is returned when the loop exhausts `max_pages` while `hasNextPage` is still true; `Read`.
+8. A `--force` or full-rebuild path bypasses a top-level ETag or commit SHA check without clearing downstream stream watermarks or purging deleted keys absent from the new snapshot.
+   Look at: how `force=True` propagates into sub-stream watermarks and whether full-snapshot replacements delete keys no longer present in the source. Settles it: trace `force=True` through all downstream sync functions and deletion queries; `Read`.
 
 ## Hypothesis templates
 
