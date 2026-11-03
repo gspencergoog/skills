@@ -7,16 +7,24 @@ GitHub API calls, reading blob contents directly from <target_sha>:<file_path>.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import shlex
 import subprocess
-import sys
 import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
-from types import ModuleType
+
+try:
+    from .blob_parsers import (
+        extract_content_entities,
+        parse_markdown_sections,
+    )
+except ImportError:
+    from blob_parsers import (  # type: ignore[no-redef]
+        extract_content_entities,
+        parse_markdown_sections,
+    )
 
 from db_store import PackratStore
 from models import (
@@ -71,47 +79,6 @@ _IGNORED_PATH_PARTS: frozenset[str] = frozenset(
 _PR_NUMBER_IN_SUBJECT_RE = re.compile(r"\(#(\d+)\)\s*$")
 
 
-def _find_context_indexer_dir() -> Path:
-    """Locates the companion context-indexer skill scripts directory."""
-    sibling = Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
-    candidates = [
-        sibling,
-        Path.home() / ".gemini" / "config" / "skills" / "context-indexer" / "scripts",
-        Path.home() / ".gemini" / "skills" / "context-indexer" / "scripts",
-        Path.home() / ".claude" / "skills" / "context-indexer" / "scripts",
-        Path.home() / ".agents" / "skills" / "context-indexer" / "scripts",
-    ]
-    for cand in candidates:
-        if cand.is_dir():
-            return cand
-    return sibling
-
-
-_CACHED_MODULES: dict[str, ModuleType] = {}
-
-
-def _load_context_indexer_module(script_name: str) -> ModuleType:
-    """Dynamically loads stage_diffs.py or stage_markdown.py from context-indexer."""
-    if script_name in _CACHED_MODULES:
-        return _CACHED_MODULES[script_name]
-    indexer_dir = _find_context_indexer_dir()
-    script_path = indexer_dir / f"{script_name}.py"
-    if not script_path.is_file():
-        raise ImportError(
-            f"Missing companion skill script '{script_path}'. "
-            "Install the 'context-indexer' skill alongside 'packrat'."
-        )
-    mod_name = f"context_indexer_{script_name}"
-    spec = importlib.util.spec_from_file_location(mod_name, script_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Unable to load {script_path}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    _CACHED_MODULES[script_name] = mod
-    return mod
-
-
 _SCP_REMOTE_RE = re.compile(r"^(?:[^:/\s]+@)?(?:\[([^\]]+)\]|([^@:/\s]+)):(.+)$")
 _BASE_BATCH_SSH_CMD = (
     "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
@@ -158,9 +125,15 @@ def _build_git_ssh_env(
 
     ssh_cmd = _BASE_BATCH_SSH_CMD
     key_path = (
-        ssh_key_path.expanduser() if ssh_key_path is not None else Path.home() / ".ssh" / "github"
+        ssh_key_path.expanduser()
+        if ssh_key_path is not None
+        else Path.home() / ".ssh" / "github"
     )
-    if remote_url and _extract_remote_host(remote_url) == "github.com" and key_path.exists():
+    if (
+        remote_url
+        and _extract_remote_host(remote_url) == "github.com"
+        and key_path.exists()
+    ):
         ssh_cmd = f"{ssh_cmd} -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes"
     env["GIT_SSH_COMMAND"] = ssh_cmd
     return env
@@ -249,7 +222,9 @@ def _fetch_remote_ref(
 ) -> None:
     """Runs git fetch on the candidate remote branch and records a warning if it fails."""
     rem_name, rem_branch = remote_spec.split("/", 1)
-    resolved_url = _parse_remotes(repo_dir).get(rem_name) if remote_url is None else remote_url
+    resolved_url = (
+        _parse_remotes(repo_dir).get(rem_name) if remote_url is None else remote_url
+    )
     extra_env = _build_git_ssh_env(resolved_url)
     try:
         res = run_git_command(
@@ -355,7 +330,9 @@ def list_changed_files(
         return (), ()
 
     if force or not _commit_exists(repo_dir, old_sha):
-        res = run_git_command(repo_dir, ["ls-tree", "-r", "--name-only", new_sha], timeout=30)
+        res = run_git_command(
+            repo_dir, ["ls-tree", "-r", "--name-only", new_sha], timeout=30
+        )
         if res.returncode != 0:
             return (), ()
         all_files = sorted(
@@ -471,7 +448,11 @@ def _parse_single_commit_block(
         files=files,
     )
     touched_preview = ", ".join(f.file_path for f in files[:15])
-    chunk_text = f"{full_msg}\n\nFiles: {touched_preview}".strip() if touched_preview else full_msg
+    chunk_text = (
+        f"{full_msg}\n\nFiles: {touched_preview}".strip()
+        if touched_preview
+        else full_msg
+    )
     chunk = TextChunk(
         chunk_id=f"{repo.full_name}@commit:{sha[:12]}",
         repo_id=repo.repo_id,
@@ -497,7 +478,9 @@ def index_commits(
     """Extracts CommitRecord and TextChunk entries between old_sha and new_sha."""
     if old_sha == new_sha:
         return [], []
-    range_arg = f"{old_sha}..{new_sha}" if _commit_exists(repo_dir, old_sha) else new_sha
+    range_arg = (
+        f"{old_sha}..{new_sha}" if _commit_exists(repo_dir, old_sha) else new_sha
+    )
     fmt = "__COMMIT__%x00%H%x00%an%x00%ae%x00%cI%x00%s%x00%b%x00__FILES__"
     res = run_git_command(
         repo_dir,
@@ -542,14 +525,9 @@ def _extract_markdown_sections_from_blob(
     file_path: str,
     blob_text: str,
 ) -> tuple[list[DocSectionRecord], list[TextChunk]]:
-    """Parses Markdown sections in memory using context-indexer's stage_markdown."""
-    stage_md = _load_context_indexer_module("stage_markdown")
+    """Parses Markdown sections in memory using blob_parsers."""
     raw_lines = blob_text.splitlines()
-    records = [stage_md.LineRecord(line_num=i + 1, raw=ln) for i, ln in enumerate(raw_lines)]
-    stage_md._mark_frontmatter(records)
-    stage_md._mark_fences(records)
-    stage_md._mark_headings_and_sections(records)
-    raw_sections = stage_md._build_sections(file_path, records)
+    raw_sections = parse_markdown_sections(file_path, raw_lines)
 
     now = utc_now_iso()
     sections: list[DocSectionRecord] = []
@@ -558,7 +536,9 @@ def _extract_markdown_sections_from_blob(
         l_start = int(sec["line_start"])
         l_end = int(sec["line_end"])
         sub_end = int(sec["subtree_line_end"])
-        body_text = "\n".join(raw_lines[max(0, l_start - 1) : min(len(raw_lines), l_end)]).strip()
+        body_text = "\n".join(
+            raw_lines[max(0, l_start - 1) : min(len(raw_lines), l_end)]
+        ).strip()
         heading = str(sec["heading"])
         breadcrumb = str(sec["breadcrumb"])
         sec_id = int(sec["section_id"])
@@ -603,9 +583,8 @@ def _extract_code_symbols_from_blob(
     file_path: str,
     blob_text: str,
 ) -> tuple[list[CodeSymbolRecord], list[TextChunk]]:
-    """Extracts AST symbol spans in memory using context-indexer's stage_diffs."""
-    stage_diffs = _load_context_indexer_module("stage_diffs")
-    entities = stage_diffs._extract_content_entities(file_path, "NEW", blob_text, full_path=None)
+    """Extracts AST symbol spans in memory using blob_parsers."""
+    entities = extract_content_entities(file_path, "NEW", blob_text, full_path=None)
     raw_lines = blob_text.splitlines()
     now = utc_now_iso()
 
@@ -680,11 +659,15 @@ def index_files_at_sha(
             continue
         ext = Path(file_path).suffix.lower()
         if ext in MARKDOWN_EXTENSIONS:
-            secs, chs = _extract_markdown_sections_from_blob(repo, target_sha, file_path, blob)
+            secs, chs = _extract_markdown_sections_from_blob(
+                repo, target_sha, file_path, blob
+            )
             all_sections.extend(secs)
             all_chunks.extend(chs)
         elif ext in CODE_EXTENSIONS:
-            syms, chs = _extract_code_symbols_from_blob(repo, target_sha, file_path, blob)
+            syms, chs = _extract_code_symbols_from_blob(
+                repo, target_sha, file_path, blob
+            )
             all_symbols.extend(syms)
             all_chunks.extend(chs)
         reporter.advance(idx, total_files, detail=file_path)
@@ -707,7 +690,9 @@ def sync_git_codebase(
         return stats
 
     repo_dir = Path(repo.local_path).expanduser()
-    resolved = resolve_canonical_ref(repo_dir, repo, fetch=fetch, reporter=reporter, stats=stats)
+    resolved = resolve_canonical_ref(
+        repo_dir, repo, fetch=fetch, reporter=reporter, stats=stats
+    )
     if resolved is None:
         stats.skipped_reason = f"missing_git_repo:{repo_dir}"
         return stats
@@ -727,7 +712,9 @@ def sync_git_codebase(
         store.upsert_commits(commits)
         store.upsert_chunks(commit_chunks)
 
-    modified_files, deleted_files = list_changed_files(repo_dir, old_sha, target_sha, force=force)
+    modified_files, deleted_files = list_changed_files(
+        repo_dir, old_sha, target_sha, force=force
+    )
     if (force or not _commit_exists(repo_dir, old_sha)) and modified_files:
         indexed_rows = store.conn.execute(
             """
@@ -742,7 +729,11 @@ def sync_git_codebase(
         ).fetchall()
         live_set = set(modified_files)
         deleted_files = tuple(
-            sorted(str(r["file_path"]) for r in indexed_rows if str(r["file_path"]) not in live_set)
+            sorted(
+                str(r["file_path"])
+                for r in indexed_rows
+                if str(r["file_path"]) not in live_set
+            )
         )
     symbols, sections, file_chunks = index_files_at_sha(
         repo_dir, repo, target_sha, modified_files, reporter=reporter
