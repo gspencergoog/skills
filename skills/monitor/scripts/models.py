@@ -268,6 +268,7 @@ class MonitorState:
     pushed_shas: dict[str, str] = field(default_factory=dict)
     reruns: dict[str, list[str]] = field(default_factory=dict)
     reported_threads: dict[str, dict[str, str]] = field(default_factory=dict)
+    daemon: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> MonitorState:
@@ -289,6 +290,7 @@ class MonitorState:
             "pushed_shas": dict(self.pushed_shas),
             "reruns": {k: list(v) for k, v in self.reruns.items()},
             "reported_threads": {k: dict(v) for k, v in self.reported_threads.items()},
+            "daemon": dict(self.daemon),
         }
 
     @classmethod
@@ -310,4 +312,5 @@ class MonitorState:
             pushed_shas={str(k): str(v) for k, v in (data.get("pushed_shas") or {}).items()},
             reruns={str(k): [str(x) for x in v] for k, v in (data.get("reruns") or {}).items()},
             reported_threads=_parse_reported_threads(data.get("reported_threads")),
+            daemon=dict(data.get("daemon") or {}),
         )

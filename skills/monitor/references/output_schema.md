@@ -29,6 +29,10 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--pushed-sha PR=SHA` | repeatable | Record a commit SHA pushed by the agent so `head_push` is suppressed for that SHA |
 | `--mark-rerun PR=CHECK@SHA` | repeatable | Record a one-time flaky check rerun so a second failure routes to `diagnose_ci` |
 | `--no-notifications` | `false` | Skip `GET /notifications` and use GraphQL polling only |
+| `--daemon` | `false` | Run continuously as a background daemon, notifying the conversation via `agentapi` and waiting for acks in `control.jsonl` |
+| `--control FILE` | `<state-dir>/control.jsonl` | Path to the control commands file for daemon mode |
+| `--reminder SECONDS` | `1800` | Re-notify conversation if an active batch remains unacknowledged (`0` disables) |
+| `--notify-scope SCOPE` | `mine` | Which pull request events trigger conversation notifications: `mine` (viewer PRs + terminal) or `all` |
 
 ## 2. Exit Codes and Precedence
 
@@ -36,10 +40,11 @@ When multiple conditions hold on the same tick, precedence is **terminal (`3`) >
 
 | Exit code | `exit_reason` | JSON on `stdout` | Meaning |
 | :--- | :--- | :--- | :--- |
-| `0` | `change` (or `snapshot` with `--once`) | Yes | Matching wake events were collected (or `--once` completed without terminal state) |
+| `0` | `change` (or `snapshot` with `--once`, or `stopped` with `--daemon`) | Yes | Matching wake events were collected, `--once` completed, or daemon received `{"stop": true}` |
 | `1` | none | No (diagnostics on `stderr`) | Invalid arguments, corrupt state file, startup error, or 5 consecutive GitHub failures |
 | `2` | `timeout` | Yes (`events: []`) | `--timeout` elapsed with no matching wake events |
 | `3` | `terminal` | Yes | Every watched pull request satisfied `--until` (`merged`, `closed`, or `all-green`) |
+| `4` | `already_running` | Yes (when `--output` or `--daemon`) | Another daemon process holds the liveness lock for this state directory |
 | `130` | interrupted | No (state saved) | Interrupted by `SIGINT` |
 | `143` | interrupted | No (state saved) | Terminated by `SIGTERM` |
 

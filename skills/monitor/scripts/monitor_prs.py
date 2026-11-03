@@ -15,6 +15,16 @@ from pathlib import Path
 from typing import Any
 
 from a2ui_board import board_data_model, board_dsl, sync_pane_store, write_board_file
+from daemon_support import (
+    CONTROL_FILE,
+    EXIT_ALREADY_RUNNING,
+    AckGate,
+    ControlReader,
+    Liveness,
+    Notifier,
+    format_batch_message,
+    resolve_notifier,
+)
 from diff_events import (
     DiffContext,
     diff_snapshots,
@@ -166,7 +176,33 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Disable /notifications polling and use GraphQL polling only.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run continuously as a daemon, notifying the conversation on change without exiting.",
+    )
+    parser.add_argument(
+        "--control",
+        help="Path to control instructions JSONL file (default: <state-dir>/control.jsonl).",
+    )
+    parser.add_argument(
+        "--reminder",
+        type=int,
+        default=1200,
+        help="Seconds before sending a reminder for unacknowledged batches (default: 1200).",
+    )
+    parser.add_argument(
+        "--notify-scope",
+        choices=("mine", "all"),
+        default="mine",
+        help="Which PRs can wake the agent in daemon mode (default: mine).",
+    )
+    args = parser.parse_args(argv)
+    if args.daemon and args.once:
+        parser.error("cannot use --daemon and --once together")
+    if args.daemon and not args.conversation_id:
+        parser.error("--daemon requires --conversation-id")
+    return args
 
 
 def _parse_kv(item: str, default_repo: str | None) -> tuple[str, str]:
@@ -177,16 +213,32 @@ def _parse_kv(item: str, default_repo: str | None) -> tuple[str, str]:
     return pr_key(repo, number), val.strip()
 
 
+def apply_override_items(
+    state: MonitorState,
+    pushed: list[Any],
+    reruns: list[str],
+    default_repo: str | None,
+) -> None:
+    """Applies pushed SHA overrides and flaky check rerun markers to state."""
+    for raw in pushed:
+        if isinstance(raw, dict):
+            for k, v in raw.items():
+                repo, num = parse_pr_ref(str(k), default_repo)
+                state.pushed_shas[pr_key(repo, num)] = str(v).strip()
+        elif isinstance(raw, str):
+            key, sha = _parse_kv(raw, default_repo)
+            state.pushed_shas[key] = sha
+    for raw in reruns:
+        if isinstance(raw, str):
+            key, token = _parse_kv(raw, default_repo)
+            existing = state.reruns.setdefault(key, [])
+            if token not in existing:
+                existing.append(token)
+
+
 def apply_cli_overrides(args: argparse.Namespace, state: MonitorState) -> None:
     """Applies ``--pushed-sha`` and ``--mark-rerun`` flags to ``state`` before refreshing."""
-    for raw in args.pushed_sha or []:
-        key, sha = _parse_kv(raw, args.repo)
-        state.pushed_shas[key] = sha
-    for raw in args.mark_rerun or []:
-        key, token = _parse_kv(raw, args.repo)
-        existing = state.reruns.setdefault(key, [])
-        if token not in existing:
-            existing.append(token)
+    apply_override_items(state, args.pushed_sha or [], args.mark_rerun or [], args.repo)
 
 
 def _list_prs_by_branch(
@@ -293,6 +345,7 @@ class Monitor:
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], str] = utcnow_iso,
         epoch_now: Callable[[], float] = time.time,
+        notifier: Notifier | None = None,
     ) -> None:
         self.runner = runner
         self.state_path = Path(state_path)
@@ -300,6 +353,7 @@ class Monitor:
         self.sleep = sleep
         self.now = now
         self.epoch_now = epoch_now
+        self.notifier = notifier
         self.state = MonitorState.empty()
         self.watched_keys: list[str] = []
         self.viewer: str = ""
@@ -307,6 +361,12 @@ class Monitor:
         self.notifications_enabled = True
         self._warned_truncated: set[str] = set()
         self._interrupted_code: int | None = None
+        self.liveness: Liveness | None = None
+        self.control_reader: ControlReader | None = None
+        self.gate: AckGate = AckGate()
+        self._send_backoff: float = 60.0
+        self._next_send_retry: float = 0.0
+        self._last_batch_id: int | None = None
 
     def _warn_truncation(self, pr: str, fields: list[str]) -> None:
         if not fields or pr in self._warned_truncated:
@@ -399,6 +459,8 @@ class Monitor:
         exit_code: int,
         events: list[Event],
         args: argparse.Namespace,
+        batch_id: int | None = None,
+        notify_mode: str | None = None,
     ) -> dict[str, Any]:
         observed_at = self.now()
         etas = self._compute_etas()
@@ -408,6 +470,7 @@ class Monitor:
             entry = snap.to_dict()
             entry["eta_s"] = etas.get(key)
             prs_dict[key] = entry
+        effective_mode = notify_mode or ("agentapi" if self.notifier else "exit")
         payload: dict[str, Any] = {
             "schema": SCHEMA_VERSION,
             "exit_reason": exit_reason,
@@ -417,7 +480,11 @@ class Monitor:
             "prs": prs_dict,
             "events": [ev.to_dict() for ev in events],
             "eta": etas,
+            "notify_mode": effective_mode,
+            "notifier": list(self.notifier.argv_prefix) if self.notifier else None,
         }
+        if batch_id is not None:
+            payload["batch_id"] = batch_id
         a2ui_meta = self._sync_board(events, args, observed_at=observed_at)
         if a2ui_meta is not None:
             payload["a2ui"] = a2ui_meta
@@ -517,6 +584,104 @@ class Monitor:
         self.emit(payload, args)
         return code
 
+    def _filter_wake_events_for_scope(self, events: list[Event], scope: str) -> list[Event]:
+        if scope != "mine":
+            return list(events)
+        filtered: list[Event] = []
+        for ev in events:
+            snap = self.state.snapshots.get(ev.pr)
+            if (snap and snap.mine) or ev.kind == "terminal":
+                filtered.append(ev)
+        return filtered
+
+    def _process_control(self, default_repo: str | None) -> bool:
+        if self.control_reader is None:
+            return False
+        cmds = self.control_reader.read_new()
+        for ack_id in cmds.acks:
+            self.gate.ack(ack_id)
+        pushed: list[Any] = []
+        for override in cmds.overrides:
+            if "pushed_sha" in override:
+                pushed.append(override["pushed_sha"])
+        apply_override_items(self.state, pushed, cmds.mark_reruns, default_repo)
+        self.state.daemon["gate"] = self.gate.to_dict()
+        self.state.daemon["control_offset"] = self.control_reader.offset
+        return cmds.stop
+
+    def _dispatch_daemon_batch(
+        self,
+        now: float,
+        accumulated: list[Event],
+        args: argparse.Namespace,
+    ) -> bool:
+        if not self.gate.can_send() or now < self._next_send_retry:
+            return False
+        events_to_wake = self._filter_wake_events_for_scope(
+            accumulated, getattr(args, "notify_scope", "mine")
+        )
+        if not events_to_wake:
+            self._sync_board(accumulated, args)
+            save_state(self.state_path, self.state)
+            accumulated.clear()
+            return True
+
+        batch_id = self.gate.mark_sent(now)
+        self._last_batch_id = batch_id
+        payload = self._build_payload(
+            "change", 0, accumulated, args, batch_id=batch_id, notify_mode="agentapi"
+        )
+        self.emit(payload, args)
+
+        summary = summarize(events_to_wake)
+        last_json = (
+            Path(args.output)
+            if getattr(args, "output", None)
+            else (self.state_path.parent / "last.json")
+        )
+        control_path = (
+            self.control_reader.path
+            if self.control_reader
+            else (self.state_path.parent / CONTROL_FILE)
+        )
+        title, body = format_batch_message(
+            skill="PR Monitor",
+            batch_id=batch_id,
+            summary=summary,
+            events=[e.to_dict() for e in events_to_wake],
+            last_json=last_json,
+            control=control_path,
+        )
+
+        sent = False
+        if self.notifier and getattr(args, "conversation_id", None):
+            sent = self.notifier.send(args.conversation_id, title, body)
+        if sent:
+            self._send_backoff = 60.0
+            self._next_send_retry = 0.0
+            accumulated.clear()
+            self.state.daemon["gate"] = self.gate.to_dict()
+            save_state(self.state_path, self.state)
+            return True
+        else:
+            self._next_send_retry = now + self._send_backoff
+            self._send_backoff = min(600.0, self._send_backoff * 2)
+            self.gate.awaiting = None
+            return False
+
+    def _check_reminder(self, now: float, reminder_s: float, conversation_id: str | None) -> None:
+        if not self.gate.reminder_due(now, reminder_s) or not self.notifier or not conversation_id:
+            return
+        title = f"[PR Monitor] Reminder: Batch {self.gate.awaiting} awaiting acknowledgment"
+        body = (
+            f"Batch {self.gate.awaiting} has unacknowledged events. "
+            f'Append `{{"ack": {self.gate.awaiting}}}` to control.jsonl.'
+        )
+        self.notifier.send(conversation_id, title, body)
+        self.gate.record_reminder(now)
+        self.state.daemon["gate"] = self.gate.to_dict()
+        save_state(self.state_path, self.state)
+
     def _check_exit_conditions(
         self,
         now: float,
@@ -530,12 +695,17 @@ class Monitor:
             return self._interrupted_code
         if is_terminal(self.state.snapshots, args.until):
             return self._finish_with("terminal", 3, accumulated, args)
-        if debounce_deadline is not None and now >= debounce_deadline:
-            return self._finish_with("change", 0, accumulated, args)
         if timeout_deadline is not None and now >= timeout_deadline:
             reason = "change" if accumulated else "timeout"
             code = 0 if accumulated else 2
             return self._finish_with(reason, code, accumulated, args)
+        if getattr(args, "daemon", False):
+            if debounce_deadline is not None and now >= debounce_deadline:
+                self._dispatch_daemon_batch(now, accumulated, args)
+            self._check_reminder(now, float(args.reminder), getattr(args, "conversation_id", None))
+            return None
+        if debounce_deadline is not None and now >= debounce_deadline:
+            return self._finish_with("change", 0, accumulated, args)
         return None
 
     def _select_refresh_targets(
@@ -603,6 +773,20 @@ class Monitor:
             save_state(self.state_path, self.state)
         return next_full, next_notify, debounce_deadline
 
+    def _update_debounce_deadline(
+        self,
+        accumulated: list[Event],
+        debounce_deadline: float | None,
+        now: float,
+        poll_s: int,
+        is_daemon: bool,
+    ) -> float | None:
+        if not accumulated:
+            return None
+        if is_daemon and debounce_deadline is not None and now >= debounce_deadline:
+            return now + poll_s
+        return debounce_deadline
+
     def _loop(
         self,
         args: argparse.Namespace,
@@ -627,6 +811,12 @@ class Monitor:
             if exit_code is not None:
                 return exit_code
 
+            stop_exit = self._loop_heartbeat_and_control(accumulated, args)
+            if stop_exit is not None:
+                return stop_exit
+            debounce_deadline = self._update_debounce_deadline(
+                accumulated, debounce_deadline, now, poll_s, getattr(args, "daemon", False)
+            )
             wait_s = self._next_sleep_duration(
                 now, next_full, next_notify, debounce_deadline, timeout_deadline
             )
@@ -656,19 +846,91 @@ class Monitor:
                 next_full = now + delay
                 next_notify = now + delay
 
+    def _loop_heartbeat_and_control(
+        self, accumulated: list[Event], args: argparse.Namespace
+    ) -> int | None:
+        if self.liveness is not None:
+            self.liveness.beat()
+        if getattr(args, "daemon", False) and self._process_control(args.repo):
+            return self._finish_with("stopped", 0, accumulated, args)
+        return None
+
+    def _init_run_state(self, args: argparse.Namespace) -> tuple[set[str] | None, list[Event]]:
+        self._install_signal_handlers()
+        if self.notifier is None:
+            self.notifier = resolve_notifier()
+        allowed_kinds = _parse_event_list(args.events)
+        self.state = load_state(self.state_path)
+        apply_cli_overrides(args, self.state)
+        self.watched_keys = resolve_targets(args, self.runner, self.state)
+        self.notifications_enabled = not bool(args.no_notifications)
+        return allowed_kinds, self.refresh()
+
+    def _setup_daemon_mode(self, args: argparse.Namespace) -> int | None:
+        if not self.notifier:
+            sys.stderr.write(
+                "warning: agentapi notifier not found; falling back to exit-on-change mode\n"
+            )
+            args.daemon = False
+            return None
+
+        self.liveness = Liveness(self.state_path.parent)
+        ok, existing_pid = self.liveness.acquire()
+        if not ok:
+            payload = {
+                "schema": SCHEMA_VERSION,
+                "exit_reason": "already_running",
+                "exit_code": EXIT_ALREADY_RUNNING,
+                "pid": existing_pid,
+                "summary": f"Monitor daemon already running (PID {existing_pid})",
+            }
+            self.emit(payload, args)
+            return EXIT_ALREADY_RUNNING
+
+        self.liveness.arm(
+            {
+                "argv": sys.argv,
+                "cwd": os.getcwd(),
+                "skill": "monitor",
+                "poll_s": args.poll,
+                "conversation_id": args.conversation_id,
+            }
+        )
+        control_path = (
+            Path(args.control) if args.control else (self.state_path.parent / CONTROL_FILE)
+        )
+        self.control_reader = ControlReader(control_path)
+        if "gate" in self.state.daemon:
+            self.gate = AckGate.from_dict(self.state.daemon["gate"])
+        if "control_offset" in self.state.daemon:
+            self.control_reader.offset = int(self.state.daemon["control_offset"])
+        return None
+
+    def _handle_run_error(self, exc: GhError, args: argparse.Namespace) -> None:
+        sys.stderr.write(f"error: {exc}\n")
+        if (
+            self.notifier
+            and getattr(args, "conversation_id", None)
+            and getattr(args, "daemon", False)
+        ):
+            self.notifier.send(
+                args.conversation_id,
+                "[PR Monitor] Error: GitHub API failure",
+                f"Monitor daemon failed after {MAX_CONSECUTIVE_ERRORS} errors: {exc}",
+            )
+
     def run(self, args: argparse.Namespace) -> int:
         """Executes ``monitor_prs.py`` from parsed arguments and returns its exit code."""
-        self._install_signal_handlers()
         try:
-            allowed_kinds = _parse_event_list(args.events)
-            self.state = load_state(self.state_path)
-            apply_cli_overrides(args, self.state)
-            self.watched_keys = resolve_targets(args, self.runner, self.state)
-            self.notifications_enabled = not bool(args.no_notifications)
-            raw_events = self.refresh()
+            allowed_kinds, raw_events = self._init_run_state(args)
         except (ValueError, StateError, GhError) as exc:
             sys.stderr.write(f"error: {exc}\n")
             return 1
+
+        if getattr(args, "daemon", False):
+            daemon_code = self._setup_daemon_mode(args)
+            if daemon_code is not None:
+                return daemon_code
 
         matched = filter_events(raw_events, allowed_kinds)
         if args.once:
@@ -684,8 +946,12 @@ class Monitor:
         try:
             return self._loop(args, allowed_kinds, wake_events)
         except GhError as exc:
-            sys.stderr.write(f"error: {exc}\n")
+            self._handle_run_error(exc, args)
             return 1
+        finally:
+            if self.liveness is not None:
+                self.liveness.disarm()
+                self.liveness.release()
 
 
 def main(argv: list[str] | None = None) -> int:

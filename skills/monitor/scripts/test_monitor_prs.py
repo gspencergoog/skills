@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import signal
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from models import Event
 from monitor_prs import Monitor, parse_args
 from state import load_state
 from testing import FakeGh, load_fixture
@@ -438,6 +440,255 @@ class TestMonitorPrs(unittest.TestCase):
             self.assertEqual(code, 143)
             self.assertEqual(out_buf.getvalue(), "")
             self.assertTrue(Path(state_path).exists())
+
+
+class FakeNotifier:
+    def __init__(self, succeed: bool = True) -> None:
+        self.succeed = succeed
+        self.calls: list[dict[str, Any]] = []
+        self.argv_prefix = ("fake-agentapi", "send-message")
+
+    def send(self, conversation_id: str, title: str, body: str, timeout_s: float = 15.0) -> bool:
+        self.calls.append({"conversation_id": conversation_id, "title": title, "body": body})
+        return self.succeed
+
+
+class TestDaemonMode(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self.tmp.name)
+        self.state_path = str(self.state_dir / "state.json")
+        self.control_path = self.state_dir / "control.jsonl"
+        self.armed_path = self.state_dir / "armed.json"
+        self.output_path = str(self.state_dir / "last.json")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_daemon_already_running_returns_code_4(self) -> None:
+        import fcntl
+        lock_file = self.state_dir / "daemon.lock"
+        pid_file = self.state_dir / "daemon.pid"
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        pid_file.write_text("99999\n")
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        try:
+            fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
+            args = parse_args([
+                "acme/widget#3339",
+                "--state", self.state_path,
+                "--conversation-id", "conv-test",
+                "--daemon",
+                "--output", self.output_path,
+                "--no-notifications",
+            ])
+            mon = Monitor(runner=fake, state_path=self.state_path, notifier=FakeNotifier())
+            out_buf = io.StringIO()
+            with redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
+                code = mon.run(args)
+            self.assertEqual(code, 4)
+            data = json.loads(Path(self.output_path).read_text())
+            self.assertEqual(data["exit_reason"], "already_running")
+            self.assertEqual(data["pid"], 99999)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+    def test_daemon_notifies_and_respects_ack_and_stop(self) -> None:
+        # Fixture sequence:
+        # 1. initial refresh: ci running
+        # 2. refresh step 1: ci failed -> actionable event -> should notify batch 1
+        # 3. refresh step 2: another check failed -> should be held because awaiting ack
+        # 4. write ack and stop to control -> unblocks gate, stops cleanly
+        responses = [
+            ("graphql", 0, load_fixture("pr_open_ci_running.json"), ""),
+            ("graphql", 0, load_fixture("pr_ci_failed.json"), ""),
+            ("graphql", 0, load_fixture("pr_ci_failed.json"), ""),
+        ]
+        fake = FakeGh(responses)
+        notifier = FakeNotifier(succeed=True)
+        clk = FakeClock()
+        args = parse_args([
+            "acme/widget#3339",
+            "--state", self.state_path,
+            "--conversation-id", "conv-test",
+            "--daemon",
+            "--debounce", "0",
+            "--poll", "10",
+            "--output", self.output_path,
+            "--no-notifications",
+        ])
+
+        sleep_count = 0
+
+        def sleep_and_feed_control(seconds: float) -> None:
+            nonlocal sleep_count
+            clk.sleep(seconds)
+            sleep_count += 1
+            if sleep_count == 2:
+                # Write ack for batch 1 and stop
+                self.control_path.write_text('{"ack": 1}\n{"stop": true}\n')
+
+        mon = Monitor(
+            runner=fake,
+            state_path=self.state_path,
+            clock=clk,
+            sleep=sleep_and_feed_control,
+            now=lambda: "2026-11-03T18:00:00Z",
+            notifier=notifier,
+        )
+
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(self.armed_path.exists())  # disarmed on stop
+        self.assertEqual(len(notifier.calls), 1)
+        self.assertEqual(notifier.calls[0]["conversation_id"], "conv-test")
+        self.assertIn("Batch 1", notifier.calls[0]["title"])
+        self.assertIn('echo \'{"ack": 1}\'', notifier.calls[0]["body"])
+
+        data = json.loads(Path(self.output_path).read_text())
+        self.assertEqual(data["exit_reason"], "stopped")
+
+    def test_daemon_scope_mine_filters_non_owned_prs(self) -> None:
+        # Fixture with viewer != author (viewer is "bob", author is "alice")
+        # In pr_ci_failed, viewer is also "bob" (mine == False)
+        # Verify that when mine is False, notification is NOT sent for non-terminal events
+        running_json = load_fixture("pr_open_ci_running.json").replace('"alice"', '"bob"', 1)
+        failed_json = load_fixture("pr_ci_failed.json").replace('"alice"', '"bob"', 1)
+        responses = [
+            ("graphql", 0, running_json, ""),
+            ("graphql", 0, failed_json, ""),
+        ]
+        fake = FakeGh(responses)
+        notifier = FakeNotifier(succeed=True)
+        clk = FakeClock()
+        args = parse_args([
+            "acme/widget#3339",
+            "--state", self.state_path,
+            "--conversation-id", "conv-test",
+            "--daemon",
+            "--debounce", "0",
+            "--notify-scope", "mine",
+            "--poll", "10",
+            "--output", self.output_path,
+            "--no-notifications",
+        ])
+
+        sleep_count = 0
+
+        def sleep_and_stop(seconds: float) -> None:
+            nonlocal sleep_count
+            clk.sleep(seconds)
+            sleep_count += 1
+            if sleep_count == 1:
+                self.control_path.write_text('{"stop": true}\n')
+
+        mon = Monitor(
+            runner=fake,
+            state_path=self.state_path,
+            clock=clk,
+            sleep=sleep_and_stop,
+            now=lambda: "2026-11-03T18:00:00Z",
+            notifier=notifier,
+        )
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+
+        self.assertEqual(code, 0)
+        # Notification was NOT sent because mine == False and event was not terminal
+        self.assertEqual(len(notifier.calls), 0)
+
+    def test_daemon_requires_conversation_id(self) -> None:
+        with redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parse_args(["acme/widget#3339", "--state", self.state_path, "--daemon"])
+
+    def test_update_debounce_deadline_reschedules_when_past(self) -> None:
+        clk = FakeClock()
+        mon = Monitor(
+            runner=FakeGh([]),
+            state_path=self.state_path,
+            clock=clk,
+            notifier=FakeNotifier(),
+        )
+        events = [
+            Event(
+                pr="3339",
+                kind="ci_failed",
+                from_value="pending",
+                to_value="failed",
+                actionable=True,
+                suggested_action=None,
+                summary="lint failed",
+            )
+        ]
+        new_deadline = mon._update_debounce_deadline(
+            accumulated=events,
+            debounce_deadline=100.0,
+            now=150.0,
+            poll_s=10,
+            is_daemon=True,
+        )
+        self.assertEqual(new_deadline, 160.0)
+
+        self.assertIsNone(
+            mon._update_debounce_deadline(
+                accumulated=[],
+                debounce_deadline=100.0,
+                now=150.0,
+                poll_s=10,
+                is_daemon=True,
+            )
+        )
+
+    def test_daemon_dispatch_failure_retains_events_and_resets_gate(self) -> None:
+        responses = [
+            ("graphql", 0, load_fixture("pr_open_ci_running.json"), ""),
+            ("graphql", 0, load_fixture("pr_ci_failed.json"), ""),
+        ]
+        fake = FakeGh(responses)
+        notifier = FakeNotifier(succeed=False)
+        clk = FakeClock()
+        args = parse_args([
+            "acme/widget#3339",
+            "--state", self.state_path,
+            "--conversation-id", "conv-test",
+            "--daemon",
+            "--debounce", "0",
+            "--output", self.output_path,
+            "--no-notifications",
+        ])
+
+        sleep_count = 0
+
+        def sleep_and_stop(seconds: float) -> None:
+            nonlocal sleep_count
+            clk.sleep(seconds)
+            sleep_count += 1
+            if sleep_count == 1:
+                self.control_path.write_text('{"stop": true}\n')
+
+        mon = Monitor(
+            runner=fake,
+            state_path=self.state_path,
+            clock=clk,
+            sleep=sleep_and_stop,
+            now=lambda: "2026-11-03T18:00:00Z",
+            notifier=notifier,
+        )
+
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(mon.gate.awaiting)
+        self.assertGreater(mon._next_send_retry, 0.0)
 
 
 if __name__ == "__main__":
