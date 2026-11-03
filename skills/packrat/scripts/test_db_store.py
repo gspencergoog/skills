@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 from db_store import BACKFILL_COLUMNS, PackratStore, render_init_sql
 from models import (
@@ -268,7 +270,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         unembedded = self.store.get_unembedded_chunks(repo.repo_id, "test-model")
         self.assertEqual(len(unembedded), 1)
 
-        vec = l2_normalize([1.0 if i == 0 else 0.5 if i == 1 else 0.0 for i in range(EMBEDDING_DIM)])
+        vec = l2_normalize(
+            [1.0 if i == 0 else 0.5 if i == 1 else 0.0 for i in range(EMBEDDING_DIM)]
+        )
         self.store.upsert_embeddings(
             [
                 StoredEmbeddingRecord(
@@ -373,9 +377,18 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
                 )
             ]
         )
-        vec = l2_normalize([1.0 if i == number % EMBEDDING_DIM else 0.0 for i in range(EMBEDDING_DIM)])
+        vec = l2_normalize(
+            [1.0 if i == number % EMBEDDING_DIM else 0.0 for i in range(EMBEDDING_DIM)]
+        )
         self.store.upsert_embeddings(
-            [StoredEmbeddingRecord(chunk_id=chunk_id, model_id="test-model", content_sha256=sha, vector=vec)]
+            [
+                StoredEmbeddingRecord(
+                    chunk_id=chunk_id,
+                    model_id="test-model",
+                    content_sha256=sha,
+                    vector=vec,
+                )
+            ]
         )
         return chunk_id
 
@@ -383,7 +396,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         repo = self.store.register_repo("octo-org", "widgets")
         # A second repo whose name shares the first one's prefix must not be touched.
         other = self.store.register_repo("octo-org", "widgets-extra")
-        self.store.update_repo_sync_state(repo.repo_id, events_etag='"abc"', issues_watermark="2026-10-30T00:00:00Z")
+        self.store.update_repo_sync_state(
+            repo.repo_id, events_etag='"abc"', issues_watermark="2026-10-30T00:00:00Z"
+        )
         self._add_chunk_with_embedding(repo.repo_id, repo.full_name, 7)
         other_chunk = self._add_chunk_with_embedding(other.repo_id, other.full_name, 8)
 
@@ -403,7 +418,10 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         ).fetchall()
         self.assertEqual(
             [(r["chunk_id"], r["source_ref"]) for r in fts_rows],
-            [("new-org/widgets#issue:7", "new-org/widgets#7"), (other_chunk, "octo-org/widgets-extra#8")],
+            [
+                ("new-org/widgets#issue:7", "new-org/widgets#7"),
+                (other_chunk, "octo-org/widgets-extra#8"),
+            ],
         )
         self.assertEqual(self.store.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
 
@@ -457,10 +475,14 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         self.assertEqual(loaded.backfill("prs"), StreamBackfill("prs", "CUR_4", None))
         self.assertFalse(loaded.backfill("prs").complete)
 
-        self.store.set_backfill_state(repo.repo_id, "prs", cursor=None, done_at="2026-11-02T00:00:00Z")
+        self.store.set_backfill_state(
+            repo.repo_id, "prs", cursor=None, done_at="2026-11-02T00:00:00Z"
+        )
         loaded = self.store.get_repo_by_id(repo.repo_id)
         assert loaded is not None
-        self.assertEqual(loaded.backfill("prs"), StreamBackfill("prs", None, "2026-11-02T00:00:00Z"))
+        self.assertEqual(
+            loaded.backfill("prs"), StreamBackfill("prs", None, "2026-11-02T00:00:00Z")
+        )
         self.assertTrue(loaded.backfill("prs").complete)
 
         self.store.reset_backfill_state(repo.repo_id)
@@ -488,9 +510,383 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         self.assertIsNotNone(self.store.get_embedding(other_chunk))
         fts_ids = [
             r["chunk_id"]
-            for r in self.store.conn.execute("SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'subscription'")
+            for r in self.store.conn.execute(
+                "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'subscription'"
+            )
         ]
         self.assertEqual(fts_ids, [other_chunk])
+
+    def _run_duckdb_json(self, init_file: Path, query: str) -> list[dict[str, Any]]:
+        """Executes a DuckDB SQL query with init_file and returns parsed JSON rows."""
+        res = subprocess.run(
+            [
+                "duckdb",
+                "-batch",
+                "-no-stdin",
+                "-dark-mode",
+                "-json",
+                "-init",
+                str(init_file),
+                "-c",
+                query,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        out = res.stdout.strip()
+        return json.loads(out) if out else []
+
+    def _seed_collaboration_fixture(self) -> None:
+        """Populates PRs, reviews, inline threads, issues, and discussions for collaboration tests."""
+        repo = self.store.register_repo("octo-org", "widgets")
+        nested_comments = json.dumps(
+            [
+                {"author": {"login": "Carol"}},
+                {"author": None},
+                {"author": {"login": ""}},
+                {"author": {"login": "Bob"}},
+                {"author": {"login": "Bob"}},
+            ]
+        )
+        self.store.upsert_pull_requests(
+            [
+                PrRecord(
+                    repo_id=repo.repo_id,
+                    number=101,
+                    title="Refactor WidgetController lifecycle",
+                    state="MERGED",
+                    author="Alice",
+                    created_at="2026-02-01T10:00:00Z",
+                    updated_at="2026-02-05T12:00:00Z",
+                    merged_at="2026-02-05T12:00:00Z",
+                    url="https://github.com/octo-org/widgets/pull/101",
+                    reviews=(
+                        ReviewRecord(
+                            repo_id=repo.repo_id,
+                            review_id="RV_101_1",
+                            pr_number=101,
+                            state="approved",
+                            author="Bob",
+                        ),
+                        ReviewRecord(
+                            repo_id=repo.repo_id,
+                            review_id="RV_101_2",
+                            pr_number=101,
+                            state="",
+                            author="Carol",
+                        ),
+                        ReviewRecord(
+                            repo_id=repo.repo_id,
+                            review_id="RV_101_ghost",
+                            pr_number=101,
+                            state="COMMENTED",
+                            author=None,
+                        ),
+                    ),
+                    review_threads=(
+                        ReviewThreadRecord(
+                            thread_id="RT_101_nested",
+                            repo_id=repo.repo_id,
+                            pr_number=101,
+                            file_path="src/controller.ts",
+                            line=20,
+                            reviewer="Carol",
+                            body="Carol and Bob thread",
+                            comments_json=nested_comments,
+                        ),
+                    ),
+                    comments=(
+                        CommentRecord(
+                            repo_id=repo.repo_id,
+                            comment_id="PR_IC_101",
+                            parent_kind="pr",
+                            parent_number=101,
+                            author="Bob",
+                            body="Ship it!",
+                            url="https://github.com/octo-org/widgets/pull/101#issuecomment-1",
+                        ),
+                    ),
+                ),
+                PrRecord(
+                    repo_id=repo.repo_id,
+                    number=102,
+                    title="Co-reviewed surface adapter",
+                    state="OPEN",
+                    author="Carol",
+                    created_at="2026-03-10T09:00:00Z",
+                    updated_at="2026-03-12T09:00:00Z",
+                    url="https://github.com/octo-org/widgets/pull/102",
+                    review_threads=(
+                        ReviewThreadRecord(
+                            thread_id="RT_102_empty_list",
+                            repo_id=repo.repo_id,
+                            pr_number=102,
+                            reviewer="Alice",
+                            comments_json="[]",
+                        ),
+                        ReviewThreadRecord(
+                            thread_id="RT_102_empty_str",
+                            repo_id=repo.repo_id,
+                            pr_number=102,
+                            reviewer="Bob",
+                            comments_json="",
+                        ),
+                        ReviewThreadRecord(
+                            thread_id="RT_102_null_reviewer",
+                            repo_id=repo.repo_id,
+                            pr_number=102,
+                            reviewer=None,
+                            comments_json="[]",
+                        ),
+                    ),
+                ),
+                PrRecord(
+                    repo_id=repo.repo_id,
+                    number=103,
+                    title="Out-of-window legacy PR",
+                    state="MERGED",
+                    author="Alice",
+                    created_at="2025-11-10T00:00:00Z",
+                    updated_at="2025-11-15T00:00:00Z",
+                    merged_at="2025-11-15T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/pull/103",
+                    reviews=(
+                        ReviewRecord(
+                            repo_id=repo.repo_id,
+                            review_id="RV_103_1",
+                            pr_number=103,
+                            state="CHANGES_REQUESTED",
+                            author="Bob",
+                        ),
+                    ),
+                ),
+                PrRecord(
+                    repo_id=repo.repo_id,
+                    number=104,
+                    title="Solo Alice and Carol PR",
+                    state="MERGED",
+                    author="Alice",
+                    created_at="2026-04-01T00:00:00Z",
+                    updated_at="2026-04-02T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/pull/104",
+                    reviews=(
+                        ReviewRecord(
+                            repo_id=repo.repo_id,
+                            review_id="RV_104_1",
+                            pr_number=104,
+                            state="APPROVED",
+                            author="Carol",
+                        ),
+                    ),
+                ),
+            ]
+        )
+        self.store.upsert_issues(
+            [
+                IssueRecord(
+                    repo_id=repo.repo_id,
+                    number=201,
+                    title="Memory retention on widget teardown",
+                    state="OPEN",
+                    author="Alice",
+                    created_at="2026-02-10T00:00:00Z",
+                    updated_at="2026-02-11T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/issues/201",
+                )
+            ],
+            comments=[
+                CommentRecord(
+                    repo_id=repo.repo_id,
+                    comment_id="ISS_IC_201",
+                    parent_kind="issue",
+                    parent_number=201,
+                    author="Bob",
+                    body="Reproduced on Linux.",
+                    url="https://github.com/octo-org/widgets/issues/201#issuecomment-99",
+                )
+            ],
+        )
+        self.store.upsert_discussions(
+            [
+                DiscussionRecord(
+                    repo_id=repo.repo_id,
+                    number=301,
+                    title="Unanswered RFC",
+                    author="Alice",
+                    answer_body=None,
+                    created_at="2026-02-20T00:00:00Z",
+                    updated_at="2026-02-20T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/discussions/301",
+                ),
+                DiscussionRecord(
+                    repo_id=repo.repo_id,
+                    number=302,
+                    title="Empty answer RFC",
+                    author="Bob",
+                    answer_body="",
+                    created_at="2026-02-21T00:00:00Z",
+                    updated_at="2026-02-21T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/discussions/302",
+                ),
+                DiscussionRecord(
+                    repo_id=repo.repo_id,
+                    number=303,
+                    title="Answered state management Q&A",
+                    author="Alice",
+                    answer_body="Use signal bindings.",
+                    created_at="2026-02-22T00:00:00Z",
+                    updated_at="2026-02-22T00:00:00Z",
+                    url="https://github.com/octo-org/widgets/discussions/303",
+                ),
+            ]
+        )
+
+    def test_v_item_participants_collaboration_and_edge_cases(self) -> None:
+        if not shutil.which("duckdb"):
+            self.skipTest("duckdb CLI is not installed")
+        self._seed_collaboration_fixture()
+        init_file = self.store.write_init_sql(self.tmp_dir / "init.sql")
+
+        # 1. Verify PR #101 roles, nested comments_json reply extraction, ghost filtering, and parent URL.
+        pr101_rows = self._run_duckdb_json(
+            init_file,
+            "SELECT participant, role, url, item_author, merged_at "
+            "FROM v_item_participants WHERE kind = 'pr' AND number = 101 "
+            "ORDER BY participant, role;",
+        )
+        self.assertEqual(
+            [(r["participant"], r["role"]) for r in pr101_rows],
+            [
+                ("alice", "author"),
+                ("bob", "comment"),
+                ("bob", "inline_comment"),
+                ("bob", "review:APPROVED"),
+                ("carol", "inline_comment"),
+                ("carol", "review:COMMENTED"),
+            ],
+        )
+        self.assertTrue(
+            all(r["url"] == "https://github.com/octo-org/widgets/pull/101" for r in pr101_rows)
+        )
+        self.assertTrue(all(r["item_author"] == "alice" for r in pr101_rows))
+
+        # 2. Verify rt.reviewer fallback when comments_json is '[]' or '' and null filtering on PR #102.
+        pr102_rows = self._run_duckdb_json(
+            init_file,
+            "SELECT participant, role FROM v_item_participants "
+            "WHERE kind = 'pr' AND number = 102 ORDER BY participant, role;",
+        )
+        self.assertEqual(
+            [(r["participant"], r["role"]) for r in pr102_rows],
+            [
+                ("alice", "inline_comment"),
+                ("bob", "inline_comment"),
+                ("carol", "author"),
+            ],
+        )
+
+        # 3. Verify issue comment uses parent issue URL and NULL merged_at.
+        issue_rows = self._run_duckdb_json(
+            init_file,
+            "SELECT participant, role, url, state, merged_at FROM v_item_participants "
+            "WHERE kind = 'issue' AND number = 201 ORDER BY participant;",
+        )
+        self.assertEqual(
+            issue_rows,
+            [
+                {
+                    "participant": "alice",
+                    "role": "author",
+                    "url": "https://github.com/octo-org/widgets/issues/201",
+                    "state": "OPEN",
+                    "merged_at": None,
+                },
+                {
+                    "participant": "bob",
+                    "role": "comment",
+                    "url": "https://github.com/octo-org/widgets/issues/201",
+                    "state": "OPEN",
+                    "merged_at": None,
+                },
+            ],
+        )
+
+        # 4. Verify discussions OPEN vs ANSWERED state mapping.
+        disc_rows = self._run_duckdb_json(
+            init_file,
+            "SELECT number, participant, state, role, merged_at FROM v_item_participants "
+            "WHERE kind = 'discussion' ORDER BY number;",
+        )
+        self.assertEqual(
+            disc_rows,
+            [
+                {
+                    "number": 301,
+                    "participant": "alice",
+                    "state": "OPEN",
+                    "role": "author",
+                    "merged_at": None,
+                },
+                {
+                    "number": 302,
+                    "participant": "bob",
+                    "state": "OPEN",
+                    "role": "author",
+                    "merged_at": None,
+                },
+                {
+                    "number": 303,
+                    "participant": "alice",
+                    "state": "ANSWERED",
+                    "role": "author",
+                    "merged_at": None,
+                },
+            ],
+        )
+
+        # 5. Verify two-user intersection (@alice & @bob) within a 2026 H1 date window.
+        shared = self._run_duckdb_json(
+            init_file,
+            """
+            SELECT
+              kind,
+              number,
+              LIST(DISTINCT role ORDER BY role) FILTER (WHERE participant = 'alice') AS alice_roles,
+              LIST(DISTINCT role ORDER BY role) FILTER (WHERE participant = 'bob') AS bob_roles
+            FROM v_item_participants
+            WHERE repo = 'octo-org/widgets'
+              AND participant IN ('alice', 'bob')
+              AND updated_at >= '2026-01-01T00:00:00Z'
+              AND updated_at <= '2026-06-30T23:59:59Z'
+            GROUP BY kind, number
+            HAVING COUNT(DISTINCT participant) = 2
+            ORDER BY kind, number;
+            """,
+        )
+        self.assertEqual(
+            shared,
+            [
+                {
+                    "kind": "issue",
+                    "number": 201,
+                    "alice_roles": ["author"],
+                    "bob_roles": ["comment"],
+                },
+                {
+                    "kind": "pr",
+                    "number": 101,
+                    "alice_roles": ["author"],
+                    "bob_roles": ["comment", "inline_comment", "review:APPROVED"],
+                },
+                {
+                    "kind": "pr",
+                    "number": 102,
+                    "alice_roles": ["inline_comment"],
+                    "bob_roles": ["inline_comment"],
+                },
+            ],
+        )
 
 
 if __name__ == "__main__":

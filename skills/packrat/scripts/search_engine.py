@@ -55,9 +55,7 @@ def _build_filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
 
     if filters.path_prefix:
         escaped_prefix = (
-            filters.path_prefix.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+            filters.path_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
         clauses.append("c.file_path LIKE ? ESCAPE '\\'")
         params.append(f"{escaped_prefix}%")
@@ -109,10 +107,7 @@ def search_fts5_bm25(
     LIMIT ?
     """
     rows = store.conn.execute(sql, [fts_expr, *filter_params, limit]).fetchall()
-    return [
-        (str(row["chunk_id"]), idx + 1, float(row["raw_bm25"]))
-        for idx, row in enumerate(rows)
-    ]
+    return [(str(row["chunk_id"]), idx + 1, float(row["raw_bm25"])) for idx, row in enumerate(rows)]
 
 
 def search_vector_cosine(
@@ -147,10 +142,7 @@ def search_vector_cosine(
         sim = sum(a * b for a, b in zip(q_norm, vec))
         scored.append((sim, str(row["chunk_id"])))
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [
-        (chunk_id, idx + 1, float(sim))
-        for idx, (sim, chunk_id) in enumerate(scored[:limit])
-    ]
+    return [(chunk_id, idx + 1, float(sim)) for idx, (sim, chunk_id) in enumerate(scored[:limit])]
 
 
 def _format_snippet(chunk: TextChunk, max_chars: int = 420) -> str:

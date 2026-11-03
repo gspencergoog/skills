@@ -125,7 +125,9 @@ class RepoConfig:
             ValueError: if `stream` is not one of BACKFILL_STREAMS.
         """
         if stream not in BACKFILL_STREAMS:
-            raise ValueError(f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}.")
+            raise ValueError(
+                f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}."
+            )
         return StreamBackfill(
             stream=stream,
             cursor=getattr(self, f"{stream}_backfill_cursor"),

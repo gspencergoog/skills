@@ -827,6 +827,71 @@ Verdict: Minor revisions needed.
             with self.subTest(raw=raw):
                 self.assertEqual(_clean_overview(raw), expected)
 
+    def test_clean_overview_strips_packrat_context_notes(self):
+        from lint_review import _clean_overview
+
+        cases = {
+            # Single-line multi-sentence paragraph with `--path . && packrat sync`
+            # in the middle keeps surrounding prose and strips Verdict.
+            "Updates widget state handling. "
+            "Packrat context: skipped (octo-org/widgets is not synced; run "
+            "`packrat repo add octo-org/widgets --path . && packrat sync` for "
+            "faster history lookups). "
+            "The fallback retry path remains untested. "
+            "Verdict: Minor Revisions Needed.": (
+                "Updates widget state handling. "
+                "The fallback retry path remains untested."
+            ),
+            # Leading Packrat context sentence followed by prose on the same line.
+            "Packrat context: skipped (octo-org/widgets is not synced; run "
+            "`packrat repo add octo-org/widgets --path . && packrat sync` for "
+            "faster history lookups). "
+            "Refactors the event dispatcher.": "Refactors the event dispatcher.",
+            # Ephemeral checkout `--github-only` variant and 0-chunk variant.
+            "Tightens schema checks. "
+            "Packrat context: skipped (octo-org/widgets is not synced; run "
+            "`packrat repo add octo-org/widgets && packrat sync --repo "
+            "octo-org/widgets --github-only` for faster history lookups). "
+            "Verdict: Ready.": "Tightens schema checks.",
+            "Cleans up CLI flags. "
+            "Packrat context: skipped (octo-org/packrat has 0 indexed chunks; run "
+            "`packrat sync --repo octo-org/packrat` for faster history lookups). "
+            "All existing callers pass explicit paths.": (
+                "Cleans up CLI flags. All existing callers pass explicit paths."
+            ),
+            # Unavailable variant both inline and as a standalone paragraph.
+            "Updates parser. "
+            "Packrat context: unavailable (syncing octo-org/widgets with `packrat` "
+            "speeds up historical review context). "
+            "Edge cases are covered.": "Updates parser. Edge cases are covered.",
+            "First paragraph.\n\n"
+            "Packrat context: unavailable (syncing octo-org/widgets with `packrat` "
+            "speeds up historical review context).\n\n"
+            "Third paragraph. Verdict: Ready.": "First paragraph.\n\nThird paragraph.",
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(_clean_overview(raw), expected)
+
+        report_text = self._focus_report(
+            "- **Focus**: `sync-to-async`",
+            summary=(
+                "Updates async widget dispatch. "
+                "Packrat context: skipped (octo-org/widgets is not synced; run "
+                "`packrat repo add octo-org/widgets --path . && packrat sync` for "
+                "faster history lookups). "
+                "Timeout handling still needs a caller check. "
+                "Verdict: Minor Revisions Needed."
+            ),
+        )
+        exported = self._export(report_text)
+        self.assertEqual(
+            exported["review_summary"]["overview"],
+            "Updates async widget dispatch. "
+            "Timeout handling still needs a caller check.",
+        )
+        self.assertEqual(exported["review_summary"]["verdict"], "COMMENT")
+
     def test_playbook_feedback_section_fails_lint(self):
         leaked = self._focus_report("- **Focus**: `sync-to-async`") + (
             "\n## Playbook Feedback\n"

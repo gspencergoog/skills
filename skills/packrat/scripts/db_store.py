@@ -385,7 +385,9 @@ class PackratStore:
 
     def write_init_sql(self, init_sql_path: Path | None = None) -> Path:
         """Writes the rendered DuckDB init.sql file to disk."""
-        target = Path(init_sql_path) if init_sql_path is not None else (self.db_path.parent / "init.sql")
+        target = (
+            Path(init_sql_path) if init_sql_path is not None else (self.db_path.parent / "init.sql")
+        )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_init_sql(self.db_path), encoding="utf-8")
         return target
@@ -452,7 +454,15 @@ class PackratStore:
                   source_ref = CASE WHEN substr(source_ref, 1, ?) = ? THEN ? || substr(source_ref, ?) ELSE source_ref END
                 WHERE chunk_id IN ({repo_chunk_ids})
                 """,
-                (new_full_name, start, len(old_prefix), old_prefix, new_full_name, start, repo.repo_id),
+                (
+                    new_full_name,
+                    start,
+                    len(old_prefix),
+                    old_prefix,
+                    new_full_name,
+                    start,
+                    repo.repo_id,
+                ),
             )
             for column in ("chunk_id", "source_ref"):
                 self.conn.execute(
@@ -555,7 +565,9 @@ class PackratStore:
             ValueError: if `stream` is not one of BACKFILL_STREAMS.
         """
         if stream not in BACKFILL_STREAMS:
-            raise ValueError(f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}.")
+            raise ValueError(
+                f"Unknown GitHub stream '{stream}'; expected one of {BACKFILL_STREAMS}."
+            )
         with self.conn:
             self.conn.execute(
                 f"""

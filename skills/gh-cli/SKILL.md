@@ -7,7 +7,7 @@ description: >-
   needs gh commands or flags, when scripting against GitHub, when checking CI or
   PR state, or when gh authentication fails. Don't use for cascade-rebasing PR
   stacks (use git-stack) or for mining collaboration history between two people
-  (use github-collab-search).
+  (use packrat).
 ---
 
 # GitHub CLI (`gh`)

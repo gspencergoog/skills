@@ -7,16 +7,21 @@ import tempfile
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
+from unittest.mock import patch
 
 from db_store import PackratStore
 from github_sync import (
+    GhAuthProbe,
     GhCommandResult,
     extract_issue_links,
     needs_safety_sweep,
     poll_repo_events,
+    probe_gh_auth,
+    run_gh_command,
     sync_github_metadata,
 )
 from models import BACKFILL_STREAMS, RepoConfig
+from sync_runtime import BoundedCmdResult
 
 
 def _mark_backfill_complete(store: PackratStore, repo_id: int) -> None:
@@ -53,9 +58,9 @@ class TestGithubSync(unittest.TestCase):
                     return GhCommandResult(
                         returncode=0,
                         stdout=(
-                            'HTTP/2.0 304 Not Modified\r\n'
+                            "HTTP/2.0 304 Not Modified\r\n"
                             'ETag: W/"etag-1"\r\n'
-                            'X-Poll-Interval: 60\r\n\r\n'
+                            "X-Poll-Interval: 60\r\n\r\n"
                         ),
                         stderr="",
                     )
@@ -94,10 +99,10 @@ class TestGithubSync(unittest.TestCase):
                         return GhCommandResult(
                             returncode=0,
                             stdout=(
-                                'HTTP/2.0 200 OK\r\n'
+                                "HTTP/2.0 200 OK\r\n"
                                 'ETag: W/"etag-2"\r\n'
-                                'Last-Modified: Fri, 30 Oct 2026 23:00:00 GMT\r\n'
-                                'X-Poll-Interval: 45\r\n\r\n'
+                                "Last-Modified: Fri, 30 Oct 2026 23:00:00 GMT\r\n"
+                                "X-Poll-Interval: 45\r\n\r\n"
                                 '[{"id":"1","type":"PushEvent"}]'
                             ),
                             stderr="",
@@ -184,7 +189,9 @@ class TestGithubSync(unittest.TestCase):
                                                 "author": {"login": "bob"},
                                                 "authorAssociation": "MEMBER",
                                                 "labels": {"nodes": [{"name": "ui"}]},
-                                                "closingIssuesReferences": {"nodes": [{"number": 101}]},
+                                                "closingIssuesReferences": {
+                                                    "nodes": [{"number": 101}]
+                                                },
                                                 "files": {
                                                     "nodes": [
                                                         {
@@ -222,7 +229,9 @@ class TestGithubSync(unittest.TestCase):
                                                                         "body": "Use --focus-ring token here.",
                                                                         "createdAt": "2026-10-29T13:00:00Z",
                                                                         "updatedAt": "2026-10-29T13:00:00Z",
-                                                                        "author": {"login": "carol"},
+                                                                        "author": {
+                                                                            "login": "carol"
+                                                                        },
                                                                     }
                                                                 ]
                                                             },
@@ -268,7 +277,9 @@ class TestGithubSync(unittest.TestCase):
                 self.assertEqual(stats.issues_upserted, 1)
                 self.assertEqual(stats.prs_upserted, 1)
                 self.assertEqual(stats.discussions_upserted, 1)
-                self.assertGreaterEqual(pr_attempts, 2)  # Verified pageSize=25 -> pageSize=12 halving
+                self.assertGreaterEqual(
+                    pr_attempts, 2
+                )  # Verified pageSize=25 -> pageSize=12 halving
 
                 updated_repo = store.get_repo("octo-org/widgets")
                 assert updated_repo is not None
@@ -283,7 +294,9 @@ class TestGithubSync(unittest.TestCase):
                 self.assertEqual(counts["review_threads"], 1)
                 self.assertEqual(counts["discussions"], 1)
 
-                links = extract_issue_links(repo.repo_id, 202, "Fixes #101 and references #88.", [101])
+                links = extract_issue_links(
+                    repo.repo_id, 202, "Fixes #101 and references #88.", [101]
+                )
                 self.assertEqual(len(links), 2)
             finally:
                 store.close()
@@ -375,8 +388,14 @@ class TestGithubSync(unittest.TestCase):
                             {
                                 "data": {
                                     "repository": {
-                                        "pullRequests": {"pageInfo": {"hasNextPage": False}, "nodes": []},
-                                        "discussions": {"pageInfo": {"hasNextPage": False}, "nodes": []},
+                                        "pullRequests": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [],
+                                        },
+                                        "discussions": {
+                                            "pageInfo": {"hasNextPage": False},
+                                            "nodes": [],
+                                        },
                                     }
                                 }
                             }
@@ -486,7 +505,9 @@ class PagedIssuesRunner:
         if "/events" in cmd:
             status = "304 Not Modified" if self.events_status == 304 else "200 OK"
             body = "" if self.events_status == 304 else "[]"
-            return GhCommandResult(returncode=0, stdout=f'HTTP/2.0 {status}\r\nETag: "e1"\r\n\r\n{body}', stderr="")
+            return GhCommandResult(
+                returncode=0, stdout=f'HTTP/2.0 {status}\r\nETag: "e1"\r\n\r\n{body}', stderr=""
+            )
         if "issues(first:" not in cmd:
             empty = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}
             payload = {"data": {"repository": {"pullRequests": empty, "discussions": empty}}}
@@ -498,7 +519,9 @@ class PagedIssuesRunner:
         numbers, has_next, end_cursor = self.pages[cursor]
         nodes = [_issue_node(n, f"2026-10-{n:02d}T00:00:00Z") for n in numbers]
         conn = {"pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor}, "nodes": nodes}
-        return GhCommandResult(returncode=0, stdout=json.dumps({"data": {"repository": {"issues": conn}}}), stderr="")
+        return GhCommandResult(
+            returncode=0, stdout=json.dumps({"data": {"repository": {"issues": conn}}}), stderr=""
+        )
 
 
 THREE_ISSUE_PAGES: dict[str | None, tuple[list[int], bool, str | None]] = {
@@ -597,7 +620,9 @@ class TestGithubBackfill(unittest.TestCase):
         self.assertTrue(self._reload().backfill("issues").complete)
 
     def test_existing_watermark_without_backfill_record_backfills_from_newest_item(self) -> None:
-        self.store.update_repo_sync_state(self.repo.repo_id, issues_watermark="2026-10-25T00:00:00Z")
+        self.store.update_repo_sync_state(
+            self.repo.repo_id, issues_watermark="2026-10-25T00:00:00Z"
+        )
         runner = PagedIssuesRunner(THREE_ISSUE_PAGES)
         stats = sync_github_metadata(self.store, self._reload(), runner=runner)
 
@@ -614,7 +639,9 @@ class TestGithubBackfill(unittest.TestCase):
             def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
                 events_recorded.append(("start", (repo, phase, total)))
 
-            def advance(self, completed: int, total: int | None = None, *, detail: str = "") -> None:
+            def advance(
+                self, completed: int, total: int | None = None, *, detail: str = ""
+            ) -> None:
                 events_recorded.append(("advance", (completed, total, detail)))
 
             def finish_phase(self, summary: str = "") -> None:
@@ -632,7 +659,9 @@ class TestGithubBackfill(unittest.TestCase):
         def fake_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
             cmd = " ".join(args)
             if "/events" in cmd:
-                return GhCommandResult(returncode=0, stdout='HTTP/2.0 200 OK\r\nETag: "e9"\r\n\r\n[]', stderr="")
+                return GhCommandResult(
+                    returncode=0, stdout='HTTP/2.0 200 OK\r\nETag: "e9"\r\n\r\n[]', stderr=""
+                )
             if "issues(first:" in cmd:
                 if "pageSize=25" in cmd:
                     return GhCommandResult(returncode=1, stdout="", stderr="HTTP 502 Bad Gateway")
@@ -689,6 +718,226 @@ class TestGithubBackfill(unittest.TestCase):
 
         advances = [payload for kind, payload in events_recorded if kind == "advance"]
         self.assertIn((1, 42, "oldest 2026-10-10"), advances)
+
+
+def _graphql_timeout_or_small_page(
+    args: Sequence[str],
+    recorded_sizes: list[str],
+) -> GhCommandResult:
+    """Fails with timeout on pageSize 25 and 12, then succeeds on pageSize 5."""
+    cmd = " ".join(args)
+    if "/events" in cmd:
+        return GhCommandResult(
+            returncode=0,
+            stdout='HTTP/2.0 200 OK\r\nETag: "e-ok"\r\n\r\n[]',
+            stderr="",
+        )
+    if "issues(first:" in cmd:
+        size_arg = next((a for a in args if a.startswith("pageSize=")), "")
+        recorded_sizes.append(size_arg)
+        if size_arg in ("pageSize=25", "pageSize=12"):
+            return GhCommandResult(
+                returncode=124,
+                stdout="",
+                stderr="gh command timed out",
+                timed_out=True,
+            )
+        conn = {
+            "pageInfo": {"hasNextPage": False, "endCursor": "END"},
+            "nodes": [_issue_node(7, "2026-10-07T00:00:00Z")],
+        }
+        body = json.dumps({"data": {"repository": {"issues": conn}}})
+        return GhCommandResult(returncode=0, stdout=body, stderr="")
+    empty = {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}
+    payload = {"data": {"repository": {"pullRequests": empty, "discussions": empty}}}
+    return GhCommandResult(returncode=0, stdout=json.dumps(payload), stderr="")
+
+
+class TestGhAuthProbeAndCircuitBreaker(unittest.TestCase):
+    """Tests bounded gh execution, auth token probing, and keyring circuit breaking."""
+
+    def test_run_gh_command_delegates_to_bounded_subprocess(self) -> None:
+        ok_res = BoundedCmdResult(returncode=0, stdout="tok\n", stderr="", timed_out=False)
+        with patch("github_sync.run_bounded_subprocess", return_value=ok_res) as mocked:
+            res = run_gh_command(["auth", "token"], timeout=5)
+            self.assertEqual(res.returncode, 0)
+            self.assertEqual(res.stdout, "tok\n")
+            self.assertFalse(res.timed_out)
+            cmd_arg = mocked.call_args.args[0]
+            env_arg = mocked.call_args.kwargs["env"]
+            self.assertEqual(cmd_arg, ["gh", "auth", "token"])
+            self.assertEqual(env_arg["GH_PROMPT_DISABLED"], "1")
+            self.assertEqual(env_arg["GIT_TERMINAL_PROMPT"], "0")
+            self.assertEqual(env_arg["PAGER"], "cat")
+            self.assertEqual(mocked.call_args.kwargs["timeout"], 5)
+
+        to_res = BoundedCmdResult(returncode=124, stdout="", stderr="timed out", timed_out=True)
+        with patch("github_sync.run_bounded_subprocess", return_value=to_res):
+            timed = run_gh_command(["api", "user"], timeout=3)
+            self.assertTrue(timed.timed_out)
+            self.assertEqual(timed.returncode, 124)
+            self.assertIn("timed out", timed.stderr)
+
+    def test_probe_gh_auth_unlocked_token(self) -> None:
+        seen: list[tuple[list[str], int]] = []
+
+        def fake_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
+            seen.append((list(args), timeout))
+            return GhCommandResult(returncode=0, stdout="gho_valid_token\n", stderr="")
+
+        probe = probe_gh_auth(runner=fake_runner, timeout=5)
+        self.assertTrue(probe.ok)
+        self.assertIsNone(probe.error_kind)
+        self.assertEqual(probe.detail, "")
+        self.assertEqual(seen, [(["auth", "token", "--no-refresh"], 5)])
+
+    def test_probe_gh_auth_timeout_and_dbus_keyring_stderr(self) -> None:
+        def timeout_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
+            return GhCommandResult(returncode=124, stdout="", stderr="timed out", timed_out=True)
+
+        timed_probe = probe_gh_auth(runner=timeout_runner)
+        self.assertFalse(timed_probe.ok)
+        self.assertEqual(timed_probe.error_kind, "keyring_locked")
+
+        for err_msg in (
+            "failed to get token from keyring: collection is locked",
+            "org.freedesktop.Secret.Service error over D-Bus",
+            "secret service unavailable",
+        ):
+            res = GhCommandResult(returncode=1, stdout="", stderr=err_msg)
+            probe = probe_gh_auth(runner=lambda _a, _t, r=res: r)
+            self.assertFalse(probe.ok)
+            self.assertEqual(probe.error_kind, "keyring_locked")
+            self.assertIn(err_msg, probe.detail)
+
+    def test_probe_gh_auth_logged_out_and_empty_token(self) -> None:
+        logged_out = GhCommandResult(
+            returncode=1,
+            stdout="",
+            stderr="You are not logged into any GitHub hosts. Run gh auth login",
+        )
+        probe = probe_gh_auth(runner=lambda _a, _t: logged_out)
+        self.assertFalse(probe.ok)
+        self.assertEqual(probe.error_kind, "auth_error")
+        self.assertIn("not logged into any GitHub hosts", probe.detail)
+
+        blank_ok = GhCommandResult(returncode=0, stdout="   \n", stderr="")
+        blank_probe = probe_gh_auth(runner=lambda _a, _t: blank_ok)
+        self.assertFalse(blank_probe.ok)
+        self.assertEqual(blank_probe.error_kind, "auth_error")
+
+    def test_probe_gh_auth_falls_back_when_no_refresh_rejected(self) -> None:
+        calls: list[list[str]] = []
+
+        def legacy_gh_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
+            calls.append(list(args))
+            if "--no-refresh" in args:
+                return GhCommandResult(
+                    returncode=1,
+                    stdout="",
+                    stderr="unknown flag: --no-refresh",
+                )
+            return GhCommandResult(returncode=0, stdout="gho_legacy_tok\n", stderr="")
+
+        probe = probe_gh_auth(runner=legacy_gh_runner, timeout=4)
+        self.assertTrue(probe.ok)
+        self.assertEqual(calls, [["auth", "token", "--no-refresh"], ["auth", "token"]])
+
+    def test_mid_run_keyring_locked_aborts_halving_backfill_and_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                store.update_repo_sync_state(
+                    repo.repo_id,
+                    issues_watermark="2026-10-20T00:00:00Z",
+                )
+                store.set_backfill_state(
+                    repo.repo_id,
+                    "issues",
+                    cursor="C_RESUME",
+                    done_at=None,
+                )
+                repo = store.get_repo_by_id(repo.repo_id)
+                assert repo is not None
+
+                graphql_calls: list[str] = []
+                probe_calls = 0
+
+                def timeout_graphql_runner(args: Sequence[str], timeout: int) -> GhCommandResult:
+                    cmd = " ".join(args)
+                    if "/events" in cmd:
+                        return GhCommandResult(
+                            returncode=0,
+                            stdout='HTTP/2.0 200 OK\r\nETag: "e-lock"\r\n\r\n[]',
+                            stderr="",
+                        )
+                    graphql_calls.append(cmd)
+                    return GhCommandResult(
+                        returncode=124,
+                        stdout="",
+                        stderr="gh command timed out",
+                        timed_out=True,
+                    )
+
+                def locked_probe() -> GhAuthProbe:
+                    nonlocal probe_calls
+                    probe_calls += 1
+                    return GhAuthProbe(
+                        ok=False,
+                        error_kind="keyring_locked",
+                        detail="gnome-keyring collection is locked",
+                    )
+
+                stats = sync_github_metadata(
+                    store,
+                    repo,
+                    runner=timeout_graphql_runner,
+                    auth_probe=locked_probe,
+                )
+
+                self.assertEqual(probe_calls, 1)
+                self.assertEqual(len(graphql_calls), 1)
+                self.assertIn("issues(first:", graphql_calls[0])
+                self.assertIn("pageSize=25", graphql_calls[0])
+                self.assertNotIn("cursor=", graphql_calls[0])
+                self.assertEqual(stats.backfill_incomplete, ["issues"])
+                self.assertEqual(len(stats.errors), 1)
+                self.assertIn("keyring_locked", stats.errors[0])
+
+                reloaded = store.get_repo_by_id(repo.repo_id)
+                assert reloaded is not None
+                self.assertEqual(reloaded.backfill("issues").cursor, "C_RESUME")
+                self.assertEqual(reloaded.issues_watermark, "2026-10-20T00:00:00Z")
+            finally:
+                store.close()
+
+    def test_mid_run_timeout_with_unlocked_probe_keeps_page_halving(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                recorded_sizes: list[str] = []
+                probe_calls = 0
+
+                def unlocked_probe() -> GhAuthProbe:
+                    nonlocal probe_calls
+                    probe_calls += 1
+                    return GhAuthProbe(ok=True)
+
+                stats = sync_github_metadata(
+                    store,
+                    repo,
+                    runner=lambda args, _t: _graphql_timeout_or_small_page(args, recorded_sizes),
+                    auth_probe=unlocked_probe,
+                )
+
+                self.assertEqual(probe_calls, 2)
+                self.assertEqual(recorded_sizes, ["pageSize=25", "pageSize=12", "pageSize=5"])
+                self.assertEqual(stats.issues_upserted, 1)
+                self.assertEqual(stats.errors, [])
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

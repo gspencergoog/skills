@@ -208,7 +208,9 @@ class StderrProgressReporter:
             return False
         if self._last_emit_at is None:
             return True
-        interval = self._tty_interval_sec if self._effective_mode == "tty" else self._plain_interval_sec
+        interval = (
+            self._tty_interval_sec if self._effective_mode == "tty" else self._plain_interval_sec
+        )
         return (now - self._last_emit_at) >= interval
 
     def advance(

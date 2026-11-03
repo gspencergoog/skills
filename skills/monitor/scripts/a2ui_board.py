@@ -250,11 +250,17 @@ def _format_eta(eta_s: int | None) -> str:
 
 def _ci_badge(snap: PrSnapshot, eta_s: int | None) -> tuple[str, str]:
     summary = snap.required_summary()
-    if summary == "FAILURE" or snap.rollup_state in ("FAILURE", "ERROR"):
+    if summary != "NONE":
+        if summary == "FAILURE":
+            return "CI failed", "danger"
+        if summary == "PENDING":
+            return f"CI running{_format_eta(eta_s)}", "active"
+        return "CI passed", "success"
+    if snap.rollup_state in ("FAILURE", "ERROR"):
         return "CI failed", "danger"
-    if summary == "PENDING" or snap.rollup_state == "PENDING":
+    if snap.rollup_state == "PENDING":
         return f"CI running{_format_eta(eta_s)}", "active"
-    if summary == "SUCCESS" or snap.rollup_state == "SUCCESS":
+    if snap.rollup_state == "SUCCESS":
         return "CI passed", "success"
     return "No CI", "neutral"
 
@@ -361,7 +367,9 @@ def _board_status_badge(
     if snaps and all(s.state in ("MERGED", "CLOSED") for s in snaps):
         return f"All merged{suffix}", "success", False
     any_pending = any(
-        s.required_summary() == "PENDING" or s.rollup_state == "PENDING" for s in snaps
+        s.required_summary() == "PENDING"
+        or (s.required_summary() == "NONE" and s.rollup_state == "PENDING")
+        for s in snaps
     )
     if any_pending:
         etas = [v for v in eta_map.values() if isinstance(v, int) and v > 0]
@@ -461,14 +469,24 @@ def write_board_file(path: str | os.PathLike[str], dsl: str) -> Path:
 
 
 def default_store_dir() -> Path | None:
-    """Returns the installed ``a2ui-pane`` plugin data directory when present on disk."""
-    env_dir = os.environ.get("A2UI_PANE_DATA") or os.environ.get("PLUGIN_DATA")
-    if env_dir:
-        candidate = Path(env_dir)
-        if candidate.exists():
-            return candidate
-    fallback = Path.home() / ".gemini" / "jetski" / "plugin_data" / "a2ui-pane"
-    return fallback if fallback.exists() else None
+    """Returns the installed ``a2ui-pane`` plugin data directory when present on disk.
+
+    Checks, in order: ``$A2UI_PANE_DATA``, ``$PLUGIN_DATA``,
+    ``$ANTIGRAVITY_APP_DATA_DIR/plugin_data/a2ui-pane`` (exported to agent shells by
+    Jetski and Antigravity hosts, so the store resolves under whichever host is
+    running), and finally ``~/.gemini/jetski/plugin_data/a2ui-pane`` for runs
+    outside an agent shell.
+    """
+    candidates: list[Path] = []
+    for name in ("A2UI_PANE_DATA", "PLUGIN_DATA"):
+        env_dir = os.environ.get(name)
+        if env_dir:
+            candidates.append(Path(env_dir))
+    app_data_dir = os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+    if app_data_dir:
+        candidates.append(Path(app_data_dir) / "plugin_data" / "a2ui-pane")
+    candidates.append(Path.home() / ".gemini" / "jetski" / "plugin_data" / "a2ui-pane")
+    return next((candidate for candidate in candidates if candidate.exists()), None)
 
 
 def _parse_store_line(raw: str) -> dict[str, Any] | None:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,6 +28,7 @@ from models import (
     utc_now_iso,
 )
 from progress import NULL_REPORTER, ProgressReporter
+from sync_runtime import run_bounded_subprocess
 
 SAFETY_SWEEP_INTERVAL_SEC = 600
 PAGE_SIZE_LADDER = (25, 12, 5)
@@ -204,7 +204,38 @@ class EventsPollResult:
     error: str | None = None
 
 
+_KEYRING_ERROR_SUBSTRINGS: tuple[str, ...] = (
+    "keyring",
+    "secret service",
+    "dbus",
+    "d-bus",
+    "locked",
+)
+
+
+@dataclass(frozen=True)
+class GhAuthProbe:
+    """Outcome of a non-interactive GitHub CLI authentication token check.
+
+    Attributes:
+        ok: Whether `gh auth token` returned a non-empty token within the timeout.
+        error_kind: Failure category ("keyring_locked" or "auth_error"), or None when ok.
+        detail: Single-line diagnostic message when `ok` is False.
+    """
+
+    ok: bool
+    error_kind: str | None = None
+    detail: str = ""
+
+
 GhRunner = Callable[[Sequence[str], int], GhCommandResult]
+AuthProbeFn = Callable[[], GhAuthProbe]
+
+
+def _is_keyring_error(text: str) -> bool:
+    """Checks whether diagnostic output indicates a locked OS keyring or D-Bus error."""
+    lowered = text.lower()
+    return any(token in lowered for token in _KEYRING_ERROR_SUBSTRINGS)
 
 
 def run_gh_command(args: Sequence[str], timeout: int = 20) -> GhCommandResult:
@@ -215,30 +246,76 @@ def run_gh_command(args: Sequence[str], timeout: int = 20) -> GhCommandResult:
         "GIT_TERMINAL_PROMPT": "0",
         "PAGER": "cat",
     }
-    try:
-        proc = subprocess.run(
-            ["gh", *args],
-            capture_output=True,
-            text=True,
-            env=env,
-            timeout=timeout,
-            check=False,
-        )
+    res = run_bounded_subprocess(["gh", *args], env=env, timeout=timeout)
+    if res.timed_out:
         return GhCommandResult(
-            returncode=proc.returncode,
-            stdout=proc.stdout,
-            stderr=proc.stderr,
-            timed_out=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return GhCommandResult(
-            returncode=124,
-            stdout=exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""),
+            returncode=res.returncode,
+            stdout=res.stdout,
             stderr="gh command timed out (possible locked keyring or network stall)",
             timed_out=True,
         )
-    except OSError as exc:
-        return GhCommandResult(returncode=127, stdout="", stderr=str(exc), timed_out=False)
+    return GhCommandResult(
+        returncode=res.returncode,
+        stdout=res.stdout,
+        stderr=res.stderr,
+        timed_out=False,
+    )
+
+
+def _rejects_no_refresh_flag(res: GhCommandResult) -> bool:
+    """Checks whether an older gh CLI rejected the --no-refresh flag."""
+    if res.returncode == 0 or res.timed_out:
+        return False
+    combined = f"{res.stderr}\n{res.stdout}".lower()
+    return "--no-refresh" in combined
+
+
+def _first_gh_detail(res: GhCommandResult, fallback: str) -> str:
+    """Extracts the first non-empty diagnostic line from a gh command result."""
+    raw = (res.stderr or res.stdout or "").strip()
+    if not raw:
+        return fallback
+    return raw.splitlines()[0].strip() or fallback
+
+
+def probe_gh_auth(
+    runner: GhRunner = run_gh_command,
+    timeout: int = 5,
+) -> GhAuthProbe:
+    """Probes whether `gh` can read an auth token without blocking on a locked keyring.
+
+    Args:
+        runner: Subprocess runner invoking `gh` arguments with a timeout.
+        timeout: Maximum seconds to wait before classifying a hang as `keyring_locked`.
+
+    Returns:
+        A `GhAuthProbe` indicating token availability or failure classification.
+    """
+    res = runner(["auth", "token", "--no-refresh"], timeout)
+    if _rejects_no_refresh_flag(res):
+        res = runner(["auth", "token"], timeout)
+
+    if res.timed_out or res.returncode == 124:
+        return GhAuthProbe(
+            ok=False,
+            error_kind="keyring_locked",
+            detail=_first_gh_detail(res, "gh auth token timed out (OS keyring likely locked)"),
+        )
+    if res.returncode == 0 and res.stdout.strip():
+        return GhAuthProbe(ok=True)
+
+    combined = f"{res.stderr}\n{res.stdout}"
+    if _is_keyring_error(combined):
+        return GhAuthProbe(
+            ok=False,
+            error_kind="keyring_locked",
+            detail=_first_gh_detail(res, "OS keyring is locked"),
+        )
+    return GhAuthProbe(
+        ok=False,
+        error_kind="auth_error",
+        detail=_first_gh_detail(res, f"gh auth token exited with {res.returncode}"),
+    )
 
 
 def _parse_iso_epoch(ts: str | None) -> float | None:
@@ -347,7 +424,9 @@ def poll_repo_events(
     )
 
 
-def extract_issue_links(repo_id: int, pr_number: int, body: str, closing_nums: Sequence[int]) -> tuple[IssuePrLink, ...]:
+def extract_issue_links(
+    repo_id: int, pr_number: int, body: str, closing_nums: Sequence[int]
+) -> tuple[IssuePrLink, ...]:
     """Extracts closing and referenced issue numbers from a PR body and GraphQL nodes."""
     links: dict[int, str] = {}
     for num in closing_nums:
@@ -416,7 +495,9 @@ def _connection_nodes(node: dict[str, Any], key: str) -> list[dict[str, Any]]:
     return [n for n in raw_nodes if isinstance(n, dict)]
 
 
-def _extract_string_field_tuple(node: dict[str, Any], conn_key: str, item_key: str) -> tuple[str, ...]:
+def _extract_string_field_tuple(
+    node: dict[str, Any], conn_key: str, item_key: str
+) -> tuple[str, ...]:
     """Extracts a tuple of strings from a nested GraphQL connection's nodes."""
     return tuple(str(n[item_key]) for n in _connection_nodes(node, conn_key) if n.get(item_key))
 
@@ -582,7 +663,9 @@ def _parse_pr_files(repo_id: int, pr_number: int, node: dict[str, Any]) -> tuple
     )
 
 
-def _parse_pr_reviews(repo_id: int, pr_number: int, node: dict[str, Any]) -> tuple[ReviewRecord, ...]:
+def _parse_pr_reviews(
+    repo_id: int, pr_number: int, node: dict[str, Any]
+) -> tuple[ReviewRecord, ...]:
     """Parses PR review nodes into ReviewRecord instances."""
     return tuple(
         ReviewRecord(
@@ -664,7 +747,11 @@ def _parse_pr_node(
         item_number=number,
         updated_at=updated_at,
     )
-    chunks = [pr_chunk, *thread_chunks, *_comments_to_chunks(repo, "PR", number, updated_at, comments)]
+    chunks = [
+        pr_chunk,
+        *thread_chunks,
+        *_comments_to_chunks(repo, "PR", number, updated_at, comments),
+    ]
     return pr, chunks
 
 
@@ -725,7 +812,7 @@ def _extract_graphql_connection(stdout: str, field_name: str) -> dict[str, Any] 
 def _is_fatal_auth_error(stderr: str) -> bool:
     """Returns True when stderr indicates an unrecoverable auth or keyring failure."""
     lowered = stderr.lower()
-    return "401" in lowered or "403" in lowered or "locked" in lowered
+    return "401" in lowered or "403" in lowered or _is_keyring_error(lowered)
 
 
 @dataclass(frozen=True)
@@ -754,6 +841,8 @@ def _classify_gh_failure(res: GhCommandResult) -> tuple[str, str]:
     first_line = raw_err.splitlines()[0].strip() if raw_err else f"gh exited with {res.returncode}"
     if res.timed_out or res.returncode == 124:
         return "timeout", first_line
+    if _is_keyring_error(raw_err):
+        return "keyring_locked", first_line
     if _is_fatal_auth_error(raw_err):
         return "auth_error", first_line
     if res.returncode == 0:
@@ -786,6 +875,23 @@ def _build_graphql_args(
     return args
 
 
+def _probe_timeout_auth(
+    last_kind: str,
+    last_detail: str,
+    auth_probe: AuthProbeFn | None,
+) -> tuple[str, str, bool]:
+    """Checks auth_probe after a GraphQL timeout and signals whether to abort retries."""
+    if last_kind in ("auth_error", "keyring_locked"):
+        return last_kind, last_detail, True
+    if last_kind == "timeout" and auth_probe is not None:
+        probe = auth_probe()
+        if not probe.ok:
+            kind = probe.error_kind or "auth_error"
+            detail = probe.detail or last_detail
+            return kind, detail, True
+    return last_kind, last_detail, False
+
+
 def _fetch_graphql_page_with_halving(
     owner: str,
     name: str,
@@ -797,6 +903,7 @@ def _fetch_graphql_page_with_halving(
     reporter: ProgressReporter = NULL_REPORTER,
     repo_full_name: str = "",
     stream: str = "",
+    auth_probe: AuthProbeFn | None = None,
 ) -> PageFetchOutcome:
     """Executes a GraphQL page query, halving pageSize (25 -> 12 -> 5) on 5xx/timeouts."""
     last_kind = "http_error"
@@ -808,8 +915,9 @@ def _fetch_graphql_page_with_halving(
             conn = _extract_graphql_connection(res.stdout, field_name)
             if conn is not None:
                 return PageFetchOutcome(connection=conn)
-        last_kind, last_detail = _classify_gh_failure(res)
-        if last_kind == "auth_error":
+        raw_kind, raw_detail = _classify_gh_failure(res)
+        last_kind, last_detail, abort = _probe_timeout_auth(raw_kind, raw_detail, auth_probe)
+        if abort:
             break
         if idx + 1 < len(PAGE_SIZE_LADDER):
             next_size = PAGE_SIZE_LADDER[idx + 1]
@@ -890,9 +998,13 @@ def _extract_page_metadata(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, bool, int | None, str | None]:
     """Unpacks a GraphQL connection page into (nodes, accepted, newest, reached_wm, total_count, oldest_date)."""
     nodes = [n for n in (conn.get("nodes") or []) if isinstance(n, dict) and n.get("number")]
-    accepted, newest, reached_wm = _filter_nodes_above_watermark(nodes, stop_watermark, newest_updated)
+    accepted, newest, reached_wm = _filter_nodes_above_watermark(
+        nodes, stop_watermark, newest_updated
+    )
     raw_total = conn.get("totalCount")
-    total_count = raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else None
+    total_count = (
+        raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else None
+    )
     sample = accepted or nodes
     stamps = [str(n.get("updatedAt"))[:10] for n in sample if n.get("updatedAt")]
     oldest_date = min(stamps) if stamps else None
@@ -943,6 +1055,7 @@ def _walk_pages(
     runner: GhRunner,
     on_page: PageHandler,
     reporter: ProgressReporter = NULL_REPORTER,
+    auth_probe: AuthProbeFn | None = None,
 ) -> PageWalk:
     """Pages a GraphQL connection in UPDATED_AT DESC order, handing each page to on_page.
 
@@ -963,14 +1076,15 @@ def _walk_pages(
             reporter=reporter,
             repo_full_name=repo.full_name,
             stream=spec.stream,
+            auth_probe=auth_probe,
         )
         if outcome.connection is None:
             walk.failed = True
             walk.error_kind = outcome.error_kind
             walk.error_detail = outcome.error_detail
             return walk
-        nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = _extract_page_metadata(
-            outcome.connection, stop_watermark, walk.newest_updated
+        nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = (
+            _extract_page_metadata(outcome.connection, stop_watermark, walk.newest_updated)
         )
         if total_count is not None:
             walk.total_count = total_count
@@ -1000,7 +1114,9 @@ def _walk_pages(
     return walk
 
 
-def _persist_issues(store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats) -> None:
+def _persist_issues(
+    store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats
+) -> None:
     """Upserts issue nodes with their comments and search chunks."""
     if not nodes:
         return
@@ -1018,7 +1134,9 @@ def _persist_issues(store: PackratStore, repo: RepoConfig, nodes: list[dict[str,
     stats.chunks_upserted += len(chunks)
 
 
-def _persist_prs(store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats) -> None:
+def _persist_prs(
+    store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats
+) -> None:
     """Upserts pull request nodes with their threads, links, and search chunks."""
     if not nodes:
         return
@@ -1073,7 +1191,8 @@ def _run_incremental_walk(
     runner: GhRunner,
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
-) -> None:
+    auth_probe: AuthProbeFn | None = None,
+) -> PageWalk:
     """Fetches items updated since the stream's watermark.
 
     The watermark only advances when the walk reaches it (or the last page), so a
@@ -1101,11 +1220,13 @@ def _run_incremental_walk(
         runner=runner,
         on_page=on_page,
         reporter=reporter,
+        auth_probe=auth_probe,
     )
     reporter.finish_phase()
     _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
     if walk.reached_end:
         _store_watermark(store, repo, spec.stream, _max_timestamp(watermark, walk.newest_updated))
+    return walk
 
 
 def _run_backfill_walk(
@@ -1118,7 +1239,8 @@ def _run_backfill_walk(
     runner: GhRunner,
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
-) -> None:
+    auth_probe: AuthProbeFn | None = None,
+) -> PageWalk:
     """Fetches a stream's older history until the last page, saving progress after every page.
 
     A walk that starts from the newest item (start_cursor is None) also moves the
@@ -1133,7 +1255,12 @@ def _run_backfill_walk(
         nonlocal watermark_pending
         spec.persist(store, repo, batch.nodes, stats)
         if watermark_pending:
-            _store_watermark(store, repo, spec.stream, _max_timestamp(old_watermark, _newest_updated(batch.nodes)))
+            _store_watermark(
+                store,
+                repo,
+                spec.stream,
+                _max_timestamp(old_watermark, _newest_updated(batch.nodes)),
+            )
             watermark_pending = False
         store.set_backfill_state(repo.repo_id, spec.stream, cursor=batch.cursor, done_at=None)
         detail = f"oldest {batch.oldest_date}" if batch.oldest_date else ""
@@ -1148,6 +1275,7 @@ def _run_backfill_walk(
         runner=runner,
         on_page=on_page,
         reporter=reporter,
+        auth_probe=auth_probe,
     )
     reporter.finish_phase()
     _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
@@ -1155,6 +1283,7 @@ def _run_backfill_walk(
         store.set_backfill_state(repo.repo_id, spec.stream, cursor=None, done_at=utc_now_iso())
     else:
         stats.backfill_incomplete.append(spec.stream)
+    return walk
 
 
 def _sync_stream(
@@ -1167,7 +1296,8 @@ def _sync_stream(
     runner: GhRunner,
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
-) -> None:
+    auth_probe: AuthProbeFn | None = None,
+) -> str | None:
     """Syncs one GitHub stream, backfilling its history until the last page if needed.
 
     - Backfill complete: incremental walk only.
@@ -1175,15 +1305,37 @@ def _sync_stream(
     - Backfill in progress: incremental walk, then resume the backfill from its cursor.
     """
     state = repo.backfill(spec.stream)
-    walk_args: dict[str, Any] = {"runner": runner, "stats": stats, "reporter": reporter}
+    walk_args: dict[str, Any] = {
+        "runner": runner,
+        "stats": stats,
+        "reporter": reporter,
+        "auth_probe": auth_probe,
+    }
     if state.complete:
-        _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
-        return
+        return _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args).error_kind
     if state.cursor is None or getattr(repo, f"{spec.stream}_watermark") is None:
-        _run_backfill_walk(store, repo, spec, start_cursor=None, max_pages=backfill_max_pages, **walk_args)
-        return
-    _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
-    _run_backfill_walk(store, repo, spec, start_cursor=state.cursor, max_pages=backfill_max_pages, **walk_args)
+        return _run_backfill_walk(
+            store, repo, spec, start_cursor=None, max_pages=backfill_max_pages, **walk_args
+        ).error_kind
+    inc_walk = _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
+    if inc_walk.error_kind in ("keyring_locked", "auth_error"):
+        stats.backfill_incomplete.append(spec.stream)
+        return inc_walk.error_kind
+    return _run_backfill_walk(
+        store, repo, spec, start_cursor=state.cursor, max_pages=backfill_max_pages, **walk_args
+    ).error_kind
+
+
+def _resolve_auth_probe(
+    runner: GhRunner,
+    auth_probe: AuthProbeFn | None,
+) -> AuthProbeFn | None:
+    """Defaults auth_probe to probe_gh_auth only when using the live run_gh_command runner."""
+    if auth_probe is not None:
+        return auth_probe
+    if runner is run_gh_command:
+        return probe_gh_auth
+    return None
 
 
 def sync_github_metadata(
@@ -1194,6 +1346,7 @@ def sync_github_metadata(
     backfill_max_pages: int = DEFAULT_BACKFILL_MAX_PAGES,
     runner: GhRunner = run_gh_command,
     reporter: ProgressReporter = NULL_REPORTER,
+    auth_probe: AuthProbeFn | None = None,
 ) -> SyncStats:
     """Polls /events with ETag and syncs issues, PRs, and discussions via GraphQL.
 
@@ -1202,6 +1355,8 @@ def sync_github_metadata(
         backfill_max_pages: safety cap on pages per stream while backfilling
             history; an unfinished backfill resumes on the next sync.
         force: refetch every stream's full history, ignoring ETags and watermarks.
+        auth_probe: optional zero-arg probe called after a GraphQL timeout to
+            detect a locked OS keyring and abort retries early.
     """
     stats = SyncStats(repo_full_name=repo.full_name)
     now_iso = utc_now_iso()
@@ -1229,8 +1384,9 @@ def sync_github_metadata(
         )
         return stats
 
+    effective_probe = _resolve_auth_probe(runner, auth_probe)
     for spec in STREAM_SPECS:
-        _sync_stream(
+        stream_err = _sync_stream(
             store,
             repo,
             spec,
@@ -1239,7 +1395,10 @@ def sync_github_metadata(
             runner=runner,
             stats=stats,
             reporter=reporter,
+            auth_probe=effective_probe,
         )
+        if stream_err == "keyring_locked":
+            break
 
     done_iso = utc_now_iso()
     sweep_ts = repo.last_full_sweep_at if stats.errors else done_iso

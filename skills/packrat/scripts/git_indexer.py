@@ -10,8 +10,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
+import shlex
 import subprocess
 import sys
+import urllib.parse
 from collections.abc import Sequence
 from pathlib import Path
 from types import ModuleType
@@ -29,6 +31,7 @@ from models import (
     utc_now_iso,
 )
 from progress import NULL_REPORTER, ProgressReporter
+from sync_runtime import run_bounded_subprocess
 
 CODE_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -66,6 +69,7 @@ _IGNORED_PATH_PARTS: frozenset[str] = frozenset(
     }
 )
 _PR_NUMBER_IN_SUBJECT_RE = re.compile(r"\(#(\d+)\)\s*$")
+
 
 def _find_context_indexer_dir() -> Path:
     """Locates the companion context-indexer skill scripts directory."""
@@ -108,25 +112,93 @@ def _load_context_indexer_module(script_name: str) -> ModuleType:
     return mod
 
 
+_SCP_REMOTE_RE = re.compile(r"^(?:[^:/\s]+@)?(?:\[([^\]]+)\]|([^@:/\s]+)):(.+)$")
+_BASE_BATCH_SSH_CMD = (
+    "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
+)
+
+
+def _extract_remote_host(remote_url: str) -> str | None:
+    """Extracts the lowercase remote hostname from an SSH, HTTPS, or SCP-style git URL."""
+    cleaned = remote_url.strip()
+    if not cleaned:
+        return None
+    if "://" in cleaned:
+        return urllib.parse.urlsplit(cleaned).hostname
+    scp_match = _SCP_REMOTE_RE.match(cleaned)
+    if not scp_match:
+        return None
+    host = (scp_match.group(1) or scp_match.group(2) or "").lower()
+    rest = scp_match.group(3)
+    if len(host) == 1 and host.isalpha() and rest.startswith(("/", "\\")):
+        return None
+    return host or None
+
+
+def _build_git_ssh_env(
+    remote_url: str | None = None,
+    ssh_key_path: Path | None = None,
+) -> dict[str, str]:
+    """Builds non-interactive git and SSH environment variables for a remote URL.
+
+    Preserves a caller-supplied `GIT_SSH_COMMAND` when already set in the process
+    environment. Otherwise configures batch SSH flags and appends `-i <ssh_key_path>
+    -o IdentitiesOnly=yes` only when the remote host equals `github.com` and the
+    SSH key exists on disk.
+    """
+    env: dict[str, str] = {
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+        "PAGER": "cat",
+    }
+    existing_ssh_cmd = os.environ.get("GIT_SSH_COMMAND", "").strip()
+    if existing_ssh_cmd:
+        env["GIT_SSH_COMMAND"] = os.environ["GIT_SSH_COMMAND"]
+        return env
+
+    ssh_cmd = _BASE_BATCH_SSH_CMD
+    key_path = (
+        ssh_key_path.expanduser() if ssh_key_path is not None else Path.home() / ".ssh" / "github"
+    )
+    if remote_url and _extract_remote_host(remote_url) == "github.com" and key_path.exists():
+        ssh_cmd = f"{ssh_cmd} -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes"
+    env["GIT_SSH_COMMAND"] = ssh_cmd
+    return env
+
+
 def run_git_command(
     repo_dir: Path,
     args: Sequence[str],
     timeout: int = 20,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Executes git in repo_dir with pagers and interactive prompts disabled."""
+    """Executes git in repo_dir in a bounded process group with interactive prompts disabled.
+
+    Raises `subprocess.TimeoutExpired` when execution exceeds `timeout` after killing
+    the spawned process group.
+    """
     env = {
         **os.environ,
         "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
         "PAGER": "cat",
     }
-    return subprocess.run(
-        ["git", "-C", str(repo_dir), "--no-pager", *args],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        env=env,
-        timeout=timeout,
-        check=False,
+    if extra_env:
+        env.update(extra_env)
+    cmd = ["git", "-C", str(repo_dir), "--no-pager", *args]
+    res = run_bounded_subprocess(cmd, env=env, timeout=timeout)
+    if res.timed_out:
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output=res.stdout,
+            stderr=res.stderr,
+        )
+    return subprocess.CompletedProcess(
+        args=cmd,
+        returncode=res.returncode,
+        stdout=res.stdout,
+        stderr=res.stderr,
     )
 
 
@@ -143,14 +215,18 @@ def _parse_remotes(repo_dir: Path) -> dict[str, str]:
     return remotes
 
 
-def _candidate_canonical_refs(repo_dir: Path, repo: RepoConfig) -> list[str]:
+def _candidate_canonical_refs(
+    repo_dir: Path,
+    repo: RepoConfig,
+    remotes: dict[str, str] | None = None,
+) -> list[str]:
     """Builds ordered candidate refs prioritizing the canonical upstream repository."""
     branch = repo.default_branch or "main"
-    remotes = _parse_remotes(repo_dir)
+    remote_map = _parse_remotes(repo_dir) if remotes is None else remotes
     candidates: list[str] = []
 
     target_slug = repo.full_name.lower()
-    for rem_name, url in remotes.items():
+    for rem_name, url in remote_map.items():
         if target_slug in url.lower():
             candidates.append(f"{rem_name}/{branch}")
 
@@ -169,11 +245,19 @@ def _fetch_remote_ref(
     remote_spec: str,
     reporter: ProgressReporter,
     stats: SyncStats | None,
+    remote_url: str | None = None,
 ) -> None:
     """Runs git fetch on the candidate remote branch and records a warning if it fails."""
     rem_name, rem_branch = remote_spec.split("/", 1)
+    resolved_url = _parse_remotes(repo_dir).get(rem_name) if remote_url is None else remote_url
+    extra_env = _build_git_ssh_env(resolved_url)
     try:
-        res = run_git_command(repo_dir, ["fetch", "--quiet", rem_name, rem_branch], timeout=15)
+        res = run_git_command(
+            repo_dir,
+            ["fetch", "--quiet", rem_name, rem_branch],
+            timeout=15,
+            extra_env=extra_env,
+        )
     except subprocess.TimeoutExpired:
         msg = f"git fetch {rem_name}/{rem_branch} timed out; indexing local ref"
         if stats is not None:
@@ -181,7 +265,9 @@ def _fetch_remote_ref(
         reporter.warn(repo_full_name, msg)
         return
     if res.returncode != 0:
-        detail = (res.stderr or res.stdout or f"exit {res.returncode}").strip().splitlines()[0]
+        detail = (
+            res.stderr.strip() or res.stdout.strip() or f"exit {res.returncode}"
+        ).splitlines()[0]
         msg = f"git fetch {rem_name}/{rem_branch} failed ({detail}); indexing local ref"
         if stats is not None:
             stats.warnings.append(msg)
@@ -199,9 +285,18 @@ def resolve_canonical_ref(
     """Resolves the canonical main-repository ref and its commit SHA."""
     if not repo_dir.exists() or not (repo_dir / ".git").exists():
         return None
-    candidates = _candidate_canonical_refs(repo_dir, repo)
+    remotes = _parse_remotes(repo_dir)
+    candidates = _candidate_canonical_refs(repo_dir, repo, remotes=remotes)
     if fetch and candidates and "/" in candidates[0]:
-        _fetch_remote_ref(repo_dir, repo.full_name, candidates[0], reporter, stats)
+        rem_name = candidates[0].split("/", 1)[0]
+        _fetch_remote_ref(
+            repo_dir,
+            repo.full_name,
+            candidates[0],
+            reporter,
+            stats,
+            remote_url=remotes.get(rem_name, ""),
+        )
 
     for ref in candidates:
         res = run_git_command(repo_dir, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
@@ -450,10 +545,7 @@ def _extract_markdown_sections_from_blob(
     """Parses Markdown sections in memory using context-indexer's stage_markdown."""
     stage_md = _load_context_indexer_module("stage_markdown")
     raw_lines = blob_text.splitlines()
-    records = [
-        stage_md.LineRecord(line_num=i + 1, raw=ln)
-        for i, ln in enumerate(raw_lines)
-    ]
+    records = [stage_md.LineRecord(line_num=i + 1, raw=ln) for i, ln in enumerate(raw_lines)]
     stage_md._mark_frontmatter(records)
     stage_md._mark_fences(records)
     stage_md._mark_headings_and_sections(records)
@@ -529,7 +621,9 @@ def _extract_code_symbols_from_blob(
         seen_keys.add((sym_name, l_start))
         kind = str(ent.get("kind") or ent.get("entity_kind") or "symbol")
         signature = str(ent.get("signature") or sym_name)
-        snippet_lines = raw_lines[max(0, l_start - 1) : min(len(raw_lines), min(l_end, l_start + 35))]
+        snippet_lines = raw_lines[
+            max(0, l_start - 1) : min(len(raw_lines), min(l_end, l_start + 35))
+        ]
         body_preview = "\n".join(snippet_lines).strip()
 
         symbols.append(
@@ -626,7 +720,9 @@ def sync_git_codebase(
     if old_sha == target_sha and not force:
         return stats
 
-    commits, commit_chunks = index_commits(repo_dir, repo, old_sha, target_sha, max_commits=max_commits)
+    commits, commit_chunks = index_commits(
+        repo_dir, repo, old_sha, target_sha, max_commits=max_commits
+    )
     if commits:
         store.upsert_commits(commits)
         store.upsert_chunks(commit_chunks)

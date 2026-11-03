@@ -773,11 +773,12 @@ VERDICT_LINE_RE = re.compile(
 
 # Process sentences that code-review's Summary carries for the orchestrator
 # (ring classification banner, Pre-Execution Security Gate status, citation
-# audit tally, flags in effect, trust/tier limit, clean check, challenge tally,
-# and the closing Verdict label). They are parsed into structured fields and
-# removed from the public overview. Each alternative is anchored to a
-# sentence start and bounded at a sentence end, so prose such as "New Flags:
-# `--dry-run` are wired" or text after the trust-limit sentence is left alone.
+# audit tally, Packrat context status, flags in effect, trust/tier limit,
+# clean check, challenge tally, and the closing Verdict label). They are parsed
+# into structured fields and removed from the public overview. Each alternative
+# is anchored to a sentence start and bounded at a sentence end, so prose such
+# as "New Flags: `--dry-run` are wired" or text after the trust-limit sentence
+# is left alone.
 _NESTED_PARENS = r"\((?:[^()\n]|\([^()\n]*\))*\)"
 _FLAG_TOKEN = (
     r"(?:`[^`\n]*`|--[\w-]+|\*\(none\)\*|\(none\)|\b(?:none|default|standard)\b)"
@@ -790,6 +791,10 @@ INTERNAL_SUMMARY_RE = re.compile(
     + r"|(?i:citation audit):[^\n.]*?(?:dropped|verified|none required)(?:\s*"
     + _NESTED_PARENS
     + r")?\.?"
+    + r"|(?i:packrat context):[^\n().]*(?:\s*"
+    + _NESTED_PARENS
+    + r")?"
+    + _SENTENCE_END
     + r"|Flags(?:\s+in\s+effect)?:\s*"
     + _FLAG_TOKEN
     + r"(?:(?:\s*,\s*|\s+)(?:and\s+)?"

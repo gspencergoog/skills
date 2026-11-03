@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from a2ui_board import (
     board_data_model,
     board_dsl,
+    default_store_dir,
     item_for,
     lifecycle_step,
     sync_pane_store,
@@ -87,6 +90,15 @@ class TestA2uiBoard(unittest.TestCase):
             ("1 unresolved", "warning"),
         )
         self.assertEqual(watch_item["detail"], "- Watch only")
+
+        # Superseded failed check run that leaves rollup_state="FAILURE" while all
+        # latest deduplicated checks succeeded still renders "CI passed".
+        rerun_passed = make_snapshot(
+            checks=[make_check(status="COMPLETED", conclusion="SUCCESS")],
+            rollup_state="FAILURE",
+        )
+        rerun_item = item_for(rerun_passed)
+        self.assertEqual((rerun_item["ci"], rerun_item["ciTone"]), ("CI passed", "success"))
 
     def test_board_dsl_escaping_and_stack_wave(self) -> None:
         parent = make_snapshot(number=3338, key="acme/widget#3338", head_ref="feat/base")
@@ -289,6 +301,55 @@ class TestA2uiBoard(unittest.TestCase):
                 lines_after[4]["message"],
                 {"version": "v1.0", "deleteSurface": {"surfaceId": "git-stack"}},
             )
+
+
+class TestDefaultStoreDir(unittest.TestCase):
+    """Covers the host-aware lookup order in ``default_store_dir``."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        home_patch = mock.patch.object(Path, "home", return_value=self.home)
+        home_patch.start()
+        self.addCleanup(home_patch.stop)
+        self.addCleanup(self._tmp.cleanup)
+
+    def _make(self, *parts: str) -> Path:
+        path = self.root.joinpath(*parts)
+        path.mkdir(parents=True)
+        return path
+
+    def test_prefers_explicit_a2ui_pane_data(self) -> None:
+        explicit = self._make("explicit")
+        app_data = self._make("agy")
+        (app_data / "plugin_data" / "a2ui-pane").mkdir(parents=True)
+        env = {"A2UI_PANE_DATA": str(explicit), "ANTIGRAVITY_APP_DATA_DIR": str(app_data)}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(default_store_dir(), explicit)
+
+    def test_uses_antigravity_app_data_dir(self) -> None:
+        app_data = self._make("antigravity")
+        store = app_data / "plugin_data" / "a2ui-pane"
+        store.mkdir(parents=True)
+        (self.home / ".gemini" / "jetski" / "plugin_data" / "a2ui-pane").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_APP_DATA_DIR": str(app_data)}, clear=True):
+            self.assertEqual(default_store_dir(), store)
+
+    def test_skips_missing_candidates_and_falls_back_to_jetski_home(self) -> None:
+        fallback = self.home / ".gemini" / "jetski" / "plugin_data" / "a2ui-pane"
+        fallback.mkdir(parents=True)
+        env = {
+            "A2UI_PANE_DATA": str(self.root / "missing"),
+            "ANTIGRAVITY_APP_DATA_DIR": str(self.root / "no-plugin-data"),
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(default_store_dir(), fallback)
+
+    def test_returns_none_when_nothing_exists(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(default_store_dir())
 
 
 if __name__ == "__main__":

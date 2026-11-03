@@ -72,7 +72,8 @@ class TestSearchEngine(unittest.TestCase):
                         title="Issue #42: OAuth2 bearer token refresh race condition",
                         text="Concurrent surface requests fail when OAuth2 bearer token expires.",
                         content_sha256=compute_content_sha256(
-                            "Issue #42", "Concurrent surface requests fail when OAuth2 bearer token expires."
+                            "Issue #42",
+                            "Concurrent surface requests fail when OAuth2 bearer token expires.",
                         ),
                         is_untrusted=True,
                         updated_at=now,
@@ -86,7 +87,9 @@ class TestSearchEngine(unittest.TestCase):
                         item_number=43,
                         title="Issue #43: Legacy closed auth issue",
                         text="OAuth2 bearer token refresh old bug.",
-                        content_sha256=compute_content_sha256("Issue #43", "OAuth2 bearer token refresh old bug."),
+                        content_sha256=compute_content_sha256(
+                            "Issue #43", "OAuth2 bearer token refresh old bug."
+                        ),
                         is_untrusted=True,
                         updated_at=now,
                     ),
@@ -116,7 +119,8 @@ class TestSearchEngine(unittest.TestCase):
                         title="class AuthClient in lib/auth.dart",
                         text="class AuthClient handles OAuth2 bearer token refresh in Flutter",
                         content_sha256=compute_content_sha256(
-                            "AuthClient", "class AuthClient handles OAuth2 bearer token refresh in Flutter"
+                            "AuthClient",
+                            "class AuthClient handles OAuth2 bearer token refresh in Flutter",
                         ),
                         is_untrusted=False,
                         updated_at=now,
@@ -139,7 +143,9 @@ class TestSearchEngine(unittest.TestCase):
                 self.assertIsNotNone(hits[0].bm25_rank)
                 self.assertIsNotNone(hits[0].vector_rank)
                 self.assertTrue(hits[0].is_untrusted)
-                self.assertIn('<untrusted_repo_content source="octo-org/widgets#42">', hits[0].snippet)
+                self.assertIn(
+                    '<untrusted_repo_content source="octo-org/widgets#42">', hits[0].snippet
+                )
 
                 # Trusted code symbol must NOT have untrusted XML tags
                 code_hits = [h for h in hits if h.source_kind == "code_symbol"]

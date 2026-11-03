@@ -101,14 +101,16 @@ def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
 def _diff_terminal(prev: PrSnapshot, cur: PrSnapshot, _ctx: DiffContext) -> list[Event]:
     if prev.state == cur.state:
         return []
+    terminal = cur.state in ("MERGED", "CLOSED")
+    action = "celebrate" if cur.state == "MERGED" else None
     return [
         Event(
             pr=cur.key,
             kind="terminal",
             from_value=prev.state,
             to_value=cur.state,
-            actionable=False,
-            suggested_action=None,
+            actionable=terminal,
+            suggested_action=action,
             summary=f"PR {cur.state.lower()}",
             detail={},
         )
@@ -489,7 +491,7 @@ def is_green(snap: PrSnapshot) -> bool:
     req_sum = snap.required_summary()
     if req_sum in ("FAILURE", "PENDING"):
         return False
-    return snap.rollup_state in ("SUCCESS", None)
+    return req_sum == "SUCCESS" or snap.rollup_state in ("SUCCESS", None)
 
 
 def is_terminal(snapshots: dict[str, PrSnapshot], until: str | None = None) -> bool:

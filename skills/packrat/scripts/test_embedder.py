@@ -35,9 +35,15 @@ class TestEmbedder(unittest.TestCase):
     """Tests deterministic 384-dim embeddings, ONNX fallback, and incremental sync."""
 
     def test_deterministic_vector_dims_and_semantic_clustering(self) -> None:
-        vec_auth_1 = embed_text_deterministic("OAuth2 bearer token authentication and JWT session credentials")
-        vec_auth_2 = embed_text_deterministic("SSO login permission RBAC token secret authentication")
-        vec_db = embed_text_deterministic("SQLite WAL database schema migration and SQL table index")
+        vec_auth_1 = embed_text_deterministic(
+            "OAuth2 bearer token authentication and JWT session credentials"
+        )
+        vec_auth_2 = embed_text_deterministic(
+            "SSO login permission RBAC token secret authentication"
+        )
+        vec_db = embed_text_deterministic(
+            "SQLite WAL database schema migration and SQL table index"
+        )
 
         self.assertEqual(len(vec_auth_1), EMBEDDING_DIM)
         self.assertAlmostEqual(math.sqrt(sum(x * x for x in vec_auth_1)), 1.0, places=5)
@@ -159,7 +165,9 @@ class TestEmbedder(unittest.TestCase):
             def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
                 pass
 
-            def advance(self, completed: int, total: int | None = None, *, detail: str = "") -> None:
+            def advance(
+                self, completed: int, total: int | None = None, *, detail: str = ""
+            ) -> None:
                 advances.append((completed, total))
 
             def finish_phase(self, summary: str = "") -> None:

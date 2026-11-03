@@ -23,7 +23,7 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--no-a2ui` | `false` | Disable writing `board.a2ui` and updating the A2UI Pane conversation JSONL store |
 | `--a2ui-file FILE` | `<state-dir>/board.a2ui` | Path to write the `stack_board` A2UI Express DSL file |
 | `--conversation-id ID` | none | Target Jetski conversation ID for direct A2UI Pane JSONL store updates |
-| `--a2ui-store-dir DIR` | `$A2UI_PANE_DATA` or `~/.gemini/jetski/plugin_data/a2ui-pane` | Override the `a2ui-pane` plugin data directory |
+| `--a2ui-store-dir DIR` | First existing of `$A2UI_PANE_DATA`, `$PLUGIN_DATA`, `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/a2ui-pane`, or `~/.gemini/jetski/plugin_data/a2ui-pane` | Override the `a2ui-pane` plugin data directory |
 | `--log FILE` | none | Append each emitted JSON payload as one line to this JSONL file |
 | `--output FILE` | none | Write the emitted JSON payload to this file in addition to `stdout` |
 | `--pushed-sha PR=SHA` | repeatable | Record a commit SHA pushed by the agent so `head_push` is suppressed for that SHA |
@@ -149,7 +149,7 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
 | `head_push` | `head_sha` changes and matches neither `--pushed-sha` nor `last_committer == viewer` | `false` | `null` |
 | `base_change` | `base_ref` changes | `false` | `null` |
 | `draft` | `draft` boolean toggles | `false` | `null` |
-| `terminal` | `state` changes (`OPEN` to `MERGED` or `CLOSED`) | `false` | `null` |
+| `terminal` | `state` changes (`OPEN` to `MERGED` or `CLOSED`) | `true` on `MERGED` or `CLOSED` | `celebrate` (`MERGED`), else `null` |
 | `stack_parent` | Watched parent PR's `state` becomes `MERGED` or `CLOSED` | `true` on `MERGED` | `rebase_onto_base` (`MERGED`), else `null` |
 | `approval_dismissed` | Previous approver disappears from `approvals` without entering `changes_requested` when `head_sha` changes | `false` | `null` |
 | `auto_merge` | `auto_merge` boolean toggles | `false` | `null` |

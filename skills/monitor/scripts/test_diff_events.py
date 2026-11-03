@@ -189,6 +189,9 @@ class TestDiffEvents(unittest.TestCase):
             }.issubset(kinds)
         )
         self.assertEqual(len(filter_events(evs, {"conflicts"})), 1)
+        term_ev = next(e for e in evs if e.kind == "terminal")
+        self.assertTrue(term_ev.actionable)
+        self.assertEqual(term_ev.suggested_action, "celebrate")
         self.assertIn("widget#3339:", summarize(evs))
 
         # is_green with null reviewDecision and null rollup_state.

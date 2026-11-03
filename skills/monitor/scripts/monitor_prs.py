@@ -36,7 +36,7 @@ from state import (
     save_state,
 )
 
-MAX_WATCHED_PRS = 20
+MAX_WATCHED_PRS = 60
 MAX_CONSECUTIVE_ERRORS = 5
 FAST_POLL_INTERVAL_S = 10
 BASE_BRANCHES = frozenset({"main", "master", "develop"})

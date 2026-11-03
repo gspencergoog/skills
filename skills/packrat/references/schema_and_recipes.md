@@ -34,6 +34,7 @@ When running `packrat sql "<query>"` (or `duckdb -batch -dark-mode -init ~/.loca
 - `v_doc_sections`: `kb.doc_sections` joined with `repo` (`r.full_name`).
 - `v_chunk_vectors`: `kb.chunks` joined with `kb.chunk_embeddings` and `repo` (`r.full_name`).
 - `v_file_hotspots`: per-file `commit_count`, `review_thread_count`, and `unresolved_thread_count`.
+- `v_item_participants`: unified lowercased `participant` logins and `role` values across PRs, issues, and discussions. Each row exposes `repo`, `kind`, `number`, `title`, `state`, `url`, `item_author`, `created_at`, `updated_at`, `merged_at`, `participant`, and `role`. Roles use `author`, `review:<STATE>`, `comment`, and `inline_comment`. PRs and issues mirror full multi-user comments and inline threads, while discussions mirror `discussions.author` only.
 - `kb_vec(v_json)`: parses `vector_json` into `FLOAT[384]`.
 - `kb_cosine(v_json, q_vec)`: computes `list_cosine_similarity(from_json(v_json, '["FLOAT"]')::FLOAT[384], q_vec::FLOAT[384])`.
 
@@ -111,4 +112,106 @@ JOIN v_code_symbols cs
  AND cs.file_path = rt.file_path
  AND rt.line BETWEEN cs.line_start AND cs.line_end
 ORDER BY rt.pr_number DESC;
+```
+
+### 5. Collaboration History & Peer Feedback Between Engineers
+
+If a repository is not yet mirrored locally, register it and run `packrat sync --repo octo-org/widgets --github-only` first. Run `packrat status` to confirm that `prs` and `issues` backfills are complete before summarizing long date windows.
+
+Find every pull request and issue where both `@alice` and `@bob` participated (including co-reviewed third-party PRs and inline threads):
+
+```bash
+packrat sql --format markdown "
+SELECT
+  repo,
+  kind,
+  number,
+  state,
+  title,
+  item_author,
+  LIST(DISTINCT role ORDER BY role) FILTER (WHERE participant = 'alice') AS alice_roles,
+  LIST(DISTINCT role ORDER BY role) FILTER (WHERE participant = 'bob') AS bob_roles,
+  updated_at,
+  url
+FROM v_item_participants
+WHERE repo = 'octo-org/widgets'
+  AND participant IN ('alice', 'bob')
+  AND updated_at >= '2026-01-01T00:00:00Z'
+  AND updated_at <= '2026-06-30T23:59:59Z'
+GROUP BY repo, kind, number, state, title, item_author, updated_at, url
+HAVING COUNT(DISTINCT participant) = 2
+ORDER BY updated_at DESC;
+"
+```
+
+Summarize a single engineer's authored and reviewed activity across repositories over a review cycle:
+
+```bash
+packrat sql --format markdown "
+SELECT
+  repo,
+  kind,
+  role,
+  COUNT(DISTINCT number) AS item_count,
+  COUNT(DISTINCT CASE WHEN state = 'MERGED' THEN number END) AS merged_count
+FROM v_item_participants
+WHERE participant = 'alice'
+  AND updated_at >= '2026-01-01T00:00:00Z'
+  AND updated_at <= '2026-06-30T23:59:59Z'
+GROUP BY repo, kind, role
+ORDER BY repo, kind, item_count DESC;
+"
+```
+
+Fetch full review bodies, timeline comments, and inline review threads for selected PRs to prepare peer feedback:
+
+```bash
+packrat sql --format json "
+SELECT * FROM (
+  SELECT
+    rv.pr_number,
+    'review:' || UPPER(COALESCE(NULLIF(rv.state, ''), 'COMMENTED')) AS source,
+    LOWER(rv.author) AS author,
+    CAST(NULL AS VARCHAR) AS location,
+    rv.submitted_at AS ts,
+    rv.body
+  FROM kb.reviews rv
+  JOIN kb.repos r ON r.repo_id = rv.repo_id
+  WHERE r.full_name = 'octo-org/widgets'
+    AND rv.pr_number IN (101, 102)
+    AND rv.body <> ''
+
+  UNION ALL
+
+  SELECT
+    c.parent_number AS pr_number,
+    'comment' AS source,
+    LOWER(c.author) AS author,
+    CAST(NULL AS VARCHAR) AS location,
+    c.created_at AS ts,
+    c.body
+  FROM kb.comments c
+  JOIN kb.repos r ON r.repo_id = c.repo_id
+  WHERE r.full_name = 'octo-org/widgets'
+    AND c.parent_kind = 'pr'
+    AND c.parent_number IN (101, 102)
+    AND c.body <> ''
+
+  UNION ALL
+
+  SELECT
+    rt.pr_number,
+    'inline_thread' AS source,
+    LOWER(rt.reviewer) AS author,
+    COALESCE(rt.file_path, 'general') || COALESCE(':' || CAST(rt.line AS VARCHAR), '') AS location,
+    rt.updated_at AS ts,
+    rt.body
+  FROM kb.review_threads rt
+  JOIN kb.repos r ON r.repo_id = rt.repo_id
+  WHERE r.full_name = 'octo-org/widgets'
+    AND rt.pr_number IN (101, 102)
+    AND rt.body <> ''
+)
+ORDER BY pr_number, ts;
+"
 ```

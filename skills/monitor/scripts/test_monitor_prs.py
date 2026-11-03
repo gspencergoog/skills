@@ -263,6 +263,46 @@ class TestMonitorPrs(unittest.TestCase):
             payload = json.loads(stdout)
             self.assertEqual(payload["exit_reason"], "terminal")
 
+    def test_partial_merged_wakes_actionable_only_with_exit_code_0(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_path = str(Path(tmp) / "state.json")
+            stack_both_open = json.loads(load_fixture("pr_stack.json"))
+            stack_both_open["data"]["pr0"]["pullRequest"]["state"] = "OPEN"
+            stack_both_open["data"]["pr0"]["pullRequest"]["merged"] = False
+            stack_both_open["data"]["pr1"]["pullRequest"]["baseRefName"] = "main"
+            fake_seed = FakeGh([("graphql", 0, json.dumps(stack_both_open), "")])
+            self._run_monitor(
+                fake_seed,
+                ["acme/widget#3338", "acme/widget#3339", "--state", state_path, "--once"],
+            )
+
+            # Now sibling pr0 (#3338) merges while pr1 (#3339) stays OPEN.
+            sibling_merged = json.loads(load_fixture("pr_stack.json"))
+            sibling_merged["data"]["pr1"]["pullRequest"]["baseRefName"] = "main"
+            fake_watch = FakeGh([("graphql", 0, json.dumps(sibling_merged), "")])
+            code, stdout, _ = self._run_monitor(
+                fake_watch,
+                [
+                    "acme/widget#3338",
+                    "acme/widget#3339",
+                    "--state",
+                    state_path,
+                    "--actionable-only",
+                    "--debounce",
+                    "0",
+                    "--no-notifications",
+                ],
+            )
+            self.assertEqual(code, 0)
+            payload = json.loads(stdout)
+            self.assertEqual(payload["exit_reason"], "change")
+            self.assertEqual(len(payload["events"]), 1)
+            term_ev = payload["events"][0]
+            self.assertEqual(term_ev["kind"], "terminal")
+            self.assertEqual(term_ev["pr"], "acme/widget#3338")
+            self.assertTrue(term_ev["actionable"])
+            self.assertEqual(term_ev["suggested_action"], "celebrate")
+
     def test_event_filter_pushed_sha_and_partial_notification_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_path = str(Path(tmp) / "state.json")
