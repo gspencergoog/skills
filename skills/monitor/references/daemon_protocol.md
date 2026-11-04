@@ -20,7 +20,7 @@ All daemon files are located in the state directory (e.g. `<scratch>/monitor/` o
 | :--- | :--- | :--- |
 | `daemon.lock` | Daemon | Exclusive `fcntl.flock` lock file preventing duplicate daemons. |
 | `daemon.pid` | Daemon | Contains the PID of the active daemon process. |
-| `armed.json` | Daemon | Metadata declaring that the monitor is armed and expected to run. Contains `{"argv": [...], "cwd": "...", "skill": "...", "started_at": "...", "poll_s": ...}`. |
+| `armed.json` | Daemon | Metadata declaring that the monitor is armed and expected to run. Contains `{"argv": [...], "cwd": "...", "skill": "...", "started_at": "...", "poll_s": ...}`. The PR monitor adds `"source"` (`"packrat"` or `"github"`, rewritten when it falls back) and, in `packrat` mode, `"packrat_db"`. |
 | `heartbeat` | Daemon | Empty file whose `mtime` is touched every polling loop tick. |
 | `control.jsonl` | Agent | Append-only instruction file consumed by `ControlReader`. |
 | `last.json` | Daemon | Latest emitted payload, including `batch_id`, `notify_mode`, and `notifier`. |
@@ -43,6 +43,7 @@ Signals that the agent has received and begun handling batch `1`. Older or equal
 {"pushed_sha": {"owner/repo#123": "c0ffee1234567890"}}
 ```
 Records a commit SHA pushed by the agent so the subsequent `head_push` event is suppressed.
+In `packrat` mode the daemon also runs `packrat refresh` for that pull request, so the new head shows up without waiting for a signal.
 
 ### 3. Suppressing Self-Uploaded Snapshots (CL Monitor)
 ```json
@@ -61,6 +62,15 @@ Records a flaky check rerun performed by the agent.
 {"stop": true}
 ```
 Instructs the daemon to disarm (`armed.json` removed), emit a final payload with `exit_reason == "stopped"`, and cleanly exit code `0`.
+
+## `packrat` Leases (PR Monitor)
+
+When `/monitor` reads from `packrat serve` (`--source auto` with a fresh heartbeat, or `--source packrat`), it holds a lease on every watched pull request:
+
+1. **Start:** `packrat watch add --consumer monitor --id <id> --freshness 120 --ttl 900 <PR>...`, where `<id>` is a hash of `--conversation-id` (or of the state directory). Pull requests that `packrat` hasn't refreshed in the last 15 minutes get a `packrat refresh` and up to 30 seconds to arrive; any still missing are fetched once with `gh`.
+2. **Running:** `packrat watch renew` every 5 minutes. The daemon waits on `packrat changes --since <seq> --wait <debounce>` and re-reads only the changed pull requests from the views. A `{"reset": true}` answer re-reads every watched pull request.
+3. **Exit:** after the daemon loop ends (`stop`, `--timeout`, terminal state, or a signal), `packrat watch remove` drops the leases. A crashed daemon's leases expire after the 900-second TTL. `--once` keeps its lease so the daemon that usually follows starts warm.
+4. **Fallback:** if the heartbeat goes stale or a `packrat` command fails, the daemon switches to direct GitHub polling for the rest of the run, logs it once, and rewrites `armed.json` with `"source": "github"`.
 
 ## Exit Codes & Exit Reasons
 

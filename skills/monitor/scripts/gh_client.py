@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import sys
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from models import parse_pr_ref
@@ -11,6 +15,7 @@ from models import parse_pr_ref
 BATCH_SIZE = 10
 MIN_POLL_BACKOFF_S = 30
 MAX_POLL_BACKOFF_S = 600
+_STATUS_LINE_RE = re.compile(r"^HTTP/[\d.]+\s+(\d{3})")
 
 PR_FIELDS_FRAGMENT = """
 fragment PrFields on PullRequest {
@@ -192,7 +197,7 @@ def _alias_block(index: int, owner: str, name: str, number: int) -> str:
 
 
 def build_query(keys: list[str]) -> str:
-    """Builds a single GraphQL document fetching ``viewer`` and aliased PRs."""
+    """Builds a single GraphQL document fetching ``viewer``, ``rateLimit``, and aliased PRs."""
     if not keys:
         raise ValueError("build_query requires at least one PR key")
     aliases: list[str] = []
@@ -201,34 +206,183 @@ def build_query(keys: list[str]) -> str:
         owner, name = repo.split("/", 1)
         aliases.append(_alias_block(idx, owner, name, number))
     joined = "\n".join(aliases)
-    return f"query {{\n  viewer {{\n    login\n  }}\n{joined}\n}}\n\n{PR_FIELDS_FRAGMENT}\n"
+    return (
+        "query {\n  viewer {\n    login\n  }\n"
+        "  rateLimit {\n    cost\n    remaining\n    resetAt\n  }\n"
+        f"{joined}\n}}\n\n{PR_FIELDS_FRAGMENT}\n"
+    )
+
+
+@dataclass(frozen=True)
+class RateLimit:
+    """Rate-limit state parsed from ``X-RateLimit-*`` headers and the ``rateLimit`` node.
+
+    Every field is ``None`` when the response did not carry it.
+    """
+
+    resource: str | None = None
+    limit: int | None = None
+    remaining: int | None = None
+    used: int | None = None
+    reset_at: int | None = None
+    """Epoch seconds from ``X-RateLimit-Reset``."""
+    cost: int | None = None
+    """Point cost of the query from the GraphQL ``rateLimit { cost }`` node."""
+
+
+@dataclass(frozen=True)
+class GraphqlResult:
+    """Parsed ``gh api -i graphql`` response: the ``data`` object plus rate-limit details."""
+
+    data: dict[str, Any]
+    headers: dict[str, str] = field(default_factory=dict)
+    """Response headers with lowercased names."""
+    rate_limit: RateLimit = field(default_factory=RateLimit)
+
+
+def split_http_response(text: str) -> tuple[int | None, dict[str, str], str]:
+    """Splits ``gh api -i`` output into ``(status, lowercase_headers, body)``.
+
+    Output without a leading ``HTTP/`` status line is treated as a bare body, so the
+    status is ``None`` and the headers are empty.
+    """
+    normalized = text.replace("\r\n", "\n")
+    match = _STATUS_LINE_RE.match(normalized)
+    if not match:
+        return None, {}, text
+    split_idx = normalized.find("\n\n")
+    head = normalized if split_idx == -1 else normalized[:split_idx]
+    body = "" if split_idx == -1 else normalized[split_idx + 2 :]
+    headers: dict[str, str] = {}
+    for line in head.split("\n")[1:]:
+        name, sep, value = line.partition(":")
+        if sep and name.strip():
+            headers[name.strip().lower()] = value.strip()
+    return int(match.group(1)), headers, body
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def parse_rate_limit(headers: dict[str, str], data: dict[str, Any] | None = None) -> RateLimit:
+    """Builds a ``RateLimit`` from lowercased headers and an optional GraphQL ``data`` object."""
+    node = (data or {}).get("rateLimit")
+    cost = _int_or_none(node.get("cost")) if isinstance(node, dict) else None
+    remaining = _int_or_none(headers.get("x-ratelimit-remaining"))
+    if remaining is None and isinstance(node, dict):
+        remaining = _int_or_none(node.get("remaining"))
+    return RateLimit(
+        resource=headers.get("x-ratelimit-resource"),
+        limit=_int_or_none(headers.get("x-ratelimit-limit")),
+        remaining=remaining,
+        used=_int_or_none(headers.get("x-ratelimit-used")),
+        reset_at=_int_or_none(headers.get("x-ratelimit-reset")),
+        cost=cost,
+    )
+
+
+def _log_cost(rate: RateLimit, log: Callable[[str], Any]) -> None:
+    if rate.cost is None:
+        return
+    log(
+        f"monitor: graphql cost={rate.cost} remaining={rate.remaining} "
+        f"limit={rate.limit} reset_at={rate.reset_at}\n"
+    )
+
+
+def _graphql_error_status(payload: dict[str, Any], status: int | None) -> int | None:
+    """Returns the HTTP status to report, mapping ``RATE_LIMITED`` errors to 403."""
+    if status not in (None, 200):
+        return status
+    errors = payload.get("errors") or []
+    if any(isinstance(err, dict) and err.get("type") == "RATE_LIMITED" for err in errors):
+        return 403
+    return status
+
+
+def _failed_call_status(body: str, status: int | None) -> int | None:
+    """Returns the status for a non-zero ``gh`` exit, reading GraphQL ``errors`` in the body.
+
+    ``gh api graphql`` exits 1 when an HTTP 200 body carries ``errors``, so a
+    ``RATE_LIMITED`` error only shows up in the body.
+    """
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return status
+    return _graphql_error_status(payload, status) if isinstance(payload, dict) else status
+
+
+def _decode_graphql_body(
+    body: str, status: int | None, headers: dict[str, str], stderr: str
+) -> dict[str, Any]:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise GhError(
+            f"Invalid JSON from gh api graphql: {exc}",
+            code=1,
+            stderr=stderr,
+            status=status,
+            headers=headers,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise GhError("GraphQL response is not a JSON object", code=1, stderr=stderr)
+    if payload.get("errors"):
+        messages = "; ".join(
+            str(err.get("message") or err) if isinstance(err, dict) else str(err)
+            for err in payload["errors"]
+        )
+        raise GhError(
+            f"GraphQL error: {messages}",
+            code=1,
+            stderr=stderr,
+            status=_graphql_error_status(payload, status),
+            headers=headers,
+        )
+    return payload
 
 
 def graphql(
-    runner: GhRunner, query: str, variables: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Executes a GraphQL query via ``gh api graphql`` and returns ``data``."""
-    args = ["api", "graphql", "-f", f"query={query}"]
+    runner: GhRunner,
+    query: str,
+    variables: dict[str, Any] | None = None,
+    log: Callable[[str], Any] | None = None,
+) -> GraphqlResult:
+    """Executes a GraphQL query via ``gh api -i graphql`` and returns ``data`` with rate limits.
+
+    The ``-i`` header block is split from the body before decoding. Failures raise
+    ``GhError`` carrying the HTTP status and headers, so ``RateLimitBackoff`` can honor
+    ``X-RateLimit-Reset``. When the query selects ``rateLimit { cost }``, the cost is
+    written to ``log`` (default: ``stderr``) once per call.
+    """
+    args = ["api", "-i", "graphql", "-f", f"query={query}"]
     for key, val in (variables or {}).items():
         args.extend(["-F", f"{key}={val}"])
     code, stdout, stderr = runner(args)
+    status, headers, body = split_http_response(stdout)
     if code != 0:
         raise GhError(
-            f"gh api graphql failed (exit {code}): {stderr.strip() or stdout.strip()}",
+            f"gh api graphql failed (exit {code}): {stderr.strip() or body.strip()}",
             code=code,
             stderr=stderr,
+            status=_failed_call_status(body, status),
+            headers=headers,
         )
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise GhError(f"Invalid JSON from gh api graphql: {exc}", code=1, stderr=stderr) from exc
-    if payload.get("errors"):
-        messages = "; ".join(str(err.get("message") or err) for err in payload["errors"])
-        raise GhError(f"GraphQL error: {messages}", code=1, stderr=stderr)
+    payload = _decode_graphql_body(body, status, headers, stderr)
     data = payload.get("data")
     if not isinstance(data, dict):
         raise GhError("GraphQL response missing 'data' object", code=1, stderr=stderr)
-    return data
+    rate = parse_rate_limit(headers, data)
+    _log_cost(rate, log or sys.stderr.write)
+    return GraphqlResult(data=data, headers=headers, rate_limit=rate)
 
 
 def fetch_prs(runner: GhRunner, keys: list[str]) -> tuple[str, dict[str, dict[str, Any]]]:
@@ -239,7 +393,7 @@ def fetch_prs(runner: GhRunner, keys: list[str]) -> tuple[str, dict[str, dict[st
     results: dict[str, dict[str, Any]] = {}
     for start in range(0, len(keys), BATCH_SIZE):
         chunk = keys[start : start + BATCH_SIZE]
-        data = graphql(runner, build_query(chunk))
+        data = graphql(runner, build_query(chunk)).data
         viewer_node = data.get("viewer") or {}
         if isinstance(viewer_node, dict) and viewer_node.get("login"):
             viewer = str(viewer_node["login"])

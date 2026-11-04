@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -25,9 +26,10 @@ from auto_sync import (
     enable_auto_sync,
     get_auto_sync_status,
 )
+from db_migrations import SchemaTooNewError
 from db_store import DEFAULT_DB_PATH, PackratStore
 from embedder import (
-    ensure_bge_model,
+    ensure_onnx_model,
     get_default_embedder,
     sync_repo_embeddings,
 )
@@ -36,6 +38,7 @@ from github_sync import (
     DEFAULT_BACKFILL_MAX_PAGES,
     GhAuthProbe,
     probe_gh_auth,
+    sync_backfill_only,
     sync_github_metadata,
 )
 from models import BACKFILL_STREAMS, RepoConfig, SearchFilters, SyncStats, utc_now_iso
@@ -45,7 +48,9 @@ from progress import (
     StderrProgressReporter,
     format_duration,
 )
+from rate_budget import RATE_BUDGET_FILENAME, RateBudget, RateSnapshot
 from search_engine import hybrid_rrf_search
+from serve_cli import add_live_parsers, cmd_serve, format_service_status, service_status
 from sync_runtime import (
     AutoSyncRunRecord,
     LockMode,
@@ -54,17 +59,22 @@ from sync_runtime import (
     write_auto_sync_run_state,
 )
 
+INIT_SQL_FILENAME = "init.sql"
+
 
 def _resolve_db_path(db_path_str: str | None) -> Path:
     """Resolves the target SQLite database path from CLI args or default."""
     return Path(db_path_str).expanduser() if db_path_str else DEFAULT_DB_PATH
 
 
-def _open_store(db_path_str: str | None) -> PackratStore:
-    """Opens PackratStore and refreshes init.sql."""
+def _open_store(
+    db_path_str: str | None, *, refresh_init_sql: bool = False
+) -> PackratStore:
+    """Opens PackratStore and optionally refreshes init.sql."""
     db_path = _resolve_db_path(db_path_str)
     store = PackratStore(db_path)
-    store.write_init_sql()
+    if refresh_init_sql:
+        store.write_init_sql()
     return store
 
 
@@ -81,10 +91,33 @@ def _select_repos(store: PackratStore, repo_arg: str | None) -> list[RepoConfig]
     if not repo_arg:
         return all_repos
     needle = repo_arg.strip().lower()
-    matched = [r for r in all_repos if r.full_name.lower() == needle or r.name.lower() == needle]
+    matched = [
+        r
+        for r in all_repos
+        if r.full_name.lower() == needle or r.name.lower() == needle
+    ]
     if not matched:
         raise ValueError(f"Repository '{repo_arg}' is not registered in packrat.")
     return matched
+
+
+def _select_mirror_repos(store: PackratStore, repo_arg: str | None) -> list[RepoConfig]:
+    """Resolves the `mirror` repositories that `packrat sync` should process.
+
+    `items` repositories hold only watched or notified items; `packrat serve`
+    refreshes those, so sync skips them (no backfill, events, or indexing).
+
+    Raises:
+        ValueError: `repo_arg` is unregistered, or names only `items` repositories.
+    """
+    selected = _select_repos(store, repo_arg)
+    repos = [r for r in selected if r.is_mirror]
+    if repo_arg and not repos:
+        name = selected[0].full_name
+        raise ValueError(
+            f"{name} is in items mode; run 'packrat repo add {name}' to mirror it."
+        )
+    return repos
 
 
 def _merge_sync_stats(
@@ -114,6 +147,8 @@ def _merge_sync_stats(
         combined.discussions_upserted = gh_stats.discussions_upserted
         combined.chunks_upserted += gh_stats.chunks_upserted
         combined.backfill_incomplete = list(gh_stats.backfill_incomplete)
+        combined.deferred = gh_stats.deferred
+        combined.deferred_streams = list(gh_stats.deferred_streams)
         combined.warnings.extend(gh_stats.warnings)
         combined.errors.extend(gh_stats.errors)
         if gh_stats.skipped_reason:
@@ -143,7 +178,9 @@ def _backfill_warnings(repo: RepoConfig) -> list[str]:
         if state.complete:
             continue
         if state.cursor is not None:
-            warnings.append(f"{stream} backfill incomplete; resumes on next packrat sync")
+            warnings.append(
+                f"{stream} backfill incomplete; resumes on next packrat sync"
+            )
         else:
             warnings.append(
                 f"{stream} backfill incomplete; history not fetched yet, run packrat sync"
@@ -173,21 +210,53 @@ def _format_last_auto_sync(last_run: AutoSyncRunRecord | None) -> str | None:
     return line
 
 
+def _rate_budget_for(db_path: Path) -> RateBudget:
+    """Returns the shared GitHub rate budget stored next to the database."""
+    return RateBudget(db_path.parent / RATE_BUDGET_FILENAME)
+
+
+def _rate_budget_payload(
+    budget: RateBudget, now: float | None = None
+) -> dict[str, Any]:
+    """Returns the last recorded snapshot per resource for `packrat status`.
+
+    Each entry is the stored snapshot plus `expired`, which is True once its
+    window has reset and the numbers no longer apply.
+    """
+    moment = time.time() if now is None else now
+    return {
+        name: {**asdict(snap), "expired": snap.expired(moment)}
+        for name, snap in sorted(budget.last_snapshots().items())
+    }
+
+
+def _format_rate_snapshot(snap: RateSnapshot, now: float) -> str:
+    """Formats one budget snapshot as a single human-readable line."""
+    reset_iso = time.strftime("%H:%M:%SZ", time.gmtime(snap.reset_at))
+    if snap.expired(now):
+        return f"GitHub budget ({snap.resource}): unknown (window reset at {reset_iso})"
+    pct = round(snap.fraction_remaining() * 100)
+    return (
+        f"GitHub budget ({snap.resource}): {snap.remaining}/{snap.limit} ({pct}%), "
+        f"resets {reset_iso}"
+    )
+
+
 def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> None:
     """Prints human-readable `packrat status` output to stdout."""
     print(f"Database: {payload['db_path']}")
     print(f"DuckDB init.sql: {payload['init_sql_path']}")
     print(f"Embedder: {payload['active_embedder']}")
-    if auto_sync.enabled:
-        print(
-            f"Auto-sync timer: enabled (active={auto_sync.active}, "
-            f"every={auto_sync.interval_min}m, fetch={auto_sync.fetch})"
-        )
-    else:
-        print(f"Auto-sync timer: disabled ({auto_sync.detail})")
+    print(_format_auto_sync_mode(auto_sync))
     last_line = _format_last_auto_sync(auto_sync.last_run)
     if last_line is not None:
         print(last_line)
+    if "service" in payload:
+        print(format_service_status(payload["service"]))
+    now = time.time()
+    for raw in payload.get("rate_budget", {}).values():
+        fields = {k: v for k, v in raw.items() if k != "expired"}
+        print(_format_rate_snapshot(RateSnapshot(**fields), now))
     if not payload["repos"]:
         print(f"\n{NO_REPOS_MESSAGE.replace('Error: ', '')}", end="")
     for item in payload["repos"]:
@@ -214,13 +283,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     try:
         repos = _select_repos(store, args.repo)
         embedder = get_default_embedder()
-        init_sql_path = store.write_init_sql()
+        init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
+        if not init_sql_path.exists():
+            init_sql_path = store.write_init_sql()
         auto_sync = get_auto_sync_status(db_path=store.db_path)
         payload: dict[str, Any] = {
             "db_path": str(store.db_path),
             "init_sql_path": str(init_sql_path),
             "active_embedder": embedder.model_id,
             "auto_sync": asdict(auto_sync),
+            "rate_budget": _rate_budget_payload(_rate_budget_for(store.db_path)),
+            "service": service_status(store),
             "repos": [],
         }
         for r in repos:
@@ -228,6 +301,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 {
                     "repo_id": r.repo_id,
                     "full_name": r.full_name,
+                    "mode": r.mode,
                     "local_path": r.local_path,
                     "default_branch": r.default_branch,
                     "last_indexed_sha": r.last_indexed_sha,
@@ -260,6 +334,33 @@ def _skipped_gh_stats_from_probe(repo_name: str, probe: GhAuthProbe) -> SyncStat
     return gh_stats
 
 
+def _run_github_sync(
+    store: PackratStore,
+    repo: RepoConfig,
+    args: argparse.Namespace,
+    reporter: ProgressReporter,
+    budget: RateBudget | None,
+) -> SyncStats:
+    """Runs the GitHub part of a repo sync: backfill walks only, or the full delta sync."""
+    if getattr(args, "backfill_only", False):
+        return sync_backfill_only(
+            store,
+            repo,
+            backfill_max_pages=args.backfill_max_pages,
+            reporter=reporter,
+            budget=budget,
+        )
+    return sync_github_metadata(
+        store,
+        repo,
+        force=args.force,
+        max_pages=args.max_pages,
+        backfill_max_pages=args.backfill_max_pages,
+        reporter=reporter,
+        budget=budget,
+    )
+
+
 def _sync_single_repo(
     store: PackratStore,
     repo: RepoConfig,
@@ -267,8 +368,13 @@ def _sync_single_repo(
     embedder: Any,
     reporter: ProgressReporter = NULL_REPORTER,
     gh_probe: GhAuthProbe | None = None,
+    budget: RateBudget | None = None,
 ) -> dict[str, Any]:
-    """Executes git, GitHub, and embedding sync for a single repository."""
+    """Executes git, GitHub, and embedding sync for a single repository.
+
+    Args:
+        budget: Shared GitHub rate budget passed to `sync_github_metadata`.
+    """
     started = time.monotonic()
     git_stats: SyncStats | None = None
     gh_stats: SyncStats | None = None
@@ -287,14 +393,7 @@ def _sync_single_repo(
             gh_stats = _skipped_gh_stats_from_probe(repo.full_name, gh_probe)
         else:
             fresh_repo = store.get_repo(repo.full_name) or repo
-            gh_stats = sync_github_metadata(
-                store,
-                fresh_repo,
-                force=args.force,
-                max_pages=args.max_pages,
-                backfill_max_pages=args.backfill_max_pages,
-                reporter=reporter,
-            )
+            gh_stats = _run_github_sync(store, fresh_repo, args, reporter, budget)
     embedded_count = sync_repo_embeddings(
         store,
         repo.repo_id,
@@ -308,12 +407,36 @@ def _sync_single_repo(
     )
 
 
+def _sync_single_repo_guarded(
+    store: PackratStore,
+    repo: RepoConfig,
+    args: argparse.Namespace,
+    embedder: Any,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Runs `_sync_single_repo`, turning a SQLite write failure into a recorded error.
+
+    A failed write (for example `database or disk is full`) used to abort the
+    whole run with a traceback before the auto-sync outcome was recorded. Now
+    the repository reports the error, the run ends as `degraded_error`, and
+    the next sync resumes from the saved cursors and flags.
+    """
+    try:
+        return _sync_single_repo(store, repo, args, embedder, **kwargs)
+    except sqlite3.OperationalError as exc:
+        msg = f"sqlite write failed during sync ({exc})"
+        reporter = kwargs.get("reporter") or NULL_REPORTER
+        reporter.error(repo.full_name, msg)
+        failed = SyncStats(repo_full_name=repo.full_name, errors=[msg])
+        return asdict(failed)
+
+
 def _validate_git_sync_paths(
     repos: Sequence[RepoConfig],
     args: argparse.Namespace,
 ) -> str | None:
     """Returns an actionable error message if any target repo lacks a valid local git path."""
-    if args.github_only:
+    if args.github_only or getattr(args, "backfill_only", False):
         return None
     for repo in repos:
         if not repo.local_path:
@@ -356,7 +479,15 @@ def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) ->
         print(f"  note: {res['skipped_reason']}", flush=True)
     for stream in res.get("backfill_incomplete") or []:
         print(
-            f"  note: {stream} backfill incomplete; run packrat sync again to continue", flush=True
+            f"  note: {stream} backfill incomplete; run packrat sync again to continue",
+            flush=True,
+        )
+    deferred = res.get("deferred_streams") or []
+    if deferred:
+        print(
+            f"  note: deferred by GitHub rate budget: {', '.join(deferred)}; "
+            "resumes on a later sync",
+            flush=True,
         )
 
 
@@ -368,7 +499,11 @@ def _handle_contended_sync_lock(
     started: float,
 ) -> int:
     """Reports single-flight lock contention and records skipped_locked under --auto."""
-    holder = f"pid={lock_info.holder_pid}" if lock_info.holder_pid is not None else "unknown pid"
+    holder = (
+        f"pid={lock_info.holder_pid}"
+        if lock_info.holder_pid is not None
+        else "unknown pid"
+    )
     if lock_info.holder_started_at:
         holder = f"{holder}, started_at={lock_info.holder_started_at}"
     detail = f"sync.lock held ({holder})"
@@ -413,16 +548,36 @@ def _collect_sync_errors(results: Sequence[dict[str, Any]]) -> list[str]:
     return errors
 
 
+def _deferred_detail(results: Sequence[dict[str, Any]]) -> str:
+    """Summarizes rate-budget deferrals as `owner/name: stream, ...; ...`, or ""."""
+    parts = [
+        f"{res.get('repo_full_name')}: {', '.join(res['deferred_streams'])}"
+        for res in results
+        if res.get("deferred_streams")
+    ]
+    if not parts:
+        return ""
+    return "deferred by GitHub rate budget (" + "; ".join(parts) + ")"
+
+
 def _classify_sync_outcome(
     results: Sequence[dict[str, Any]],
     gh_probe: GhAuthProbe | None,
 ) -> tuple[str, str]:
-    """Classifies completed repository sync results into `(outcome, detail)`."""
+    """Classifies completed repository sync results into `(outcome, detail)`.
+
+    Errors win over deferrals: a run with any error is degraded even when other
+    streams were only deferred. Without errors, any deferred stream yields
+    `deferred_rate_limit`.
+    """
     all_errors = _collect_sync_errors(results)
     if all_errors:
         if all("keyring_locked" in err for err in all_errors):
             return "degraded_keyring_locked", all_errors[0]
         return "degraded_error", all_errors[0]
+    deferred = _deferred_detail(results)
+    if deferred:
+        return "deferred_rate_limit", deferred
     if gh_probe is None or gh_probe.ok:
         return "ok", ""
     if gh_probe.error_kind == "keyring_locked":
@@ -485,7 +640,9 @@ def _handle_empty_sync_repos(
     if not is_auto:
         sys.stderr.write(NO_REPOS_MESSAGE)
         return 2
-    _record_auto_sync_run(db_path, started, "skipped_no_repos", [], "no repositories registered")
+    _record_auto_sync_run(
+        db_path, started, "skipped_no_repos", [], "no repositories registered"
+    )
     if args.json:
         print(
             json.dumps(
@@ -518,7 +675,11 @@ def _finalize_sync_run(
             )
         )
     if is_auto:
-        return 0 if outcome in ("ok", "degraded_keyring_locked") else 1
+        return (
+            0
+            if outcome in ("ok", "degraded_keyring_locked", "deferred_rate_limit")
+            else 1
+        )
     return 0 if outcome == "ok" else 1
 
 
@@ -545,12 +706,17 @@ def _sync_repos_under_lock(
     db_path: Path,
     reporter: ProgressReporter,
     started: float,
+    budget: RateBudget | None = None,
 ) -> int:
-    """Executes repository syncs while holding the single-flight lock."""
+    """Executes repository syncs while holding the single-flight lock.
+
+    Args:
+        budget: Shared GitHub rate budget used by every repository in this run.
+    """
     is_auto = bool(getattr(args, "auto", False))
-    store = _open_store(args.db)
+    store = _open_store(args.db, refresh_init_sql=True)
     try:
-        repos = _select_repos(store, args.repo)
+        repos = _select_mirror_repos(store, args.repo)
         if not repos:
             return _handle_empty_sync_repos(args, db_path, started, is_auto=is_auto)
 
@@ -561,11 +727,22 @@ def _sync_repos_under_lock(
                 return 2
 
         gh_probe = _probe_github_if_needed(args, reporter)
-        embedder = get_default_embedder(reporter=reporter)
+        allow_download = not getattr(args, "no_download_model", False) and (
+            getattr(args, "download_model", False) or db_path == DEFAULT_DB_PATH
+        )
+        embedder = get_default_embedder(
+            allow_download=allow_download, reporter=reporter
+        )
         results: list[dict[str, Any]] = []
         for repo in repos:
-            res = _sync_single_repo(
-                store, repo, args, embedder, reporter=reporter, gh_probe=gh_probe
+            res = _sync_single_repo_guarded(
+                store,
+                repo,
+                args,
+                embedder,
+                reporter=reporter,
+                gh_probe=gh_probe,
+                budget=budget,
             )
             results.append(res)
             gh_probe = _propagate_keyring_lock(gh_probe, res)
@@ -600,10 +777,15 @@ def cmd_sync(args: argparse.Namespace) -> int:
     )
     with acquire_sync_lock(db_path, mode=lock_mode) as lock_info:
         if not lock_info.acquired:
-            return _handle_contended_sync_lock(args, db_path, lock_info, lock_mode, started)
-        if args.download_model:
-            ensure_bge_model(allow_download=True, reporter=reporter)
-        return _sync_repos_under_lock(args, db_path, reporter, started)
+            return _handle_contended_sync_lock(
+                args, db_path, lock_info, lock_mode, started
+            )
+        if getattr(args, "download_model", False) and not getattr(
+            args, "no_download_model", False
+        ):
+            ensure_onnx_model(allow_download=True, reporter=reporter)
+        budget = _rate_budget_for(db_path)
+        return _sync_repos_under_lock(args, db_path, reporter, started, budget=budget)
 
 
 def _empty_search_hint(store: PackratStore, repo_arg: str | None) -> str | None:
@@ -667,8 +849,8 @@ def cmd_search(args: argparse.Namespace) -> int:
 
 def cmd_sql(args: argparse.Namespace) -> int:
     """Handles `packrat sql` via read-only DuckDB v2.0 with init.sql."""
-    store = _open_store(args.db)
-    init_sql_path = store.write_init_sql()
+    store = _open_store(args.db, refresh_init_sql=True)
+    init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
     store.close()
 
     duckdb_bin = (
@@ -748,7 +930,9 @@ def _cmd_repo_rename(store: PackratStore, args: argparse.Namespace) -> int:
 def _cmd_repo_remove(store: PackratStore, args: argparse.Namespace) -> int:
     """Handles `packrat repo remove`."""
     if not store.remove_repo(args.full_name):
-        sys.stderr.write(f"Error: Repository '{args.full_name}' is not registered in packrat.\n")
+        sys.stderr.write(
+            f"Error: Repository '{args.full_name}' is not registered in packrat.\n"
+        )
         return 2
     print(f"Removed {args.full_name} and all of its synced data.")
     return 0
@@ -756,7 +940,8 @@ def _cmd_repo_remove(store: PackratStore, args: argparse.Namespace) -> int:
 
 def cmd_repo(args: argparse.Namespace) -> int:
     """Handles `packrat repo {list,add,set-path,rename,remove}`."""
-    store = _open_store(args.db)
+    mutating = args.repo_action in ("add", "set-path", "rename", "remove")
+    store = _open_store(args.db, refresh_init_sql=mutating)
     try:
         if args.repo_action in ("add", "set-path"):
             return _cmd_repo_register(store, args)
@@ -773,7 +958,10 @@ def cmd_repo(args: argparse.Namespace) -> int:
             sys.stderr.write(NO_REPOS_MESSAGE.replace("Error: ", ""))
             return 0
         for r in repos:
-            print(f"{r.full_name}\tbranch={r.default_branch}\tpath={r.local_path or '-'}")
+            mode_note = "" if r.is_mirror else f"\tmode={r.mode}"
+            print(
+                f"{r.full_name}\tbranch={r.default_branch}\tpath={r.local_path or '-'}{mode_note}"
+            )
         return 0
     finally:
         store.close()
@@ -791,17 +979,39 @@ def cmd_install_cli(args: argparse.Namespace) -> int:
     link_path.symlink_to(target_script)
     print(f"Installed symlink: {link_path} -> {target_script}")
     path_entries = [
-        str(Path(p).expanduser().resolve()) for p in os.environ.get("PATH", "").split(":") if p
+        str(Path(p).expanduser().resolve())
+        for p in os.environ.get("PATH", "").split(":")
+        if p
     ]
     if str(bin_dir) not in path_entries:
         print(f"Note: '{bin_dir}' is not on your PATH. Add it in your shell profile.")
     return 0
 
 
+def _format_auto_sync_mode(state: AutoSyncStatus) -> str:
+    """Formats the background-sync line of `packrat status` for service or timer mode."""
+    if state.mode == "service":
+        return (
+            f"Auto-sync: packrat.service (active={state.serve_active}, {state.detail})"
+        )
+    if state.enabled:
+        return (
+            f"Auto-sync timer: enabled (active={state.active}, "
+            f"every={state.interval_min}m, fetch={state.fetch})"
+        )
+    return f"Auto-sync: disabled ({state.detail})"
+
+
 def _format_auto_sync_header(state: AutoSyncStatus) -> str:
     """Formats the primary status line for `packrat auto-sync`."""
+    if state.mode == "service":
+        verb = {
+            "already_enabled": "already enabled (no changes)",
+            "updated": "updated",
+        }.get(state.action, "enabled")
+        return f"Auto-sync service: {verb} (active={state.serve_active}, unit={state.serve_unit_path})"
     if not state.enabled:
-        return f"Auto-sync timer: disabled ({state.detail})"
+        return f"Auto-sync: disabled ({state.detail})"
     details = (
         f"active={state.active}, interval={state.interval_min}m, "
         f"fetch={state.fetch}, unit={state.timer_unit_path}"
@@ -817,19 +1027,21 @@ def cmd_auto_sync(args: argparse.Namespace) -> int:
     """Handles `packrat auto-sync {on,off,status}` (`timer` alias)."""
     db_path = _resolve_db_path(args.db)
     action = (args.action or "status").lower()
+    use_timer = bool(args.timer or getattr(args, "command", "") == "timer")
     try:
         if action in ("on", "enable"):
             state = enable_auto_sync(
                 db_path=db_path,
                 interval_min=args.interval_min,
                 fetch=args.fetch,
+                mode="timer" if use_timer else "service",
             )
         elif action in ("off", "disable"):
             state = disable_auto_sync(db_path=db_path)
         else:
             state = get_auto_sync_status(db_path=db_path)
     except (RuntimeError, ValueError, OSError) as exc:
-        sys.stderr.write(f"Error managing auto-sync timer: {exc}\n")
+        sys.stderr.write(f"Error managing auto-sync: {exc}\n")
         return 2
 
     if args.json:
@@ -842,6 +1054,22 @@ def cmd_auto_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_live(args: argparse.Namespace) -> int:
+    """Dispatches `serve`, `watch`, `changes`, and `refresh` (see serve_cli.py).
+
+    Store commands open the database without rewriting init.sql, since readers
+    call `changes` and `watch renew` often.
+    """
+    db_path = _resolve_db_path(args.db)
+    if args.command_kind == "serve":
+        return cmd_serve(args, db_path)
+    store = PackratStore(db_path)
+    try:
+        return int(args.store_func(args, store))
+    finally:
+        store.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Constructs the argparse CLI parser for packrat."""
     parser = argparse.ArgumentParser(
@@ -851,16 +1079,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="Override SQLite database path.")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_status = sub.add_parser("status", help="Show repository watermarks and table counts.")
-    p_status.add_argument("--repo", help="Filter by repository (<owner>/<name> or just <name>).")
+    p_status = sub.add_parser(
+        "status", help="Show repository watermarks and table counts."
+    )
+    p_status.add_argument(
+        "--repo", help="Filter by repository (<owner>/<name> or just <name>)."
+    )
     p_status.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_status.set_defaults(func=cmd_status)
 
-    p_sync = sub.add_parser("sync", help="Run incremental git diff-tree, GitHub, and vector sync.")
+    p_sync = sub.add_parser(
+        "sync", help="Run incremental git diff-tree, GitHub, and vector sync."
+    )
     p_sync.add_argument("--repo", help="Sync only a specific repository.")
-    p_sync.add_argument("--force", action="store_true", help="Force full re-index and bypass ETag.")
-    p_sync.add_argument("--git-only", action="store_true", help="Sync local git commits/code only.")
-    p_sync.add_argument("--github-only", action="store_true", help="Sync GitHub metadata only.")
+    p_sync.add_argument(
+        "--force", action="store_true", help="Force full re-index and bypass ETag."
+    )
+    sync_scope = p_sync.add_mutually_exclusive_group()
+    sync_scope.add_argument(
+        "--git-only", action="store_true", help="Sync local git commits/code only."
+    )
+    sync_scope.add_argument(
+        "--github-only", action="store_true", help="Sync GitHub metadata only."
+    )
+    sync_scope.add_argument(
+        "--backfill-only",
+        action="store_true",
+        help="Run only GitHub history backfill walks (no events poll or incremental delta, "
+        "which packrat serve owns), plus the git and embedding steps.",
+    )
     p_sync.add_argument(
         "--fetch", action="store_true", help="Run git fetch on canonical remote first."
     )
@@ -888,9 +1135,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Safety cap on GraphQL pages per stream while backfilling history; "
         "an unfinished backfill resumes on the next sync.",
     )
-    p_sync.add_argument("--max-commits", type=int, default=300, help="Max git commits to ingest.")
     p_sync.add_argument(
-        "--download-model", action="store_true", help="Download BGE ONNX model if missing."
+        "--max-commits", type=int, default=300, help="Max git commits to ingest."
+    )
+    model_dl = p_sync.add_mutually_exclusive_group()
+    model_dl.add_argument(
+        "--download-model",
+        action="store_true",
+        help="Download Snowflake Arctic XS ONNX model if missing (enabled by default on default DB).",
+    )
+    model_dl.add_argument(
+        "--no-download-model",
+        action="store_true",
+        help="Skip downloading the ONNX embedding model if missing.",
     )
     p_sync.add_argument(
         "--progress",
@@ -907,7 +1164,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_sync.set_defaults(func=cmd_sync)
 
-    p_search = sub.add_parser("search", help="Run hybrid RRF (FTS5 BM25 + 384-dim cosine) search.")
+    p_search = sub.add_parser(
+        "search", help="Run hybrid RRF (FTS5 BM25 + 384-dim cosine) search."
+    )
     p_search.add_argument("query", help="Natural language or code search query.")
     p_search.add_argument("--repo", help="Filter by repository.")
     p_search.add_argument(
@@ -915,11 +1174,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated chunk kinds (issue,pr,review_thread,comment,discussion,commit,code_symbol,doc_section).",
     )
     p_search.add_argument("--path", help="Filter by file_path prefix.")
-    p_search.add_argument("--state", help="Filter issues/PRs by state (OPEN, CLOSED, MERGED).")
     p_search.add_argument(
-        "--mode", choices=("hybrid", "fts", "vector"), default="hybrid", help="Retrieval mode."
+        "--state", help="Filter issues/PRs by state (OPEN, CLOSED, MERGED)."
     )
-    p_search.add_argument("--limit", type=int, default=12, help="Max results to return.")
+    p_search.add_argument(
+        "--mode",
+        choices=("hybrid", "fts", "vector"),
+        default="hybrid",
+        help="Retrieval mode.",
+    )
+    p_search.add_argument(
+        "--limit", type=int, default=12, help="Max results to return."
+    )
     p_search.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_search.set_defaults(func=cmd_search)
 
@@ -944,7 +1210,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_repo_add = repo_sub.add_parser("add", help="Register or update a repository.")
     p_repo_add.add_argument("full_name", help="Repository in <owner>/<name> format.")
     p_repo_add.add_argument("--path", help="Local git checkout path.")
-    p_repo_add.add_argument("--branch", default="main", help="Canonical default branch name.")
+    p_repo_add.add_argument(
+        "--branch", default="main", help="Canonical default branch name."
+    )
     p_repo_add.set_defaults(func=cmd_repo)
 
     p_repo_set = repo_sub.add_parser(
@@ -952,7 +1220,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_repo_set.add_argument("full_name", help="Repository in <owner>/<name> format.")
     p_repo_set.add_argument("path", help="Local git checkout or worktree path.")
-    p_repo_set.add_argument("--branch", default="main", help="Canonical default branch name.")
+    p_repo_set.add_argument(
+        "--branch", default="main", help="Canonical default branch name."
+    )
     p_repo_set.set_defaults(func=cmd_repo)
 
     p_repo_rename = repo_sub.add_parser(
@@ -986,7 +1256,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto = sub.add_parser(
         "auto-sync",
         aliases=["timer"],
-        help="Enable, disable, or inspect the background systemd user sync timer.",
+        help="Enable, disable, or inspect background sync (packrat.service, or the timer).",
     )
     p_auto.add_argument(
         "action",
@@ -996,10 +1266,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Timer action: on/enable, off/disable, or status (default: status).",
     )
     p_auto.add_argument(
+        "--timer",
+        action="store_true",
+        help="With `on`: install the periodic packrat-sync.timer instead of packrat.service "
+        "(rollback path); stops the service.",
+    )
+    p_auto.add_argument(
         "--interval-min",
         type=int,
         default=None,
-        help="Sync interval in minutes when enabling (preserves existing or defaults to 10).",
+        help="Timer mode only: sync interval in minutes (preserves existing or defaults to 10).",
     )
     fetch_group = p_auto.add_mutually_exclusive_group()
     fetch_group.add_argument(
@@ -1018,6 +1294,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_auto.set_defaults(func=cmd_auto_sync)
 
+    add_live_parsers(sub, cmd_live)
     return parser
 
 
@@ -1027,7 +1304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except ValueError as exc:
+    except (ValueError, SchemaTooNewError) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 2
 

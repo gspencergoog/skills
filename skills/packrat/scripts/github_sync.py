@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from db_migrations import REFETCH_OPEN_PRS_KEY_PREFIX
 from db_store import PackratStore
+from gh_transport import (
+    GhCommandResult,
+    GhRunner,
+    _is_rate_limited,
+    _split_http_response,
+    run_gh_command,
+)
 from models import (
     BACKFILL_STREAMS,
     CommentRecord,
@@ -28,7 +35,7 @@ from models import (
     utc_now_iso,
 )
 from progress import NULL_REPORTER, ProgressReporter
-from sync_runtime import run_bounded_subprocess
+from rate_budget import Priority, RateBudget
 
 SAFETY_SWEEP_INTERVAL_SEC = 600
 PAGE_SIZE_LADDER = (25, 12, 5)
@@ -76,13 +83,7 @@ query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
 }
 """
 
-PRS_DELTA_QUERY = """
-query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
-  repository(owner: $owner, name: $name) {
-    pullRequests(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
-      totalCount
-      pageInfo { hasNextPage endCursor }
-      nodes {
+_PR_NODE_FIELDS = """\
         id
         number
         title
@@ -97,6 +98,8 @@ query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
         baseRefName
         headRefName
         headRefOid
+        isCrossRepository
+        headRepositoryOwner { login }
         mergeCommit { oid }
         reviewDecision
         mergeable
@@ -151,11 +154,35 @@ query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
             authorAssociation
           }
         }
-      }
-    }
-  }
-}
 """
+"""Pull request node selection shared by `PRS_DELTA_QUERY` and `OPEN_PRS_QUERY`."""
+
+
+def _pr_connection_query(connection_args: str) -> str:
+    """Builds a repository `pullRequests(...)` page query with `_PR_NODE_FIELDS`."""
+    return (
+        "query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {\n"
+        "  repository(owner: $owner, name: $name) {\n"
+        f"    pullRequests({connection_args}) {{\n"
+        "      totalCount\n"
+        "      pageInfo { hasNextPage endCursor }\n"
+        "      nodes {\n"
+        f"{_PR_NODE_FIELDS}"
+        "      }\n"
+        "    }\n"
+        "  }\n"
+        "}\n"
+    )
+
+
+PRS_DELTA_QUERY = _pr_connection_query(
+    "first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}"
+)
+
+OPEN_PRS_QUERY = _pr_connection_query(
+    "states: OPEN, first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}"
+)
+"""Pages every open pull request, for the one-time fork-field refetch."""
 
 DISCUSSIONS_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
@@ -182,16 +209,6 @@ query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
 
 
 @dataclass(frozen=True)
-class GhCommandResult:
-    """Result of executing a gh CLI subprocess."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-    timed_out: bool = False
-
-
-@dataclass(frozen=True)
 class EventsPollResult:
     """Parsed HTTP response from conditional /repos/<owner>/<name>/events polling."""
 
@@ -202,6 +219,7 @@ class EventsPollResult:
     poll_interval_sec: int
     events: tuple[dict[str, Any], ...] = ()
     error: str | None = None
+    rate_limited: bool = False
 
 
 _KEYRING_ERROR_SUBSTRINGS: tuple[str, ...] = (
@@ -228,7 +246,6 @@ class GhAuthProbe:
     detail: str = ""
 
 
-GhRunner = Callable[[Sequence[str], int], GhCommandResult]
 AuthProbeFn = Callable[[], GhAuthProbe]
 
 
@@ -236,30 +253,6 @@ def _is_keyring_error(text: str) -> bool:
     """Checks whether diagnostic output indicates a locked OS keyring or D-Bus error."""
     lowered = text.lower()
     return any(token in lowered for token in _KEYRING_ERROR_SUBSTRINGS)
-
-
-def run_gh_command(args: Sequence[str], timeout: int = 20) -> GhCommandResult:
-    """Executes gh with non-interactive environment variables and a strict timeout."""
-    env = {
-        **os.environ,
-        "GH_PROMPT_DISABLED": "1",
-        "GIT_TERMINAL_PROMPT": "0",
-        "PAGER": "cat",
-    }
-    res = run_bounded_subprocess(["gh", *args], env=env, timeout=timeout)
-    if res.timed_out:
-        return GhCommandResult(
-            returncode=res.returncode,
-            stdout=res.stdout,
-            stderr="gh command timed out (possible locked keyring or network stall)",
-            timed_out=True,
-        )
-    return GhCommandResult(
-        returncode=res.returncode,
-        stdout=res.stdout,
-        stderr=res.stderr,
-        timed_out=False,
-    )
 
 
 def _rejects_no_refresh_flag(res: GhCommandResult) -> bool:
@@ -299,7 +292,9 @@ def probe_gh_auth(
         return GhAuthProbe(
             ok=False,
             error_kind="keyring_locked",
-            detail=_first_gh_detail(res, "gh auth token timed out (OS keyring likely locked)"),
+            detail=_first_gh_detail(
+                res, "gh auth token timed out (OS keyring likely locked)"
+            ),
         )
     if res.returncode == 0 and res.stdout.strip():
         return GhAuthProbe(ok=True)
@@ -344,34 +339,23 @@ def needs_safety_sweep(
     return (now_epoch - last_epoch) >= sweep_interval_sec
 
 
-def _split_http_response(raw: str) -> tuple[int, dict[str, str], str]:
-    """Splits `gh api -i` output into status code, lowercase header dict, and body."""
-    normalized = raw.replace("\r\n", "\n")
-    parts = normalized.split("\n\n", 1)
-    header_block = parts[0]
-    body = parts[1] if len(parts) > 1 else ""
-    lines = [ln for ln in header_block.splitlines() if ln.strip()]
-    if not lines:
-        return 0, {}, body
-
-    status_code = 0
-    first_tokens = lines[0].split()
-    if len(first_tokens) >= 2 and first_tokens[1].isdigit():
-        status_code = int(first_tokens[1])
-
-    headers: dict[str, str] = {}
-    for line in lines[1:]:
-        if ":" in line:
-            k, v = line.split(":", 1)
-            headers[k.strip().lower()] = v.strip()
-    return status_code, headers, body
-
-
 def poll_repo_events(
     repo: RepoConfig,
     runner: GhRunner = run_gh_command,
+    budget: RateBudget | None = None,
 ) -> EventsPollResult:
-    """Polls /repos/<owner>/<name>/events with If-None-Match and If-Modified-Since."""
+    """Polls /repos/<owner>/<name>/events with If-None-Match and If-Modified-Since.
+
+    Args:
+        repo: Repository whose stored ETag and Last-Modified values are sent.
+        runner: Subprocess runner invoking `gh` arguments with a timeout.
+        budget: Optional shared rate budget that records the response's
+            `X-RateLimit-*` headers.
+
+    Returns:
+        The parsed poll result. `rate_limited` is True when GitHub rejected the
+        request for exceeding a rate limit.
+    """
     args: list[str] = [
         "api",
         "-i",
@@ -384,11 +368,19 @@ def poll_repo_events(
 
     res = runner(args, 15)
     status_code, headers, body = _split_http_response(res.stdout)
+    if budget is not None:
+        budget.record(headers, worker="sync")
     etag = headers.get("etag") or repo.events_etag
     last_mod = headers.get("last-modified") or repo.events_last_modified
-    poll_interval = int(headers.get("x-poll-interval", str(repo.poll_interval_sec or 60)))
+    poll_interval = int(
+        headers.get("x-poll-interval", str(repo.poll_interval_sec or 60))
+    )
 
-    if status_code == 304 or "304 Not Modified" in res.stdout or "304 Not Modified" in res.stderr:
+    if (
+        status_code == 304
+        or "304 Not Modified" in res.stdout
+        or "304 Not Modified" in res.stderr
+    ):
         return EventsPollResult(
             status_code=304,
             not_modified=True,
@@ -406,6 +398,7 @@ def poll_repo_events(
             last_modified=repo.events_last_modified,
             poll_interval_sec=repo.poll_interval_sec,
             error=err,
+            rate_limited=_is_rate_limited(f"{res.stderr}\n{body}"),
         )
 
     try:
@@ -441,16 +434,21 @@ def extract_issue_links(
         if num != pr_number and num not in links:
             links[num] = "references"
     return tuple(
-        IssuePrLink(repo_id=repo_id, issue_number=issue_num, pr_number=pr_number, link_type=ltype)
+        IssuePrLink(
+            repo_id=repo_id,
+            issue_number=issue_num,
+            pr_number=pr_number,
+            link_type=ltype,
+        )
         for issue_num, ltype in sorted(links.items())
     )
 
 
-def _login(node: dict[str, Any] | None) -> str | None:
-    """Safely extracts author.login from a GraphQL actor object."""
+def _login(node: dict[str, Any] | None, field: str = "author") -> str | None:
+    """Safely extracts `<field>.login` (default `author.login`) from a GraphQL node."""
     if not isinstance(node, dict):
         return None
-    author = node.get("author")
+    author = node.get(field)
     if isinstance(author, dict) and author.get("login"):
         return str(author["login"])
     return None
@@ -499,7 +497,9 @@ def _extract_string_field_tuple(
     node: dict[str, Any], conn_key: str, item_key: str
 ) -> tuple[str, ...]:
     """Extracts a tuple of strings from a nested GraphQL connection's nodes."""
-    return tuple(str(n[item_key]) for n in _connection_nodes(node, conn_key) if n.get(item_key))
+    return tuple(
+        str(n[item_key]) for n in _connection_nodes(node, conn_key) if n.get(item_key)
+    )
 
 
 def _comments_to_chunks(
@@ -514,7 +514,9 @@ def _comments_to_chunks(
     for cm in comments:
         if not cm.body.strip():
             continue
-        c_title = f"Comment on {parent_label} #{parent_number} by {cm.author or 'unknown'}"
+        c_title = (
+            f"Comment on {parent_label} #{parent_number} by {cm.author or 'unknown'}"
+        )
         out.append(
             TextChunk(
                 chunk_id=f"{repo.full_name}#comment:{cm.comment_id}",
@@ -557,7 +559,9 @@ def _parse_issue_node(
         closed_at=node.get("closedAt"),
         url=node.get("url"),
     )
-    comments = _parse_comments(repo.repo_id, "issue", number, _connection_nodes(node, "comments"))
+    comments = _parse_comments(
+        repo.repo_id, "issue", number, _connection_nodes(node, "comments")
+    )
     issue_chunk = TextChunk(
         chunk_id=f"{repo.full_name}#issue:{number}",
         repo_id=repo.repo_id,
@@ -570,7 +574,10 @@ def _parse_issue_node(
         item_number=number,
         updated_at=updated_at,
     )
-    chunks = [issue_chunk, *_comments_to_chunks(repo, "Issue", number, updated_at, comments)]
+    chunks = [
+        issue_chunk,
+        *_comments_to_chunks(repo, "Issue", number, updated_at, comments),
+    ]
     return issue, comments, chunks
 
 
@@ -647,7 +654,9 @@ def _parse_review_threads(
     return tuple(threads), chunks
 
 
-def _parse_pr_files(repo_id: int, pr_number: int, node: dict[str, Any]) -> tuple[PrFileRecord, ...]:
+def _parse_pr_files(
+    repo_id: int, pr_number: int, node: dict[str, Any]
+) -> tuple[PrFileRecord, ...]:
     """Parses PR file nodes into PrFileRecord instances."""
     return tuple(
         PrFileRecord(
@@ -700,8 +709,11 @@ def _parse_pr_node(
     threads, thread_chunks = _parse_review_threads(
         repo, number, updated_at, _connection_nodes(node, "reviewThreads")
     )
-    comments = _parse_comments(repo.repo_id, "pr", number, _connection_nodes(node, "comments"))
+    comments = _parse_comments(
+        repo.repo_id, "pr", number, _connection_nodes(node, "comments")
+    )
     merge_commit = node.get("mergeCommit")
+    cross_repo = node.get("isCrossRepository")
 
     pr = PrRecord(
         repo_id=repo.repo_id,
@@ -717,7 +729,11 @@ def _parse_pr_node(
         base_ref=node.get("baseRefName"),
         head_ref=node.get("headRefName"),
         head_sha=node.get("headRefOid"),
-        merge_commit_sha=merge_commit.get("oid") if isinstance(merge_commit, dict) else None,
+        head_repo_owner=_login(node, "headRepositoryOwner"),
+        is_cross_repository=cross_repo if isinstance(cross_repo, bool) else None,
+        merge_commit_sha=merge_commit.get("oid")
+        if isinstance(merge_commit, dict)
+        else None,
         review_decision=node.get("reviewDecision"),
         mergeable=node.get("mergeable"),
         additions=int(node.get("additions") or 0),
@@ -766,12 +782,16 @@ def _parse_discussion_node(
     updated_at = str(node.get("updatedAt") or utc_now_iso())
     cat = node.get("category")
     ans = node.get("answer")
-    answer_body = str(ans.get("body")) if isinstance(ans, dict) and ans.get("body") else None
+    answer_body = (
+        str(ans.get("body")) if isinstance(ans, dict) and ans.get("body") else None
+    )
     disc = DiscussionRecord(
         repo_id=repo.repo_id,
         number=number,
         node_id=node.get("id"),
-        category=str(cat.get("name")) if isinstance(cat, dict) and cat.get("name") else None,
+        category=str(cat.get("name"))
+        if isinstance(cat, dict) and cat.get("name")
+        else None,
         author=_login(node),
         title=title,
         body=body,
@@ -780,7 +800,9 @@ def _parse_discussion_node(
         updated_at=updated_at,
         url=node.get("url"),
     )
-    full_text = f"{body}\n\nAccepted Answer:\n{answer_body}".strip() if answer_body else body
+    full_text = (
+        f"{body}\n\nAccepted Answer:\n{answer_body}".strip() if answer_body else body
+    )
     chunk = TextChunk(
         chunk_id=f"{repo.full_name}#discussion:{number}",
         repo_id=repo.repo_id,
@@ -796,17 +818,31 @@ def _parse_discussion_node(
     return disc, chunk
 
 
-def _extract_graphql_connection(stdout: str, field_name: str) -> dict[str, Any] | None:
-    """Parses GraphQL JSON output and returns data.repository.<field_name> if valid."""
-    if not stdout.strip():
+def _extract_graphql_connection(body: str, field_name: str) -> dict[str, Any] | None:
+    """Parses a GraphQL JSON response body and returns data.repository.<field_name> if valid."""
+    if not body.strip():
         return None
     try:
-        payload = json.loads(stdout)
+        payload = json.loads(body)
     except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
         return None
     repo_obj = (payload.get("data") or {}).get("repository") or {}
     conn = repo_obj.get(field_name)
     return conn if isinstance(conn, dict) else None
+
+
+def _split_gh_include_output(raw: str) -> tuple[dict[str, str], str]:
+    """Separates `gh api -i` output into lowercase headers and the body.
+
+    Output that does not start with an HTTP status line (for example from a
+    runner that omits `-i`) is returned unchanged as the body with no headers.
+    """
+    if not raw.lstrip().startswith("HTTP/"):
+        return {}, raw
+    _status, headers, body = _split_http_response(raw.lstrip())
+    return headers, body
 
 
 def _is_fatal_auth_error(stderr: str) -> bool:
@@ -835,12 +871,47 @@ class PageBatch:
     oldest_date: str | None
 
 
-def _classify_gh_failure(res: GhCommandResult) -> tuple[str, str]:
-    """Classifies a failed GraphQL subprocess result into (error_kind, short_reason)."""
-    raw_err = (res.stderr or res.stdout or "").strip()
-    first_line = raw_err.splitlines()[0].strip() if raw_err else f"gh exited with {res.returncode}"
+_EXPLICIT_ERROR_KINDS: dict[str, str] = {
+    "rate_limited": "rate_limited",
+    "deferred_rate_limit": "rate_limited",
+    "auth_failed": "auth_error",
+    "keyring_locked": "keyring_locked",
+}
+
+
+def _classify_gh_failure(
+    res: GhCommandResult, body: str | None = None
+) -> tuple[str, str]:
+    """Classifies a failed GraphQL subprocess result into (error_kind, short_reason).
+
+    Args:
+        res: The failed subprocess result.
+        body: Response body without the `-i` header block. Defaults to
+            `res.stdout` for runners that return the body alone.
+
+    Returns:
+        `(error_kind, short_reason)`. Rate limits are detected before the
+        401/403 checks so a 403 rate-limit response is not mistaken for an
+        auth failure.
+    """
+    resp_body = res.stdout if body is None else body
+    raw_err = (res.stderr or resp_body or "").strip()
+    first_line = (
+        raw_err.splitlines()[0].strip()
+        if raw_err
+        else f"gh exited with {res.returncode}"
+    )
+    if res.error_kind in (
+        "rate_limited",
+        "deferred_rate_limit",
+        "auth_failed",
+        "keyring_locked",
+    ):
+        return _EXPLICIT_ERROR_KINDS[res.error_kind], first_line
     if res.timed_out or res.returncode == 124:
         return "timeout", first_line
+    if _is_rate_limited(f"{res.stderr}\n{resp_body}"):
+        return "rate_limited", first_line
     if _is_keyring_error(raw_err):
         return "keyring_locked", first_line
     if _is_fatal_auth_error(raw_err):
@@ -861,6 +932,7 @@ def _build_graphql_args(
     args = [
         "api",
         "graphql",
+        "-i",
         "-F",
         f"owner={owner}",
         "-F",
@@ -904,20 +976,31 @@ def _fetch_graphql_page_with_halving(
     repo_full_name: str = "",
     stream: str = "",
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
 ) -> PageFetchOutcome:
-    """Executes a GraphQL page query, halving pageSize (25 -> 12 -> 5) on 5xx/timeouts."""
+    """Executes a GraphQL page query, halving pageSize (25 -> 12 -> 5) on 5xx/timeouts.
+
+    Each response's `X-RateLimit-*` headers are recorded in `budget`. A
+    rate-limited response ends the attempt at once instead of retrying at a
+    smaller page size against an exhausted budget.
+    """
     last_kind = "http_error"
     last_detail = "GraphQL page fetch failed"
     for idx, page_size in enumerate(PAGE_SIZE_LADDER):
         args = _build_graphql_args(owner, name, query, page_size, cursor)
         res = runner(args, 25)
+        headers, body = _split_gh_include_output(res.stdout)
+        if budget is not None:
+            budget.record(headers, worker="sync")
         if res.returncode == 0:
-            conn = _extract_graphql_connection(res.stdout, field_name)
+            conn = _extract_graphql_connection(body, field_name)
             if conn is not None:
                 return PageFetchOutcome(connection=conn)
-        raw_kind, raw_detail = _classify_gh_failure(res)
-        last_kind, last_detail, abort = _probe_timeout_auth(raw_kind, raw_detail, auth_probe)
-        if abort:
+        raw_kind, raw_detail = _classify_gh_failure(res, body)
+        last_kind, last_detail, abort = _probe_timeout_auth(
+            raw_kind, raw_detail, auth_probe
+        )
+        if abort or last_kind == "rate_limited":
             break
         if idx + 1 < len(PAGE_SIZE_LADDER):
             next_size = PAGE_SIZE_LADDER[idx + 1]
@@ -925,7 +1008,9 @@ def _fetch_graphql_page_with_halving(
                 repo_full_name,
                 f"github {stream}: page request failed at pageSize={page_size} ({last_detail}); retrying at pageSize={next_size}",
             )
-    return PageFetchOutcome(connection=None, error_kind=last_kind, error_detail=last_detail)
+    return PageFetchOutcome(
+        connection=None, error_kind=last_kind, error_detail=last_detail
+    )
 
 
 def _filter_nodes_above_watermark(
@@ -950,7 +1035,9 @@ def _filter_nodes_above_watermark(
 
 DEFAULT_BACKFILL_MAX_PAGES = 1000
 
-StreamPersister = Callable[[PackratStore, RepoConfig, list[dict[str, Any]], SyncStats], None]
+StreamPersister = Callable[
+    [PackratStore, RepoConfig, list[dict[str, Any]], SyncStats], None
+]
 PageHandler = Callable[[PageBatch], None]
 
 
@@ -974,8 +1061,13 @@ class PageWalk:
     newest_updated: str | None = None
     reached_end: bool = False
     failed: bool = False
+    deferred: bool = False
     error_kind: str | None = None
     error_detail: str | None = None
+
+
+DEFERRED_RATE_LIMIT = "deferred_rate_limit"
+_DEFERRING_ERROR_KINDS = ("rate_limited", DEFERRED_RATE_LIMIT)
 
 
 def _max_timestamp(a: str | None, b: str | None) -> str | None:
@@ -995,20 +1087,33 @@ def _extract_page_metadata(
     conn: dict[str, Any],
     stop_watermark: str | None,
     newest_updated: str | None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None, bool, int | None, str | None]:
+) -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], str | None, bool, int | None, str | None
+]:
     """Unpacks a GraphQL connection page into (nodes, accepted, newest, reached_wm, total_count, oldest_date)."""
-    nodes = [n for n in (conn.get("nodes") or []) if isinstance(n, dict) and n.get("number")]
+    nodes = [
+        n for n in (conn.get("nodes") or []) if isinstance(n, dict) and n.get("number")
+    ]
     accepted, newest, reached_wm = _filter_nodes_above_watermark(
         nodes, stop_watermark, newest_updated
     )
     raw_total = conn.get("totalCount")
     total_count = (
-        raw_total if isinstance(raw_total, int) and not isinstance(raw_total, bool) else None
+        raw_total
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool)
+        else None
     )
     sample = accepted or nodes
     stamps = [str(n.get("updatedAt"))[:10] for n in sample if n.get("updatedAt")]
     oldest_date = min(stamps) if stamps else None
     return nodes, accepted, newest, reached_wm, total_count, oldest_date
+
+
+def _mark_stream_deferred(stats: SyncStats, stream: str) -> None:
+    """Records that `stream` was deferred by the rate budget (not an error)."""
+    stats.deferred = True
+    if stream not in stats.deferred_streams:
+        stats.deferred_streams.append(stream)
 
 
 def _record_walk_failure(
@@ -1018,7 +1123,19 @@ def _record_walk_failure(
     stats: SyncStats,
     reporter: ProgressReporter,
 ) -> None:
-    """Appends a structured walk failure message to stats.errors and notifies reporter."""
+    """Records a walk failure in stats and notifies reporter.
+
+    Rate-limited and budget-deferred walks go into `stats.deferred_streams`
+    with a warning; every other failure is appended to `stats.errors`.
+    """
+    if walk.error_kind in _DEFERRING_ERROR_KINDS:
+        _mark_stream_deferred(stats, stream)
+        detail = walk.error_detail or "rate budget low"
+        reporter.warn(
+            repo_name,
+            f"github {stream} deferred after {walk.pages} page(s) ({walk.error_kind}: {detail})",
+        )
+        return
     if not walk.failed:
         return
     kind = walk.error_kind or "graphql_error"
@@ -1056,16 +1173,24 @@ def _walk_pages(
     on_page: PageHandler,
     reporter: ProgressReporter = NULL_REPORTER,
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
+    priority: Priority = Priority.MIRROR,
 ) -> PageWalk:
     """Pages a GraphQL connection in UPDATED_AT DESC order, handing each page to on_page.
 
     Stops when GitHub reports no further pages, when stop_watermark is reached,
-    after max_pages pages, when a page fetch fails, or when GitHub returns a
-    missing or repeated endCursor (which would otherwise loop forever).
+    after max_pages pages, when a page fetch fails, when GitHub returns a
+    missing or repeated endCursor (which would otherwise loop forever), or
+    when `budget` denies the next page at `priority` (marked `deferred`).
     """
     walk = PageWalk()
     cursor = start_cursor
     while walk.pages < max_pages:
+        if budget is not None and not budget.allows("graphql", priority):
+            walk.deferred = True
+            walk.error_kind = DEFERRED_RATE_LIMIT
+            walk.error_detail = f"graphql budget below the {priority.name} threshold"
+            return walk
         outcome = _fetch_graphql_page_with_halving(
             repo.owner,
             repo.name,
@@ -1077,6 +1202,7 @@ def _walk_pages(
             repo_full_name=repo.full_name,
             stream=spec.stream,
             auth_probe=auth_probe,
+            budget=budget,
         )
         if outcome.connection is None:
             walk.failed = True
@@ -1084,7 +1210,9 @@ def _walk_pages(
             walk.error_detail = outcome.error_detail
             return walk
         nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = (
-            _extract_page_metadata(outcome.connection, stop_watermark, walk.newest_updated)
+            _extract_page_metadata(
+                outcome.connection, stop_watermark, walk.newest_updated
+            )
         )
         if total_count is not None:
             walk.total_count = total_count
@@ -1173,11 +1301,15 @@ def _persist_discussions(
 STREAM_SPECS: tuple[StreamSpec, ...] = (
     StreamSpec("issues", ISSUES_DELTA_QUERY, "issues", _persist_issues),
     StreamSpec("prs", PRS_DELTA_QUERY, "pullRequests", _persist_prs),
-    StreamSpec("discussions", DISCUSSIONS_DELTA_QUERY, "discussions", _persist_discussions),
+    StreamSpec(
+        "discussions", DISCUSSIONS_DELTA_QUERY, "discussions", _persist_discussions
+    ),
 )
 
 
-def _store_watermark(store: PackratStore, repo: RepoConfig, stream: str, value: str | None) -> None:
+def _store_watermark(
+    store: PackratStore, repo: RepoConfig, stream: str, value: str | None
+) -> None:
     """Persists a stream's UPDATED_AT watermark (None leaves the stored value unchanged)."""
     store.update_repo_sync_state(repo.repo_id, **{f"{stream}_watermark": value})
 
@@ -1192,8 +1324,9 @@ def _run_incremental_walk(
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
 ) -> PageWalk:
-    """Fetches items updated since the stream's watermark.
+    """Fetches items updated since the stream's watermark at `MIRROR` priority.
 
     The watermark only advances when the walk reaches it (or the last page), so a
     walk cut short by max_pages or an error never leaves a gap behind it.
@@ -1221,11 +1354,15 @@ def _run_incremental_walk(
         on_page=on_page,
         reporter=reporter,
         auth_probe=auth_probe,
+        budget=budget,
+        priority=Priority.MIRROR,
     )
     reporter.finish_phase()
     _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
     if walk.reached_end:
-        _store_watermark(store, repo, spec.stream, _max_timestamp(watermark, walk.newest_updated))
+        _store_watermark(
+            store, repo, spec.stream, _max_timestamp(watermark, walk.newest_updated)
+        )
     return walk
 
 
@@ -1240,8 +1377,9 @@ def _run_backfill_walk(
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
 ) -> PageWalk:
-    """Fetches a stream's older history until the last page, saving progress after every page.
+    """Fetches a stream's older history at `BACKFILL` priority, saving progress after every page.
 
     A walk that starts from the newest item (start_cursor is None) also moves the
     watermark to the newest updatedAt on its first page, so later incremental
@@ -1262,7 +1400,9 @@ def _run_backfill_walk(
                 _max_timestamp(old_watermark, _newest_updated(batch.nodes)),
             )
             watermark_pending = False
-        store.set_backfill_state(repo.repo_id, spec.stream, cursor=batch.cursor, done_at=None)
+        store.set_backfill_state(
+            repo.repo_id, spec.stream, cursor=batch.cursor, done_at=None
+        )
         detail = f"oldest {batch.oldest_date}" if batch.oldest_date else ""
         reporter.advance(batch.items_fetched, batch.total_count, detail=detail)
 
@@ -1276,11 +1416,15 @@ def _run_backfill_walk(
         on_page=on_page,
         reporter=reporter,
         auth_probe=auth_probe,
+        budget=budget,
+        priority=Priority.BACKFILL,
     )
     reporter.finish_phase()
     _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
     if walk.reached_end:
-        store.set_backfill_state(repo.repo_id, spec.stream, cursor=None, done_at=utc_now_iso())
+        store.set_backfill_state(
+            repo.repo_id, spec.stream, cursor=None, done_at=utc_now_iso()
+        )
     else:
         stats.backfill_incomplete.append(spec.stream)
     return walk
@@ -1297,12 +1441,14 @@ def _sync_stream(
     stats: SyncStats,
     reporter: ProgressReporter = NULL_REPORTER,
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
 ) -> str | None:
     """Syncs one GitHub stream, backfilling its history until the last page if needed.
 
     - Backfill complete: incremental walk only.
     - Backfill never started (or no watermark yet): backfill from the newest item.
-    - Backfill in progress: incremental walk, then resume the backfill from its cursor.
+    - Backfill in progress: incremental walk, then resume the backfill from its cursor,
+      unless the incremental walk hit an auth failure or a rate limit.
     """
     state = repo.backfill(spec.stream)
     walk_args: dict[str, Any] = {
@@ -1310,32 +1456,259 @@ def _sync_stream(
         "stats": stats,
         "reporter": reporter,
         "auth_probe": auth_probe,
+        "budget": budget,
     }
     if state.complete:
-        return _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args).error_kind
+        return _run_incremental_walk(
+            store, repo, spec, max_pages=max_pages, **walk_args
+        ).error_kind
     if state.cursor is None or getattr(repo, f"{spec.stream}_watermark") is None:
         return _run_backfill_walk(
-            store, repo, spec, start_cursor=None, max_pages=backfill_max_pages, **walk_args
+            store,
+            repo,
+            spec,
+            start_cursor=None,
+            max_pages=backfill_max_pages,
+            **walk_args,
         ).error_kind
-    inc_walk = _run_incremental_walk(store, repo, spec, max_pages=max_pages, **walk_args)
-    if inc_walk.error_kind in ("keyring_locked", "auth_error"):
+    inc_walk = _run_incremental_walk(
+        store, repo, spec, max_pages=max_pages, **walk_args
+    )
+    if inc_walk.error_kind in ("keyring_locked", "auth_error", *_DEFERRING_ERROR_KINDS):
         stats.backfill_incomplete.append(spec.stream)
         return inc_walk.error_kind
     return _run_backfill_walk(
-        store, repo, spec, start_cursor=state.cursor, max_pages=backfill_max_pages, **walk_args
+        store,
+        repo,
+        spec,
+        start_cursor=state.cursor,
+        max_pages=backfill_max_pages,
+        **walk_args,
     ).error_kind
+
+
+OPEN_PRS_SPEC = StreamSpec("open_prs", OPEN_PRS_QUERY, "pullRequests", _persist_prs)
+"""One-time walk over every open PR that fills fork fields added after the PRs were stored."""
+
+
+def refetch_open_prs_key(repo_id: int) -> str:
+    """Returns the `service_state` key that marks a pending open-PR refetch for a repo."""
+    return f"{REFETCH_OPEN_PRS_KEY_PREFIX}{repo_id}"
+
+
+def _run_open_prs_refetch(
+    store: PackratStore,
+    repo: RepoConfig,
+    *,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter = NULL_REPORTER,
+    auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
+    max_pages: int = DEFAULT_BACKFILL_MAX_PAGES,
+) -> PageWalk:
+    """Re-fetches every open PR at `MIRROR` priority and clears the pending flag.
+
+    The flag is cleared only when the walk reached the last page. A deferred
+    walk lands in `stats.deferred_streams` and a failed one in `stats.errors`,
+    both under the stream name "open_prs", and the flag stays set so the next
+    sync tries again from the first page.
+    """
+    reporter.start_phase(repo.full_name, f"github {OPEN_PRS_SPEC.stream}", total=None)
+
+    def on_page(batch: PageBatch) -> None:
+        OPEN_PRS_SPEC.persist(store, repo, batch.nodes, stats)
+        reporter.advance(batch.items_fetched, batch.total_count)
+
+    walk = _walk_pages(
+        repo,
+        OPEN_PRS_SPEC,
+        start_cursor=None,
+        stop_watermark=None,
+        max_pages=max_pages,
+        runner=runner,
+        on_page=on_page,
+        reporter=reporter,
+        auth_probe=auth_probe,
+        budget=budget,
+        priority=Priority.MIRROR,
+    )
+    reporter.finish_phase()
+    _record_walk_failure(walk, repo.full_name, OPEN_PRS_SPEC.stream, stats, reporter)
+    if walk.reached_end:
+        store.set_state(refetch_open_prs_key(repo.repo_id), None)
+    return walk
+
+
+def refetch_open_prs(
+    store: PackratStore,
+    repo: RepoConfig,
+    runner: GhRunner = run_gh_command,
+    *,
+    budget: RateBudget | None = None,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> int:
+    """Re-fetches every open pull request of `repo` with the full PR node fields.
+
+    Fills fields added to the PR query after older rows were stored (such as
+    `head_repo_owner` and `is_cross_repository`). Pages are requested at
+    `Priority.MIRROR` and stop early when `budget` denies the next page. The
+    repo's pending-refetch `service_state` flag is cleared once the walk
+    reaches the last page.
+
+    Args:
+        store: Destination store.
+        repo: Repository whose open PRs are refetched.
+        runner: Runs `gh` arguments with a timeout.
+        budget: Optional shared rate budget checked before every page.
+        reporter: Progress sink.
+
+    Returns:
+        The number of pull requests upserted.
+    """
+    stats = SyncStats(repo_full_name=repo.full_name)
+    _run_open_prs_refetch(
+        store,
+        repo,
+        runner=runner,
+        stats=stats,
+        reporter=reporter,
+        auth_probe=_resolve_auth_probe(runner, None),
+        budget=budget,
+    )
+    return stats.prs_upserted
+
+
+def _maybe_refetch_open_prs(
+    store: PackratStore,
+    repo: RepoConfig,
+    *,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter,
+    auth_probe: AuthProbeFn | None,
+    budget: RateBudget | None,
+) -> str | None:
+    """Runs the open-PR refetch when its flag is set; returns the walk's error kind."""
+    if not store.get_state(refetch_open_prs_key(repo.repo_id)):
+        return None
+    walk = _run_open_prs_refetch(
+        store,
+        repo,
+        runner=runner,
+        stats=stats,
+        reporter=reporter,
+        auth_probe=auth_probe,
+        budget=budget,
+    )
+    return walk.error_kind
+
+
+def _sync_all_streams(
+    store: PackratStore,
+    repo: RepoConfig,
+    *,
+    max_pages: int,
+    backfill_max_pages: int,
+    runner: GhRunner,
+    stats: SyncStats,
+    reporter: ProgressReporter,
+    auth_probe: AuthProbeFn | None,
+    budget: RateBudget | None,
+) -> None:
+    """Syncs every stream in `STREAM_SPECS`, stopping on rate limits or a locked keyring."""
+    for idx, spec in enumerate(STREAM_SPECS):
+        stream_err = _sync_stream(
+            store,
+            repo,
+            spec,
+            max_pages=max_pages,
+            backfill_max_pages=backfill_max_pages,
+            runner=runner,
+            stats=stats,
+            reporter=reporter,
+            auth_probe=auth_probe,
+            budget=budget,
+        )
+        # Only a GitHub rate-limit response stops the remaining streams. A
+        # budget deferral is per stream and priority: a BACKFILL deferral must
+        # not stop a sibling's MIRROR walk, and each walk checks the budget
+        # before its first call, so deferred siblings cost nothing.
+        if stream_err == "rate_limited":
+            _mark_remaining_deferred(stats, STREAM_SPECS[idx + 1 :])
+            break
+        if stream_err == "keyring_locked":
+            break
 
 
 def _resolve_auth_probe(
     runner: GhRunner,
     auth_probe: AuthProbeFn | None,
 ) -> AuthProbeFn | None:
-    """Defaults auth_probe to probe_gh_auth only when using the live run_gh_command runner."""
+    """Defaults auth_probe to probe_gh_auth when using a live gh CLI runner."""
     if auth_probe is not None:
         return auth_probe
-    if runner is run_gh_command:
+    if runner is run_gh_command or getattr(runner, "_uses_gh_cli", False):
         return probe_gh_auth
     return None
+
+
+def _skipped_events_poll(repo: RepoConfig) -> EventsPollResult:
+    """Returns a "changed" poll result without calling /events.
+
+    Its ETag fields are None, so the stored events ETag is left as it was.
+    """
+    return EventsPollResult(
+        status_code=200,
+        not_modified=False,
+        etag=None,
+        last_modified=None,
+        poll_interval_sec=repo.poll_interval_sec,
+    )
+
+
+def _defer_events_poll(
+    repo: RepoConfig, budget: RateBudget | None
+) -> EventsPollResult | None:
+    """Returns a synthetic rate-limited poll result when the core budget is too low.
+
+    Returns None when the poll may proceed.
+    """
+    if budget is None or budget.allows("core", Priority.MIRROR):
+        return None
+    return EventsPollResult(
+        status_code=0,
+        not_modified=False,
+        etag=repo.events_etag,
+        last_modified=repo.events_last_modified,
+        poll_interval_sec=repo.poll_interval_sec,
+        error="core budget below the MIRROR threshold",
+        rate_limited=True,
+    )
+
+
+def _record_poll_failure(
+    stats: SyncStats,
+    repo: RepoConfig,
+    poll: EventsPollResult,
+    reporter: ProgressReporter,
+) -> None:
+    """Records a failed /events poll as a deferral (rate limits) or an error."""
+    if poll.rate_limited:
+        _mark_stream_deferred(stats, "events")
+        stats.skipped_reason = f"github_{DEFERRED_RATE_LIMIT}: {poll.error}"
+        reporter.warn(repo.full_name, f"github sync deferred: {poll.error}")
+        return
+    stats.skipped_reason = f"github_poll_error: {poll.error}"
+    msg = f"github events poll failed: {poll.error}"
+    stats.errors.append(msg)
+    reporter.error(repo.full_name, msg)
+
+
+def _mark_remaining_deferred(stats: SyncStats, specs: Sequence[StreamSpec]) -> None:
+    """Marks every stream in `specs` deferred after GitHub reported a rate limit."""
+    for spec in specs:
+        _mark_stream_deferred(stats, spec.stream)
 
 
 def sync_github_metadata(
@@ -1347,8 +1720,15 @@ def sync_github_metadata(
     runner: GhRunner = run_gh_command,
     reporter: ProgressReporter = NULL_REPORTER,
     auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
+    skip_events_poll: bool = False,
 ) -> SyncStats:
     """Polls /events with ETag and syncs issues, PRs, and discussions via GraphQL.
+
+    When the repo's open-PR refetch flag is set (see `refetch_open_prs`), every
+    open PR is refetched first, even when /events answers 304. The flag is
+    cleared once that walk completes; a deferred or failed refetch is reported
+    as stream "open_prs" and retried on the next sync.
 
     Args:
         max_pages: page budget per stream for incremental updates.
@@ -1357,20 +1737,41 @@ def sync_github_metadata(
         force: refetch every stream's full history, ignoring ETags and watermarks.
         auth_probe: optional zero-arg probe called after a GraphQL timeout to
             detect a locked OS keyring and abort retries early.
+        budget: optional shared rate budget. Every response's `X-RateLimit-*`
+            headers are recorded in it, and each page is skipped when the
+            budget denies it (`MIRROR` for incremental, `BACKFILL` for history
+            walks). Deferred and rate-limited streams are listed in
+            `SyncStats.deferred_streams` instead of `errors`, and their
+            watermarks and cursors stay where they were.
+        skip_events_poll: skip the /events poll because the caller already
+            saw a change (the service's signals worker); the streams are
+            walked as if events changed.
+
+    A run that ends with errors or deferrals keeps the previous events ETag,
+    so the next sync's poll answers 200 and walks again instead of a 304.
     """
     stats = SyncStats(repo_full_name=repo.full_name)
     now_iso = utc_now_iso()
-    poll = poll_repo_events(repo, runner=runner)
+    poll = _skipped_events_poll(repo) if skip_events_poll else None
+    poll = poll or _defer_events_poll(repo, budget)
+    poll = poll or poll_repo_events(repo, runner=runner, budget=budget)
     if poll.error:
-        stats.skipped_reason = f"github_poll_error: {poll.error}"
-        msg = f"github events poll failed: {poll.error}"
-        stats.errors.append(msg)
-        reporter.error(repo.full_name, msg)
+        _record_poll_failure(stats, repo, poll, reporter)
         return stats
 
     if force:
         store.reset_backfill_state(repo.repo_id)
         repo = store.get_repo_by_id(repo.repo_id) or repo
+    effective_probe = _resolve_auth_probe(runner, auth_probe)
+    refetch_err = _maybe_refetch_open_prs(
+        store,
+        repo,
+        runner=runner,
+        stats=stats,
+        reporter=reporter,
+        auth_probe=effective_probe,
+        budget=budget,
+    )
     sweep_due = needs_safety_sweep(repo, now_iso=now_iso)
     backfill_pending = not all(repo.backfill(s).complete for s in BACKFILL_STREAMS)
     if poll.not_modified and not force and not sweep_due and not backfill_pending:
@@ -1384,30 +1785,74 @@ def sync_github_metadata(
         )
         return stats
 
-    effective_probe = _resolve_auth_probe(runner, auth_probe)
-    for spec in STREAM_SPECS:
-        stream_err = _sync_stream(
+    if refetch_err == "rate_limited":
+        _mark_remaining_deferred(stats, STREAM_SPECS)
+    elif refetch_err != "keyring_locked":
+        _sync_all_streams(
             store,
             repo,
-            spec,
             max_pages=max_pages,
             backfill_max_pages=backfill_max_pages,
             runner=runner,
             stats=stats,
             reporter=reporter,
             auth_probe=effective_probe,
+            budget=budget,
         )
-        if stream_err == "keyring_locked":
-            break
 
     done_iso = utc_now_iso()
-    sweep_ts = repo.last_full_sweep_at if stats.errors else done_iso
+    incomplete = bool(stats.errors or stats.deferred)
     store.update_repo_sync_state(
         repo.repo_id,
-        events_etag=poll.etag,
-        events_last_modified=poll.last_modified,
+        events_etag=None if incomplete else poll.etag,
+        events_last_modified=None if incomplete else poll.last_modified,
         poll_interval_sec=poll.poll_interval_sec,
         last_events_check_at=done_iso,
-        last_full_sweep_at=sweep_ts,
+        last_full_sweep_at=None if incomplete else done_iso,
     )
+    return stats
+
+
+def sync_backfill_only(
+    store: PackratStore,
+    repo: RepoConfig,
+    *,
+    backfill_max_pages: int = DEFAULT_BACKFILL_MAX_PAGES,
+    runner: GhRunner = run_gh_command,
+    reporter: ProgressReporter = NULL_REPORTER,
+    auth_probe: AuthProbeFn | None = None,
+    budget: RateBudget | None = None,
+) -> SyncStats:
+    """Runs only the history backfill walks of streams whose backfill isn't complete.
+
+    Used by the `packrat serve` backfill child (`packrat sync --backfill-only`):
+    the service's mirror worker owns the /events poll and the incremental
+    delta, so this neither polls events nor walks newer items. A stream whose
+    backfill never started walks from the newest item (which also moves its
+    watermark); one in progress resumes from its saved cursor. Pages are
+    requested at `Priority.BACKFILL`.
+    """
+    stats = SyncStats(repo_full_name=repo.full_name)
+    effective_probe = _resolve_auth_probe(runner, auth_probe)
+    pending = [s for s in STREAM_SPECS if not repo.backfill(s.stream).complete]
+    for idx, spec in enumerate(pending):
+        state = repo.backfill(spec.stream)
+        has_watermark = getattr(repo, f"{spec.stream}_watermark") is not None
+        walk = _run_backfill_walk(
+            store,
+            repo,
+            spec,
+            start_cursor=state.cursor if has_watermark else None,
+            max_pages=backfill_max_pages,
+            runner=runner,
+            stats=stats,
+            reporter=reporter,
+            auth_probe=effective_probe,
+            budget=budget,
+        )
+        if walk.error_kind in _DEFERRING_ERROR_KINDS:
+            _mark_remaining_deferred(stats, pending[idx + 1 :])
+            break
+        if walk.error_kind == "keyring_locked":
+            break
     return stats

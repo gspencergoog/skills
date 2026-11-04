@@ -17,7 +17,8 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--until MODE` | `closed` | Terminal condition for exit code `3`: `merged`, `closed`, or `all-green` |
 | `--timeout SECONDS` | none | Exit with code `2` when no matching event occurs within this duration |
 | `--debounce SECONDS` | `20` | Fixed window after the first matching wake event to collect follow-on transitions (`0` disables) |
-| `--poll SECONDS` | `120` | Full GraphQL refresh interval in seconds |
+| `--poll SECONDS` | `120` | Targeted GraphQL refresh interval in seconds. Refetches only flagged pull requests (notifications, `PENDING` CI, `UNKNOWN` mergeability, pending debounce, `control.jsonl` `pushed_sha`) and makes no call when none are flagged. With `--no-notifications`, every step is a full refresh |
+| `--sweep SECONDS` | `600` | Full GraphQL refresh interval for every watched pull request |
 | `--notify-poll SECONDS` | `60` | Conditional `GET /notifications` poll interval in seconds |
 | `--once` | `false` | Fetch once, diff against `--state`, update board, emit JSON, save state, and exit immediately |
 | `--no-a2ui` | `false` | Disable writing `board.a2ui` and updating the A2UI Pane conversation JSONL store |
@@ -28,11 +29,13 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--output FILE` | none | Write the emitted JSON payload to this file in addition to `stdout` |
 | `--pushed-sha PR=SHA` | repeatable | Record a commit SHA pushed by the agent so `head_push` is suppressed for that SHA |
 | `--mark-rerun PR=CHECK@SHA` | repeatable | Record a one-time flaky check rerun so a second failure routes to `diagnose_ci` |
-| `--no-notifications` | `false` | Skip `GET /notifications` and use GraphQL polling only |
+| `--no-notifications` | `false` | Skip `GET /notifications` and use GraphQL polling only (every `--poll` step is a full refresh) |
 | `--daemon` | `false` | Run continuously as a background daemon, notifying the conversation via `agentapi` and waiting for acks in `control.jsonl` |
 | `--control FILE` | `<state-dir>/control.jsonl` | Path to the control commands file for daemon mode |
 | `--reminder SECONDS` | `1800` | Re-notify conversation if an active batch remains unacknowledged (`0` disables) |
 | `--notify-scope SCOPE` | `mine` | Which pull request events trigger conversation notifications: `mine` (viewer PRs + terminal) or `all` |
+| `--source MODE` | `auto` | Data source: `packrat` (read a running `packrat serve`), `github` (poll GitHub directly), or `auto` (`packrat` when its heartbeat is fresh, else `github`) |
+| `--packrat-db FILE` | `~/.local/share/packrat/repos.sqlite` | `packrat` database to read in `packrat` mode |
 
 ## 2. Exit Codes and Precedence
 
@@ -132,6 +135,7 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
   "eta": {
     "acme/widget#3339": null
   },
+  "source": "github",
   "a2ui": {
     "template": "stack_board",
     "surfaceId": "monitor",
@@ -140,6 +144,8 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
   }
 }
 ```
+
+`source` is `packrat` while the data comes from `packrat serve`, and `github` in direct mode or after a fallback (see `--source`).
 
 ## 4. Event Kinds (`EVENT_KINDS`)
 

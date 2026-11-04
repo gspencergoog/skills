@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .db_migrations import CONNECTION_PRAGMAS, apply_migrations
+    from .db_schema import BACKFILL_COLUMNS, SCHEMA_SQL
+    from .live_store import LiveStoreMixin
     from .models import (
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
@@ -22,12 +25,14 @@ try:
         RepoConfig,
         StoredEmbeddingRecord,
         TextChunk,
-        format_vector_json,
-        pack_f32_vector,
-        unpack_f32_vector,
-        utc_now_iso,
+        dequantize_u8_vector,
+        iso_at,
+        quantize_u8_vector,
     )
 except ImportError:
+    from db_migrations import CONNECTION_PRAGMAS, apply_migrations  # type: ignore[no-redef]
+    from db_schema import BACKFILL_COLUMNS, SCHEMA_SQL  # type: ignore[no-redef]
+    from live_store import LiveStoreMixin  # type: ignore[no-redef]
     from models import (  # type: ignore[no-redef]
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
@@ -41,268 +46,25 @@ except ImportError:
         RepoConfig,
         StoredEmbeddingRecord,
         TextChunk,
-        format_vector_json,
-        pack_f32_vector,
-        unpack_f32_vector,
-        utc_now_iso,
+        dequantize_u8_vector,
+        iso_at,
+        quantize_u8_vector,
     )
 
+__all__ = [
+    "BACKFILL_COLUMNS",
+    "DEFAULT_DB_PATH",
+    "INIT_SQL_FILENAME",
+    "SCHEMA_SQL",
+    "PackratStore",
+    "render_init_sql",
+]
+
+INIT_SQL_FILENAME = "init.sql"
 DEFAULT_DATA_DIR = Path.home() / ".local" / "share" / "packrat"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "repos.sqlite"
-DEFAULT_INIT_SQL_PATH = DEFAULT_DATA_DIR / "init.sql"
-_TEMPLATE_SQL_PATH = Path(__file__).resolve().parent / "init.sql"
-
-SCHEMA_SQL = """
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;
-PRAGMA busy_timeout = 5000;
-
-CREATE TABLE IF NOT EXISTS repos (
-  repo_id INTEGER PRIMARY KEY AUTOINCREMENT,
-  owner TEXT NOT NULL,
-  name TEXT NOT NULL,
-  full_name TEXT NOT NULL UNIQUE,
-  local_path TEXT,
-  default_branch TEXT NOT NULL DEFAULT 'main',
-  events_etag TEXT,
-  events_last_modified TEXT,
-  poll_interval_sec INTEGER NOT NULL DEFAULT 60,
-  last_events_check_at TEXT,
-  issues_watermark TEXT,
-  prs_watermark TEXT,
-  discussions_watermark TEXT,
-  last_full_sweep_at TEXT,
-  last_indexed_sha TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  issues_backfill_cursor TEXT,
-  issues_backfill_done_at TEXT,
-  prs_backfill_cursor TEXT,
-  prs_backfill_done_at TEXT,
-  discussions_backfill_cursor TEXT,
-  discussions_backfill_done_at TEXT
-);
-
-CREATE TABLE IF NOT EXISTS issues (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  number INTEGER NOT NULL,
-  node_id TEXT,
-  state TEXT NOT NULL,
-  author TEXT,
-  author_association TEXT,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  labels_json TEXT NOT NULL DEFAULT '[]',
-  assignees_json TEXT NOT NULL DEFAULT '[]',
-  created_at TEXT,
-  updated_at TEXT NOT NULL,
-  closed_at TEXT,
-  url TEXT,
-  PRIMARY KEY (repo_id, number)
-);
-CREATE INDEX IF NOT EXISTS idx_issues_updated ON issues(repo_id, updated_at);
-
-CREATE TABLE IF NOT EXISTS pull_requests (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  number INTEGER NOT NULL,
-  node_id TEXT,
-  state TEXT NOT NULL,
-  is_draft INTEGER NOT NULL DEFAULT 0,
-  author TEXT,
-  author_association TEXT,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  labels_json TEXT NOT NULL DEFAULT '[]',
-  base_ref TEXT,
-  head_ref TEXT,
-  head_sha TEXT,
-  merge_commit_sha TEXT,
-  review_decision TEXT,
-  mergeable TEXT,
-  additions INTEGER NOT NULL DEFAULT 0,
-  deletions INTEGER NOT NULL DEFAULT 0,
-  changed_files INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT,
-  updated_at TEXT NOT NULL,
-  merged_at TEXT,
-  closed_at TEXT,
-  url TEXT,
-  PRIMARY KEY (repo_id, number)
-);
-CREATE INDEX IF NOT EXISTS idx_prs_updated ON pull_requests(repo_id, updated_at);
-
-CREATE TABLE IF NOT EXISTS pr_files (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  pr_number INTEGER NOT NULL,
-  file_path TEXT NOT NULL,
-  change_type TEXT NOT NULL DEFAULT 'MODIFIED',
-  additions INTEGER NOT NULL DEFAULT 0,
-  deletions INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (repo_id, pr_number, file_path)
-);
-CREATE INDEX IF NOT EXISTS idx_pr_files_path ON pr_files(repo_id, file_path);
-
-CREATE TABLE IF NOT EXISTS reviews (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  review_id TEXT NOT NULL,
-  pr_number INTEGER NOT NULL,
-  author TEXT,
-  author_association TEXT,
-  state TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  submitted_at TEXT,
-  PRIMARY KEY (repo_id, review_id)
-);
-CREATE INDEX IF NOT EXISTS idx_reviews_pr ON reviews(repo_id, pr_number);
-
-CREATE TABLE IF NOT EXISTS review_threads (
-  thread_id TEXT PRIMARY KEY,
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  pr_number INTEGER NOT NULL,
-  file_path TEXT,
-  line INTEGER,
-  start_line INTEGER,
-  is_resolved INTEGER NOT NULL DEFAULT 0,
-  is_outdated INTEGER NOT NULL DEFAULT 0,
-  reviewer TEXT,
-  author_association TEXT,
-  created_at TEXT,
-  updated_at TEXT,
-  body TEXT NOT NULL DEFAULT '',
-  comments_json TEXT NOT NULL DEFAULT '[]'
-);
-CREATE INDEX IF NOT EXISTS idx_review_threads_pr ON review_threads(repo_id, pr_number);
-CREATE INDEX IF NOT EXISTS idx_review_threads_path ON review_threads(repo_id, file_path);
-
-CREATE TABLE IF NOT EXISTS comments (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  comment_id TEXT NOT NULL,
-  parent_kind TEXT NOT NULL,
-  parent_number INTEGER NOT NULL,
-  author TEXT,
-  author_association TEXT,
-  body TEXT NOT NULL,
-  created_at TEXT,
-  updated_at TEXT,
-  url TEXT,
-  PRIMARY KEY (repo_id, comment_id)
-);
-CREATE INDEX IF NOT EXISTS idx_comments_parent ON comments(repo_id, parent_kind, parent_number);
-
-CREATE TABLE IF NOT EXISTS discussions (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  number INTEGER NOT NULL,
-  node_id TEXT,
-  category TEXT,
-  author TEXT,
-  title TEXT NOT NULL,
-  body TEXT NOT NULL DEFAULT '',
-  answer_body TEXT,
-  created_at TEXT,
-  updated_at TEXT NOT NULL,
-  url TEXT,
-  PRIMARY KEY (repo_id, number)
-);
-
-CREATE TABLE IF NOT EXISTS issue_pr_links (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  issue_number INTEGER NOT NULL,
-  pr_number INTEGER NOT NULL,
-  link_type TEXT NOT NULL DEFAULT 'references',
-  PRIMARY KEY (repo_id, issue_number, pr_number, link_type)
-);
-
-CREATE TABLE IF NOT EXISTS commits (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  sha TEXT NOT NULL,
-  author_name TEXT,
-  author_email TEXT,
-  committed_at TEXT NOT NULL,
-  title TEXT NOT NULL,
-  message TEXT NOT NULL DEFAULT '',
-  pr_number INTEGER,
-  PRIMARY KEY (repo_id, sha)
-);
-CREATE INDEX IF NOT EXISTS idx_commits_date ON commits(repo_id, committed_at);
-
-CREATE TABLE IF NOT EXISTS commit_files (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  sha TEXT NOT NULL,
-  file_path TEXT NOT NULL,
-  change_type TEXT NOT NULL DEFAULT 'M',
-  old_path TEXT,
-  additions INTEGER NOT NULL DEFAULT 0,
-  deletions INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (repo_id, sha, file_path)
-);
-CREATE INDEX IF NOT EXISTS idx_commit_files_path ON commit_files(repo_id, file_path);
-
-CREATE TABLE IF NOT EXISTS code_symbols (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  file_path TEXT NOT NULL,
-  symbol_name TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  line_start INTEGER NOT NULL,
-  line_end INTEGER NOT NULL,
-  signature TEXT NOT NULL,
-  docstring TEXT NOT NULL DEFAULT '',
-  sha TEXT NOT NULL,
-  PRIMARY KEY (repo_id, file_path, kind, symbol_name, line_start)
-);
-CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(repo_id, symbol_name);
-
-CREATE TABLE IF NOT EXISTS doc_sections (
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  file_path TEXT NOT NULL,
-  section_id INTEGER NOT NULL,
-  level INTEGER NOT NULL,
-  heading TEXT NOT NULL,
-  breadcrumb TEXT NOT NULL,
-  anchor_slug TEXT NOT NULL,
-  line_start INTEGER NOT NULL,
-  line_end INTEGER NOT NULL,
-  subtree_line_end INTEGER NOT NULL,
-  content TEXT NOT NULL,
-  sha TEXT NOT NULL,
-  PRIMARY KEY (repo_id, file_path, section_id)
-);
-
-CREATE TABLE IF NOT EXISTS chunks (
-  chunk_id TEXT PRIMARY KEY,
-  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
-  source_kind TEXT NOT NULL,
-  source_ref TEXT NOT NULL,
-  file_path TEXT,
-  item_number INTEGER,
-  title TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL,
-  is_untrusted INTEGER NOT NULL DEFAULT 1,
-  text TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_repo_kind ON chunks(repo_id, source_kind);
-CREATE INDEX IF NOT EXISTS idx_chunks_sha ON chunks(content_sha256);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-  chunk_id UNINDEXED,
-  source_kind UNINDEXED,
-  source_ref UNINDEXED,
-  title,
-  text,
-  tokenize='porter unicode61'
-);
-
-CREATE TABLE IF NOT EXISTS chunk_embeddings (
-  chunk_id TEXT PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
-  model_id TEXT NOT NULL,
-  dim INTEGER NOT NULL DEFAULT 384,
-  vector_f32 BLOB NOT NULL,
-  vector_json TEXT NOT NULL,
-  content_sha256 TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-"""
+DEFAULT_INIT_SQL_PATH = DEFAULT_DATA_DIR / INIT_SQL_FILENAME
+_TEMPLATE_SQL_PATH = Path(__file__).resolve().parent / INIT_SQL_FILENAME
 
 
 def render_init_sql(db_path: Path = DEFAULT_DB_PATH) -> str:
@@ -310,11 +72,6 @@ def render_init_sql(db_path: Path = DEFAULT_DB_PATH) -> str:
     template = _TEMPLATE_SQL_PATH.read_text(encoding="utf-8")
     escaped_path = str(db_path.resolve()).replace("'", "''")
     return template.replace("{{DB_PATH}}", escaped_path)
-
-
-BACKFILL_COLUMNS: tuple[str, ...] = tuple(
-    f"{stream}_backfill_{suffix}" for stream in BACKFILL_STREAMS for suffix in ("cursor", "done_at")
-)
 
 
 def _row_to_repo(row: sqlite3.Row) -> RepoConfig:
@@ -338,6 +95,7 @@ def _row_to_repo(row: sqlite3.Row) -> RepoConfig:
         created_at=str(row["created_at"] or ""),
         updated_at=str(row["updated_at"] or ""),
         **{col: row[col] for col in BACKFILL_COLUMNS},
+        mode=str(row["mode"] or "mirror"),
     )
 
 
@@ -358,26 +116,45 @@ def _row_to_chunk(row: sqlite3.Row) -> TextChunk:
     )
 
 
-class PackratStore:
-    """Manages the SQLite WAL relational, FTS5, and vector database."""
+class PackratStore(LiveStoreMixin):
+    """Manages the SQLite WAL relational, FTS5, and vector database.
+
+    Live GitHub state (leases, change feed, checks, notifications, heartbeat)
+    is handled by the methods inherited from `LiveStoreMixin`.
+    """
 
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
+        """Opens the database, applying pending schema migrations.
+
+        Raises:
+            SchemaTooNewError: If the database was migrated by a newer packrat.
+        """
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path), timeout=10.0)
         self.conn.row_factory = sqlite3.Row
-        self.conn.executescript(SCHEMA_SQL)
-        self._migrate_repos_columns()
+        try:
+            self.conn.executescript(CONNECTION_PRAGMAS)
+            self.applied_migrations = apply_migrations(self.conn)
+            if (
+                self.applied_migrations
+                and self.default_cache_dir is not None
+                and self.init_sql_path.exists()
+            ):
+                self.write_init_sql()
+        except BaseException:
+            self.conn.close()
+            raise
 
-    def _migrate_repos_columns(self) -> None:
-        """Adds backfill columns missing from `repos` tables created by older packrat versions."""
-        existing = {str(row["name"]) for row in self.conn.execute("PRAGMA table_info(repos)")}
-        missing = [col for col in BACKFILL_COLUMNS if col not in existing]
-        if not missing:
-            return
-        with self.conn:
-            for col in missing:
-                self.conn.execute(f"ALTER TABLE repos ADD COLUMN {col} TEXT")
+    @property
+    def default_cache_dir(self) -> Path | None:
+        """Returns the directory containing `db_path`, or None for `:memory:` stores."""
+        return self.db_path.parent if str(self.db_path) != ":memory:" else None
+
+    @property
+    def init_sql_path(self) -> Path:
+        """Returns the default `init.sql` path adjacent to `db_path`."""
+        return self.db_path.parent / INIT_SQL_FILENAME
 
     def close(self) -> None:
         """Closes the underlying SQLite connection."""
@@ -386,11 +163,54 @@ class PackratStore:
     def write_init_sql(self, init_sql_path: Path | None = None) -> Path:
         """Writes the rendered DuckDB init.sql file to disk."""
         target = (
-            Path(init_sql_path) if init_sql_path is not None else (self.db_path.parent / "init.sql")
+            Path(init_sql_path) if init_sql_path is not None else self.init_sql_path
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(render_init_sql(self.db_path), encoding="utf-8")
         return target
+
+    def _bump_vector_cache_seq_in_tx(self, now: float | None = None) -> None:
+        """Increments the monotonic vector_cache_seq counter in service_state."""
+        self.conn.execute(
+            """
+            INSERT INTO service_state (key, value, updated_at)
+            VALUES ('vector_cache_seq', '1', ?)
+            ON CONFLICT(key) DO UPDATE SET
+              value = CAST(CAST(service_state.value AS INTEGER) + 1 AS TEXT),
+              updated_at = excluded.updated_at
+            """,
+            (iso_at(now),),
+        )
+
+    def vector_cache_watermark(self) -> list[Any]:
+        """Computes an O(log N) watermark over service_state, chunk_embeddings, chunks, and repos."""
+        row = self.conn.execute(
+            """
+            SELECT
+              COALESCE((SELECT value FROM service_state WHERE key = 'vector_cache_seq'), '0') AS seq,
+              COALESCE((SELECT COUNT(*) FROM chunk_embeddings), 0) AS ce_cnt,
+              COALESCE((SELECT MAX(rowid) FROM chunk_embeddings), 0) AS max_ce_rowid,
+              COALESCE((SELECT MIN(rowid) FROM chunk_embeddings), 0) AS min_ce_rowid,
+              COALESCE((SELECT COUNT(*) FROM chunks), 0) AS ch_cnt,
+              COALESCE((SELECT MAX(rowid) FROM chunks), 0) AS max_ch_rowid,
+              COALESCE((SELECT MIN(rowid) FROM chunks), 0) AS min_ch_rowid,
+              COALESCE((SELECT COUNT(*) FROM repos), 0) AS repo_cnt,
+              COALESCE((SELECT GROUP_CONCAT(full_name, ',') FROM repos), '') AS repo_names
+            """
+        ).fetchone()
+        if not row:
+            return ["0", 0, 0, 0, 0, 0, 0, 0, ""]
+        return [
+            str(row["seq"]),
+            int(row["ce_cnt"]),
+            int(row["max_ce_rowid"]),
+            int(row["min_ce_rowid"]),
+            int(row["ch_cnt"]),
+            int(row["max_ch_rowid"]),
+            int(row["min_ch_rowid"]),
+            int(row["repo_cnt"]),
+            str(row["repo_names"]),
+        ]
 
     def remove_repo(self, full_name: str) -> bool:
         """Deletes a tracked repository and all of its synced rows.
@@ -407,27 +227,50 @@ class PackratStore:
                 (repo.repo_id,),
             )
             self.conn.execute("DELETE FROM repos WHERE repo_id = ?", (repo.repo_id,))
+            self._bump_vector_cache_seq_in_tx()
         return True
 
-    def rename_repo(self, old_full_name: str, new_owner: str, new_name: str) -> RepoConfig:
+    def rename_repo(
+        self,
+        old_full_name: str,
+        new_owner_or_full_name: str,
+        new_name: str | None = None,
+        *,
+        now: float | None = None,
+    ) -> RepoConfig:
         """Renames a tracked repository in place, keeping its synced rows and embeddings.
 
-        Use this after a GitHub repository is transferred or renamed. Chunk IDs and
-        source references embed the full name, so their prefixes are rewritten too.
-        The events ETag is cleared because the events URL changes with the name.
+        Accepts either `rename_repo("old/repo", "new/repo")` or
+        `rename_repo("old/repo", "new", "repo")`. Chunk IDs and source references
+        embed the full name, so their prefixes are rewritten too. The events ETag
+        is cleared because the events URL changes with the name.
 
         Raises:
-            ValueError: if `old_full_name` is not registered or the new name is taken.
+            ValueError: if `old_full_name` is not registered, the new name is
+                malformed, or the new name is already taken.
         """
+        if new_name is None:
+            if "/" not in new_owner_or_full_name:
+                raise ValueError(
+                    f"Invalid repository name '{new_owner_or_full_name}'; expected owner/name."
+                )
+            new_owner, resolved_name = new_owner_or_full_name.split("/", 1)
+        else:
+            new_owner, resolved_name = new_owner_or_full_name, new_name
         repo = self.get_repo(old_full_name)
         if repo is None:
-            raise ValueError(f"Repository '{old_full_name}' is not registered in packrat.")
-        new_full_name = f"{new_owner}/{new_name}"
+            raise ValueError(
+                f"Repository '{old_full_name}' is not registered in packrat."
+            )
+        new_full_name = f"{new_owner}/{resolved_name}"
         existing = self.get_repo(new_full_name)
         if existing is not None and existing.repo_id != repo.repo_id:
-            raise ValueError(f"Repository '{new_full_name}' is already registered in packrat.")
+            raise ValueError(
+                f"Repository '{new_full_name}' is already registered in packrat."
+            )
         old_prefix = repo.full_name
         start = len(old_prefix) + 1
+        now_iso = iso_at(now)
         with self.conn:
             # chunk_embeddings.chunk_id references chunks.chunk_id without ON UPDATE
             # CASCADE, so defer the check until both tables have been rewritten.
@@ -438,7 +281,7 @@ class PackratStore:
                   events_etag = NULL, events_last_modified = NULL, updated_at = ?
                 WHERE repo_id = ?
                 """,
-                (new_owner, new_name, new_full_name, utc_now_iso(), repo.repo_id),
+                (new_owner, resolved_name, new_full_name, now_iso, repo.repo_id),
             )
             # Rewrite dependent tables first, while chunks still identifies this
             # repo's rows by their old IDs.
@@ -472,6 +315,7 @@ class PackratStore:
                     """,
                     (new_full_name, start, repo.repo_id, len(old_prefix), old_prefix),
                 )
+            self._bump_vector_cache_seq_in_tx(now)
         renamed = self.get_repo(new_full_name)
         if renamed is None:
             raise RuntimeError(f"Failed to load repository {new_full_name}")
@@ -483,22 +327,52 @@ class PackratStore:
         name: str,
         local_path: str | None = None,
         default_branch: str = "main",
+        *,
+        now: float | None = None,
     ) -> RepoConfig:
-        """Inserts or updates a tracked repository configuration."""
-        now = utc_now_iso()
+        """Inserts or updates a tracked repository configuration.
+
+        Registering an `items` repository promotes it to `mirror` mode, so the
+        next sync backfills its history and polls its events. An existing row
+        is matched case-insensitively (like every other lookup) and keeps its
+        stored casing, so a repo auto-created from a notification in GitHub's
+        canonical case is promoted rather than duplicated.
+        """
+        now_iso = iso_at(now)
         full_name = f"{owner}/{name}"
+        existing = self.get_repo(full_name)
         with self.conn:
-            self.conn.execute(
-                """
-                INSERT INTO repos (owner, name, full_name, local_path, default_branch, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(full_name) DO UPDATE SET
-                  local_path = COALESCE(excluded.local_path, repos.local_path),
-                  default_branch = COALESCE(excluded.default_branch, repos.default_branch),
-                  updated_at = excluded.updated_at
-                """,
-                (owner, name, full_name, local_path, default_branch, now, now),
-            )
+            if existing is not None:
+                self.conn.execute(
+                    """
+                    UPDATE repos SET
+                      local_path = COALESCE(?, local_path),
+                      default_branch = COALESCE(?, default_branch),
+                      mode = 'mirror',
+                      updated_at = ?
+                    WHERE repo_id = ?
+                    """,
+                    (local_path, default_branch, now_iso, existing.repo_id),
+                )
+            else:
+                self.conn.execute(
+                    """
+                    INSERT INTO repos (
+                      owner, name, full_name, local_path, default_branch, created_at, updated_at,
+                      mode
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'mirror')
+                    """,
+                    (
+                        owner,
+                        name,
+                        full_name,
+                        local_path,
+                        default_branch,
+                        now_iso,
+                        now_iso,
+                    ),
+                )
         repo = self.get_repo(full_name)
         if repo is None:
             raise RuntimeError(f"Failed to load repository {full_name}")
@@ -517,9 +391,10 @@ class PackratStore:
         discussions_watermark: str | None = None,
         last_full_sweep_at: str | None = None,
         last_indexed_sha: str | None = None,
+        now: float | None = None,
     ) -> None:
         """Updates non-None watermark and ETag columns for repo_id."""
-        now = utc_now_iso()
+        now_iso = iso_at(now)
         with self.conn:
             self.conn.execute(
                 """
@@ -546,7 +421,7 @@ class PackratStore:
                     discussions_watermark,
                     last_full_sweep_at,
                     last_indexed_sha,
-                    now,
+                    now_iso,
                     repo_id,
                 ),
             )
@@ -558,6 +433,7 @@ class PackratStore:
         *,
         cursor: str | None,
         done_at: str | None,
+        now: float | None = None,
     ) -> None:
         """Sets the backfill cursor and completion time for one stream, including clearing them to NULL.
 
@@ -574,17 +450,17 @@ class PackratStore:
                 UPDATE repos SET {stream}_backfill_cursor = ?, {stream}_backfill_done_at = ?, updated_at = ?
                 WHERE repo_id = ?
                 """,
-                (cursor, done_at, utc_now_iso(), repo_id),
+                (cursor, done_at, iso_at(now), repo_id),
             )
 
-    def reset_backfill_state(self, repo_id: int) -> None:
+    def reset_backfill_state(self, repo_id: int, *, now: float | None = None) -> None:
         """Clears every stream's watermark and backfill state so the next sync refetches full history."""
         cleared = [f"{col} = NULL" for col in BACKFILL_COLUMNS]
         cleared += [f"{stream}_watermark = NULL" for stream in BACKFILL_STREAMS]
         with self.conn:
             self.conn.execute(
                 f"UPDATE repos SET {', '.join(cleared)}, updated_at = ? WHERE repo_id = ?",
-                (utc_now_iso(), repo_id),
+                (iso_at(now), repo_id),
             )
 
     def get_repo(self, full_name: str) -> RepoConfig | None:
@@ -603,9 +479,20 @@ class PackratStore:
         ).fetchone()
         return _row_to_repo(row) if row else None
 
-    def list_repos(self) -> list[RepoConfig]:
-        """Returns all registered repositories ordered by repo_id."""
-        rows = self.conn.execute("SELECT * FROM repos ORDER BY repo_id ASC").fetchall()
+    def list_repos(self, mode: str | None = None) -> list[RepoConfig]:
+        """Returns registered repositories ordered by repo_id.
+
+        Args:
+            mode: When set ("mirror" or "items"), only repositories in that mode.
+        """
+        if mode is None:
+            rows = self.conn.execute(
+                "SELECT * FROM repos ORDER BY repo_id ASC"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM repos WHERE mode = ? ORDER BY repo_id ASC", (mode,)
+            ).fetchall()
         return [_row_to_repo(r) for r in rows]
 
     def upsert_issues(
@@ -700,14 +587,16 @@ class PackratStore:
 
     def _upsert_single_pr(self, pr: PrRecord) -> None:
         """Upserts one pull request and its child records inside an active transaction."""
+        self._note_mirror_pr_change_in_tx(pr)
         self.conn.execute(
             """
             INSERT INTO pull_requests (
               repo_id, number, node_id, state, is_draft, author, author_association,
               title, body, labels_json, base_ref, head_ref, head_sha, merge_commit_sha,
               review_decision, mergeable, additions, deletions, changed_files,
-              created_at, updated_at, merged_at, closed_at, url
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              created_at, updated_at, merged_at, closed_at, url,
+              head_repo_owner, is_cross_repository
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(repo_id, number) DO UPDATE SET
               node_id = excluded.node_id,
               state = excluded.state,
@@ -729,7 +618,11 @@ class PackratStore:
               updated_at = excluded.updated_at,
               merged_at = excluded.merged_at,
               closed_at = excluded.closed_at,
-              url = excluded.url
+              url = excluded.url,
+              head_repo_owner = COALESCE(excluded.head_repo_owner, pull_requests.head_repo_owner),
+              is_cross_repository = COALESCE(
+                excluded.is_cross_repository, pull_requests.is_cross_repository
+              )
             """,
             (
                 pr.repo_id,
@@ -756,6 +649,8 @@ class PackratStore:
                 pr.merged_at,
                 pr.closed_at,
                 pr.url,
+                pr.head_repo_owner,
+                None if pr.is_cross_repository is None else int(pr.is_cross_repository),
             ),
         )
         self.conn.execute(
@@ -769,7 +664,14 @@ class PackratStore:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (f.repo_id, f.pr_number, f.file_path, f.change_type, f.additions, f.deletions)
+                    (
+                        f.repo_id,
+                        f.pr_number,
+                        f.file_path,
+                        f.change_type,
+                        f.additions,
+                        f.deletions,
+                    )
                     for f in pr.files
                 ],
             )
@@ -947,6 +849,23 @@ class PackratStore:
                     ],
                 )
 
+    def list_indexed_file_paths(self, repo_id: int) -> set[str]:
+        """Returns all file paths with indexed symbols, doc sections, or file chunks."""
+        rows = self.conn.execute(
+            """
+            SELECT file_path FROM code_symbols WHERE repo_id = ?
+            UNION
+            SELECT file_path FROM doc_sections WHERE repo_id = ?
+            UNION
+            SELECT file_path FROM chunks
+            WHERE repo_id = ?
+              AND source_kind IN ('code_symbol', 'doc_section')
+              AND file_path IS NOT NULL
+            """,
+            (repo_id, repo_id, repo_id),
+        ).fetchall()
+        return {str(r["file_path"]) for r in rows if r["file_path"]}
+
     def replace_code_index_for_files(
         self,
         repo_id: int,
@@ -955,31 +874,41 @@ class PackratStore:
         symbols: Sequence[CodeSymbolRecord],
         doc_sections: Sequence[DocSectionRecord],
         chunks: Sequence[TextChunk],
+        *,
+        now: float | None = None,
     ) -> None:
         """Replaces code symbols, doc sections, and chunks for changed or deleted files."""
         affected = list(dict.fromkeys([*changed_paths, *deleted_paths]))
         with self.conn:
-            for rel_path in affected:
+            if affected:
+                marks = ", ".join("?" for _ in affected)
+                params = (repo_id, *affected)
                 self.conn.execute(
-                    "DELETE FROM code_symbols WHERE repo_id = ? AND file_path = ?",
-                    (repo_id, rel_path),
+                    f"DELETE FROM code_symbols WHERE repo_id = ? AND file_path IN ({marks})",
+                    params,
                 )
                 self.conn.execute(
-                    "DELETE FROM doc_sections WHERE repo_id = ? AND file_path = ?",
-                    (repo_id, rel_path),
+                    f"DELETE FROM doc_sections WHERE repo_id = ? AND file_path IN ({marks})",
+                    params,
                 )
-                old_chunk_rows = self.conn.execute(
-                    """
-                    SELECT chunk_id FROM chunks
-                    WHERE repo_id = ? AND file_path = ?
+                self.conn.execute(
+                    f"""
+                    DELETE FROM chunks_fts WHERE chunk_id IN (
+                        SELECT chunk_id FROM chunks
+                        WHERE repo_id = ? AND file_path IN ({marks})
+                          AND source_kind IN ('code_symbol', 'doc_section')
+                    )
+                    """,
+                    params,
+                )
+                self.conn.execute(
+                    f"""
+                    DELETE FROM chunks
+                    WHERE repo_id = ? AND file_path IN ({marks})
                       AND source_kind IN ('code_symbol', 'doc_section')
                     """,
-                    (repo_id, rel_path),
-                ).fetchall()
-                for row in old_chunk_rows:
-                    cid = str(row["chunk_id"])
-                    self.conn.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (cid,))
-                    self.conn.execute("DELETE FROM chunks WHERE chunk_id = ?", (cid,))
+                    params,
+                )
 
             if symbols:
                 self.conn.executemany(
@@ -1030,22 +959,28 @@ class PackratStore:
                         for d in doc_sections
                     ],
                 )
-            self._upsert_chunks_in_tx(chunks)
+            self._upsert_chunks_in_tx(chunks, now=now)
+            if affected and not chunks:
+                self._bump_vector_cache_seq_in_tx(now)
 
-    def upsert_chunks(self, chunks: Sequence[TextChunk]) -> None:
+    def upsert_chunks(
+        self, chunks: Sequence[TextChunk], *, now: float | None = None
+    ) -> None:
         """Upserts searchable text chunks and synchronizes the FTS5 index."""
         if not chunks:
             return
         with self.conn:
-            self._upsert_chunks_in_tx(chunks)
+            self._upsert_chunks_in_tx(chunks, now=now)
 
-    def _upsert_chunks_in_tx(self, chunks: Sequence[TextChunk]) -> None:
+    def _upsert_chunks_in_tx(
+        self, chunks: Sequence[TextChunk], *, now: float | None = None
+    ) -> None:
         """Upserts chunks and keeps chunks_fts synchronized inside a transaction."""
         if not chunks:
             return
-        now = utc_now_iso()
+        now_iso = iso_at(now)
         for ch in chunks:
-            ts = ch.updated_at or now
+            ts = ch.updated_at or now_iso
             self.conn.execute(
                 """
                 INSERT INTO chunks (
@@ -1076,7 +1011,9 @@ class PackratStore:
                     ts,
                 ),
             )
-            self.conn.execute("DELETE FROM chunks_fts WHERE chunk_id = ?", (ch.chunk_id,))
+            self.conn.execute(
+                "DELETE FROM chunks_fts WHERE chunk_id = ?", (ch.chunk_id,)
+            )
             self.conn.execute(
                 """
                 INSERT INTO chunks_fts (chunk_id, source_kind, source_ref, title, text)
@@ -1084,6 +1021,7 @@ class PackratStore:
                 """,
                 (ch.chunk_id, ch.source_kind, ch.source_ref, ch.title, ch.text),
             )
+        self._bump_vector_cache_seq_in_tx(now)
 
     def get_unembedded_chunks(
         self,
@@ -1116,38 +1054,47 @@ class PackratStore:
         ).fetchall()
         return {str(r["chunk_id"]): _row_to_chunk(r) for r in rows}
 
-    def upsert_embeddings(self, embeddings: Sequence[StoredEmbeddingRecord]) -> None:
-        """Upserts 384-dimensional float32 BLOB and JSON embeddings for chunks."""
+    def upsert_embeddings(
+        self,
+        embeddings: Sequence[StoredEmbeddingRecord],
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Upserts 384-dimensional embeddings as per-vector scaled offset uint8 BLOBs."""
         if not embeddings:
             return
-        now = utc_now_iso()
+        now_iso = iso_at(now)
+        rows = []
+        for e in embeddings:
+            blob, scale = quantize_u8_vector(e.vector)
+            rows.append(
+                (
+                    e.chunk_id,
+                    e.model_id,
+                    EMBEDDING_DIM,
+                    scale,
+                    blob,
+                    e.content_sha256,
+                    e.updated_at or now_iso,
+                )
+            )
         with self.conn:
             self.conn.executemany(
                 """
                 INSERT INTO chunk_embeddings (
-                  chunk_id, model_id, dim, vector_f32, vector_json, content_sha256, updated_at
+                  chunk_id, model_id, dim, scale, vector_u8, content_sha256, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chunk_id) DO UPDATE SET
                   model_id = excluded.model_id,
                   dim = excluded.dim,
-                  vector_f32 = excluded.vector_f32,
-                  vector_json = excluded.vector_json,
+                  scale = excluded.scale,
+                  vector_u8 = excluded.vector_u8,
                   content_sha256 = excluded.content_sha256,
                   updated_at = excluded.updated_at
                 """,
-                [
-                    (
-                        e.chunk_id,
-                        e.model_id,
-                        EMBEDDING_DIM,
-                        pack_f32_vector(e.vector),
-                        format_vector_json(e.vector),
-                        e.content_sha256,
-                        e.updated_at or now,
-                    )
-                    for e in embeddings
-                ],
+                rows,
             )
+            self._bump_vector_cache_seq_in_tx(now)
 
     def get_embedding(self, chunk_id: str) -> StoredEmbeddingRecord | None:
         """Fetches a single StoredEmbeddingRecord by chunk_id."""
@@ -1161,7 +1108,7 @@ class PackratStore:
             chunk_id=str(row["chunk_id"]),
             model_id=str(row["model_id"]),
             content_sha256=str(row["content_sha256"]),
-            vector=unpack_f32_vector(bytes(row["vector_f32"])),
+            vector=dequantize_u8_vector(bytes(row["vector_u8"]), float(row["scale"])),
             updated_at=str(row["updated_at"] or ""),
         )
 
@@ -1190,7 +1137,9 @@ class PackratStore:
             counts[tbl] = int(row["n"]) if row else 0
 
         if repo_id is None:
-            emb_row = self.conn.execute("SELECT COUNT(*) AS n FROM chunk_embeddings").fetchone()
+            emb_row = self.conn.execute(
+                "SELECT COUNT(*) AS n FROM chunk_embeddings"
+            ).fetchone()
         else:
             emb_row = self.conn.execute(
                 """

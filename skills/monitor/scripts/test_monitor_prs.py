@@ -2,19 +2,43 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import os
 import signal
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from typing import Any
 
+import packrat_source
+from daemon_support import ControlReader
 from models import Event
-from monitor_prs import Monitor, parse_args
+from monitor_prs import Monitor, _LoopConfig, _Timers, parse_args
 from state import load_state
-from testing import FakeGh, load_fixture
+from test_packrat_source import (
+    FakePackratCli,
+    change,
+    make_packrat_db,
+    set_heartbeat,
+    store_fixture_prs,
+    store_graphql_pr,
+)
+from testing import FakeGh, load_fixture, make_snapshot
+
+_REAL_PACKRAT_DB = packrat_source.DEFAULT_PACKRAT_DB
+
+
+def setUpModule() -> None:
+    # `--source auto` must never pick up a packrat database on the host running the tests.
+    packrat_source.DEFAULT_PACKRAT_DB = Path(tempfile.gettempdir()) / "no-such-packrat.sqlite"
+
+
+def tearDownModule() -> None:
+    packrat_source.DEFAULT_PACKRAT_DB = _REAL_PACKRAT_DB
 
 
 class FakeClock:
@@ -442,6 +466,213 @@ class TestMonitorPrs(unittest.TestCase):
             self.assertTrue(Path(state_path).exists())
 
 
+def _two_open_prs() -> dict[str, Any]:
+    """Returns the ``pr_stack.json`` payload with both PRs open, mergeable, and based on main."""
+    raw = json.loads(load_fixture("pr_stack.json"))
+    first = raw["data"]["pr0"]["pullRequest"]
+    first.update(
+        state="OPEN", merged=False, mergedAt=None, mergeable="MERGEABLE", mergeStateStatus="CLEAN"
+    )
+    raw["data"]["pr1"]["pullRequest"]["baseRefName"] = "main"
+    return raw
+
+
+def _only(raw: dict[str, Any], alias: str) -> str:
+    """Builds a single-PR response whose ``pr0`` alias is ``raw``'s ``alias`` node."""
+    return json.dumps({"data": {"viewer": raw["data"]["viewer"], "pr0": raw["data"][alias]}})
+
+
+def _graphql_queries(fake: FakeGh) -> list[str]:
+    return [" ".join(args) for args, _ in fake.calls if "graphql" in args]
+
+
+NOT_MODIFIED = ("notifications", 1, load_fixture("notifications_304.txt"), "gh: HTTP 304")
+TWO_PRS = ["acme/widget#3338", "acme/widget#3339"]
+
+
+class TestTargetedRefresh(unittest.TestCase):
+    """``--poll`` refetches only flagged PRs; ``--sweep`` refetches every watched PR."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.state_path = str(Path(self.tmp.name) / "state.json")
+        self.raw = _two_open_prs()
+        seed = FakeGh([("graphql", 0, json.dumps(self.raw), "")])
+        self._run(seed, [*TWO_PRS, "--once"])
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _run(self, fake: FakeGh, extra: list[str]) -> tuple[int, str]:
+        args = parse_args([*extra, "--state", self.state_path, "--no-a2ui"])
+        clk = FakeClock()
+        mon = Monitor(
+            runner=fake,
+            state_path=args.state,
+            clock=clk,
+            sleep=clk.sleep,
+            now=lambda: "2026-10-27T21:15:00Z",
+            epoch_now=lambda: 1793135700.0,
+            notifier=None,
+        )
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = mon.run(args)
+        return code, err.getvalue()
+
+    def _fake(self, *extra: tuple[str, int, str, str]) -> FakeGh:
+        fake = FakeGh([("graphql", 0, json.dumps(self.raw), "")])
+        for item in extra:
+            fake.add(*item)
+        for _ in range(12):
+            fake.add(*NOT_MODIFIED)
+        return fake
+
+    def test_idle_cycle_makes_no_graphql_calls(self) -> None:
+        fake = self._fake()
+        code, _ = self._run(fake, [*TWO_PRS, "--timeout", "250"])
+        self.assertEqual(code, 2)
+        self.assertEqual(len(_graphql_queries(fake)), 1)  # startup refresh only
+        notification_calls = [a for a, _ in fake.calls if "notifications?per_page=50&all=true" in a]
+        self.assertEqual(len(notification_calls), 4)
+
+    def test_notification_refreshes_only_the_named_pr(self) -> None:
+        fake = FakeGh(
+            [
+                ("graphql", 0, json.dumps(self.raw), ""),
+                ("notifications", 0, load_fixture("notifications_200.txt"), ""),
+                ("graphql", 0, _only(self.raw, "pr1"), ""),
+            ]
+        )
+        code, _ = self._run(fake, [*TWO_PRS, "--timeout", "70"])
+        self.assertEqual(code, 2)
+        queries = _graphql_queries(fake)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("pullRequest(number: 3339)", queries[1])
+        self.assertNotIn("pullRequest(number: 3338)", queries[1])
+
+    def test_sweep_refreshes_every_watched_pr(self) -> None:
+        fake = self._fake(("graphql", 0, json.dumps(self.raw), ""))
+        code, _ = self._run(fake, [*TWO_PRS, "--sweep", "300", "--timeout", "310"])
+        self.assertEqual(code, 2)
+        queries = _graphql_queries(fake)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("pullRequest(number: 3338)", queries[1])
+        self.assertIn("pullRequest(number: 3339)", queries[1])
+
+    def test_no_notifications_does_full_refresh_every_poll(self) -> None:
+        fake = FakeGh([("graphql", 0, json.dumps(self.raw), "") for _ in range(3)])
+        code, _ = self._run(fake, [*TWO_PRS, "--no-notifications", "--timeout", "250"])
+        self.assertEqual(code, 2)
+        queries = _graphql_queries(fake)
+        self.assertEqual(len(queries), 3)
+        for query in queries[1:]:
+            self.assertIn("pullRequest(number: 3338)", query)
+            self.assertIn("pullRequest(number: 3339)", query)
+        self.assertFalse(any("notifications" in a for a, _ in fake.calls))
+
+    def test_unknown_mergeable_refreshes_only_its_own_key(self) -> None:
+        unknown = copy.deepcopy(self.raw)
+        unknown["data"]["pr0"]["pullRequest"]["mergeable"] = "UNKNOWN"
+        self._run(FakeGh([("graphql", 0, json.dumps(unknown), "")]), [*TWO_PRS, "--once"])
+        fake = FakeGh(
+            [
+                ("graphql", 0, json.dumps(unknown), ""),
+                ("graphql", 0, _only(self.raw, "pr0"), ""),
+            ]
+        )
+        code, _ = self._run(fake, [*TWO_PRS, "--timeout", "15", "--events", "terminal"])
+        self.assertEqual(code, 2)
+        queries = _graphql_queries(fake)
+        self.assertEqual(len(queries), 2)
+        self.assertIn("pullRequest(number: 3338)", queries[1])
+        self.assertNotIn("pullRequest(number: 3339)", queries[1])
+
+    def test_graphql_cost_is_logged_to_stderr(self) -> None:
+        priced = copy.deepcopy(self.raw)
+        priced["data"]["rateLimit"] = {"cost": 2, "remaining": 4000, "resetAt": "x"}
+        _, err = self._run(FakeGh([("graphql", 0, json.dumps(priced), "")]), [*TWO_PRS, "--once"])
+        self.assertIn("graphql cost=2 remaining=4000", err)
+
+
+class TestSelectRefreshTargets(unittest.TestCase):
+    """Direct checks of which keys a loop step flags."""
+
+    def setUp(self) -> None:
+        self.mon = Monitor(runner=FakeGh([]), state_path="/nonexistent/state.json")
+        self.mon.watched_keys = ["acme/widget#1", "acme/widget#2", "acme/widget#3"]
+        for number in (1, 2, 3):
+            snap = make_snapshot(number=number, rollup_state="SUCCESS")
+            self.mon.state.snapshots[snap.key] = snap
+        self.cfg = _LoopConfig(
+            poll_s=120, sweep_s=600, notify_s=60, debounce_s=20, allowed_kinds=None
+        )
+
+    def _timers(self, **overrides: float) -> _Timers:
+        values = {"next_poll": 1120.0, "next_sweep": 1600.0, "next_notify": 1060.0}
+        values.update(overrides)
+        return _Timers(**values)
+
+    def _event(self, pr: str) -> Event:
+        return Event(
+            pr=pr,
+            kind="ci_check",
+            from_value=None,
+            to_value="FAILURE",
+            actionable=True,
+            suggested_action=None,
+            summary="lint failed",
+        )
+
+    def test_idle_step_flags_nothing(self) -> None:
+        self.assertEqual(self.mon._select_refresh_targets(1010.0, self._timers(), [], self.cfg), [])
+
+    def test_unknown_mergeable_flags_only_its_key(self) -> None:
+        self.mon.state.snapshots["acme/widget#2"].mergeable = "UNKNOWN"
+        targets = self.mon._select_refresh_targets(1010.0, self._timers(), [], self.cfg)
+        self.assertEqual(targets, ["acme/widget#2"])
+
+    def test_pending_debounce_flags_only_its_keys(self) -> None:
+        accumulated = [self._event("acme/widget#3"), self._event("other/repo#9")]
+        targets = self.mon._select_refresh_targets(1010.0, self._timers(), accumulated, self.cfg)
+        self.assertEqual(targets, ["acme/widget#3"])
+
+    def test_pending_rollup_flagged_when_poll_due(self) -> None:
+        self.mon.state.snapshots["acme/widget#1"].rollup_state = "PENDING"
+        timers = self._timers(next_notify=2000.0)
+        self.assertEqual(self.mon._select_refresh_targets(1010.0, timers, [], self.cfg), [])
+        targets = self.mon._select_refresh_targets(1120.0, timers, [], self.cfg)
+        self.assertEqual(targets, ["acme/widget#1"])
+        self.assertEqual(timers.next_poll, 1240.0)
+
+    def test_expected_rollup_flagged_when_poll_due(self) -> None:
+        self.mon.state.snapshots["acme/widget#3"].rollup_state = "EXPECTED"
+        timers = self._timers(next_notify=2000.0)
+        targets = self.mon._select_refresh_targets(1120.0, timers, [], self.cfg)
+        self.assertEqual(targets, ["acme/widget#3"])
+
+    def test_sweep_due_returns_full_refresh(self) -> None:
+        timers = self._timers(next_sweep=1000.0)
+        self.assertIsNone(self.mon._select_refresh_targets(1000.0, timers, [], self.cfg))
+
+    def test_backoff_suppresses_refresh(self) -> None:
+        self.mon.state.snapshots["acme/widget#2"].mergeable = "UNKNOWN"
+        timers = self._timers(next_sweep=1000.0, backoff_until=1030.0)
+        self.assertEqual(self.mon._select_refresh_targets(1010.0, timers, [], self.cfg), [])
+
+    def test_control_pushed_sha_flags_key_until_refreshed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            control = Path(tmp) / "control.jsonl"
+            control.write_text('{"pushed_sha": {"acme/widget#1": "c0ffee"}}\n', encoding="utf-8")
+            self.mon.control_reader = ControlReader(control)
+            self.mon._process_control(None)
+        timers = self._timers(next_notify=2000.0)
+        targets = self.mon._select_refresh_targets(1010.0, timers, [], self.cfg)
+        self.assertEqual(targets, ["acme/widget#1"])
+        self.mon._pushed_keys.difference_update(targets)
+        self.assertEqual(self.mon._select_refresh_targets(1011.0, timers, [], self.cfg), [])
+
+
 class FakeNotifier:
     def __init__(self, succeed: bool = True) -> None:
         self.succeed = succeed
@@ -467,6 +698,7 @@ class TestDaemonMode(unittest.TestCase):
 
     def test_daemon_already_running_returns_code_4(self) -> None:
         import fcntl
+
         lock_file = self.state_dir / "daemon.lock"
         pid_file = self.state_dir / "daemon.pid"
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -476,14 +708,19 @@ class TestDaemonMode(unittest.TestCase):
 
         try:
             fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
-            args = parse_args([
-                "acme/widget#3339",
-                "--state", self.state_path,
-                "--conversation-id", "conv-test",
-                "--daemon",
-                "--output", self.output_path,
-                "--no-notifications",
-            ])
+            args = parse_args(
+                [
+                    "acme/widget#3339",
+                    "--state",
+                    self.state_path,
+                    "--conversation-id",
+                    "conv-test",
+                    "--daemon",
+                    "--output",
+                    self.output_path,
+                    "--no-notifications",
+                ]
+            )
             mon = Monitor(runner=fake, state_path=self.state_path, notifier=FakeNotifier())
             out_buf = io.StringIO()
             with redirect_stdout(out_buf), redirect_stderr(io.StringIO()):
@@ -510,16 +747,23 @@ class TestDaemonMode(unittest.TestCase):
         fake = FakeGh(responses)
         notifier = FakeNotifier(succeed=True)
         clk = FakeClock()
-        args = parse_args([
-            "acme/widget#3339",
-            "--state", self.state_path,
-            "--conversation-id", "conv-test",
-            "--daemon",
-            "--debounce", "0",
-            "--poll", "10",
-            "--output", self.output_path,
-            "--no-notifications",
-        ])
+        args = parse_args(
+            [
+                "acme/widget#3339",
+                "--state",
+                self.state_path,
+                "--conversation-id",
+                "conv-test",
+                "--daemon",
+                "--debounce",
+                "0",
+                "--poll",
+                "10",
+                "--output",
+                self.output_path,
+                "--no-notifications",
+            ]
+        )
 
         sleep_count = 0
 
@@ -549,7 +793,7 @@ class TestDaemonMode(unittest.TestCase):
         self.assertEqual(len(notifier.calls), 1)
         self.assertEqual(notifier.calls[0]["conversation_id"], "conv-test")
         self.assertIn("Batch 1", notifier.calls[0]["title"])
-        self.assertIn('echo \'{"ack": 1}\'', notifier.calls[0]["body"])
+        self.assertIn("echo '{\"ack\": 1}'", notifier.calls[0]["body"])
 
         data = json.loads(Path(self.output_path).read_text())
         self.assertEqual(data["exit_reason"], "stopped")
@@ -567,17 +811,25 @@ class TestDaemonMode(unittest.TestCase):
         fake = FakeGh(responses)
         notifier = FakeNotifier(succeed=True)
         clk = FakeClock()
-        args = parse_args([
-            "acme/widget#3339",
-            "--state", self.state_path,
-            "--conversation-id", "conv-test",
-            "--daemon",
-            "--debounce", "0",
-            "--notify-scope", "mine",
-            "--poll", "10",
-            "--output", self.output_path,
-            "--no-notifications",
-        ])
+        args = parse_args(
+            [
+                "acme/widget#3339",
+                "--state",
+                self.state_path,
+                "--conversation-id",
+                "conv-test",
+                "--daemon",
+                "--debounce",
+                "0",
+                "--notify-scope",
+                "mine",
+                "--poll",
+                "10",
+                "--output",
+                self.output_path,
+                "--no-notifications",
+            ]
+        )
 
         sleep_count = 0
 
@@ -605,9 +857,8 @@ class TestDaemonMode(unittest.TestCase):
         self.assertEqual(len(notifier.calls), 0)
 
     def test_daemon_requires_conversation_id(self) -> None:
-        with redirect_stderr(io.StringIO()):
-            with self.assertRaises(SystemExit):
-                parse_args(["acme/widget#3339", "--state", self.state_path, "--daemon"])
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(["acme/widget#3339", "--state", self.state_path, "--daemon"])
 
     def test_update_debounce_deadline_reschedules_when_past(self) -> None:
         clk = FakeClock()
@@ -655,15 +906,21 @@ class TestDaemonMode(unittest.TestCase):
         fake = FakeGh(responses)
         notifier = FakeNotifier(succeed=False)
         clk = FakeClock()
-        args = parse_args([
-            "acme/widget#3339",
-            "--state", self.state_path,
-            "--conversation-id", "conv-test",
-            "--daemon",
-            "--debounce", "0",
-            "--output", self.output_path,
-            "--no-notifications",
-        ])
+        args = parse_args(
+            [
+                "acme/widget#3339",
+                "--state",
+                self.state_path,
+                "--conversation-id",
+                "conv-test",
+                "--daemon",
+                "--debounce",
+                "0",
+                "--output",
+                self.output_path,
+                "--no-notifications",
+            ]
+        )
 
         sleep_count = 0
 
@@ -689,6 +946,209 @@ class TestDaemonMode(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIsNone(mon.gate.awaiting)
         self.assertGreater(mon._next_send_retry, 0.0)
+
+
+class TestPackratMode(unittest.TestCase):
+    """``--source packrat|auto``: reads packrat's views and its change feed, not GitHub."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.db = make_packrat_db(self.dir / "repos.sqlite")
+        self.state_path = str(self.dir / "state.json")
+        self.clk = FakeClock()
+        self.cli = FakePackratCli(on_wait=self.clk.sleep)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _monitor(self, fake_gh: FakeGh, notifier: Any = None, sleep: Any = None) -> Monitor:
+        return Monitor(
+            runner=fake_gh,
+            state_path=self.state_path,
+            clock=self.clk,
+            sleep=sleep or self.clk.sleep,
+            now=lambda: "2026-10-27T21:15:00Z",
+            epoch_now=lambda: 1793135700.0,
+            notifier=notifier,
+            packrat_runner=self.cli,
+        )
+
+    def _run(
+        self, extra: list[str], fake_gh: FakeGh | None = None, source: str = "packrat"
+    ) -> tuple[int, dict[str, Any] | None, str]:
+        argv = [*extra, "--state", self.state_path, "--source", source, "--packrat-db"]
+        args = parse_args([*argv, str(self.db)])
+        mon = self._monitor(fake_gh or FakeGh())
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = mon.run(args)
+        payload = json.loads(out.getvalue()) if out.getvalue().strip() else None
+        return code, payload, err.getvalue()
+
+    def test_once_reads_views_with_zero_gh_calls(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        code, payload, _ = self._run(["acme/widget#3339", "--once"])
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertEqual(payload["source"], "packrat")
+        self.assertEqual(payload["prs"]["acme/widget#3339"]["rollup_state"], "PENDING")
+        self.assertTrue(payload["prs"]["acme/widget#3339"]["mine"])  # viewer from packrat
+        self.assertIn("via packrat", (self.dir / "board.a2ui").read_text(encoding="utf-8"))
+        self.assertEqual(len(self.cli.by_command("add")), 1)
+
+    def test_auto_picks_packrat_only_when_heartbeat_is_fresh(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        _, payload, _ = self._run(["acme/widget#3339", "--once"], source="auto")
+        self.assertEqual(payload and payload["source"], "packrat")
+
+        set_heartbeat(self.db, 500)
+        fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
+        _, payload, _ = self._run(["acme/widget#3339", "--once"], fake, source="auto")
+        self.assertEqual(payload and payload["source"], "github")
+        self.assertEqual(len(fake.calls), 1)
+
+        code, payload, err = self._run(["acme/widget#3339", "--once"], FakeGh())
+        self.assertEqual((code, payload), (1, None))
+        self.assertIn("packrat serve is not running", err)
+
+    def test_packrat_db_with_tilde_is_expanded_before_the_heartbeat_check(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        with unittest.mock.patch.dict(os.environ, {"HOME": str(self.dir)}):
+            args = parse_args(
+                ["acme/widget#3339", "--once", "--state", self.state_path, "--source",
+                 "packrat", "--packrat-db", "~/repos.sqlite"]
+            )  # fmt: skip
+            mon = self._monitor(FakeGh())
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = mon.run(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())["source"], "packrat")
+
+    def test_change_feed_drives_events_without_gh(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        self._run(["acme/widget#3339", "--once"])
+
+        def ci_fails() -> dict[str, Any]:
+            store_fixture_prs(self.db, "pr_ci_failed.json")
+            return change(11, "acme/widget#3339", "other/repo#5")
+
+        self.cli.changes.append(ci_fails)
+        code, payload, _ = self._run(["acme/widget#3339", "--debounce", "0", "--timeout", "120"])
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertEqual(payload["exit_reason"], "change")
+        self.assertIn("ci_check", {e["kind"] for e in payload["events"]})
+
+    def test_feed_reset_takes_a_full_snapshot(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        self._run(["acme/widget#3339", "--once"])
+
+        def reset() -> dict[str, Any]:
+            store_fixture_prs(self.db, "pr_ci_failed.json")
+            return {"reset": True, "seq": 50}
+
+        self.cli.changes.append(reset)
+        code, payload, _ = self._run(["acme/widget#3339", "--debounce", "0", "--timeout", "120"])
+        self.assertEqual(code, 0)
+        self.assertIn("ci_check", {e["kind"] for e in (payload or {})["events"]})
+
+    def test_stale_heartbeat_falls_back_to_github_once(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        self._run(["acme/widget#3339", "--once"])
+
+        def service_dies() -> dict[str, Any]:
+            set_heartbeat(self.db, 999)
+            return {"seq": 10, "changes": []}
+
+        self.cli.changes.append(service_dies)
+        fake = FakeGh([("graphql", 0, load_fixture("pr_ci_failed.json"), "")])
+        code, payload, err = self._run(
+            ["acme/widget#3339", "--debounce", "0", "--timeout", "120"], fake
+        )
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertEqual(payload["source"], "github")
+        self.assertIn("ci_check", {e["kind"] for e in payload["events"]})
+        self.assertEqual(err.count("falling back to direct GitHub polling"), 1)
+        board = (self.dir / "board.a2ui").read_text(encoding="utf-8")
+        self.assertIn("via GitHub (packrat unavailable)", board)
+
+    def test_mirrored_stack_expansion_makes_no_gh_calls(self) -> None:
+        stack = json.loads(load_fixture("pr_stack.json"))
+        stack["data"]["pr0"]["pullRequest"].update(state="OPEN", merged=False)
+        for alias in ("pr0", "pr1"):
+            store_graphql_pr(self.db, stack["data"][alias]["pullRequest"])
+        code, payload, _ = self._run(["acme/widget#3339", "--stack", "--once"])  # FakeGh()
+        self.assertEqual(code, 0)
+        self.assertEqual(list((payload or {})["prs"]), ["acme/widget#3338", "acme/widget#3339"])
+
+    def test_items_repo_stack_walks_with_gh(self) -> None:
+        stack = json.loads(load_fixture("pr_stack.json"))
+        stack["data"]["pr0"]["pullRequest"].update(state="OPEN", merged=False)
+        for alias in ("pr0", "pr1"):
+            store_graphql_pr(self.db, stack["data"][alias]["pullRequest"], mode="items")
+        child_only = {"data": {"viewer": {"login": "alice"}, "pr0": stack["data"]["pr1"]}}
+        parent = [{"number": 3338, "headRefName": "feat/store-writer", "baseRefName": "main"}]
+        fake = FakeGh(
+            [
+                ("graphql", 0, json.dumps(child_only), ""),
+                ("--head feat/store-writer", 0, json.dumps(parent), ""),
+                ("--base feat/decision-planner", 0, "[]", ""),
+            ]
+        )
+        code, payload, _ = self._run(["acme/widget#3339", "--stack", "--once"], fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(list((payload or {})["prs"]), ["acme/widget#3338", "acme/widget#3339"])
+        self.assertEqual(len(fake.calls), 3)  # stack walk only; snapshots come from packrat
+
+    def test_missing_pr_is_refreshed_then_fetched_with_gh_after_startup_wait(self) -> None:
+        fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
+        code, payload, _ = self._run(["acme/widget#3339", "--once"], fake)
+        self.assertEqual(code, 0)
+        self.assertEqual(
+            self.cli.by_command("refresh"), [["refresh", "--json", "--", "acme/widget#3339"]]
+        )
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual((payload or {})["source"], "packrat")
+
+    def test_daemon_arms_with_source_renews_lease_and_refreshes_pushed_sha(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        control = self.dir / "control.jsonl"
+        seen_armed: list[dict[str, Any]] = []
+
+        def push_then_stop() -> dict[str, Any]:
+            seen_armed.append(json.loads((self.dir / "armed.json").read_text(encoding="utf-8")))
+            control.write_text(
+                '{"pushed_sha": {"acme/widget#3339": "c0ffee"}}\n{"stop": true}\n',
+                encoding="utf-8",
+            )
+            self.clk.now += 400  # past the 5-minute lease renewal
+            return {"seq": 10, "changes": []}
+
+        self.cli.changes.append(push_then_stop)
+        args = parse_args(
+            ["acme/widget#3339", "--state", self.state_path, "--daemon", "--conversation-id",
+             "conv-pr", "--source", "packrat", "--packrat-db", str(self.db), "--no-a2ui"]
+        )  # fmt: skip
+        mon = self._monitor(FakeGh(), notifier=FakeNotifier())
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(seen_armed[0]["source"], "packrat")
+        self.assertEqual(seen_armed[0]["packrat_db"], str(self.db.resolve()))
+        self.assertEqual(
+            self.cli.by_command("refresh"), [["refresh", "--json", "--", "acme/widget#3339"]]
+        )
+        self.assertEqual(len(self.cli.by_command("renew")), 0)  # stop came first
+        self.assertEqual(len(self.cli.by_command("remove")), 1)  # lease released on exit
+
+    def test_lease_renewed_every_five_minutes(self) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        code, _, _ = self._run(["acme/widget#3339", "--events", "terminal", "--timeout", "650"])
+        self.assertEqual(code, 2)
+        self.assertEqual(len(self.cli.by_command("renew")), 2)  # at ~300 s and ~600 s
 
 
 if __name__ == "__main__":

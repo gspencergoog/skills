@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from db_store import PackratStore
 from embedder import DeterministicHashEmbedder, sync_repo_embeddings
@@ -15,7 +16,7 @@ from models import (
     compute_content_sha256,
     utc_now_iso,
 )
-from search_engine import hybrid_rrf_search, sanitize_fts5_query
+from search_engine import hybrid_rrf_search, sanitize_fts5_query, search_vector_cosine
 
 
 class TestSearchEngine(unittest.TestCase):
@@ -144,7 +145,8 @@ class TestSearchEngine(unittest.TestCase):
                 self.assertIsNotNone(hits[0].vector_rank)
                 self.assertTrue(hits[0].is_untrusted)
                 self.assertIn(
-                    '<untrusted_repo_content source="octo-org/widgets#42">', hits[0].snippet
+                    '<untrusted_repo_content source="octo-org/widgets#42">',
+                    hits[0].snippet,
                 )
 
                 # Trusted code symbol must NOT have untrusted XML tags
@@ -157,7 +159,9 @@ class TestSearchEngine(unittest.TestCase):
                 open_hits = hybrid_rrf_search(
                     store,
                     "OAuth2 bearer token",
-                    filters=SearchFilters(repo="octo-org/widgets", kinds=("issue",), state="OPEN"),
+                    filters=SearchFilters(
+                        repo="octo-org/widgets", kinds=("issue",), state="OPEN"
+                    ),
                     mode="hybrid",
                     embedder=embedder,
                 )
@@ -167,7 +171,9 @@ class TestSearchEngine(unittest.TestCase):
                 path_hits = hybrid_rrf_search(
                     store,
                     "credential token",
-                    filters=SearchFilters(repo="octo-org/widgets", path_prefix="src/auth"),
+                    filters=SearchFilters(
+                        repo="octo-org/widgets", path_prefix="src/auth"
+                    ),
                     mode="vector",
                     embedder=embedder,
                 )
@@ -178,11 +184,119 @@ class TestSearchEngine(unittest.TestCase):
                 wildcard_hits = hybrid_rrf_search(
                     store,
                     "credential token",
-                    filters=SearchFilters(repo="octo-org/widgets", path_prefix="src_auth"),
+                    filters=SearchFilters(
+                        repo="octo-org/widgets", path_prefix="src_auth"
+                    ),
                     mode="vector",
                     embedder=embedder,
                 )
                 self.assertEqual(len(wildcard_hits), 0)
+
+                # Verify invalid search mode raises ValueError (C4)
+                with self.assertRaises(ValueError):
+                    hybrid_rrf_search(
+                        store,
+                        "OAuth2 bearer token",
+                        mode="bm25",  # type: ignore[arg-type]
+                        embedder=embedder,
+                    )
+
+                # Verify allow_cache_rebuild=False does not create .mmap files (C1)
+                q_vec = embedder.embed_query("OAuth2 bearer token refresh")
+                cold_dir = Path(tmp) / "no-rebuild-cache"
+                cold_dir.mkdir()
+                no_rebuild_res = search_vector_cosine(
+                    store,
+                    q_vec,
+                    SearchFilters(),
+                    limit=10,
+                    model_id=embedder.model_id,
+                    cache_dir=cold_dir,
+                    allow_cache_rebuild=False,
+                )
+                self.assertFalse((cold_dir / "vectors.meta.json").exists())
+
+                # Verify numpy mmap path and pure-stdlib fallback return identical rankings
+                mmap_res = search_vector_cosine(
+                    store, q_vec, SearchFilters(), limit=10, model_id=embedder.model_id
+                )
+                self.assertEqual(
+                    [cid for cid, _, _ in mmap_res],
+                    [cid for cid, _, _ in no_rebuild_res],
+                )
+                with mock.patch("search_engine._ensure_numpy", return_value=False):
+                    stdlib_res = search_vector_cosine(
+                        store,
+                        q_vec,
+                        SearchFilters(),
+                        limit=10,
+                        model_id=embedder.model_id,
+                    )
+                self.assertEqual(
+                    [cid for cid, _, _ in mmap_res],
+                    [cid for cid, _, _ in stdlib_res],
+                )
+                for (_, _, s_mmap), (_, _, s_std) in zip(mmap_res, stdlib_res):
+                    self.assertAlmostEqual(s_mmap, s_std, places=3)
+
+                # Verify mmap cache invalidation on repo rename and repo removal
+                store.rename_repo("octo-org/widgets", "new-org", "widgets")
+                renamed_res = search_vector_cosine(
+                    store,
+                    q_vec,
+                    SearchFilters(repo="new-org/widgets"),
+                    limit=10,
+                    model_id=embedder.model_id,
+                )
+                self.assertTrue(
+                    all(cid.startswith("new-org/widgets") for cid, _, _ in renamed_res)
+                )
+
+                # Dirtying a chunk's content_sha256 excludes it from both mmap and stdlib vector search
+                store.upsert_chunks(
+                    [
+                        TextChunk(
+                            chunk_id="new-org/widgets#issue:42",
+                            repo_id=widgets.repo_id,
+                            source_kind="issue",
+                            source_ref="new-org/widgets#42",
+                            item_number=42,
+                            title="Mutated unembedded title",
+                            text="Mutated unembedded body",
+                            content_sha256=compute_content_sha256(
+                                "Mutated unembedded title", "Mutated unembedded body"
+                            ),
+                            is_untrusted=True,
+                            updated_at=utc_now_iso(),
+                        )
+                    ]
+                )
+                dirty_mmap = search_vector_cosine(
+                    store, q_vec, SearchFilters(), limit=10, model_id=embedder.model_id
+                )
+                self.assertNotIn(
+                    "new-org/widgets#issue:42", [cid for cid, _, _ in dirty_mmap]
+                )
+
+                store.remove_repo("octo-org/gadgets")
+                after_remove = search_vector_cosine(
+                    store, q_vec, SearchFilters(), limit=10, model_id=embedder.model_id
+                )
+                self.assertTrue(
+                    all(
+                        not cid.startswith("octo-org/gadgets")
+                        for cid, _, _ in after_remove
+                    )
+                )
+
+                # Removing all remaining repos clears on-disk mmap files when n_rows == 0
+                store.remove_repo("new-org/widgets")
+                empty_res = search_vector_cosine(
+                    store, q_vec, SearchFilters(), limit=10, model_id=embedder.model_id
+                )
+                self.assertEqual(empty_res, [])
+                self.assertFalse((Path(tmp) / "vectors.meta.json").exists())
+                self.assertFalse((Path(tmp) / "vectors.u8.mmap").exists())
             finally:
                 store.close()
 

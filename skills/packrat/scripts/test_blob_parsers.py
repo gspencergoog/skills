@@ -136,6 +136,7 @@ class TestBlobParsers(unittest.TestCase):
         self.assertEqual(fn_ent["kind"], "function")
         self.assertEqual(fn_ent["name"], "calculate_total")
         self.assertIn("def calculate_total(a: int, b: int) -> int", fn_ent["signature"])
+        self.assertEqual(extract_content_entities("engine.py", code), entities)
 
     def test_extract_python_syntax_error_returns_empty_list(self) -> None:
         code = "def broken(:\n    pass\n"

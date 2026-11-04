@@ -584,7 +584,7 @@ def _extract_code_symbols_from_blob(
     blob_text: str,
 ) -> tuple[list[CodeSymbolRecord], list[TextChunk]]:
     """Extracts AST symbol spans in memory using blob_parsers."""
-    entities = extract_content_entities(file_path, "NEW", blob_text, full_path=None)
+    entities = extract_content_entities(file_path, blob_text)
     raw_lines = blob_text.splitlines()
     now = utc_now_iso()
 
@@ -675,6 +675,24 @@ def index_files_at_sha(
     return all_symbols, all_sections, all_chunks
 
 
+def _list_indexed_file_paths(store: PackratStore, repo_id: int) -> set[str]:
+    """Returns all file paths with indexed symbols, doc sections, or file chunks."""
+    if hasattr(store, "list_indexed_file_paths"):
+        return set(store.list_indexed_file_paths(repo_id))
+    rows = store.conn.execute(
+        """
+        SELECT file_path FROM code_symbols WHERE repo_id = ?
+        UNION
+        SELECT file_path FROM doc_sections WHERE repo_id = ?
+        UNION
+        SELECT file_path FROM chunks
+        WHERE repo_id = ? AND source_kind IN ('code_symbol', 'doc_section') AND file_path IS NOT NULL
+        """,
+        (repo_id, repo_id, repo_id),
+    ).fetchall()
+    return {str(r["file_path"]) for r in rows if r["file_path"]}
+
+
 def sync_git_codebase(
     store: PackratStore,
     repo: RepoConfig,
@@ -716,25 +734,10 @@ def sync_git_codebase(
         repo_dir, old_sha, target_sha, force=force
     )
     if (force or not _commit_exists(repo_dir, old_sha)) and modified_files:
-        indexed_rows = store.conn.execute(
-            """
-            SELECT file_path FROM code_symbols WHERE repo_id = ?
-            UNION
-            SELECT file_path FROM doc_sections WHERE repo_id = ?
-            UNION
-            SELECT file_path FROM chunks
-            WHERE repo_id = ? AND source_kind IN ('symbol', 'doc_section') AND file_path IS NOT NULL
-            """,
-            (repo.repo_id, repo.repo_id, repo.repo_id),
-        ).fetchall()
-        live_set = set(modified_files)
-        deleted_files = tuple(
-            sorted(
-                str(r["file_path"])
-                for r in indexed_rows
-                if str(r["file_path"]) not in live_set
-            )
+        extra_deleted = _list_indexed_file_paths(store, repo.repo_id) - set(
+            modified_files
         )
+        deleted_files = tuple(sorted(set(deleted_files) | extra_deleted))
     symbols, sections, file_chunks = index_files_at_sha(
         repo_dir, repo, target_sha, modified_files, reporter=reporter
     )

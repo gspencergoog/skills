@@ -2,7 +2,7 @@
 
 Supports two offline CPU backends producing 384-dimensional L2-normalized
 FLOAT32 vectors:
-1. OnnxBgeEmbedder: local BAAI/bge-small-en-v1.5 via onnxruntime + tokenizers.
+1. OnnxArcticEmbedder: local Snowflake/snowflake-arctic-embed-xs via onnxruntime + tokenizers.
 2. DeterministicHashEmbedder: zero-network 384-dim semantic cluster + feature-hash
    embedder ported from agents/plugins/inflight/src/arcs/embedder.ts.
 """
@@ -10,6 +10,7 @@ FLOAT32 vectors:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -29,10 +30,10 @@ from models import (
 )
 from progress import NULL_REPORTER, ProgressReporter
 
-DEFAULT_MODEL_DIR = DEFAULT_DATA_DIR / "models" / "bge-small-en-v1.5"
-BGE_MODEL_ID = "bge-small-en-v1.5"
+DEFAULT_MODEL_DIR = DEFAULT_DATA_DIR / "models" / "snowflake-arctic-embed-xs"
+ARCTIC_MODEL_ID = "snowflake-arctic-embed-xs"
 DETERMINISTIC_MODEL_ID = "deterministic-384-v2"
-BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+RETRIEVAL_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 
 CONCEPT_DIM = 30
 HASH_DIM = EMBEDDING_DIM - CONCEPT_DIM
@@ -974,12 +975,16 @@ class Embedder(Protocol):
         """Computes L2-normalized 384-dim vectors for a sequence of document strings."""
         ...
 
+    def embed_chunks(self, chunks: Sequence[TextChunk]) -> list[list[float]]:
+        """Computes L2-normalized 384-dim vectors for a sequence of structured chunks."""
+        ...
+
     def embed_query(self, query: str) -> list[float]:
         """Computes an L2-normalized 384-dim vector for a search query string."""
         ...
 
 
-def _ensure_onnx_deps() -> bool:
+def ensure_onnx_deps() -> bool:
     """Ensures onnxruntime, tokenizers, and numpy are importable via uv cache if needed."""
     try:
         import numpy
@@ -1042,6 +1047,9 @@ def _ensure_onnx_deps() -> bool:
         return True
     except (ImportError, OSError, ValueError):
         return False
+
+
+_ensure_onnx_deps = ensure_onnx_deps
 
 
 def _fnv1a(text: str) -> int:
@@ -1121,7 +1129,9 @@ def _tokenize(text: str) -> list[str]:
 def _apply_concept_clusters(token_set: set[str], vec: list[float]) -> None:
     """Populates the first 30 semantic concept dimensions."""
     for c_idx, cluster in enumerate(CONCEPT_CLUSTERS):
-        matches = sum(1 for kw in cluster if kw in token_set or _stem_token(kw) in token_set)
+        matches = sum(
+            1 for kw in cluster if kw in token_set or _stem_token(kw) in token_set
+        )
         if matches > 0:
             vec[c_idx] += 2.8 + min(matches - 1, 3) * 0.6
 
@@ -1158,7 +1168,9 @@ def embed_text_deterministic(text: str) -> list[float]:
     return list(l2_normalize(vec))
 
 
-def embed_structured_deterministic(title: str, body: str, extra: str = "") -> list[float]:
+def embed_structured_deterministic(
+    title: str, body: str, extra: str = ""
+) -> list[float]:
     """Blends title + extra (weight 1.0) with body (weight 0.65) and L2-normalizes."""
     head_text = f"{title} {title} {extra}".strip()
     head_vec = embed_text_deterministic(head_text)
@@ -1176,14 +1188,18 @@ class DeterministicHashEmbedder:
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         """Computes 384-dim vectors for a sequence of document strings."""
-        results: list[list[float]] = []
-        for text in texts:
-            if "\n\n" in text:
-                title, body = text.split("\n\n", 1)
-                results.append(embed_structured_deterministic(title, body))
-            else:
-                results.append(embed_text_deterministic(text))
-        return results
+        return [embed_text_deterministic(text) for text in texts]
+
+    def embed_chunks(self, chunks: Sequence[TextChunk]) -> list[list[float]]:
+        """Computes 384-dim vectors for structured chunks, blending title, metadata, and body."""
+        return [
+            embed_structured_deterministic(
+                ch.title,
+                ch.text,
+                extra=f"{ch.source_kind} {ch.file_path or ''}".strip(),
+            )
+            for ch in chunks
+        ]
 
     def embed_query(self, query: str) -> list[float]:
         """Computes a 384-dim vector for a search query."""
@@ -1207,48 +1223,65 @@ def _find_onnx_model_files(model_dir: Path) -> tuple[Path, Path] | None:
     return None
 
 
-def ensure_bge_model(
+def _download_url_to_path(url: str, dest: Path, timeout: float = 30.0) -> None:
+    """Downloads `url` to `dest` with an explicit socket timeout."""
+    with (
+        urllib.request.urlopen(url, timeout=timeout) as resp,
+        dest.open("wb") as out_f,
+    ):
+        shutil.copyfileobj(resp, out_f)
+
+
+def ensure_onnx_model(
     model_dir: Path = DEFAULT_MODEL_DIR,
     allow_download: bool = False,
     *,
     reporter: ProgressReporter = NULL_REPORTER,
 ) -> bool:
-    """Checks if BAAI/bge-small-en-v1.5 ONNX files exist, optionally downloading them."""
+    """Checks if Snowflake/snowflake-arctic-embed-xs ONNX files exist, optionally downloading them."""
     if _find_onnx_model_files(model_dir) is not None:
         return True
-    if not allow_download:
+    if not allow_download or not ensure_onnx_deps():
         return False
 
     onnx_dir = model_dir / "onnx"
     onnx_dir.mkdir(parents=True, exist_ok=True)
-    base_url = "https://huggingface.co/Xenova/bge-small-en-v1.5/resolve/main"
+    base_url = "https://huggingface.co/Snowflake/snowflake-arctic-embed-xs/resolve/main"
     files = {
         model_dir / "tokenizer.json": f"{base_url}/tokenizer.json",
         onnx_dir / "model_quantized.onnx": f"{base_url}/onnx/model_quantized.onnx",
     }
-    reporter.start_phase("packrat", "download BGE model", total=len(files))
+    reporter.start_phase("packrat", f"download {ARCTIC_MODEL_ID}", total=len(files))
+    pid = os.getpid()
+    tmp_files: list[Path] = []
     try:
         for idx, (dest, url) in enumerate(files.items(), start=1):
             if not dest.exists():
-                urllib.request.urlretrieve(url, dest)
+                tmp_dest = dest.with_name(f"{dest.name}.tmp.{pid}")
+                tmp_files.append(tmp_dest)
+                _download_url_to_path(url, tmp_dest)
+                os.replace(tmp_dest, dest)
             reporter.advance(idx, len(files), detail=dest.name)
         reporter.finish_phase()
         return _find_onnx_model_files(model_dir) is not None
     except (OSError, ValueError) as exc:
+        for tmp_dest in tmp_files:
+            tmp_dest.unlink(missing_ok=True)
         reporter.finish_phase()
         reporter.warn(
-            "packrat", f"BGE ONNX download failed ({exc}); falling back to {DETERMINISTIC_MODEL_ID}"
+            "packrat",
+            f"ONNX download failed ({exc}); falling back to {DETERMINISTIC_MODEL_ID}",
         )
         return False
 
 
-class OnnxBgeEmbedder:
-    """Offline local CPU ONNX embedder for BAAI/bge-small-en-v1.5 (384-dim)."""
+class OnnxArcticEmbedder:
+    """Offline local CPU ONNX embedder for Snowflake/snowflake-arctic-embed-xs (384-dim)."""
 
-    model_id: str = BGE_MODEL_ID
+    model_id: str = ARCTIC_MODEL_ID
 
     def __init__(self, model_dir: Path = DEFAULT_MODEL_DIR) -> None:
-        if not _ensure_onnx_deps():
+        if not ensure_onnx_deps():
             raise RuntimeError("onnxruntime, tokenizers, and numpy are not available.")
         found = _find_onnx_model_files(model_dir)
         if found is None:
@@ -1294,27 +1327,38 @@ class OnnxBgeEmbedder:
         normalized = cls_vecs / norms
         return [row.astype(float).tolist() for row in normalized]
 
+    def embed_chunks(self, chunks: Sequence[TextChunk]) -> list[list[float]]:
+        """Computes 384-dim embeddings for structured chunks."""
+        return self.embed_texts([_format_chunk_for_embedding(ch) for ch in chunks])
+
     def embed_query(self, query: str) -> list[float]:
-        """Computes a 384-dim BGE query embedding with retrieval instruction prefix."""
-        vecs = self.embed_texts([f"{BGE_QUERY_PREFIX}{query}"])
+        """Computes a 384-dim query embedding with retrieval instruction prefix."""
+        vecs = self.embed_texts([f"{RETRIEVAL_QUERY_PREFIX}{query}"])
         return vecs[0] if vecs else [0.0] * EMBEDDING_DIM
 
 
 def get_default_embedder(
     model_dir: Path = DEFAULT_MODEL_DIR,
     prefer_onnx: bool = True,
+    allow_download: bool = False,
     *,
     reporter: ProgressReporter = NULL_REPORTER,
 ) -> Embedder:
-    """Returns OnnxBgeEmbedder when model files and runtime exist, else DeterministicHashEmbedder."""
-    if prefer_onnx and _find_onnx_model_files(model_dir) is not None and _ensure_onnx_deps():
-        try:
-            return OnnxBgeEmbedder(model_dir=model_dir)
-        except Exception as exc:  # noqa: BLE001
-            reporter.warn(
-                "packrat", f"ONNX runtime init failed ({exc}); using {DETERMINISTIC_MODEL_ID}"
+    """Returns OnnxArcticEmbedder when model files and runtime exist, else DeterministicHashEmbedder."""
+    if prefer_onnx and ensure_onnx_deps():
+        if _find_onnx_model_files(model_dir) is None and allow_download:
+            ensure_onnx_model(
+                model_dir=model_dir, allow_download=True, reporter=reporter
             )
-            return DeterministicHashEmbedder()
+        if _find_onnx_model_files(model_dir) is not None:
+            try:
+                return OnnxArcticEmbedder(model_dir=model_dir)
+            except Exception as exc:  # noqa: BLE001
+                reporter.warn(
+                    "packrat",
+                    f"ONNX runtime init failed ({exc}); using {DETERMINISTIC_MODEL_ID}",
+                )
+                return DeterministicHashEmbedder()
     return DeterministicHashEmbedder()
 
 
@@ -1350,8 +1394,7 @@ def sync_repo_embeddings(
     )
     for start in range(0, total_pending, batch_size):
         batch = pending[start : start + batch_size]
-        texts = [_format_chunk_for_embedding(ch) for ch in batch]
-        vectors = active_embedder.embed_texts(texts)
+        vectors = active_embedder.embed_chunks(batch)
         records = [
             StoredEmbeddingRecord(
                 chunk_id=ch.chunk_id,

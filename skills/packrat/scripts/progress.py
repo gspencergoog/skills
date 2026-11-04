@@ -26,7 +26,13 @@ def format_duration(seconds: float) -> str:
 
 def format_eta(elapsed_sec: float, completed: int, total: int | None) -> str:
     """Computes a remaining time estimate string when a positive rate and total are known."""
-    if total is None or total <= 0 or completed <= 0 or completed >= total or elapsed_sec <= 0.0:
+    if (
+        total is None
+        or total <= 0
+        or completed <= 0
+        or completed >= total
+        or elapsed_sec <= 0.0
+    ):
         return ""
     rate = completed / elapsed_sec
     if rate <= 0.0:
@@ -138,7 +144,11 @@ def _resolve_effective_mode(
         return "off"
     if mode == "plain":
         return "plain"
-    tty_flag = is_tty if is_tty is not None else bool(getattr(stream, "isatty", lambda: False)())
+    tty_flag = (
+        is_tty
+        if is_tty is not None
+        else bool(getattr(stream, "isatty", lambda: False)())
+    )
     return "tty" if tty_flag else "plain"
 
 
@@ -160,7 +170,9 @@ class StderrProgressReporter:
     ) -> None:
         self._stream: TextIO = stream if stream is not None else sys.stderr
         self._quiet = quiet
-        self._effective_mode = _resolve_effective_mode(mode, quiet, self._stream, is_tty)
+        self._effective_mode = _resolve_effective_mode(
+            mode, quiet, self._stream, is_tty
+        )
         self._clock = clock
         self._grace_sec = grace_sec
         self._tty_interval_sec = tty_interval_sec
@@ -204,12 +216,18 @@ class StderrProgressReporter:
 
     def _is_tick_due(self, now: float, elapsed: float) -> bool:
         """Returns True when the grace window and mode-specific throttle interval have elapsed."""
-        if self._effective_mode == "off" or not self._phase or elapsed < self._grace_sec:
+        if (
+            self._effective_mode == "off"
+            or not self._phase
+            or elapsed < self._grace_sec
+        ):
             return False
         if self._last_emit_at is None:
             return True
         interval = (
-            self._tty_interval_sec if self._effective_mode == "tty" else self._plain_interval_sec
+            self._tty_interval_sec
+            if self._effective_mode == "tty"
+            else self._plain_interval_sec
         )
         return (now - self._last_emit_at) >= interval
 
@@ -228,7 +246,9 @@ class StderrProgressReporter:
         if not self._is_tick_due(now, elapsed):
             return
 
-        line = format_status_line(self._repo, self._phase, completed, self._total, elapsed, detail)
+        line = format_status_line(
+            self._repo, self._phase, completed, self._total, elapsed, detail
+        )
         self._last_emit_at = now
         if self._effective_mode == "tty":
             clipped = line[: self._terminal_limit()]

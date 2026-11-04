@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 SYNC_LOCK_FILENAME = "sync.lock"
+SERVE_LOCK_FILENAME = "serve.lock"
 AUTO_SYNC_STATE_FILENAME = "auto-sync-state.json"
 _LOCK_POLL_INTERVAL_SEC = 0.2
 
@@ -238,23 +239,22 @@ def _read_lock_holder(lock_path: Path) -> tuple[int | None, str | None]:
 
 
 @contextlib.contextmanager
-def acquire_sync_lock(
+def _acquire_file_lock(
     db_path: Path,
-    *,
-    mode: LockMode = "wait",
-    wait_timeout_sec: float = 30.0,
+    filename: str,
+    mode: LockMode,
+    wait_timeout_sec: float,
 ) -> Iterator[SyncLockInfo]:
-    """Acquires an advisory single-flight lock for a packrat database directory.
+    """Acquires an advisory flock on `<db_path.parent>/<filename>`.
 
-    Opens `<db_path.parent>/sync.lock` without truncation so contended callers
-    never erase the active holder's metadata. Truncates and writes current
-    holder metadata only after `flock` succeeds, and keeps the lock file on
-    disk upon release.
+    Opens the lock file without truncation so contended callers never erase
+    the active holder's metadata. Truncates and writes current holder metadata
+    only after `flock` succeeds, and keeps the lock file on disk upon release.
 
     Args:
         db_path: Path to the target SQLite database file.
-        mode: Contention behavior ("wait" polls up to `wait_timeout_sec`;
-            "skip" and "fail" return `acquired=False` immediately).
+        filename: Name of the lock file inside the database directory.
+        mode: Contention behavior; see `acquire_sync_lock`.
         wait_timeout_sec: Maximum seconds to poll when `mode` is "wait".
 
     Yields:
@@ -265,7 +265,7 @@ def acquire_sync_lock(
         OSError: If opening or locking the file fails for a non-contention reason.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = db_path.parent / SYNC_LOCK_FILENAME
+    lock_path = db_path.parent / filename
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     acquired = False
     fd_open = True
@@ -297,6 +297,62 @@ def acquire_sync_lock(
         if fd_open:
             with contextlib.suppress(OSError):
                 os.close(fd)
+
+
+@contextlib.contextmanager
+def acquire_sync_lock(
+    db_path: Path,
+    *,
+    mode: LockMode = "wait",
+    wait_timeout_sec: float = 30.0,
+) -> Iterator[SyncLockInfo]:
+    """Acquires an advisory single-flight lock for a packrat database directory.
+
+    Opens `<db_path.parent>/sync.lock` without truncation so contended callers
+    never erase the active holder's metadata. Truncates and writes current
+    holder metadata only after `flock` succeeds, and keeps the lock file on
+    disk upon release.
+
+    Args:
+        db_path: Path to the target SQLite database file.
+        mode: Contention behavior ("wait" polls up to `wait_timeout_sec`;
+            "skip" and "fail" return `acquired=False` immediately).
+        wait_timeout_sec: Maximum seconds to poll when `mode` is "wait".
+
+    Yields:
+        A `SyncLockInfo` describing whether the lock was acquired and its holder.
+
+    Raises:
+        ValueError: If `mode` is not one of "wait", "skip", or "fail".
+        OSError: If opening or locking the file fails for a non-contention reason.
+    """
+    with _acquire_file_lock(
+        db_path, SYNC_LOCK_FILENAME, mode, wait_timeout_sec
+    ) as info:
+        yield info
+
+
+@contextlib.contextmanager
+def acquire_serve_lock(db_path: Path) -> Iterator[SyncLockInfo]:
+    """Acquires the non-blocking single-instance lock for `packrat serve`.
+
+    Uses `<db_path.parent>/serve.lock`, which is independent of `sync.lock`:
+    the service holds `serve.lock` for its whole life and takes `sync.lock`
+    only around individual sync runs. Holder metadata is recorded exactly as
+    `acquire_sync_lock` does.
+
+    Args:
+        db_path: Path to the target SQLite database file.
+
+    Yields:
+        A `SyncLockInfo`; `acquired` is False immediately when another process
+        holds the lock, with that holder's PID and start time when readable.
+
+    Raises:
+        OSError: If opening or locking the file fails for a non-contention reason.
+    """
+    with _acquire_file_lock(db_path, SERVE_LOCK_FILENAME, "fail", 0.0) as info:
+        yield info
 
 
 def write_auto_sync_run_state(db_path: Path, record: AutoSyncRunRecord) -> Path:

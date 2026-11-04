@@ -1,0 +1,36 @@
+{
+  "data": {
+    "node": {
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "bbb222",
+              "committedDate": "2026-11-03T08:00:00Z",
+              "statusCheckRollup": {
+                "state": "PENDING",
+                "contexts": {
+                  "totalCount": 2,
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": [
+                    {
+                      "__typename": "StatusContext",
+                      "context": "ci/legacy",
+                      "state": "PENDING",
+                      "targetUrl": "https://ci.example.com/1",
+                      "createdAt": "2026-11-03T10:01:00Z",
+                      "isRequired": true
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

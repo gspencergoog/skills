@@ -41,8 +41,12 @@ class TestGitIndexer(unittest.TestCase):
             fork_dir = tmp_path / "fork.git"
             work_dir = tmp_path / "work"
 
-            subprocess.run(["git", "init", "--bare", "-b", "main", str(upstream_dir)], check=True)
-            subprocess.run(["git", "init", "--bare", "-b", "main", str(fork_dir)], check=True)
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(upstream_dir)], check=True
+            )
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(fork_dir)], check=True
+            )
             subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
             _git(work_dir, "config", "user.name", "Test Author")
             _git(work_dir, "config", "user.email", "author@example.com")
@@ -83,7 +87,9 @@ class TestGitIndexer(unittest.TestCase):
 
             store = PackratStore(tmp_path / "repos.sqlite")
             try:
-                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
                 resolved = resolve_canonical_ref(work_dir, repo)
                 self.assertEqual(resolved, ("upstream/main", sha_1))
 
@@ -204,7 +210,9 @@ class TestGitIndexer(unittest.TestCase):
             (work_dir / "src" / "widget.py").write_text(
                 "def build_widget() -> int:\n    return 1\n", encoding="utf-8"
             )
-            (work_dir / "README.md").write_text("# Widget\n\nDoc text.\n", encoding="utf-8")
+            (work_dir / "README.md").write_text(
+                "# Widget\n\nDoc text.\n", encoding="utf-8"
+            )
             _git(work_dir, "add", ".")
             _git(work_dir, "commit", "-m", "feat: add widget")
 
@@ -212,7 +220,9 @@ class TestGitIndexer(unittest.TestCase):
             advances_seen: list[tuple[int, int | None, str]] = []
 
             class SpyReporter:
-                def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+                def start_phase(
+                    self, repo: str, phase: str, total: int | None = None
+                ) -> None:
                     pass
 
                 def advance(
@@ -234,8 +244,12 @@ class TestGitIndexer(unittest.TestCase):
 
             store = PackratStore(tmp_path / "repos.sqlite")
             try:
-                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
-                stats = sync_git_codebase(store, repo, fetch=True, reporter=SpyReporter())
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                stats = sync_git_codebase(
+                    store, repo, fetch=True, reporter=SpyReporter()
+                )
                 self.assertEqual(len(stats.warnings), 1)
                 self.assertIn("git fetch upstream/main failed", stats.warnings[0])
                 self.assertEqual(len(warnings_seen), 1)
@@ -336,7 +350,9 @@ class TestGitIndexer(unittest.TestCase):
                 self.assertEqual(gitlab_env["GIT_SSH_COMMAND"], base_ssh)
 
             custom_cmd = "ssh -F /tmp/custom_ssh_config -o BatchMode=yes"
-            with mock.patch.dict(os.environ, {"GIT_SSH_COMMAND": custom_cmd}, clear=False):
+            with mock.patch.dict(
+                os.environ, {"GIT_SSH_COMMAND": custom_cmd}, clear=False
+            ):
                 preserved = _build_git_ssh_env(
                     "git@github.com:octo-org/widgets.git",
                     ssh_key_path=key_path,
@@ -384,12 +400,16 @@ class TestGitIndexer(unittest.TestCase):
                     return subprocess.CompletedProcess(
                         args=args, returncode=0, stdout="", stderr=""
                     )
-                return real_run_git(repo_dir, args, timeout=timeout, extra_env=extra_env)
+                return real_run_git(
+                    repo_dir, args, timeout=timeout, extra_env=extra_env
+                )
 
             clean_env = {k: v for k, v in os.environ.items() if k != "GIT_SSH_COMMAND"}
             store = PackratStore(tmp_path / "repos.sqlite")
             try:
-                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
                 with (
                     mock.patch.dict(os.environ, clean_env, clear=True),
                     mock.patch("git_indexer.Path.home", return_value=fake_home),
@@ -410,7 +430,9 @@ class TestGitIndexer(unittest.TestCase):
             tmp_path = Path(tmp)
             upstream_dir = tmp_path / "upstream.git"
             work_dir = tmp_path / "work"
-            subprocess.run(["git", "init", "--bare", "-b", "main", str(upstream_dir)], check=True)
+            subprocess.run(
+                ["git", "init", "--bare", "-b", "main", str(upstream_dir)], check=True
+            )
             subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
             _git(work_dir, "config", "user.name", "Test Author")
             _git(work_dir, "config", "user.email", "author@example.com")
@@ -429,7 +451,9 @@ class TestGitIndexer(unittest.TestCase):
             warnings_seen: list[tuple[str, str]] = []
 
             class TimeoutSpyReporter:
-                def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+                def start_phase(
+                    self, repo: str, phase: str, total: int | None = None
+                ) -> None:
                     pass
 
                 def advance(
@@ -469,8 +493,12 @@ class TestGitIndexer(unittest.TestCase):
 
             store = PackratStore(tmp_path / "repos.sqlite")
             try:
-                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
-                with mock.patch("git_indexer.run_bounded_subprocess", side_effect=fake_bounded):
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                with mock.patch(
+                    "git_indexer.run_bounded_subprocess", side_effect=fake_bounded
+                ):
                     stats = sync_git_codebase(
                         store,
                         repo,
@@ -526,6 +554,57 @@ class TestGitIndexer(unittest.TestCase):
                 )
             elapsed = time.monotonic() - started
             self.assertLess(elapsed, 4.0)
+
+    def test_force_reindex_cleans_up_stale_code_symbol_chunks_from_deleted_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "keep.py").write_text(
+                "def keep_fn() -> int:\n    return 1\n", encoding="utf-8"
+            )
+            (work_dir / "gone.py").write_text(
+                "def gone_fn() -> int:\n    return 2\n", encoding="utf-8"
+            )
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: add keep and gone")
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                sync_git_codebase(store, repo)
+
+                # Simulate an orphaned code_symbol chunk whose code_symbols row was removed
+                # while its file was deleted from the tree before a force re-index.
+                store.conn.execute(
+                    "DELETE FROM code_symbols WHERE repo_id = ? AND file_path = 'gone.py'",
+                    (repo.repo_id,),
+                )
+                store.conn.commit()
+                (work_dir / "gone.py").unlink()
+                _git(work_dir, "add", "-A")
+                _git(work_dir, "commit", "-m", "chore: remove gone.py")
+
+                repo = store.get_repo("octo-org/widgets")
+                assert repo is not None
+                sync_git_codebase(store, repo, force=True)
+
+                remaining_chunks = store.conn.execute(
+                    "SELECT file_path FROM chunks WHERE repo_id = ? AND source_kind = 'code_symbol'",
+                    (repo.repo_id,),
+                ).fetchall()
+                self.assertEqual(
+                    [r["file_path"] for r in remaining_chunks], ["keep.py"]
+                )
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

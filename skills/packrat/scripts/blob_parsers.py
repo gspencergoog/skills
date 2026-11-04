@@ -7,10 +7,7 @@ retrieved from git commits, removing any dependency on external skills.
 from __future__ import annotations
 
 import ast
-import json
 import re
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -403,54 +400,23 @@ def _extract_brace_entities(
     return entities
 
 
-def _try_sem_entities(
-    rel_path: str, full_path: Path, side: str
-) -> list[dict[str, Any]] | None:
-    """Extracts entities via the sem CLI when available on PATH."""
-    if side != "NEW" or not shutil.which("sem") or not full_path.is_file():
-        return None
-    res = subprocess.run(
-        ["sem", "entities", str(full_path), "--format", "json"],
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-    if res.returncode != 0:
-        return None
-    try:
-        items = json.loads(res.stdout)
-        return [
-            {
-                "file_path": rel_path,
-                "side": side,
-                "kind": str(it.get("type") or "symbol"),
-                "name": str(it.get("name") or ""),
-                "signature": str(it.get("signature") or it.get("name") or ""),
-                "line_start": int(it.get("line_start") or 1),
-                "line_end": int(it.get("line_end") or it.get("line_start") or 1),
-            }
-            for it in items
-            if isinstance(it, dict) and it.get("name")
-        ]
-    except (ValueError, TypeError):
-        return None
-
-
 def extract_content_entities(
     rel_path: str,
-    side: str,
-    content: str,
+    content_or_side: str,
+    content: str | None = None,
     full_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Dispatches symbol extraction for a single file snapshot."""
-    if full_path is not None:
-        sem_res = _try_sem_entities(rel_path, full_path, side)
-        if sem_res:
-            return sem_res
+    del full_path
+    if content is None:
+        actual_content = content_or_side
+        side = "NEW"
+    else:
+        actual_content = content
+        side = content_or_side
     if rel_path.endswith(".py"):
-        return _extract_py_entities(rel_path, side, content)
-    return _extract_brace_entities(rel_path, side, content)
+        return _extract_py_entities(rel_path, side, actual_content)
+    return _extract_brace_entities(rel_path, side, actual_content)
 
 
 # Alias for backward compatibility if callers reference the private helper name

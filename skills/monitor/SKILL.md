@@ -9,13 +9,25 @@ description: >-
   asks to watch or babysit a pull request or stack, wants automatic CI or
   conflict fixes as checks finish, or asks to be notified when a pull request is
   green and ready to merge. Flags: --stack, --actionable-only, --until, --events,
-  --timeout, --once, --no-a2ui, --daemon. Don't use for reviewing a pull request
+  --timeout, --once, --no-a2ui, --daemon, --source. Don't use for reviewing a pull request
   (use pr-review) or addressing comments once (use pr-feedback-handler).
 ---
 
 # PR Monitor (`/monitor`)
 
-`monitor` watches one or more GitHub pull requests across a session. Its helper script, [scripts/monitor_prs.py](scripts/monitor_prs.py), polls GitHub notifications (`If-Modified-Since`, free `304` responses every 60 seconds) alongside periodic GraphQL refreshes (every 120 seconds) and diffs each pull request against a per-conversation state file.
+`monitor` watches one or more GitHub pull requests across a session. Its helper script, [scripts/monitor_prs.py](scripts/monitor_prs.py), polls GitHub notifications (`If-Modified-Since`, free `304` responses every 60 seconds) and diffs each pull request against a per-conversation state file. GraphQL refetches are targeted: every `--poll` interval (default 120 seconds) it refetches only flagged pull requests (named in a notification, CI still `PENDING`, mergeability `UNKNOWN`, events in the pending debounce batch, or a `pushed_sha` in `control.jsonl`), and makes no GraphQL call when none are flagged. A full refresh of every watched pull request runs every `--sweep` interval (default 600 seconds). With `--no-notifications`, every `--poll` step is a full refresh. Each GraphQL call logs its point cost to `stderr` (`monitor: graphql cost=N remaining=R ...`).
+
+### Data source: `packrat` or direct GitHub
+
+`--source auto` (the default) reads pull request data from a running `packrat serve` when its heartbeat is fresh (`v_service_health.beat_age_s <= 180`), and polls GitHub directly otherwise. `packrat` is optional: without it, `/monitor` behaves as described above. In `packrat` mode the daemon:
+
+- leases the watched pull requests with `packrat watch add --consumer monitor` and renews the lease every 5 minutes,
+- waits on `packrat changes --wait` (timeout equal to `--debounce`) instead of polling notifications and GraphQL, and re-reads only the changed pull requests from `packrat`'s read-only views,
+- turns a `control.jsonl` `pushed_sha` into `packrat refresh`,
+- expands `--stack` from `packrat`'s mirror for repositories registered with `packrat repo add`, and uses the `gh pr list` walk for other repositories,
+- falls back to direct GitHub polling for the rest of the run if the service goes stale, logging it once.
+
+`--source packrat` exits with an error when the service isn't running; `--source github` never reads `packrat`. The payload's `source` field and the board subtitle (`via packrat`, or `via GitHub (packrat unavailable)` after a fallback) show which source is in use. `packrat` stores neither assignees nor the head commit's committer, so those keep their last known values in `packrat` mode. Remediation still calls `gh` directly in every mode: `gh run rerun`, `gh run view --log-failed`, pushes, and review replies.
 
 On every refresh, `monitor_prs.py` writes `<scratch>/monitor/board.a2ui` and appends `stack_board` updates directly to the `a2ui-pane` conversation JSONL store (`~/.gemini/jetski/plugin_data/a2ui-pane/conversations/<conversationId>.jsonl`), streaming live badge and CI ETA updates to the open pane at zero LLM tokens. When launched with `--daemon`, it runs as a persistent background process, handles flaky-check reminder logic, and wakes the conversation via `agentapi send-message` whenever actionable events occur on `mine: true` pull requests.
 

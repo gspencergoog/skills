@@ -4,7 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from models import CheckRun, PrSnapshot, Thread, is_bot, parse_pr_ref, pr_key
+from models import (
+    FAILED_CONCLUSIONS,
+    CheckRun,
+    PrSnapshot,
+    Thread,
+    is_bot,
+    parse_pr_ref,
+    pr_key,
+)
 
 _STATUS_CONTEXT_MAP: dict[str, tuple[str, str | None]] = {
     "SUCCESS": ("COMPLETED", "SUCCESS"),
@@ -79,7 +87,11 @@ def _normalize_check_node(node: dict[str, Any]) -> CheckRun | None:
 def normalize_checks(
     rollup: dict[str, Any] | None, truncated: list[str] | None = None
 ) -> list[CheckRun]:
-    """Converts a ``statusCheckRollup`` object into deduplicated ``CheckRun`` items."""
+    """Converts a ``statusCheckRollup`` object into ``CheckRun`` items, one per check name.
+
+    Several contexts can share a name (the same job in two workflows). The worst one
+    is kept (failed, then pending, then passed), so a failing duplicate is never hidden.
+    """
     if not isinstance(rollup, dict):
         return []
     trunc_list = truncated if truncated is not None else []
@@ -87,9 +99,19 @@ def normalize_checks(
     by_name: dict[str, CheckRun] = {}
     for node in nodes:
         run = _normalize_check_node(node)
-        if run is not None:
+        if run is None:
+            continue
+        kept = by_name.get(run.name)
+        if kept is None or _check_rank(run) >= _check_rank(kept):
             by_name[run.name] = run
     return list(by_name.values())
+
+
+def _check_rank(run: CheckRun) -> int:
+    """Orders same-named checks so a failing one wins over pending, and pending over passing."""
+    if run.conclusion in FAILED_CONCLUSIONS:
+        return 2
+    return 1 if run.status != "COMPLETED" else 0
 
 
 def _extract_reviewers(raw: dict[str, Any], truncated: list[str]) -> list[str]:

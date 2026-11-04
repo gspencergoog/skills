@@ -10,12 +10,14 @@ from unittest import mock
 
 from db_store import PackratStore
 from embedder import (
+    ARCTIC_MODEL_ID,
     DETERMINISTIC_MODEL_ID,
     DeterministicHashEmbedder,
     _ensure_onnx_deps,
     embed_structured_deterministic,
     embed_text_deterministic,
-    ensure_bge_model,
+    ensure_onnx_deps,
+    ensure_onnx_model,
     get_default_embedder,
     sync_repo_embeddings,
 )
@@ -65,6 +67,13 @@ class TestEmbedder(unittest.TestCase):
         query_vec = embed_text_deterministic("pull_request rate_limit side_pane")
         self.assertGreater(_cosine(vec, query_vec), 0.4)
 
+        embedder = DeterministicHashEmbedder()
+        doc_with_para = "First paragraph\n\nSecond paragraph with token"
+        self.assertEqual(
+            embedder.embed_texts([doc_with_para])[0],
+            embed_text_deterministic(doc_with_para),
+        )
+
     def test_incremental_embedding_skips_unchanged_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = PackratStore(Path(tmp) / "repos.sqlite")
@@ -87,7 +96,9 @@ class TestEmbedder(unittest.TestCase):
                         item_number=None,
                         title="SurfaceController",
                         text=c1_text,
-                        content_sha256=compute_content_sha256("SurfaceController", c1_text),
+                        content_sha256=compute_content_sha256(
+                            "SurfaceController", c1_text
+                        ),
                         is_untrusted=False,
                         updated_at=now,
                     ),
@@ -100,7 +111,9 @@ class TestEmbedder(unittest.TestCase):
                         item_number=None,
                         title="MarkdownParser",
                         text=c2_text,
-                        content_sha256=compute_content_sha256("MarkdownParser", c2_text),
+                        content_sha256=compute_content_sha256(
+                            "MarkdownParser", c2_text
+                        ),
                         is_untrusted=False,
                         updated_at=now,
                     ),
@@ -108,17 +121,25 @@ class TestEmbedder(unittest.TestCase):
                 store.upsert_chunks(chunks)
 
                 embedder = DeterministicHashEmbedder()
-                first_count = sync_repo_embeddings(store, repo.repo_id, embedder=embedder)
+                first_count = sync_repo_embeddings(
+                    store, repo.repo_id, embedder=embedder
+                )
                 self.assertEqual(first_count, 2)
 
                 # Second sync with identical content_sha256 must embed 0 chunks
-                with mock.patch.object(embedder, "embed_texts", wraps=embedder.embed_texts) as spy:
-                    second_count = sync_repo_embeddings(store, repo.repo_id, embedder=embedder)
+                with mock.patch.object(
+                    embedder, "embed_chunks", wraps=embedder.embed_chunks
+                ) as spy:
+                    second_count = sync_repo_embeddings(
+                        store, repo.repo_id, embedder=embedder
+                    )
                     self.assertEqual(second_count, 0)
                     spy.assert_not_called()
 
                 # Modify only chunk 1's text & sha256; only 1 chunk should be re-embedded
-                c1_updated = "Surface controller manages widget component state and focus rings"
+                c1_updated = (
+                    "Surface controller manages widget component state and focus rings"
+                )
                 store.upsert_chunks(
                     [
                         TextChunk(
@@ -130,13 +151,17 @@ class TestEmbedder(unittest.TestCase):
                             item_number=None,
                             title="SurfaceController",
                             text=c1_updated,
-                            content_sha256=compute_content_sha256("SurfaceController", c1_updated),
+                            content_sha256=compute_content_sha256(
+                                "SurfaceController", c1_updated
+                            ),
                             is_untrusted=False,
                             updated_at=utc_now_iso(),
                         )
                     ]
                 )
-                third_count = sync_repo_embeddings(store, repo.repo_id, embedder=embedder)
+                third_count = sync_repo_embeddings(
+                    store, repo.repo_id, embedder=embedder
+                )
                 self.assertEqual(third_count, 1)
 
                 emb = store.get_embedding("octo-org/widgets:symbol:src/a.ts:1")
@@ -150,11 +175,12 @@ class TestEmbedder(unittest.TestCase):
     def test_fallback_when_onnx_model_dir_empty(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             empty_dir = Path(tmp) / "no-model"
-            self.assertFalse(ensure_bge_model(empty_dir, allow_download=False))
+            self.assertFalse(ensure_onnx_model(empty_dir, allow_download=False))
             embedder = get_default_embedder(model_dir=empty_dir, prefer_onnx=True)
             self.assertEqual(embedder.model_id, DETERMINISTIC_MODEL_ID)
             q_vec = embedder.embed_query("how does surface controller work")
             self.assertEqual(len(q_vec), EMBEDDING_DIM)
+            self.assertTrue(ensure_onnx_deps())
             self.assertTrue(_ensure_onnx_deps())
 
     def test_batch_progress_and_onnx_init_warning(self) -> None:
@@ -162,7 +188,9 @@ class TestEmbedder(unittest.TestCase):
         advances: list[tuple[int, int | None]] = []
 
         class SpyReporter:
-            def start_phase(self, repo: str, phase: str, total: int | None = None) -> None:
+            def start_phase(
+                self, repo: str, phase: str, total: int | None = None
+            ) -> None:
                 pass
 
             def advance(
@@ -188,7 +216,9 @@ class TestEmbedder(unittest.TestCase):
             (tmp_path / "tokenizer.json").write_text("not-json", encoding="utf-8")
             (tmp_path / "model.onnx").write_bytes(b"corrupt")
             spy = SpyReporter()
-            emb = get_default_embedder(model_dir=tmp_path, prefer_onnx=True, reporter=spy)
+            emb = get_default_embedder(
+                model_dir=tmp_path, prefer_onnx=True, reporter=spy
+            )
             self.assertEqual(emb.model_id, DETERMINISTIC_MODEL_ID)
             self.assertEqual(len(warns), 1)
             self.assertIn("ONNX runtime init failed", warns[0][1])
@@ -207,7 +237,9 @@ class TestEmbedder(unittest.TestCase):
                         item_number=None,
                         title=f"Sym{i}",
                         text=f"Function body {i}",
-                        content_sha256=compute_content_sha256(f"Sym{i}", f"Function body {i}"),
+                        content_sha256=compute_content_sha256(
+                            f"Sym{i}", f"Function body {i}"
+                        ),
                         is_untrusted=False,
                         updated_at=now,
                     )
@@ -226,6 +258,48 @@ class TestEmbedder(unittest.TestCase):
                 self.assertEqual(advances, [(2, 5), (4, 5), (5, 5)])
             finally:
                 store.close()
+
+    def test_ensure_onnx_model_atomic_download_and_failure_cleanup(self) -> None:
+        self.assertEqual(ARCTIC_MODEL_ID, "snowflake-arctic-embed-xs")
+        with tempfile.TemporaryDirectory() as tmp:
+            model_dir = Path(tmp) / "arctic-xs"
+            downloaded_urls: list[str] = []
+
+            def fake_retrieve(url: str, dest: Path, timeout: float = 30.0) -> None:
+                downloaded_urls.append(url)
+                self.assertIn(".tmp.", dest.name)
+                Path(dest).write_bytes(b"fake-bytes")
+
+            with mock.patch("embedder.ensure_onnx_deps", return_value=False):
+                self.assertFalse(ensure_onnx_model(model_dir, allow_download=True))
+
+            with mock.patch(
+                "embedder._download_url_to_path", side_effect=fake_retrieve
+            ):
+                ok = ensure_onnx_model(model_dir, allow_download=True)
+            self.assertTrue(ok)
+            self.assertEqual(len(downloaded_urls), 2)
+            self.assertTrue(
+                all("Snowflake/snowflake-arctic-embed-xs" in u for u in downloaded_urls)
+            )
+            self.assertTrue((model_dir / "tokenizer.json").exists())
+            self.assertTrue((model_dir / "onnx" / "model_quantized.onnx").exists())
+            self.assertEqual(list(model_dir.rglob("*.tmp.*")), [])
+
+            fail_dir = Path(tmp) / "arctic-fail"
+
+            def fail_retrieve(url: str, dest: Path, timeout: float = 30.0) -> None:
+                Path(dest).write_bytes(b"partial")
+                raise OSError("network interrupted")
+
+            with mock.patch(
+                "embedder._download_url_to_path", side_effect=fail_retrieve
+            ):
+                emb = get_default_embedder(
+                    model_dir=fail_dir, prefer_onnx=True, allow_download=True
+                )
+            self.assertEqual(emb.model_id, DETERMINISTIC_MODEL_ID)
+            self.assertEqual(list(fail_dir.rglob("*.tmp.*")), [])
 
 
 if __name__ == "__main__":

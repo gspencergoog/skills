@@ -3,23 +3,49 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import struct
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Literal
 
 EMBEDDING_DIM = 384
 _PACK_FORMAT = f"<{EMBEDDING_DIM}f"
 _PACK_BYTE_LEN = EMBEDDING_DIM * 4
-_CLOSING_UNTRUSTED_RE = re.compile(r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE)
+_CLOSING_UNTRUSTED_RE = re.compile(
+    r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE
+)
+
+RepoMode = Literal["mirror", "items"]
+BackfillStream = Literal["issues", "prs", "discussions"]
+SourceKind = Literal[
+    "issue", "pr", "discussion", "commit", "code_symbol", "doc_section"
+]
+ParentKind = Literal["pr", "issue"]
+ChangeKind = Literal[
+    "pr",
+    "checks",
+    "review_requests",
+    "reviews",
+    "threads",
+    "comments",
+    "notification",
+    "viewer",
+]
+
+
+def iso_at(now: float | None = None) -> str:
+    """Formats epoch seconds (default: now) as ISO-8601 UTC with second precision."""
+    moment = time.time() if now is None else now
+    return datetime.fromtimestamp(moment, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def utc_now_iso() -> str:
     """Returns the current UTC timestamp in ISO-8601 format."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return iso_at()
 
 
 def compute_content_sha256(title: str, text: str) -> str:
@@ -37,13 +63,6 @@ def l2_normalize(vec: Sequence[float]) -> tuple[float, ...]:
     return tuple(v * inv for v in vec)
 
 
-def pack_f32_vector(vec: Sequence[float]) -> bytes:
-    """Packs a 384-dimensional float vector into a little-endian IEEE-754 float32 BLOB."""
-    if len(vec) != EMBEDDING_DIM:
-        raise ValueError(f"Expected {EMBEDDING_DIM}-dim vector, got {len(vec)}")
-    return struct.pack(_PACK_FORMAT, *vec)
-
-
 def unpack_f32_vector(blob: bytes) -> tuple[float, ...]:
     """Unpacks a little-endian IEEE-754 float32 BLOB into a 384-float tuple."""
     if len(blob) != _PACK_BYTE_LEN:
@@ -51,9 +70,39 @@ def unpack_f32_vector(blob: bytes) -> tuple[float, ...]:
     return struct.unpack(_PACK_FORMAT, blob)
 
 
-def format_vector_json(vec: Sequence[float]) -> str:
-    """Formats a float vector as a compact JSON array for DuckDB FLOAT[384] parsing."""
-    return json.dumps([round(float(x), 6) for x in vec], separators=(",", ":"))
+def quantize_u8_vector(vec: Sequence[float]) -> tuple[bytes, float]:
+    """Quantizes a 384-dim float vector to per-vector scaled offset uint8 bytes.
+
+    Each component maps to `round(x / scale) + 128`, clipped to `[1, 255]`, so
+    byte 128 represents 0.0 and the range is symmetric around it. `scale` is the
+    largest absolute component divided by 127, so the largest component maps to
+    byte 1 or 255.
+
+    Args:
+        vec: The vector to quantize, usually L2-normalized.
+
+    Returns:
+        A `(blob, scale)` pair, where `blob` holds one byte per component and
+        `x ≈ (blob[i] - 128) * scale`.
+
+    Raises:
+        ValueError: If `vec` doesn't have `EMBEDDING_DIM` components.
+    """
+    if len(vec) != EMBEDDING_DIM:
+        raise ValueError(f"Expected {EMBEDDING_DIM}-dim vector, got {len(vec)}")
+    max_abs = max(abs(float(x)) for x in vec)
+    scale = max(max_abs / 127.0, 1e-8)
+    inv_scale = 1.0 / scale
+    blob = bytes(max(1, min(255, round(float(x) * inv_scale) + 128)) for x in vec)
+    return blob, scale
+
+
+def dequantize_u8_vector(blob: bytes, scale: float) -> tuple[float, ...]:
+    """Reconstructs a float vector from `quantize_u8_vector` output."""
+    if len(blob) != EMBEDDING_DIM:
+        raise ValueError(f"Expected {EMBEDDING_DIM} bytes, got {len(blob)}")
+    s = float(scale)
+    return tuple((b - 128) * s for b in blob)
 
 
 def wrap_untrusted_text(source_ref: str, text: str) -> str:
@@ -68,7 +117,38 @@ def wrap_untrusted_text(source_ref: str, text: str) -> str:
     return f'<untrusted_repo_content source="{safe_ref}">\n{safe_body}\n</untrusted_repo_content>'
 
 
-BACKFILL_STREAMS: tuple[str, ...] = ("issues", "prs", "discussions")
+BACKFILL_STREAMS: tuple[BackfillStream, ...] = ("issues", "prs", "discussions")
+
+REPO_MODE_MIRROR: RepoMode = "mirror"
+"""Repository mode: full history is backfilled, events are polled, and code is indexed."""
+
+REPO_MODE_ITEMS: RepoMode = "items"
+"""Repository mode: only items that are watched, notified, or in a viewer set are stored."""
+
+_ITEM_KEY_RE = re.compile(r"^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)$")
+
+
+def format_item_key(owner: str, name: str, number: int) -> str:
+    """Formats the canonical `owner/name#number` key for an issue or pull request."""
+    return f"{owner}/{name}#{int(number)}"
+
+
+def parse_item_key(key: str) -> tuple[str, str, int]:
+    """Parses an `owner/name#number` item key.
+
+    Args:
+        key: Item key such as "flutter/genui#123".
+
+    Returns:
+        `(owner, name, number)`.
+
+    Raises:
+        ValueError: If `key` is not of the form `owner/name#number`.
+    """
+    match = _ITEM_KEY_RE.match(key.strip())
+    if match is None:
+        raise ValueError(f"Invalid item key '{key}'; expected owner/name#number.")
+    return match.group(1), match.group(2), int(match.group(3))
 
 
 @dataclass(frozen=True)
@@ -117,6 +197,12 @@ class RepoConfig:
     prs_backfill_done_at: str | None = None
     discussions_backfill_cursor: str | None = None
     discussions_backfill_done_at: str | None = None
+    mode: RepoMode = REPO_MODE_MIRROR
+
+    @property
+    def is_mirror(self) -> bool:
+        """Whether packrat mirrors this repository's full history (not just watched items)."""
+        return self.mode == REPO_MODE_MIRROR
 
     def backfill(self, stream: str) -> StreamBackfill:
         """Returns the backfill progress for `stream`.
@@ -207,7 +293,7 @@ class CommentRecord:
 
     repo_id: int
     comment_id: str
-    parent_kind: str
+    parent_kind: ParentKind
     parent_number: int
     body: str
     author: str | None = None
@@ -255,6 +341,8 @@ class PrRecord:
     merged_at: str | None = None
     closed_at: str | None = None
     url: str | None = None
+    head_repo_owner: str | None = None
+    is_cross_repository: bool | None = None
     files: tuple[PrFileRecord, ...] = field(default_factory=tuple)
     reviews: tuple[ReviewRecord, ...] = field(default_factory=tuple)
     review_threads: tuple[ReviewThreadRecord, ...] = field(default_factory=tuple)
@@ -346,7 +434,7 @@ class TextChunk:
 
     chunk_id: str
     repo_id: int
-    source_kind: str
+    source_kind: SourceKind
     source_ref: str
     title: str
     text: str
@@ -384,7 +472,7 @@ class SearchHit:
 
     chunk_id: str
     repo_full_name: str
-    source_kind: str
+    source_kind: SourceKind
     source_ref: str
     title: str
     snippet: str
@@ -415,6 +503,204 @@ class SyncStats:
     indexed_ref: str | None = None
     indexed_sha: str | None = None
     backfill_incomplete: list[str] = field(default_factory=list)
+    deferred: bool = False
+    deferred_streams: list[str] = field(default_factory=list)
     duration_sec: float = 0.0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PrLiveRecord:
+    """Live pull request state fetched for a watched or viewer PR.
+
+    Written by `PackratStore.upsert_pr_live()`, which creates the
+    `pull_requests` row when it is missing (for `items` repositories) and
+    otherwise updates only these columns, leaving mirror-only columns such as
+    `body` untouched. `rollup_*` fields go to `pr_rollup` for `head_sha`.
+    """
+
+    repo_id: int
+    number: int
+    title: str
+    state: str
+    updated_at: str
+    node_id: str | None = None
+    is_draft: bool = False
+    url: str | None = None
+    author: str | None = None
+    author_type: str | None = None
+    base_ref: str | None = None
+    head_ref: str | None = None
+    head_sha: str | None = None
+    head_committed_date: str | None = None
+    head_repo_owner: str | None = None
+    is_cross_repository: bool | None = None
+    mergeable: str | None = None
+    merge_state_status: str | None = None
+    review_decision: str | None = None
+    auto_merge_enabled_at: str | None = None
+    created_at: str | None = None
+    merged_at: str | None = None
+    closed_at: str | None = None
+    rollup_state: str | None = None
+    rollup_total: int | None = None
+    body: str | None = None
+
+
+@dataclass(frozen=True)
+class ItemCommentRecord:
+    """A conversation comment on an issue or PR, as stored by live refreshes.
+
+    Attributes:
+        comment_id: GraphQL node id of the comment.
+        author_type: "User", "Bot", or another actor `__typename`.
+    """
+
+    comment_id: str
+    author: str | None = None
+    author_type: str | None = None
+    created_at: str | None = None
+
+
+@dataclass(frozen=True)
+class CheckRunRecord:
+    """One check run or commit status context on a pull request's head commit.
+
+    Attributes:
+        kind: "CheckRun" or "StatusContext".
+        is_required: Whether branch protection requires this check, when known.
+        run_key: Stable identity within the head commit, such as
+            "CheckRun:123456"; see `key`.
+    """
+
+    name: str
+    kind: str
+    status: str | None = None
+    conclusion: str | None = None
+    details_url: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    is_required: bool | None = None
+    workflow_run_id: int | None = None
+    run_key: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Returns the row key: `run_key` when known, else `kind:name`.
+
+        Check runs carry `CheckRun:<databaseId>`, so same-named runs (one job
+        name in two workflows, or one workflow triggered by two events) stay
+        separate rows. Status contexts are unique per commit by name.
+
+        `statusCheckRollup.contexts` does not return superseded re-run
+        attempts: on the live mirror (100 PRs, 45 same-name pairs) no two rows
+        with one name share a `workflow_run_id`, which a re-run attempt would.
+        So every row is a current result and readers should judge each one.
+        """
+        return self.run_key or f"{self.kind}:{self.name}"
+
+
+@dataclass(frozen=True)
+class ReviewRequestRecord:
+    """A pending review request on a pull request.
+
+    Attributes:
+        reviewer: User login or `org/team-slug`.
+        reviewer_kind: "User", "Team", "Bot", or "Mannequin".
+    """
+
+    reviewer: str
+    reviewer_kind: str
+
+
+@dataclass(frozen=True)
+class OpinionatedReviewRecord:
+    """The latest approving or change-requesting review per author.
+
+    Attributes:
+        author_type: "User" or "Bot".
+        state: "APPROVED", "CHANGES_REQUESTED", "COMMENTED", or "DISMISSED".
+    """
+
+    author: str
+    state: str
+    author_type: str | None = None
+    submitted_at: str | None = None
+
+
+@dataclass(frozen=True)
+class ThreadActivityRecord:
+    """A review thread's resolution state and its last comment."""
+
+    thread_id: str
+    is_resolved: bool = False
+    is_outdated: bool = False
+    last_author: str | None = None
+    last_author_type: str | None = None
+    last_at: str | None = None
+
+
+@dataclass(frozen=True)
+class NotificationRecord:
+    """One GitHub notification thread.
+
+    Attributes:
+        item_key: `owner/name#number` of the subject, or None when the subject
+            is not an issue or pull request (for example a release).
+        unread: Whether GitHub still marks the thread unread.
+    """
+
+    thread_id: str
+    reason: str | None = None
+    subject_type: str | None = None
+    item_key: str | None = None
+    updated_at: str | None = None
+    unread: bool = False
+
+
+@dataclass(frozen=True)
+class WatchLease:
+    """A consumer's lease on one item.
+
+    Attributes:
+        consumer: Consumer kind, such as "monitor" or "inflight".
+        consumer_id: Consumer instance, such as a conversation hash.
+        freshness_s: Maximum acceptable data age in seconds.
+        lease_expires_at: ISO-8601 UTC time when the lease lapses unless renewed.
+    """
+
+    consumer: str
+    consumer_id: str
+    item_key: str
+    freshness_s: int
+    lease_expires_at: str
+
+
+@dataclass(frozen=True)
+class ChangeRecord:
+    """One row of the change feed.
+
+    Attributes:
+        seq: Monotonic sequence number.
+        kind: What changed: "pr", "checks", "review_requests", "reviews",
+            "threads", "comments", "notification", or "viewer".
+        fields: Names of the fields that changed.
+        at: ISO-8601 UTC time of the change.
+    """
+
+    seq: int
+    item_key: str
+    kind: ChangeKind
+    fields: tuple[str, ...]
+    at: str
+
+
+@dataclass(frozen=True)
+class ServiceHeartbeat:
+    """The `packrat serve` liveness record."""
+
+    pid: int | None
+    started_at: str | None
+    beat_at: str | None
+    version: str | None

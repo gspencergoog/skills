@@ -1,0 +1,308 @@
+{
+  "data": {
+    "rateLimit": {
+      "cost": 1,
+      "remaining": 4000,
+      "resetAt": "2026-11-03T12:00:00Z"
+    },
+    "pr0": {
+      "id": "PR_kwDOA7",
+      "number": 7,
+      "title": "Add focus ring",
+      "url": "https://github.com/octo-org/widgets/pull/7",
+      "state": "OPEN",
+      "isDraft": false,
+      "mergedAt": null,
+      "closedAt": null,
+      "createdAt": "2026-11-01T00:00:00Z",
+      "updatedAt": "2026-11-03T10:06:00Z",
+      "repository": {
+        "nameWithOwner": "octo-org/widgets"
+      },
+      "author": {
+        "login": "alice",
+        "__typename": "User"
+      },
+      "baseRefName": "main",
+      "headRefName": "focus-ring",
+      "headRefOid": "aaa111",
+      "isCrossRepository": false,
+      "headRepositoryOwner": {
+        "login": "octo-org"
+      },
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "reviewDecision": "REVIEW_REQUIRED",
+      "autoMergeRequest": {
+        "enabledAt": "2026-11-03T09:30:00Z"
+      },
+      "reviewRequests": {
+        "nodes": [
+          {
+            "requestedReviewer": {
+              "__typename": "User",
+              "login": "bob"
+            }
+          },
+          {
+            "requestedReviewer": {
+              "__typename": "Team",
+              "slug": "ui-reviewers",
+              "organization": {
+                "login": "octo-org"
+              }
+            }
+          },
+          {
+            "requestedReviewer": null
+          }
+        ]
+      },
+      "latestOpinionatedReviews": {
+        "nodes": [
+          {
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-11-02T12:00:00Z",
+            "author": {
+              "login": "carol",
+              "__typename": "User"
+            }
+          },
+          {
+            "state": "COMMENTED",
+            "submittedAt": "2026-11-02T13:00:00Z",
+            "author": {
+              "login": "gemini-code-assist",
+              "__typename": "Bot"
+            }
+          }
+        ]
+      },
+      "reviewThreads": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "T1"
+        },
+        "nodes": [
+          {
+            "id": "PRRT_1",
+            "isResolved": false,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T09:00:00Z",
+                  "author": {
+                    "login": "carol",
+                    "__typename": "User"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_2",
+            "isResolved": true,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T09:00:00Z",
+                  "author": {
+                    "login": "gemini-code-assist",
+                    "__typename": "Bot"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "aaa111",
+              "committedDate": "2026-11-03T08:00:00Z",
+              "statusCheckRollup": {
+                "state": "FAILURE",
+                "contexts": {
+                  "totalCount": 3,
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": [
+                    {
+                      "__typename": "CheckRun",
+                      "name": "build",
+                      "status": "COMPLETED",
+                      "conclusion": "SUCCESS",
+                      "detailsUrl": "https://github.com/octo-org/widgets/actions/runs/111/job/1",
+                      "startedAt": "2026-11-03T10:00:00Z",
+                      "completedAt": "2026-11-03T10:05:00Z",
+                      "isRequired": true,
+                      "checkSuite": {
+                        "workflowRun": {
+                          "databaseId": 111
+                        }
+                      },
+                      "databaseId": 111
+                    },
+                    {
+                      "__typename": "CheckRun",
+                      "name": "test",
+                      "status": "COMPLETED",
+                      "conclusion": "FAILURE",
+                      "detailsUrl": "https://github.com/octo-org/widgets/actions/runs/112/job/1",
+                      "startedAt": "2026-11-03T10:00:00Z",
+                      "completedAt": "2026-11-03T10:05:00Z",
+                      "isRequired": true,
+                      "checkSuite": {
+                        "workflowRun": {
+                          "databaseId": 112
+                        }
+                      },
+                      "databaseId": 112
+                    },
+                    {
+                      "__typename": "StatusContext",
+                      "context": "ci/lint",
+                      "state": "SUCCESS",
+                      "targetUrl": "https://ci.example.com/1",
+                      "createdAt": "2026-11-03T10:01:00Z",
+                      "isRequired": false
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "body": "Adds a visible focus ring.",
+      "comments": {
+        "nodes": [
+          {
+            "id": "IC_7a",
+            "createdAt": "2026-11-02T08:00:00Z",
+            "author": {
+              "login": "carol",
+              "__typename": "User"
+            }
+          },
+          {
+            "id": "IC_7b",
+            "createdAt": "2026-11-03T08:00:00Z",
+            "author": {
+              "login": "gemini-code-assist",
+              "__typename": "Bot"
+            }
+          }
+        ]
+      }
+    },
+    "pr1": {
+      "id": "PR_kwDOA9",
+      "number": 9,
+      "title": "Bump deps",
+      "url": "https://github.com/octo-org/widgets/pull/9",
+      "state": "OPEN",
+      "isDraft": true,
+      "mergedAt": null,
+      "closedAt": null,
+      "createdAt": "2026-11-02T00:00:00Z",
+      "updatedAt": "2026-11-03T11:00:00Z",
+      "repository": {
+        "nameWithOwner": "octo-org/widgets"
+      },
+      "author": {
+        "login": "dependabot",
+        "__typename": "Bot"
+      },
+      "baseRefName": "main",
+      "headRefName": "deps",
+      "headRefOid": "bbb222",
+      "isCrossRepository": true,
+      "headRepositoryOwner": {
+        "login": "forker"
+      },
+      "mergeable": "UNKNOWN",
+      "mergeStateStatus": "UNKNOWN",
+      "reviewDecision": null,
+      "autoMergeRequest": null,
+      "reviewRequests": {
+        "nodes": []
+      },
+      "latestOpinionatedReviews": {
+        "nodes": []
+      },
+      "reviewThreads": {
+        "pageInfo": {
+          "hasNextPage": true,
+          "endCursor": "THREADS_P1"
+        },
+        "nodes": [
+          {
+            "id": "PRRT_9a",
+            "isResolved": false,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T09:00:00Z",
+                  "author": {
+                    "login": "dave",
+                    "__typename": "User"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "bbb222",
+              "committedDate": "2026-11-03T08:00:00Z",
+              "statusCheckRollup": {
+                "state": "PENDING",
+                "contexts": {
+                  "totalCount": 2,
+                  "pageInfo": {
+                    "hasNextPage": true,
+                    "endCursor": "CTX_P1"
+                  },
+                  "nodes": [
+                    {
+                      "__typename": "CheckRun",
+                      "name": "build",
+                      "status": "COMPLETED",
+                      "conclusion": "SUCCESS",
+                      "detailsUrl": "https://github.com/octo-org/widgets/actions/runs/201/job/1",
+                      "startedAt": "2026-11-03T10:00:00Z",
+                      "completedAt": "2026-11-03T10:05:00Z",
+                      "isRequired": true,
+                      "checkSuite": {
+                        "workflowRun": {
+                          "databaseId": 201
+                        }
+                      },
+                      "databaseId": 201
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "body": "",
+      "comments": {
+        "nodes": []
+      }
+    }
+  }
+}

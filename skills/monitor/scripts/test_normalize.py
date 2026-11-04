@@ -5,11 +5,27 @@ from __future__ import annotations
 import json
 import unittest
 
-from normalize import normalize_pr, resolve_stack_parents
+from normalize import normalize_checks, normalize_pr, resolve_stack_parents
 from testing import load_fixture
 
 
 class TestNormalize(unittest.TestCase):
+    def test_same_named_checks_keep_the_worst_run_in_any_order(self) -> None:
+        def run(conclusion: str | None, status: str = "COMPLETED") -> dict[str, object]:
+            return {"__typename": "CheckRun", "name": "build", "status": status,
+                    "conclusion": conclusion}  # fmt: skip
+
+        cases = [
+            ([run("FAILURE"), run("SUCCESS")], ("COMPLETED", "FAILURE")),
+            ([run("SUCCESS"), run("FAILURE")], ("COMPLETED", "FAILURE")),
+            ([run(None, "IN_PROGRESS"), run("SUCCESS")], ("IN_PROGRESS", None)),
+            ([run("TIMED_OUT"), run(None, "QUEUED")], ("COMPLETED", "TIMED_OUT")),
+        ]
+        for nodes, expected in cases:
+            rollup = {"contexts": {"totalCount": 2, "nodes": nodes}}
+            checks = normalize_checks(rollup)
+            self.assertEqual([(c.status, c.conclusion) for c in checks], [expected])
+
     def test_normalize_pr_open_ci_running_fixture(self) -> None:
         payload = json.loads(load_fixture("pr_open_ci_running.json"))
         raw = payload["data"]["pr0"]["pullRequest"]

@@ -16,8 +16,10 @@ from pathlib import Path
 try:
     from .sync_runtime import (
         AUTO_SYNC_STATE_FILENAME,
+        SERVE_LOCK_FILENAME,
         SYNC_LOCK_FILENAME,
         AutoSyncRunRecord,
+        acquire_serve_lock,
         acquire_sync_lock,
         read_auto_sync_run_state,
         run_bounded_subprocess,
@@ -26,8 +28,10 @@ try:
 except ImportError:
     from sync_runtime import (  # type: ignore[no-redef]
         AUTO_SYNC_STATE_FILENAME,
+        SERVE_LOCK_FILENAME,
         SYNC_LOCK_FILENAME,
         AutoSyncRunRecord,
+        acquire_serve_lock,
         acquire_sync_lock,
         read_auto_sync_run_state,
         run_bounded_subprocess,
@@ -43,6 +47,20 @@ from sync_runtime import acquire_sync_lock
 
 db_path = Path(sys.argv[1])
 with acquire_sync_lock(db_path, mode="fail") as info:
+    if not info.acquired:
+        sys.exit(2)
+    sys.stdout.write("READY\\n")
+    sys.stdout.flush()
+    sys.stdin.read()
+"""
+
+_CHILD_SERVE_LOCK_HOLDER_CODE = """\
+import sys
+from pathlib import Path
+from sync_runtime import acquire_serve_lock
+
+db_path = Path(sys.argv[1])
+with acquire_serve_lock(db_path) as info:
     if not info.acquired:
         sys.exit(2)
     sys.stdout.write("READY\\n")
@@ -99,11 +117,11 @@ def _wait_until_pid_dead(pid: int, timeout_sec: float = 1.5) -> bool:
 
 
 @contextlib.contextmanager
-def _spawn_lock_holder_process(db_path: Path):
-    """Spawns a child process holding acquire_sync_lock until context exit."""
+def _spawn_lock_holder_process(db_path: Path, code: str = _CHILD_LOCK_HOLDER_CODE):
+    """Spawns a child process running `code` (a lock holder) until context exit."""
     env = {**os.environ, "PYTHONPATH": str(_SCRIPTS_DIR)}
     proc = subprocess.Popen(
-        [sys.executable, "-c", _CHILD_LOCK_HOLDER_CODE, str(db_path)],
+        [sys.executable, "-c", code, str(db_path)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -334,6 +352,57 @@ class TestAcquireSyncLock(unittest.TestCase):
                 pass
 
 
+class TestAcquireServeLock(unittest.TestCase):
+    """Tests the single-instance serve.lock and its independence from sync.lock."""
+
+    def test_uncontended_serve_lock_writes_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "nested" / "repos.sqlite"
+            with acquire_serve_lock(db_path) as info:
+                self.assertTrue(info.acquired)
+                self.assertEqual(info.lock_path, db_path.parent / SERVE_LOCK_FILENAME)
+                self.assertEqual(info.holder_pid, os.getpid())
+                on_disk = json.loads(info.lock_path.read_text(encoding="utf-8"))
+                self.assertEqual(on_disk["pid"], os.getpid())
+                self.assertEqual(on_disk["started_at"], info.holder_started_at)
+            self.assertTrue((db_path.parent / SERVE_LOCK_FILENAME).is_file())
+
+    def test_serve_lock_is_exclusive_across_processes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "repos.sqlite"
+            lock_path = db_path.parent / SERVE_LOCK_FILENAME
+            with _spawn_lock_holder_process(
+                db_path, _CHILD_SERVE_LOCK_HOLDER_CODE
+            ) as child:
+                raw_before = lock_path.read_bytes()
+                started = time.monotonic()
+                with acquire_serve_lock(db_path) as contended:
+                    self.assertLess(time.monotonic() - started, 1.0)
+                    self.assertFalse(contended.acquired)
+                    self.assertEqual(contended.holder_pid, child.pid)
+                    self.assertIsNotNone(contended.holder_started_at)
+                    self.assertEqual(lock_path.read_bytes(), raw_before)
+            with acquire_serve_lock(db_path) as after:
+                self.assertTrue(after.acquired)
+
+    def test_serve_lock_is_independent_of_sync_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "repos.sqlite"
+            with (
+                _spawn_lock_holder_process(db_path, _CHILD_SERVE_LOCK_HOLDER_CODE),
+                acquire_sync_lock(db_path, mode="fail") as sync_info,
+            ):
+                self.assertTrue(sync_info.acquired)
+            with (
+                _spawn_lock_holder_process(db_path),
+                acquire_serve_lock(db_path) as serve_info,
+            ):
+                self.assertTrue(serve_info.acquired)
+                self.assertNotEqual(
+                    serve_info.lock_path, db_path.parent / SYNC_LOCK_FILENAME
+                )
+
+
 class TestAutoSyncRunState(unittest.TestCase):
     """Tests atomic persistence and corrupt-file recovery for auto-sync-state.json."""
 
@@ -357,6 +426,21 @@ class TestAutoSyncRunState(unittest.TestCase):
 
             loaded = read_auto_sync_run_state(db_path)
             self.assertEqual(loaded, expected)
+
+    def test_round_trips_deferred_rate_limit_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "repos.sqlite"
+            expected = AutoSyncRunRecord(
+                ran_at="2026-11-03T22:40:00Z",
+                duration_sec=1.5,
+                outcome="deferred_rate_limit",
+                repos_total=2,
+                git_commits_upserted=3,
+                github_items_upserted=4,
+                detail="deferred by GitHub rate budget (octo-org/widgets: issues, prs)",
+            )
+            write_auto_sync_run_state(db_path, expected)
+            self.assertEqual(read_auto_sync_run_state(db_path), expected)
 
     def test_missing_or_corrupt_state_returns_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

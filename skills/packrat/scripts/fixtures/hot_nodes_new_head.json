@@ -1,0 +1,177 @@
+{
+  "data": {
+    "pr0": {
+      "id": "PR_kwDOA7",
+      "number": 7,
+      "title": "Add focus ring",
+      "url": "https://github.com/octo-org/widgets/pull/7",
+      "state": "OPEN",
+      "isDraft": false,
+      "mergedAt": null,
+      "closedAt": null,
+      "createdAt": "2026-11-01T00:00:00Z",
+      "updatedAt": "2026-11-03T12:00:00Z",
+      "repository": {
+        "nameWithOwner": "octo-org/widgets"
+      },
+      "author": {
+        "login": "alice",
+        "__typename": "User"
+      },
+      "baseRefName": "main",
+      "headRefName": "focus-ring",
+      "headRefOid": "ccc333",
+      "isCrossRepository": false,
+      "headRepositoryOwner": {
+        "login": "octo-org"
+      },
+      "mergeable": "MERGEABLE",
+      "mergeStateStatus": "BLOCKED",
+      "reviewDecision": "REVIEW_REQUIRED",
+      "autoMergeRequest": {
+        "enabledAt": "2026-11-03T09:30:00Z"
+      },
+      "reviewRequests": {
+        "nodes": [
+          {
+            "requestedReviewer": {
+              "__typename": "User",
+              "login": "bob"
+            }
+          },
+          {
+            "requestedReviewer": {
+              "__typename": "Team",
+              "slug": "ui-reviewers",
+              "organization": {
+                "login": "octo-org"
+              }
+            }
+          },
+          {
+            "requestedReviewer": null
+          }
+        ]
+      },
+      "latestOpinionatedReviews": {
+        "nodes": [
+          {
+            "state": "CHANGES_REQUESTED",
+            "submittedAt": "2026-11-02T12:00:00Z",
+            "author": {
+              "login": "carol",
+              "__typename": "User"
+            }
+          },
+          {
+            "state": "COMMENTED",
+            "submittedAt": "2026-11-02T13:00:00Z",
+            "author": {
+              "login": "gemini-code-assist",
+              "__typename": "Bot"
+            }
+          }
+        ]
+      },
+      "reviewThreads": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "T1"
+        },
+        "nodes": [
+          {
+            "id": "PRRT_1",
+            "isResolved": false,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T09:00:00Z",
+                  "author": {
+                    "login": "carol",
+                    "__typename": "User"
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "id": "PRRT_2",
+            "isResolved": true,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T09:00:00Z",
+                  "author": {
+                    "login": "gemini-code-assist",
+                    "__typename": "Bot"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "commits": {
+        "nodes": [
+          {
+            "commit": {
+              "oid": "ccc333",
+              "committedDate": "2026-11-03T08:00:00Z",
+              "statusCheckRollup": {
+                "state": "PENDING",
+                "contexts": {
+                  "totalCount": 1,
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  },
+                  "nodes": [
+                    {
+                      "__typename": "CheckRun",
+                      "name": "build",
+                      "status": "IN_PROGRESS",
+                      "conclusion": null,
+                      "detailsUrl": "https://github.com/octo-org/widgets/actions/runs/301/job/1",
+                      "startedAt": "2026-11-03T10:00:00Z",
+                      "completedAt": null,
+                      "isRequired": true,
+                      "checkSuite": {
+                        "workflowRun": {
+                          "databaseId": 301
+                        }
+                      },
+                      "databaseId": 301
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "body": "Adds a visible focus ring.",
+      "comments": {
+        "nodes": [
+          {
+            "id": "IC_7a",
+            "createdAt": "2026-11-02T08:00:00Z",
+            "author": {
+              "login": "carol",
+              "__typename": "User"
+            }
+          },
+          {
+            "id": "IC_7b",
+            "createdAt": "2026-11-03T08:00:00Z",
+            "author": {
+              "login": "gemini-code-assist",
+              "__typename": "Bot"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

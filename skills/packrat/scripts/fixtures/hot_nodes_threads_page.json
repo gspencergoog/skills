@@ -1,0 +1,30 @@
+{
+  "data": {
+    "node": {
+      "reviewThreads": {
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": "THREADS_P2"
+        },
+        "nodes": [
+          {
+            "id": "PRRT_9b",
+            "isResolved": false,
+            "isOutdated": false,
+            "comments": {
+              "nodes": [
+                {
+                  "createdAt": "2026-11-03T11:30:00Z",
+                  "author": {
+                    "login": "erin",
+                    "__typename": "User"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  }
+}

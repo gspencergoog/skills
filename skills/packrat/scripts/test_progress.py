@@ -39,7 +39,9 @@ class TestProgressReporter(unittest.TestCase):
         self.assertEqual(format_eta(10.0, 100, 100), "")
         self.assertEqual(format_eta(10.0, 0, 100), "")
 
-        line = format_status_line("octo-org/widgets", "github prs", 250, 1000, 30.0, "page 10")
+        line = format_status_line(
+            "octo-org/widgets", "github prs", 250, 1000, 30.0, "page 10"
+        )
         self.assertIn("[octo-org/widgets] github prs: 250/1,000 (25%)", line)
         self.assertIn("page 10", line)
         self.assertIn("ETA 1m30s", line)
@@ -67,7 +69,9 @@ class TestProgressReporter(unittest.TestCase):
     def test_tty_throttles_to_once_per_second_and_clears_before_warnings(self) -> None:
         clock = FakeClock()
         buf = io.StringIO()
-        rep = StderrProgressReporter("auto", stream=buf, is_tty=True, clock=clock, max_width=120)
+        rep = StderrProgressReporter(
+            "auto", stream=buf, is_tty=True, clock=clock, max_width=120
+        )
 
         rep.start_phase("octo-org/widgets", "github prs", total=100)
         clock.step(2.0)  # Reaches 2.0s grace window -> first emit
@@ -86,14 +90,18 @@ class TestProgressReporter(unittest.TestCase):
         rep.warn("octo-org/widgets", "retrying at pageSize=12")
         rep.finish_phase()
         out = buf.getvalue()
-        self.assertIn("\r\x1b[K[octo-org/widgets] warning: retrying at pageSize=12\n", out)
+        self.assertIn(
+            "\r\x1b[K[octo-org/widgets] warning: retrying at pageSize=12\n", out
+        )
 
     def test_plain_mode_throttles_to_15_seconds_without_ansi_escapes(self) -> None:
         clock = FakeClock()
         buf = io.StringIO()
         rep = StderrProgressReporter("auto", stream=buf, is_tty=False, clock=clock)
 
-        rep.start_phase("octo-org/widgets", "embeddings (deterministic-384-v2)", total=1000)
+        rep.start_phase(
+            "octo-org/widgets", "embeddings (deterministic-384-v2)", total=1000
+        )
         clock.step(2.5)  # First heartbeat after grace window
         rep.advance(100, 1000)
         clock.step(10.0)  # Suppressed (< 15s)
@@ -113,7 +121,9 @@ class TestProgressReporter(unittest.TestCase):
     def test_quiet_and_off_modes_suppress_progress_and_keep_errors(self) -> None:
         clock = FakeClock()
         buf = io.StringIO()
-        rep = StderrProgressReporter("off", quiet=True, stream=buf, is_tty=True, clock=clock)
+        rep = StderrProgressReporter(
+            "off", quiet=True, stream=buf, is_tty=True, clock=clock
+        )
 
         rep.start_phase("octo-org/widgets", "github prs", total=50)
         clock.step(5.0)
@@ -122,7 +132,9 @@ class TestProgressReporter(unittest.TestCase):
         rep.error("octo-org/widgets", "HTTP 401 Bad credentials")
         rep.finish_phase("done")
 
-        self.assertEqual(buf.getvalue(), "[octo-org/widgets] error: HTTP 401 Bad credentials\n")
+        self.assertEqual(
+            buf.getvalue(), "[octo-org/widgets] error: HTTP 401 Bad credentials\n"
+        )
 
 
 if __name__ == "__main__":
