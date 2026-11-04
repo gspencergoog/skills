@@ -10,11 +10,14 @@ repository case-insensitively and use its registered `full_name`.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import time
 from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any
+
+LOGGER = logging.getLogger(__name__)
 
 try:
     from .models import (
@@ -131,13 +134,46 @@ class LiveStoreMixin:
     # ----- repositories and item keys -------------------------------------------------
 
     def _find_repo_row(self, owner: str, name: str) -> sqlite3.Row | None:
-        """Returns the repos row for `owner/name` (case-insensitive), if registered."""
+        """Returns the repos row for `owner/name` (case-insensitive, including aliases), if registered."""
+        full_name = f"{owner}/{name}"
+        alias = self.conn.execute(
+            """
+            SELECT r.* FROM repo_aliases a
+            JOIN repos r ON r.repo_id = a.repo_id
+            WHERE a.alias_full_name = ?
+            """,
+            (full_name,),
+        ).fetchone()
+        if alias is not None:
+            return alias
         return self.conn.execute(
             "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
-            (f"{owner}/{name}",),
+            (full_name,),
         ).fetchone()
 
-    def ensure_items_repo(self, owner: str, name: str) -> RepoConfig:
+    def _ensure_items_repo_in_tx(
+        self, owner: str, name: str, now_iso: str
+    ) -> RepoConfig:
+        """Finds or inserts an `items` repository inside the caller's transaction."""
+        row = self._find_repo_row(owner, name)
+        if row is None:
+            self.conn.execute(
+                """
+                INSERT INTO repos (owner, name, full_name, created_at, updated_at, mode)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(full_name) DO NOTHING
+                """,
+                (owner, name, f"{owner}/{name}", now_iso, now_iso, REPO_MODE_ITEMS),
+            )
+            row = self._find_repo_row(owner, name)
+        repo = self.get_repo_by_id(int(row["repo_id"])) if row is not None else None
+        if repo is None:
+            raise RuntimeError(f"Failed to register repository {owner}/{name}")
+        return repo
+
+    def ensure_items_repo(
+        self, owner: str, name: str, now: float | None = None
+    ) -> RepoConfig:
         """Returns the repository for `owner/name`, registering it in `items` mode if new.
 
         An `items` repository gets no backfill, `/events` polling, or code
@@ -145,22 +181,175 @@ class LiveStoreMixin:
         are stored. `register_repo()` promotes it to `mirror` later.
         """
         row = self._find_repo_row(owner, name)
-        if row is None:
-            now = iso_at()
-            with self.conn:
+        if row is not None:
+            repo = self.get_repo_by_id(int(row["repo_id"]))
+            if repo is not None:
+                return repo
+        with self.conn:
+            return self._ensure_items_repo_in_tx(owner, name, iso_at(now))
+
+    def find_repo_by_node_id(self, node_id: str) -> RepoConfig | None:
+        """Returns the stored repository for a PR or issue GraphQL `node_id`, if any."""
+        row = self.conn.execute(
+            """
+            SELECT repo_id FROM pull_requests WHERE node_id = ?
+            UNION ALL
+            SELECT repo_id FROM issues WHERE node_id = ?
+            LIMIT 1
+            """,
+            (node_id, node_id),
+        ).fetchone()
+        if row is not None:
+            return self.get_repo_by_id(int(row["repo_id"]))
+        state_row = self.conn.execute(
+            "SELECT key FROM service_state WHERE key LIKE ? AND value = ? LIMIT 1",
+            (f"{NODE_ID_STATE_PREFIX}%", node_id),
+        ).fetchone()
+        if state_row is None:
+            return None
+        item_key = str(state_row["key"])[len(NODE_ID_STATE_PREFIX) :]
+        owner, name, _ = parse_item_key(item_key)
+        found = self._find_repo_row(owner, name)
+        return self.get_repo_by_id(int(found["repo_id"])) if found is not None else None
+
+    def _rewrite_alias_item_keys_in_tx(
+        self, alias_full_name: str, canonical_full_name: str
+    ) -> None:
+        """Rewrites item keys from `alias_full_name` to `canonical_full_name` inside a transaction."""
+        prefix = f"{alias_full_name}#"
+        plen = len(prefix)
+        rewrite_args = (canonical_full_name, plen, plen, prefix)
+        delete_args = (plen, prefix)
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO watches (consumer, consumer_id, item_key, freshness_s, lease_expires_at)
+            SELECT consumer, consumer_id, ? || substr(item_key, ?), freshness_s, lease_expires_at
+            FROM watches WHERE lower(substr(item_key, 1, ?)) = lower(?)
+            """,
+            rewrite_args,
+        )
+        self.conn.execute(
+            "DELETE FROM watches WHERE lower(substr(item_key, 1, ?)) = lower(?)",
+            delete_args,
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO viewer_sets (set_name, item_key, first_seen_at, last_seen_at)
+            SELECT set_name, ? || substr(item_key, ?), first_seen_at, last_seen_at
+            FROM viewer_sets WHERE lower(substr(item_key, 1, ?)) = lower(?)
+            """,
+            rewrite_args,
+        )
+        self.conn.execute(
+            "DELETE FROM viewer_sets WHERE lower(substr(item_key, 1, ?)) = lower(?)",
+            delete_args,
+        )
+        self.conn.execute(
+            """
+            INSERT OR IGNORE INTO refresh_requests (item_key, requested_at)
+            SELECT ? || substr(item_key, ?), requested_at
+            FROM refresh_requests WHERE lower(substr(item_key, 1, ?)) = lower(?)
+            """,
+            rewrite_args,
+        )
+        self.conn.execute(
+            "DELETE FROM refresh_requests WHERE lower(substr(item_key, 1, ?)) = lower(?)",
+            delete_args,
+        )
+        self.conn.execute(
+            """
+            UPDATE notifications SET item_key = ? || substr(item_key, ?)
+            WHERE item_key IS NOT NULL AND lower(substr(item_key, 1, ?)) = lower(?)
+            """,
+            rewrite_args,
+        )
+        self.conn.execute(
+            """
+            UPDATE changes SET item_key = ? || substr(item_key, ?)
+            WHERE lower(substr(item_key, 1, ?)) = lower(?)
+            """,
+            rewrite_args,
+        )
+        state_prefix = f"{NODE_ID_STATE_PREFIX}{alias_full_name}#"
+        slen = len(state_prefix)
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO service_state (key, value, updated_at)
+            SELECT ? || substr(key, ?), value, updated_at
+            FROM service_state WHERE lower(substr(key, 1, ?)) = lower(?)
+            """,
+            (f"{NODE_ID_STATE_PREFIX}{canonical_full_name}", slen, slen, state_prefix),
+        )
+        self.conn.execute(
+            "DELETE FROM service_state WHERE lower(substr(key, 1, ?)) = lower(?)",
+            (slen, state_prefix),
+        )
+
+    def merge_repo_alias(
+        self,
+        alias_repo_id: int,
+        canonical_full_name: str,
+        now: float | None = None,
+    ) -> RepoConfig:
+        """Resolves a renamed or redirected repository to `canonical_full_name` in one transaction.
+
+        Creates or finds the canonical repository, records `alias_full_name` in
+        `repo_aliases`, rewrites item keys in `watches`, `notifications`,
+        `viewer_sets`, `refresh_requests`, and `changes`, and deletes the alias
+        repository row when it is in `items` mode. A `mirror`-mode alias
+        repository is kept and logged instead of deleted.
+        """
+        if "/" not in canonical_full_name:
+            raise ValueError(
+                f"Invalid repository name '{canonical_full_name}'; expected owner/name."
+            )
+        owner, name = canonical_full_name.split("/", 1)
+        now_iso = iso_at(now)
+        with self.conn:
+            alias_row = self.conn.execute(
+                "SELECT * FROM repos WHERE repo_id = ?", (alias_repo_id,)
+            ).fetchone()
+            if alias_row is None:
+                return self._ensure_items_repo_in_tx(owner, name, now_iso)
+            alias_full_name = str(alias_row["full_name"])
+            alias_mode = str(alias_row["mode"] or "mirror")
+            if alias_full_name.lower() == canonical_full_name.lower():
+                same = self.get_repo_by_id(alias_repo_id)
+                if same is not None:
+                    return same
+            self.conn.execute(
+                "DELETE FROM repo_aliases WHERE alias_full_name = ?",
+                (canonical_full_name,),
+            )
+            canonical = self._ensure_items_repo_in_tx(owner, name, now_iso)
+            self.conn.execute(
+                "UPDATE repo_aliases SET repo_id = ? WHERE repo_id = ?",
+                (canonical.repo_id, alias_repo_id),
+            )
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO repo_aliases (alias_full_name, repo_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (alias_full_name, canonical.repo_id, now_iso),
+            )
+            self._rewrite_alias_item_keys_in_tx(alias_full_name, canonical.full_name)
+            if alias_mode == REPO_MODE_ITEMS and alias_repo_id != canonical.repo_id:
                 self.conn.execute(
-                    """
-                    INSERT INTO repos (owner, name, full_name, created_at, updated_at, mode)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(full_name) DO NOTHING
-                    """,
-                    (owner, name, f"{owner}/{name}", now, now, REPO_MODE_ITEMS),
+                    "DELETE FROM chunks_fts WHERE chunk_id IN "
+                    "(SELECT chunk_id FROM chunks WHERE repo_id = ?)",
+                    (alias_repo_id,),
                 )
-            row = self._find_repo_row(owner, name)
-        repo = self.get_repo_by_id(int(row["repo_id"])) if row is not None else None
-        if repo is None:
-            raise RuntimeError(f"Failed to register repository {owner}/{name}")
-        return repo
+                self.conn.execute(
+                    "DELETE FROM repos WHERE repo_id = ?", (alias_repo_id,)
+                )
+            elif alias_mode != REPO_MODE_ITEMS:
+                LOGGER.warning(
+                    "Repository %s is in mirror mode; added alias to %s without deleting mirror repo",
+                    alias_full_name,
+                    canonical.full_name,
+                )
+            return canonical
 
     def _resolve_key(
         self, item_key: str, *, create: bool
@@ -1013,6 +1202,51 @@ class LiveStoreMixin:
 
     # ----- retention -----------------------------------------------------------------
 
+    def _prune_idle_items_repos_in_tx(self, now_iso: str, cutoff_iso: str) -> int:
+        """Deletes idle `items` repositories older than `cutoff_iso` inside a transaction."""
+        rows = self.conn.execute(
+            """
+            SELECT r.repo_id FROM repos r
+            WHERE r.mode = ?
+              AND r.created_at < ?
+              AND NOT EXISTS (
+                SELECT 1 FROM watches w
+                WHERE w.lease_expires_at > ?
+                  AND lower(substr(w.item_key, 1, length(r.full_name) + 1))
+                      = lower(r.full_name || '#')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM notifications n
+                WHERE n.item_key IS NOT NULL
+                  AND n.seen_at >= ?
+                  AND lower(substr(n.item_key, 1, length(r.full_name) + 1))
+                      = lower(r.full_name || '#')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM viewer_sets v
+                WHERE v.last_seen_at >= ?
+                  AND lower(substr(v.item_key, 1, length(r.full_name) + 1))
+                      = lower(r.full_name || '#')
+              )
+            """,
+            (REPO_MODE_ITEMS, cutoff_iso, now_iso, cutoff_iso, cutoff_iso),
+        ).fetchall()
+        repo_ids = [int(r["repo_id"]) for r in rows]
+        if not repo_ids:
+            return 0
+        marks = ", ".join("?" for _ in repo_ids)
+        self.conn.execute(
+            f"""
+            DELETE FROM chunks_fts
+            WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE repo_id IN ({marks}))
+            """,
+            repo_ids,
+        )
+        cur = self.conn.execute(
+            f"DELETE FROM repos WHERE repo_id IN ({marks})", repo_ids
+        )
+        return cur.rowcount
+
     def prune(
         self,
         now: float | None = None,
@@ -1020,11 +1254,15 @@ class LiveStoreMixin:
         keep_api_calls_s: int = 7 * DAY_S,
         keep_notifications_s: int = 30 * DAY_S,
         keep_viewer_s: int = 30 * DAY_S,
+        keep_idle_items_repo_s: int = 30 * DAY_S,
     ) -> dict[str, int]:
-        """Deletes old change, api_calls, notification, viewer-set, and expired lease rows.
+        """Deletes old change, api_calls, notification, viewer-set, expired lease, and idle `items` repo rows.
 
         Viewer-set rows are removed when their set has not been refreshed for
-        `keep_viewer_s` (for example a set the service stopped tracking).
+        `keep_viewer_s` (for example a set the service stopped tracking). Idle
+        `items` repositories older than `keep_idle_items_repo_s` with no active
+        watch or recent notification or viewer-set row are removed along with
+        their FTS chunks and cascaded child/alias rows.
 
         Returns:
             Rows deleted per table.
@@ -1045,4 +1283,8 @@ class LiveStoreMixin:
                 )
                 deleted[table] = cur.rowcount
         deleted["watches"] = self.prune_expired_watches(moment)
+        with self.conn:
+            deleted["items_repos"] = self._prune_idle_items_repos_in_tx(
+                iso_at(moment), iso_at(moment - keep_idle_items_repo_s)
+            )
         return deleted

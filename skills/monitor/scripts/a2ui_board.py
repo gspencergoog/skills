@@ -5,9 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from models import Event, PrSnapshot
 
@@ -500,109 +504,223 @@ def _parse_store_line(raw: str) -> dict[str, Any] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def _track_other_surface(
-    msg: dict[str, Any], surface_id: str, stale_surfaces: dict[str, None]
-) -> None:
-    create = msg.get("createSurface")
-    if isinstance(create, dict):
-        sid = create.get("surfaceId")
-        if isinstance(sid, str) and sid and sid != surface_id:
-            stale_surfaces[sid] = None
+# Pane store contract: a2ui-pane docs/store-format.md. Each surface is one file holding one
+# StoreLine; writers take `<convId>/.lock` (stale locks are removed only under the
+# `.lock.steal` guard), replace files through tmp + rename, and write `_seq` last.
+STORE_VERSION = "1.0"
+LOCK_TIMEOUT_S = 2.0
+LOCK_RETRY_S = 0.005
+STALE_LOCK_S = 10.0
+LEGACY_WAIT_S = 2.0
+LEGACY_POLL_S = 0.05
+SURFACE_FILE_RE = re.compile(r"^[A-Za-z0-9-][A-Za-z0-9_-]*\.jsonl$")
+CALL_ID_PREFIX = "call_monitor"
+
+StoreStatus = Literal["written", "unchanged", "dismissed", "unavailable"]
+
+
+class StoreLockTimeout(Exception):
+    """Raised when the conversation lock cannot be taken within ``LOCK_TIMEOUT_S``."""
+
+
+def _lock_is_stale(path: Path) -> bool:
+    try:
+        return time.time() - path.stat().st_mtime > STALE_LOCK_S
+    except FileNotFoundError:
+        return False
+
+
+def _try_create_lock(lock_path: Path, token: str) -> bool:
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    try:
+        try:
+            os.write(fd, f"{os.getpid()} {stamp} {token}\n".encode())
+        finally:
+            os.close(fd)
+    except BaseException:
+        # A tokenless lock would block every writer until it goes stale.
+        _unlink_quietly(lock_path)
+        raise
+    return True
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def _steal_stale_lock(lock_path: Path) -> bool:
+    """Removes a stale lock while holding the ``.lock.steal`` guard.
+
+    Returns True only when this call removed ``.lock``, so the caller may retry at once.
+    The re-check under the guard keeps a waiter with an outdated staleness check from
+    removing a fresh lock.
+    """
+    guard = lock_path.with_name(".lock.steal")
+    try:
+        os.close(os.open(guard, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+    except FileExistsError:
+        # Another waiter is stealing; a guard older than the stale limit lost its owner.
+        if _lock_is_stale(guard):
+            _unlink_quietly(guard)
+        return False
+    try:
+        if not _lock_is_stale(lock_path):
+            return False
+        try:
+            os.unlink(lock_path)
+        except FileNotFoundError:
+            return False
+        return True
+    finally:
+        _unlink_quietly(guard)
+
+
+def _release_lock(lock_path: Path, token: str) -> None:
+    try:
+        fields = lock_path.read_text(encoding="utf-8").split()
+    except FileNotFoundError:
         return
-    delete = msg.get("deleteSurface")
-    if isinstance(delete, dict):
-        sid = delete.get("surfaceId")
-        if isinstance(sid, str) and sid != surface_id:
-            stale_surfaces.pop(sid, None)
+    if fields[2:3] == [token]:
+        _unlink_quietly(lock_path)
 
 
-def _apply_store_message(
-    msg: dict[str, Any], surface_id: str, exists: bool, current_schema: bool, last_items: Any
-) -> tuple[bool, bool, Any]:
-    create = msg.get("createSurface")
-    if isinstance(create, dict) and create.get("surfaceId") == surface_id:
-        dm = create.get("dataModel")
-        items = dm.get("items") if isinstance(dm, dict) else None
-        matches_schema = create.get("components") == STACK_BOARD_COMPONENTS
-        return True, matches_schema, items
-    delete = msg.get("deleteSurface")
-    if isinstance(delete, dict) and delete.get("surfaceId") == surface_id:
-        return False, False, None
-    update = msg.get("updateDataModel")
-    if (
-        exists
-        and isinstance(update, dict)
-        and update.get("surfaceId") == surface_id
-        and update.get("path") == "/items"
-    ):
-        return exists, current_schema, update.get("value")
-    return exists, current_schema, last_items
-
-
-def _inspect_store_file(conv_file: Path, surface_id: str) -> tuple[int, bool, bool, Any, list[str]]:
-    if not conv_file.exists():
-        return 0, False, False, None, []
-    last_seq = 0
-    exists = False
-    current_schema = False
-    last_items: Any = None
-    stale_surfaces: dict[str, None] = {}
-    for raw in conv_file.read_text(encoding="utf-8", errors="replace").splitlines():
-        entry = _parse_store_line(raw)
-        if entry is None:
+@contextmanager
+def _conversation_lock(conv_dir: Path) -> Iterator[None]:
+    """Holds ``conv_dir/.lock`` for the body; raises ``StoreLockTimeout`` after 2 s."""
+    conv_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = conv_dir / ".lock"
+    token = secrets.token_hex(8)
+    deadline = time.monotonic() + LOCK_TIMEOUT_S
+    while not _try_create_lock(lock_path, token):
+        if _lock_is_stale(lock_path) and _steal_stale_lock(lock_path):
             continue
-        seq = entry.get("seq")
-        if isinstance(seq, int) and seq > last_seq:
-            last_seq = seq
-        msg = entry.get("message")
-        if isinstance(msg, dict):
-            _track_other_surface(msg, surface_id, stale_surfaces)
-            exists, current_schema, last_items = _apply_store_message(
-                msg, surface_id, exists, current_schema, last_items
-            )
-    return last_seq, exists, current_schema, last_items, list(stale_surfaces)
+        if time.monotonic() >= deadline:
+            raise StoreLockTimeout(f"timed out waiting for {lock_path}")
+        time.sleep(LOCK_RETRY_S)
+    try:
+        yield
+    finally:
+        _release_lock(lock_path, token)
 
 
-def _build_store_messages(
-    exists: bool,
-    current_schema: bool,
+def _write_atomic(dest: Path, tmp_name: str, text: str) -> None:
+    tmp = dest.with_name(tmp_name)
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, dest)
+
+
+def _read_seq(conv_dir: Path) -> int:
+    try:
+        return max(int((conv_dir / "_seq").read_text(encoding="utf-8").strip() or 0), 0)
+    except (FileNotFoundError, ValueError):
+        return 0
+
+
+def _read_surface_line(path: Path) -> dict[str, Any] | None:
+    """Returns the surface's StoreLine, ``{}`` for an unreadable file, or None when missing."""
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    lines = raw.splitlines()
+    return (_parse_store_line(lines[0]) if lines else None) or {}
+
+
+def _line_seq(line: dict[str, Any] | None) -> int:
+    seq = (line or {}).get("seq")
+    return seq if isinstance(seq, int) and seq > 0 else 0
+
+
+def _stored_create(line: dict[str, Any]) -> dict[str, Any]:
+    msg = line.get("message")
+    create = msg.get("createSurface") if isinstance(msg, dict) else None
+    return create if isinstance(create, dict) else {}
+
+
+def _is_unchanged(line: dict[str, Any], data_model: dict[str, Any]) -> bool:
+    """Compares only components and ``items``: ``status`` carries a minute timestamp."""
+    create = _stored_create(line)
+    stored_dm = create.get("dataModel")
+    return (
+        create.get("components") == STACK_BOARD_COMPONENTS
+        and isinstance(stored_dm, dict)
+        and stored_dm.get("items") == data_model.get("items")
+    )
+
+
+def _foreign_surface_files(conv_dir: Path, surface_id: str) -> list[Path]:
+    own = f"{surface_id}.jsonl"
+    return sorted(
+        entry
+        for entry in conv_dir.iterdir()
+        if entry.name != own and SURFACE_FILE_RE.match(entry.name) and entry.is_file()
+    )
+
+
+def _await_migration(conv_root: Path, conversation_id: str) -> bool:
+    """Waits, without the lock, for the TS migrator to fold a legacy flat file.
+
+    Returns False when ``<convId>.jsonl`` still has no ``<convId>/_seq`` after
+    ``LEGACY_WAIT_S``. Python never migrates legacy files itself.
+    """
+    legacy = conv_root / f"{conversation_id}.jsonl"
+    seq_file = conv_root / conversation_id / "_seq"
+    deadline = time.monotonic() + LEGACY_WAIT_S
+    while legacy.exists() and not seq_file.exists():
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(LEGACY_POLL_S)
+    return True
+
+
+def _commit_board(
+    conv_dir: Path,
     surface_id: str,
     data_model: dict[str, Any],
-    stale_surfaces: list[str],
-    should_update_items: bool,
-) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = [
-        {"version": "v1.0", "deleteSurface": {"surfaceId": sid}} for sid in stale_surfaces
-    ]
-    if not exists or not current_schema:
-        if exists:
-            messages.append({"version": "v1.0", "deleteSurface": {"surfaceId": surface_id}})
-        messages.append(
-            {
-                "version": "v1.0",
-                "createSurface": {
-                    "surfaceId": surface_id,
-                    "sendDataModel": True,
-                    "components": STACK_BOARD_COMPONENTS,
-                    "dataModel": data_model,
-                },
-            }
-        )
-        return messages
-    if should_update_items:
-        for key in ("status", "statusTone", "statusPulse", "subtitle", "items"):
-            if key in data_model:
-                messages.append(
-                    {
-                        "version": "v1.0",
-                        "updateDataModel": {
-                            "surfaceId": surface_id,
-                            "path": f"/{key}",
-                            "value": data_model[key],
-                        },
-                    }
-                )
-    return messages
+    ts: str,
+    force: bool,
+    allow_create: bool,
+) -> StoreStatus:
+    """Replaces the board's surface file; must run under ``_conversation_lock``."""
+    surface_path = conv_dir / f"{surface_id}.jsonl"
+    current = _read_surface_line(surface_path)
+    if current is None and not allow_create:
+        return "dismissed"
+    if current is not None and not force and _is_unchanged(current, data_model):
+        return "unchanged"
+    # Creating the board keeps it the sole surface, as the append-only store did.
+    removed = _foreign_surface_files(conv_dir, surface_id) if current is None else []
+    seq = max(_read_seq(conv_dir), _line_seq(current)) + len(removed) + 1
+    record = {
+        "seq": seq,
+        "callId": f"{CALL_ID_PREFIX}_{seq}",
+        "ts": ts,
+        "message": {
+            "version": STORE_VERSION,
+            "createSurface": {
+                "surfaceId": surface_id,
+                "sendDataModel": True,
+                "components": STACK_BOARD_COMPONENTS,
+                "dataModel": data_model,
+            },
+        },
+    }
+    pid = os.getpid()
+    line = json.dumps(record, separators=(",", ":")) + "\n"
+    _write_atomic(surface_path, f".{surface_id}.tmp-{pid}", line)
+    for path in removed:
+        _unlink_quietly(path)
+    _write_atomic(conv_dir / "_seq", f"._seq.tmp-{pid}", f"{seq}\n")
+    return "written"
 
 
 def sync_pane_store(
@@ -612,44 +730,32 @@ def sync_pane_store(
     surface_id: str = "monitor",
     observed_at: str = "",
     force: bool = False,
-) -> bool:
-    """Appends ``createSurface`` or ``updateDataModel`` lines to the conversation JSONL store."""
+    allow_create: bool = True,
+) -> StoreStatus:
+    """Replaces ``conversations/<convId>/<surface_id>.jsonl`` with the board's full snapshot.
+
+    Returns ``"written"`` after a write, ``"unchanged"`` when the stored components and
+    ``items`` already match (unless ``force``), ``"dismissed"`` when the surface file is
+    missing and ``allow_create`` is false, and ``"unavailable"`` when there is no store,
+    the ids are invalid, a legacy flat file is still waiting for migration, or the lock
+    times out. Callers fall back to ``board.a2ui`` and ``render_a2ui`` on ``"unavailable"``.
+    """
     if not conversation_id or not VALID_ID_RE.match(conversation_id):
-        return False
-    if not VALID_ID_RE.match(surface_id):
-        return False
+        return "unavailable"
+    if not VALID_ID_RE.match(surface_id) or surface_id[0] in "_.":
+        return "unavailable"
     base_dir = Path(store_dir) if store_dir is not None else default_store_dir()
     if base_dir is None:
-        return False
-
-    conv_dir = base_dir / "conversations"
-    conv_dir.mkdir(parents=True, exist_ok=True)
-    conv_file = conv_dir / f"{conversation_id}.jsonl"
-    last_seq, exists, current_schema, last_items, stale_surfaces = _inspect_store_file(
-        conv_file, surface_id
-    )
-    should_update_items = force or last_items != data_model.get("items")
-    messages = _build_store_messages(
-        exists,
-        current_schema,
-        surface_id,
-        data_model,
-        stale_surfaces,
-        should_update_items,
-    )
-    if not messages:
-        return False
+        return "unavailable"
+    conv_root = base_dir / "conversations"
+    if not _await_migration(conv_root, conversation_id):
+        return "unavailable"
+    conv_dir = conv_root / conversation_id
+    if not allow_create and not conv_dir.is_dir():
+        return "dismissed"
     ts = observed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    call_id = f"call_monitor_{last_seq + 1}"
-    lines: list[str] = []
-    for idx, msg in enumerate(messages, start=1):
-        record = {
-            "seq": last_seq + idx,
-            "callId": call_id,
-            "ts": ts,
-            "message": msg,
-        }
-        lines.append(json.dumps(record, separators=(",", ":")))
-    with conv_file.open("a", encoding="utf-8") as fh:
-        fh.write("\n".join(lines) + "\n")
-    return True
+    try:
+        with _conversation_lock(conv_dir):
+            return _commit_board(conv_dir, surface_id, data_model, ts, force, allow_create)
+    except StoreLockTimeout:
+        return "unavailable"

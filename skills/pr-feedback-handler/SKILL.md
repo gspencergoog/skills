@@ -156,7 +156,7 @@ Once the dashboard review completes (or auto-approved):
 
 1. **Verify Status**:
 
-   - In **Interactive Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"` (equivalent to exit status `0`), proceed to implement the fixes; if `status` is `"aborted"` (equivalent to exit status `1`), stop and ask the user for further instructions.
+   - In **Interactive Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"` (equivalent to exit status `0`), proceed to implement the fixes; if `status` is `"aborted"` (equivalent to exit status `1`), stop and ask the user for further instructions; if `status` is `"superseded"`, a newer dashboard replaced this session, so do not apply this session's decisions and continue with the newer session.
    - In **Interactive Web Mode**, if the task exited with status `0` (success), proceed to implement the fixes; if the task exited with a non-zero status (e.g., `1` for Abort), stop and ask the user for further instructions.
 
 2. **Read the Plan**: Read `feedback_state.json` from your conversation-specific scratch directory (`<appDataDir>/brain/<conversation-id>/scratch/feedback_state.json`).

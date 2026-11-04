@@ -352,8 +352,18 @@ class ViewerSync:
             or not isinstance(number, int)
         ):
             return None
+        node_id = node.get("id")
+        if isinstance(node_id, str) and node_id:
+            prior = self._store.find_repo_by_node_id(node_id)
+            if prior is not None and prior.full_name.lower() != full_name.lower():
+                config = self._store.merge_repo_alias(prior.repo_id, full_name)
+                return config.repo_id, format_item_key(
+                    config.owner, config.name, number
+                )
         owner, name = full_name.split("/", 1)
         config = self._store.ensure_items_repo(owner, name)
+        if config.full_name.lower() != full_name.lower():
+            config = self._store.merge_repo_alias(config.repo_id, full_name)
         return config.repo_id, format_item_key(config.owner, config.name, number)
 
     def _pr_keys(self, nodes: Iterable[Mapping[str, Any]]) -> tuple[set[str], set[str]]:

@@ -1641,11 +1641,172 @@ class TestLiveStore(unittest.TestCase):
             "notifications": 1,
             "viewer_sets": 1,
             "watches": 1,
+            "items_repos": 0,
         }
         self.assertEqual(deleted, expected)
-        self.assertEqual({t: self._count(t) for t in expected}, expected)
+        self.assertEqual(
+            {t: self._count(t) for t in expected if t != "items_repos"},
+            {k: v for k, v in expected.items() if k != "items_repos"},
+        )
         remaining = self._view("SELECT set_name FROM viewer_sets")
         self.assertEqual(remaining, [{"set_name": "fresh"}])
+
+    def test_merge_repo_alias_items_repo_rewrites_keys_and_deletes_alias(self) -> None:
+        alias_repo = self.store.ensure_items_repo("Old-Org", "Old-Widgets", now=T0)
+        alias_key7 = "Old-Org/Old-Widgets#7"
+        alias_key8 = "Old-Org/Old-Widgets#8"
+        self.store.upsert_pr_live(self._pr(repo_id=alias_repo.repo_id), now=T0)
+        self.store.upsert_chunks(
+            [
+                TextChunk(
+                    chunk_id="Old-Org/Old-Widgets#pr:7",
+                    repo_id=alias_repo.repo_id,
+                    source_kind="pr",
+                    source_ref=alias_key7,
+                    title="PR 7",
+                    text="widget focus",
+                    content_sha256="sha7",
+                )
+            ],
+            now=T0,
+        )
+        # Colliding watch on #7 plus a non-colliding watch on #8.
+        self.store.add_watch(
+            "monitor", "c1", [self.key, alias_key7, alias_key8], 60, 600, now=T0
+        )
+        self.store.upsert_notifications(
+            [
+                NotificationRecord(
+                    "N-alias", "mention", "PullRequest", alias_key7, "u1", True
+                )
+            ],
+            now=T0,
+        )
+        self.store.replace_viewer_set(
+            "authored", [self.key, alias_key7, alias_key8], now=T0
+        )
+        self.store.request_refresh([self.key, alias_key7, alias_key8], now=T0)
+        self.store.set_state("node_id:Old-Org/Old-Widgets#8", "PR_node8", now=T0)
+
+        canonical = self.store.merge_repo_alias(
+            alias_repo.repo_id, "octo-org/widgets", now=T0 + 10
+        )
+        self.assertEqual(canonical.repo_id, self.repo.repo_id)
+        self.assertEqual(canonical.full_name, "Octo-Org/Widgets")
+        self.assertIsNone(self.store.get_repo_by_id(alias_repo.repo_id))
+        self.assertEqual(self._count("chunks_fts"), 0)
+        self.assertEqual(self.store.get_repo("old-org/old-widgets"), self.repo)
+        self.assertEqual(
+            self.store.ensure_items_repo("old-org", "old-widgets").repo_id,
+            self.repo.repo_id,
+        )
+        self.assertEqual(
+            self.store.canonical_item_key("old-org/old-widgets#8"),
+            "Octo-Org/Widgets#8",
+        )
+        self.assertEqual(
+            [w.item_key for w in self.store.active_watches(now=T0)],
+            ["Octo-Org/Widgets#7", "Octo-Org/Widgets#8"],
+        )
+        self.assertEqual(
+            self.store.peek_refresh_requests(),
+            ["Octo-Org/Widgets#7", "Octo-Org/Widgets#8"],
+        )
+        viewer_keys = [
+            r["item_key"]
+            for r in self._view("SELECT item_key FROM v_viewer_items ORDER BY item_key")
+        ]
+        self.assertEqual(viewer_keys, ["Octo-Org/Widgets#7", "Octo-Org/Widgets#8"])
+        notif_keys = [
+            r["item_key"] for r in self._view("SELECT item_key FROM v_notifications")
+        ]
+        self.assertEqual(notif_keys, ["Octo-Org/Widgets#7"])
+        change_keys = {c.item_key for c in self.store.changes_since(0)}
+        self.assertEqual(change_keys, {"Octo-Org/Widgets#7", "Octo-Org/Widgets#8"})
+        self.assertEqual(self.store.get_state("node_id:Octo-Org/Widgets#8"), "PR_node8")
+
+    def test_merge_repo_alias_mirror_repo_keeps_mirror_and_logs(self) -> None:
+        mirror = self.store.register_repo("legacy-org", "widgets", now=T0)
+        self.store.add_watch("monitor", "c1", ["legacy-org/widgets#7"], 60, 600, now=T0)
+        with self.assertLogs("live_store", level="WARNING") as cm:
+            canonical = self.store.merge_repo_alias(
+                mirror.repo_id, "Octo-Org/Widgets", now=T0 + 5
+            )
+        self.assertEqual(canonical.repo_id, self.repo.repo_id)
+        self.assertTrue(any("mirror mode" in msg for msg in cm.output))
+        kept = self.store.get_repo_by_id(mirror.repo_id)
+        self.assertIsNotNone(kept)
+        self.assertEqual(kept.mode, REPO_MODE_MIRROR)
+        self.assertEqual(
+            self.store.canonical_item_key("legacy-org/widgets#7"), self.key
+        )
+        self.assertEqual(
+            [w.item_key for w in self.store.active_watches(now=T0)], [self.key]
+        )
+
+    def test_prune_deletes_idle_items_repos_fts_and_cascaded_aliases(self) -> None:
+        old = T0
+        recent = T0 + 40 * 86400
+        # Keep self.repo active via an unexpired watch.
+        self.store.add_watch("monitor", "c0", [self.key], 60, 600, now=recent)
+
+        idle = self.store.ensure_items_repo("idle-org", "gone", now=old)
+        alias_src = self.store.ensure_items_repo("ancient-org", "gone", now=old)
+        self.store.merge_repo_alias(alias_src.repo_id, "idle-org/gone", now=old)
+        self.store.upsert_chunks(
+            [
+                TextChunk(
+                    chunk_id="idle-org/gone#pr:1",
+                    repo_id=idle.repo_id,
+                    source_kind="pr",
+                    source_ref="idle-org/gone#1",
+                    title="Old PR",
+                    text="obsolete",
+                    content_sha256="sha-old",
+                )
+            ],
+            now=old,
+        )
+        self.store.add_watch("monitor", "c-exp", ["idle-org/gone#1"], 60, 10, now=old)
+        self.store.upsert_notifications(
+            [
+                NotificationRecord(
+                    "N-idle", "mention", "PullRequest", "idle-org/gone#1", "u", True
+                )
+            ],
+            now=old,
+        )
+        self.store.replace_viewer_set("old_set", ["idle-org/gone#1"], now=old)
+
+        watched = self.store.ensure_items_repo("watched-org", "kept", now=old)
+        self.store.add_watch(
+            "monitor", "c-act", ["watched-org/kept#1"], 60, 600, now=recent
+        )
+
+        notified = self.store.ensure_items_repo("notified-org", "kept", now=old)
+        self.store.upsert_notifications(
+            [
+                NotificationRecord(
+                    "N-kept", "mention", "PullRequest", "notified-org/kept#1", "u", True
+                )
+            ],
+            now=recent,
+        )
+
+        viewed = self.store.ensure_items_repo("viewed-org", "kept", now=old)
+        self.store.replace_viewer_set("authored", ["viewed-org/kept#1"], now=recent)
+
+        fresh = self.store.ensure_items_repo("fresh-org", "kept", now=recent)
+        mirror = self.store.register_repo("mirror-org", "kept", now=old)
+
+        deleted = self.store.prune(now=recent + 60)
+        self.assertEqual(deleted["items_repos"], 1)
+        self.assertIsNone(self.store.get_repo_by_id(idle.repo_id))
+        self.assertIsNone(self.store.get_repo("ancient-org/gone"))
+        self.assertEqual(self._count("repo_aliases"), 0)
+        self.assertEqual(self._count("chunks_fts"), 0)
+        for kept_repo in (watched, notified, viewed, fresh, mirror):
+            self.assertIsNotNone(self.store.get_repo_by_id(kept_repo.repo_id))
 
 
 if __name__ == "__main__":

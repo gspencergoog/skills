@@ -44,6 +44,11 @@ Every item is identified by `owner/name#number`, for example
 matches repository names case-insensitively when you pass keys to the CLI and
 returns the canonical form.
 
+Keys for renamed or redirected repositories are rewritten to the canonical
+repository name once `packrat` refreshes the item from GitHub. Readers that
+pass an old repository name to `packrat watch` or `packrat refresh` should take
+the canonical `item_key` from `v_pr_basic`, `v_pr_live`, or `packrat changes`.
+
 ## Repository modes
 
 `v_pr_basic.repo_mode` and `v_pr_live.repo_mode` are one of:

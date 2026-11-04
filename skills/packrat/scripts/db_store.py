@@ -464,11 +464,15 @@ class PackratStore(LiveStoreMixin):
             )
 
     def get_repo(self, full_name: str) -> RepoConfig | None:
-        """Looks up a repository by full_name (case-insensitively)."""
-        row = self.conn.execute(
-            "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
-            (full_name,),
-        ).fetchone()
+        """Looks up a repository by full_name (case-insensitively, including aliases)."""
+        if "/" in full_name:
+            owner, name = full_name.split("/", 1)
+            row = self._find_repo_row(owner, name)
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
+                (full_name,),
+            ).fetchone()
         return _row_to_repo(row) if row else None
 
     def get_repo_by_id(self, repo_id: int) -> RepoConfig | None:

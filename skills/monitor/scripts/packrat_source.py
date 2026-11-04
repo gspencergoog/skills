@@ -163,7 +163,10 @@ def _check_node(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _thread_node(row: sqlite3.Row) -> dict[str, Any]:
-    author = {"login": row["last_author"] or "", "__typename": row["last_author_type"] or "User"}
+    author = {
+        "login": row["last_author"] or "",
+        "__typename": row["last_author_type"] or "User",
+    }
     return {
         "id": row["thread_id"],
         "isResolved": _bool(row["is_resolved"]),
@@ -224,7 +227,10 @@ def build_raw_pr(
         "mergedAt": live["merged_at"],
         "closedAt": live["closed_at"],
         "updatedAt": live["updated_at"],
-        "author": {"login": live["author"] or "", "__typename": live["author_type"] or "User"},
+        "author": {
+            "login": live["author"] or "",
+            "__typename": live["author_type"] or "User",
+        },
         "headRefOid": live["head_sha"],
         "headRefName": live["head_ref"],
         "baseRefName": live["base_ref"],
@@ -238,7 +244,10 @@ def build_raw_pr(
         },
         "assignees": {"nodes": []},
         "latestOpinionatedReviews": {"nodes": [_review_node(r) for r in reviews]},
-        "reviewThreads": {"totalCount": len(threads), "nodes": [_thread_node(t) for t in threads]},
+        "reviewThreads": {
+            "totalCount": len(threads),
+            "nodes": [_thread_node(t) for t in threads],
+        },
         "commits": _commit_node(live, [_check_node(c) for c in checks]),
     }
 
@@ -322,7 +331,8 @@ class PackratSource:
         """Waits up to `timeout_s` for change rows after `since`, filtered to watched keys."""
         wait = max(0.0, float(timeout_s))
         payload = self._run_json(
-            ["changes", "--since", str(since), "--wait", f"{wait:g}"], timeout_s=wait + 30.0
+            ["changes", "--since", str(since), "--wait", f"{wait:g}"],
+            timeout_s=wait + 30.0,
         )
         seq = int(payload.get("seq") or since)
         if payload.get("reset"):
@@ -347,7 +357,11 @@ class PackratSource:
                     conn, "SELECT * FROM v_pr_live WHERE item_key IN ({marks})", keys
                 )
                 extra = [
-                    _rows_by_key(conn, f"SELECT * FROM {view} WHERE item_key IN ({{marks}})", keys)
+                    _rows_by_key(
+                        conn,
+                        f"SELECT * FROM {view} WHERE item_key IN ({{marks}})",
+                        keys,
+                    )
                     for view in _DETAIL_VIEWS
                 ]
                 conn.execute("COMMIT")
@@ -364,6 +378,23 @@ class PackratSource:
             )
             for key, rows in live.items()
         }
+
+    def known_keys(self, keys: Sequence[str]) -> dict[str, str]:
+        """Maps each key present in `v_pr_live` or `v_pr_basic` to its canonical `owner/repo#N`."""
+        if not keys:
+            return {}
+        marks = ",".join("?" for _ in keys)
+        out: dict[str, str] = {}
+        try:
+            with closing(connect_readonly(self.db_path)) as conn:
+                for view in ("v_pr_basic", "v_pr_live"):
+                    sql = f"SELECT item_key, repo_full_name, number, url FROM {view} WHERE item_key IN ({marks})"
+                    for row in conn.execute(sql, list(keys)).fetchall():
+                        key, canon = _canonical_key_from_row(row)
+                        out[key] = canon
+        except sqlite3.Error as exc:
+            raise PackratError(f"packrat view read failed: {exc}") from exc
+        return out
 
     def fetched_ages(self, keys: Sequence[str]) -> dict[str, float]:
         """Returns seconds since each key's `live_fetched_at`, for keys in `v_pr_live`."""
@@ -430,7 +461,25 @@ class PackratSource:
         return [*parents, key, *children]
 
 
-_DETAIL_VIEWS = ("v_pr_checks", "v_pr_review_requests", "v_pr_latest_reviews", "v_pr_threads")
+_DETAIL_VIEWS = (
+    "v_pr_checks",
+    "v_pr_review_requests",
+    "v_pr_latest_reviews",
+    "v_pr_threads",
+)
+
+
+def _canonical_key_from_row(row: sqlite3.Row) -> tuple[str, str]:
+    key = str(row["item_key"])
+    url = str(row["url"] or "").strip()
+    repo = str(row["repo_full_name"] or "")
+    num = int(row["number"])
+    if url:
+        try:
+            repo, num = parse_pr_ref(url)
+        except ValueError:
+            pass
+    return key, f"{repo}#{num}" if repo else key
 
 
 def _first_login(conn: sqlite3.Connection, sql: str) -> str:
@@ -471,7 +520,8 @@ def _walk_parents(conn: sqlite3.Connection, repo: str, base_ref: str, key: str) 
     cur_base = base_ref
     while cur_base and cur_base not in BASE_BRANCHES and len(chain) < MAX_STACK_DEPTH:
         row = conn.execute(
-            f"{_SAME_REPO_OPEN} AND head_ref = ? ORDER BY number DESC LIMIT 1", (repo, cur_base)
+            f"{_SAME_REPO_OPEN} AND head_ref = ? ORDER BY number DESC LIMIT 1",
+            (repo, cur_base),
         ).fetchone()
         if row is None or row["item_key"] in seen:
             break

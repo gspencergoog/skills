@@ -463,6 +463,44 @@ class TestViewerSync(unittest.TestCase):
         self.assertEqual(self._leases(T0 + 60), [])
         self.assertEqual(len(self.hot.calls), 1)
 
+    def test_renamed_repo_in_viewer_search_merges_alias(self) -> None:
+        pr_old = {
+            "id": "PR_shared_1",
+            "number": 1,
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "old-org/widgets"},
+        }
+        pr_new = {
+            "id": "PR_shared_1",
+            "number": 1,
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "octo-org/widgets"},
+        }
+        issue_old = _issue("old-org/widgets", 30, id="I_shared_30")
+        issue_new = _issue("octo-org/widgets", 30, id="I_shared_30")
+        sync, _ = self._sync(
+            _page(authored=[pr_old], issues=[issue_old]),
+            _page(authored=[pr_new], issues=[issue_new]),
+        )
+        sync.refresh_viewer(now=T0)
+        self.assertEqual(
+            [r.full_name for r in self.store.list_repos()], ["old-org/widgets"]
+        )
+
+        changed = sync.refresh_viewer(now=T0 + 60)
+        self.assertEqual(changed, [])
+        self.assertEqual(
+            [r.full_name for r in self.store.list_repos()], ["octo-org/widgets"]
+        )
+        self.assertEqual(
+            self.store.canonical_item_key("old-org/widgets#1"), "octo-org/widgets#1"
+        )
+        self.assertEqual(
+            self._viewer_items(),
+            {"authored": ["octo-org/widgets#1"], "issues": ["octo-org/widgets#30"]},
+        )
+        self.assertEqual(self._leases(T0 + 60), ["octo-org/widgets#1"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -186,7 +186,7 @@ Follow these steps in order when reviewing a pull request:
    - In **Pane Mode**, tell the user the **PR Review** dashboard is open in the side pane (or can be opened from the `open_pr_review_dashboard` tool step's **Open in side pane** button or the AuxPane `+` menu) and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.
    - In **Browser Mode**, the launcher opens the review UI in the user's browser and waits until they click **"Submit Review to GitHub"** or **"Abort Review"**.
 3. **Verify Status**:
-   - In **Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"`, proceed to Step 5; if `status` is `"aborted"`, clean up the temporary workspace and stop without contacting GitHub.
+   - In **Pane Mode**, call `dashboard_status` with the `session` ID: if `status` is `"saved"`, proceed to Step 5; if `status` is `"aborted"`, clean up the temporary workspace and stop without contacting GitHub; if `status` is `"superseded"`, a newer review replaced this session, so stop without contacting GitHub and continue with the newer session.
    - In **Browser Mode**, check the background task exit code: if `0` (saved), proceed to Step 5; if `1` (aborted by user), clean up the temporary workspace and stop without contacting GitHub; if `2` (startup or file validation error), inspect `stderr`, fix the missing or malformed file, and relaunch the dashboard.
 
 ---

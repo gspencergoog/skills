@@ -377,11 +377,16 @@ class HotPrSnapshot:
     reviews: list[OpinionatedReviewRecord] = field(default_factory=list)
     threads: list[ThreadActivityRecord] = field(default_factory=list)
     comments: list[ItemCommentRecord] = field(default_factory=list)
+    repo_full_name: str | None = None
 
 
 def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     """Parses one aliased PR node (first pages of threads and contexts) into a snapshot."""
     contexts = _nodes(_dict(_rollup(node).get("contexts")))
+    raw_repo = _dict(node.get("repository")).get("nameWithOwner")
+    repo_full_name = (
+        str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
+    )
     reviews = [
         OpinionatedReviewRecord(
             author=str(_login(r.get("author"))),
@@ -403,6 +408,7 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
         reviews=reviews,
         threads=[t for t in map(parse_thread, _nodes(node.get("reviewThreads"))) if t],
         comments=list(item_comments_from_graphql(node.get("comments"))),
+        repo_full_name=repo_full_name,
     )
 
 
@@ -588,27 +594,63 @@ class HotRefresher:
         )
         return changed
 
-    def _apply_node(self, node: dict[str, Any]) -> str | None:
+    def _stored_repo_for_node(
+        self, node: dict[str, Any], repo_name: str, requested_key: str | None
+    ) -> Any:
+        """Finds the stored repository for `node` or `requested_key`."""
+        find_by_node = getattr(self.store, "find_repo_by_node_id", None)
+        node_id = node.get("id")
+        if find_by_node is not None and isinstance(node_id, str) and node_id:
+            prior = find_by_node(node_id)
+            if prior is not None and prior.full_name.lower() != repo_name.lower():
+                return prior
+        if requested_key is not None:
+            req_owner, req_name, _ = parse_item_key(requested_key)
+            return self.store.ensure_items_repo(req_owner, req_name)
+        owner, name = repo_name.split("/", 1)
+        return self.store.ensure_items_repo(owner, name)
+
+    def _resolve_node_repo(
+        self, node: dict[str, Any], repo_name: str, requested_key: str | None
+    ) -> Any:
+        """Resolves the canonical repository for `repo_name`, merging an alias when needed."""
+        stored = self._stored_repo_for_node(node, repo_name, requested_key)
+        merge_fn = getattr(self.store, "merge_repo_alias", None)
+        if merge_fn is not None and stored.full_name.lower() != repo_name.lower():
+            return merge_fn(stored.repo_id, repo_name)
+        return stored
+
+    def _apply_node(
+        self, node: dict[str, Any], requested_key: str | None = None
+    ) -> str | None:
         """Parses, completes, and stores one PR node; returns its key when it changed."""
         repo_name = str(_dict(node.get("repository")).get("nameWithOwner") or "")
         if "/" not in repo_name or node.get("number") is None:
             return None
-        owner, name = repo_name.split("/", 1)
-        repo = self.store.ensure_items_repo(owner, name)
+        repo = self._resolve_node_repo(node, repo_name, requested_key)
         snap = parse_hot_node(repo.repo_id, node)
         self._complete(snap, node)
         if not self._write(snap):
             return None
         return format_item_key(repo.owner, repo.name, snap.record.number)
 
-    def _refresh_batch(self, targets: Sequence[tuple[str, int]]) -> list[str]:
+    def _refresh_batch(
+        self,
+        targets: Sequence[tuple[str, int]],
+        requested_keys: Sequence[str] | None = None,
+    ) -> list[str]:
         """Refreshes one batch of `(node_id, number)` targets."""
         data = self._query(build_hot_query(targets))
         changed: list[str] = []
         for i in range(len(targets)):
             node = data.get(f"pr{i}")
             if isinstance(node, dict):
-                key = self._apply_node(node)
+                req_key = (
+                    requested_keys[i]
+                    if requested_keys is not None and i < len(requested_keys)
+                    else None
+                )
+                key = self._apply_node(node, req_key)
                 if key:
                     changed.append(key)
         return changed
@@ -620,15 +662,14 @@ class HotRefresher:
         deferred by the budget; it stops only on a GitHub rate-limit response,
         which raises `RateLimited` (a `BudgetDeferred`) from the transport.
         """
-        node_ids = self.resolve_node_ids(list(dict.fromkeys(keys)))
-        targets = [
-            (node_ids[k], parse_item_key(k)[2])
-            for k in dict.fromkeys(keys)
-            if k in node_ids
-        ]
+        unique_keys = list(dict.fromkeys(keys))
+        node_ids = self.resolve_node_ids(unique_keys)
+        resolved_keys = [k for k in unique_keys if k in node_ids]
+        targets = [(node_ids[k], parse_item_key(k)[2]) for k in resolved_keys]
         changed: list[str] = []
         for start in range(0, len(targets), self.batch_size):
+            end = start + self.batch_size
             changed.extend(
-                self._refresh_batch(targets[start : start + self.batch_size])
+                self._refresh_batch(targets[start:end], resolved_keys[start:end])
             )
         return changed

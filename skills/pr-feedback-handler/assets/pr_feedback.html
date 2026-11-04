@@ -681,6 +681,69 @@
       overlay.innerHTML = innerHtml;
     }
 
+    function submittedOverlayHtml(closeCopy, detailsHtml) {
+      return `
+        <div style="
+          min-height: 100vh;
+          background-color: #0f1115;
+          color: #f3f4f6;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 3rem 2rem;
+          overflow-y: auto;
+        ">
+          <!-- Header -->
+          <div style="text-align: center; margin-bottom: 2.5rem; max-width: 36rem;">
+            <div style="font-size: 4.5rem; margin-bottom: 1rem; line-height: 1;">🎉</div>
+            <h2 style="font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem 0; background: linear-gradient(135deg, #60a5fa, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Review Submitted!</h2>
+            <p style="color: #9ca3af; font-size: 0.95rem; line-height: 1.5; margin: 0;">${closeCopy}</p>
+          </div>
+          ${detailsHtml}
+        </div>
+      `;
+    }
+
+    function messageOverlayHtml(color, title, message) {
+      return `
+        <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
+          <h1 style="color: ${color};">${title}</h1>
+          <p>${message}</p>
+        </div>
+      `;
+    }
+
+    function abortedOverlayHtml(closeCopy) {
+      return messageOverlayHtml('var(--danger-color)', 'Review Aborted', closeCopy);
+    }
+
+    // Returns the done page for a reconstituted frame whose session is no longer open
+    // (`_session_status` from dashboard_load or the launch tool), or null for a live session.
+    // The per-card summary is not available after a reload, so a saved session shows only
+    // where the decisions were written.
+    function terminalOverlayHtml(data) {
+      const status = data && data._session_status;
+      if (!status || status === 'open') return null;
+      if (status === 'saved') {
+        const savedTo = data.output_file
+          ? ` · saved to <code>${escapeHtml(data.output_file)}</code>` : '';
+        return submittedOverlayHtml(
+          'You can close this pane now.',
+          `<p style="color: #9ca3af; font-size: 0.95rem; margin: 0;">Feedback submitted${savedTo}</p>`
+        );
+      }
+      if (status === 'aborted') return abortedOverlayHtml('You can close this pane now.');
+      if (status === 'superseded') {
+        return messageOverlayHtml(
+          'var(--text-light)', 'Review Replaced', 'This review was replaced by a newer one.'
+        );
+      }
+      return messageOverlayHtml(
+        'var(--text-light)', 'No Active Review', 'No active review in this conversation.'
+      );
+    }
+
     // Allowed decision values. Unknown values from a hand-edited
     // proposals.json fall back to the first entry of each list.
     const ACTIONS = ['accept', 'clarify', 'decline'];
@@ -780,6 +843,11 @@
       try {
         const loaded = await dashboardHost.load();
         if (seq !== loadSeq) return;
+        const terminalHtml = terminalOverlayHtml(loaded);
+        if (terminalHtml) {
+          showDoneOverlay(terminalHtml);
+          return;
+        }
         feedbackData = loaded;
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
         
@@ -1222,25 +1290,8 @@
       }
       
       const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
-      showDoneOverlay(`
-        <div style="
-          min-height: 100vh;
-          background-color: #0f1115;
-          color: #f3f4f6;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          padding: 3rem 2rem;
-          overflow-y: auto;
-        ">
-          <!-- Header -->
-          <div style="text-align: center; margin-bottom: 2.5rem; max-width: 36rem;">
-            <div style="font-size: 4.5rem; margin-bottom: 1rem; line-height: 1;">🎉</div>
-            <h2 style="font-size: 2rem; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 0.5rem 0; background: linear-gradient(135deg, #60a5fa, #3b82f6); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Review Submitted!</h2>
-            <p style="color: #9ca3af; font-size: 0.95rem; line-height: 1.5; margin: 0;">You can close this ${closeTarget} now. The agent is resuming in the background to apply the approved changes. A summary is shown below.</p>
-          </div>
-          
+      const closeCopy = `You can close this ${closeTarget} now. The agent is resuming in the background to apply the approved changes. A summary is shown below.`;
+      showDoneOverlay(submittedOverlayHtml(closeCopy, `
           <!-- Summary Content Grid -->
           <div style="width: 100%; max-width: 48rem; display: flex; flex-direction: column; gap: 2.5rem;">
             
@@ -1267,8 +1318,7 @@
             </div>
             
           </div>
-        </div>
-      `);
+      `));
     }
 
     function updateResolve(threadId, val) {
@@ -1303,12 +1353,9 @@
         try {
           await dashboardHost.abort();
           const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
-          showDoneOverlay(`
-            <div style="text-align: center; margin-top: 100px; font-family: sans-serif; color: var(--text-color); background-color: var(--bg-color); height: 100vh; padding-top: 50px;">
-              <h1 style="color: var(--danger-color);">Review Aborted</h1>
-              <p>You can close this ${closeTarget} now. The agent has been notified.</p>
-            </div>
-          `);
+          showDoneOverlay(abortedOverlayHtml(
+            `You can close this ${closeTarget} now. The agent has been notified.`
+          ));
         } catch (err) {
           alert('Error aborting: ' + err.message);
         }

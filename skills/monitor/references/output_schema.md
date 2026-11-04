@@ -13,7 +13,7 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--stack` | `false` | Expand each target pull request to include its parent chain and direct child pull requests (up to 20 total) |
 | `--state FILE` | required | Path to the JSON state snapshot file (created automatically on first run) |
 | `--events LIST` | all kinds | Comma-separated subset of `EVENT_KINDS` that should wake the caller |
-| `--actionable-only` | `false` | Update `state.json`, `board.a2ui`, and the A2UI Pane store in place on passive events; exit `0` only on actionable events |
+| `--actionable-only` | `false` | Update `state.json`, `board.a2ui`, and the A2UI Pane board file in place on passive events (a dismissed board is not recreated); exit `0` only on actionable events |
 | `--until MODE` | `closed` | Terminal condition for exit code `3`: `merged`, `closed`, or `all-green` |
 | `--timeout SECONDS` | none | Exit with code `2` when no matching event occurs within this duration |
 | `--debounce SECONDS` | `20` | Fixed window after the first matching wake event to collect follow-on transitions (`0` disables) |
@@ -21,9 +21,9 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--sweep SECONDS` | `600` | Full GraphQL refresh interval for every watched pull request |
 | `--notify-poll SECONDS` | `60` | Conditional `GET /notifications` poll interval in seconds |
 | `--once` | `false` | Fetch once, diff against `--state`, update board, emit JSON, save state, and exit immediately |
-| `--no-a2ui` | `false` | Disable writing `board.a2ui` and updating the A2UI Pane conversation JSONL store |
+| `--no-a2ui` | `false` | Disable writing `board.a2ui` and the A2UI Pane board file |
 | `--a2ui-file FILE` | `<state-dir>/board.a2ui` | Path to write the `stack_board` A2UI Express DSL file |
-| `--conversation-id ID` | none | Target Jetski conversation ID for direct A2UI Pane JSONL store updates |
+| `--conversation-id ID` | none | Target Jetski conversation ID for direct A2UI Pane store updates (`conversations/<ID>/monitor.jsonl`) |
 | `--a2ui-store-dir DIR` | First existing of `$A2UI_PANE_DATA`, `$PLUGIN_DATA`, `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/a2ui-pane`, or `~/.gemini/jetski/plugin_data/a2ui-pane` | Override the `a2ui-pane` plugin data directory |
 | `--log FILE` | none | Append each emitted JSON payload as one line to this JSONL file |
 | `--output FILE` | none | Write the emitted JSON payload to this file in addition to `stdout` |
@@ -53,7 +53,11 @@ When multiple conditions hold on the same tick, precedence is **terminal (`3`) >
 
 ## 3. Output JSON Payload
 
-To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries only the file path (`dsl_file`, which assigns `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/items`, and `$/ackLabel` for the `stack_board` template) and whether the live `a2ui-pane` JSONL conversation store was updated directly (`store_updated`), rather than embedding the full A2UI Express DSL string in `stdout`:
+To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries only the file path (`dsl_file`, which assigns `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/items`, and `$/ackLabel` for the `stack_board` template) and the result of the direct `a2ui-pane` store update (`store_updated` and `store_status`), rather than embedding the full A2UI Express DSL string in `stdout`.
+
+`store_status` is one of `written` (the board file `conversations/<conversationId>/monitor.jsonl` was replaced), `unchanged` (same components and `items`, so nothing was written), `dismissed` (the board file is missing and this tick may not recreate it: no actionable event, no `--once`, and not the process's first sync), or `unavailable` (no store directory, invalid ids, lock timeout, or a legacy flat store still waiting for migration). `store_updated` is `true` only for `written`. Fall back to `render_a2ui` only on `unavailable`.
+
+Example:
 
 ```json
 {
@@ -140,7 +144,8 @@ To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries o
     "template": "stack_board",
     "surfaceId": "monitor",
     "dsl_file": "/path/to/scratch/monitor/board.a2ui",
-    "store_updated": true
+    "store_updated": true,
+    "store_status": "written"
   }
 }
 ```

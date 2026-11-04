@@ -46,7 +46,7 @@ from models import (
     parse_pr_ref,
     pr_key,
 )
-from normalize import normalize_pr, resolve_stack_parents
+from normalize import canonical_pr_repo, normalize_pr, resolve_stack_parents
 from notifications import DEFAULT_POLL_INTERVAL_S, NotificationsUnavailable, poll
 from packrat_source import (
     ChangeBatch,
@@ -364,19 +364,41 @@ def _walk_parent_prs(runner: GhRunner, repo: str, base_ref: str) -> list[str]:
     return list(reversed(parent_chain))
 
 
-def _gh_stack(runner: GhRunner, seeds: list[str], add_key: Callable[[str], None]) -> None:
+def _gh_stack_seed(
+    runner: GhRunner,
+    key: str,
+    node: dict[str, Any],
+    add_key: Callable[[str], None],
+    source: PackratSource | None = None,
+) -> None:
+    fallback_repo, fallback_num = parse_pr_ref(key)
+    repo = canonical_pr_repo(node, fallback_repo)
+    canon_key = pr_key(repo, int(node.get("number") or fallback_num))
+    if source is not None and canon_key != key:
+        stack = source.stack_neighbors(canon_key)
+        if stack is not None:
+            for member in stack:
+                add_key(member)
+            return
+    for p_key in _walk_parent_prs(runner, repo, str(node.get("baseRefName") or "")):
+        add_key(p_key)
+    add_key(canon_key)
+    head_ref = str(node.get("headRefName") or "")
+    if head_ref:
+        for child in _list_prs_by_branch(runner, repo, "--base", head_ref):
+            add_key(pr_key(repo, int(child["number"])))
+
+
+def _gh_stack(
+    runner: GhRunner,
+    seeds: list[str],
+    add_key: Callable[[str], None],
+    source: PackratSource | None = None,
+) -> None:
     """Expands ``seeds`` with ``gh pr list --head/--base`` walks."""
     _, raw_map = fetch_prs(runner, seeds)
     for key in seeds:
-        repo, _ = parse_pr_ref(key)
-        node = raw_map.get(key) or {}
-        for p_key in _walk_parent_prs(runner, repo, str(node.get("baseRefName") or "")):
-            add_key(p_key)
-        add_key(key)
-        head_ref = str(node.get("headRefName") or "")
-        if head_ref:
-            for child in _list_prs_by_branch(runner, repo, "--base", head_ref):
-                add_key(pr_key(repo, int(child["number"])))
+        _gh_stack_seed(runner, key, raw_map.get(key) or {}, add_key, source)
 
 
 def _expand_stack(
@@ -405,7 +427,7 @@ def _expand_stack(
         for member in stack:
             add_key(member)
     if gh_seeds:
-        _gh_stack(runner, gh_seeds, add_key)
+        _gh_stack(runner, gh_seeds, add_key, source)
     return ordered
 
 
@@ -490,6 +512,7 @@ class Monitor:
         self._packrat_seq = 0
         self._next_renew = 0.0
         self._force_gh: set[str] = set()
+        self._prefetched_raw: dict[str, dict[str, Any]] = {}
         self._arm_meta: dict[str, Any] = {}
         self.state_path = Path(state_path)
         self.clock = clock
@@ -521,6 +544,69 @@ class Monitor:
             f"warning: {pr} has paginated connections exceeding page size: {', '.join(fields)}\n"
         )
 
+    def _rekey_state_entry(self, old: str, new: str) -> None:
+        if old in self.state.snapshots:
+            snap = self.state.snapshots.pop(old)
+            self.state.snapshots.setdefault(new, snap)
+        if old in self.state.pushed_shas:
+            sha = self.state.pushed_shas.pop(old)
+            self.state.pushed_shas.setdefault(new, sha)
+        if old in self.state.reruns:
+            tokens = self.state.reruns.pop(old)
+            cur = self.state.reruns.setdefault(new, [])
+            cur.extend(tok for tok in tokens if tok not in cur)
+        if old in self.state.reported_threads:
+            threads = self.state.reported_threads.pop(old)
+            self.state.reported_threads.setdefault(new, {}).update(threads)
+        if old in self._pushed_keys:
+            self._pushed_keys.discard(old)
+            self._pushed_keys.add(new)
+
+    def _rekey_watched(self, mapping: dict[str, str]) -> None:
+        """Rewrites non-canonical PR keys in ``watched_keys`` and ``state`` to canonical ones."""
+        if not mapping:
+            return
+        new_watched: list[str] = []
+        for key in self.watched_keys:
+            canon = mapping.get(key, key)
+            if canon not in new_watched:
+                new_watched.append(canon)
+        self.watched_keys = new_watched
+        for old, new in mapping.items():
+            if old != new:
+                self._rekey_state_entry(old, new)
+
+    def _normalize_target_keys(
+        self,
+        target_keys: list[str],
+        raw_map: dict[str, dict[str, Any]],
+        from_packrat: set[str],
+        prev_snapshots: dict[str, PrSnapshot],
+    ) -> list[str]:
+        resolved_targets: list[str] = []
+        mapping: dict[str, str] = {}
+        for key in target_keys:
+            repo, _ = parse_pr_ref(key)
+            snap = normalize_pr(raw_map[key], viewer=self.viewer, repo=repo)
+            canon_key = snap.key
+            if canon_key != key:
+                mapping[key] = canon_key
+            if key in from_packrat:
+                _carry_over_unmirrored(
+                    snap, prev_snapshots.get(canon_key) or prev_snapshots.get(key)
+                )
+            self._warn_truncation(canon_key, snap.truncated)
+            self.state.snapshots[canon_key] = snap
+            if canon_key not in resolved_targets:
+                resolved_targets.append(canon_key)
+        if mapping:
+            self._rekey_watched(mapping)
+            for old, new in mapping.items():
+                old_snap = prev_snapshots.pop(old, None)
+                if old_snap is not None and new not in prev_snapshots:
+                    prev_snapshots[new] = old_snap
+        return resolved_targets
+
     def refresh(self, keys: list[str] | None = None) -> list[Event]:
         """Fetches ``keys`` (or all watched PRs), updates ``self.state``, and returns new events.
 
@@ -532,13 +618,9 @@ class Monitor:
         if viewer:
             self.viewer = viewer
         prev_snapshots = dict(self.state.snapshots)
-        for key in target_keys:
-            repo, _ = parse_pr_ref(key)
-            snap = normalize_pr(raw_map[key], viewer=self.viewer, repo=repo)
-            if key in from_packrat:
-                _carry_over_unmirrored(snap, prev_snapshots.get(key))
-            self._warn_truncation(key, snap.truncated)
-            self.state.snapshots[key] = snap
+        target_keys = self._normalize_target_keys(
+            target_keys, raw_map, from_packrat, prev_snapshots
+        )
 
         resolve_stack_parents(self.state.snapshots)
         ctx = DiffContext(
@@ -573,10 +655,17 @@ class Monitor:
             raw_map.pop(key, None)
         served = set(raw_map)
         viewer = ""
-        if gh_keys:
-            viewer, extra = fetch_prs(self.runner, gh_keys)
+        to_fetch: list[str] = []
+        for key in gh_keys:
+            cached = self._prefetched_raw.pop(key, None)
+            if cached is not None:
+                raw_map[key] = cached
+            else:
+                to_fetch.append(key)
+        if to_fetch:
+            viewer, extra = fetch_prs(self.runner, to_fetch)
             raw_map.update(extra)
-            self._force_gh.difference_update(gh_keys)
+        self._force_gh.difference_update(gh_keys)
         return viewer, raw_map, served
 
     def _compute_etas(self) -> dict[str, int | None]:
@@ -610,18 +699,28 @@ class Monitor:
             else (self.state_path.parent / "board.a2ui")
         )
         write_board_file(board_path, dsl)
-        store_updated = sync_pane_store(
+        # A dismissed board stays gone on passive ticks. It comes back for --once, an
+        # actionable event, or the first sync of this process (the user just started it).
+        allow_create = (
+            bool(getattr(args, "once", False))
+            or not getattr(self, "_board_synced", False)
+            or any(ev.actionable for ev in events)
+        )
+        store_status = sync_pane_store(
             getattr(args, "conversation_id", None),
             dm,
             store_dir=getattr(args, "a2ui_store_dir", None),
             surface_id="monitor",
             observed_at=ts,
+            allow_create=allow_create,
         )
+        self._board_synced = True
         return {
             "template": "stack_board",
             "surfaceId": "monitor",
             "dsl_file": str(board_path),
-            "store_updated": store_updated,
+            "store_updated": store_status == "written",
+            "store_status": store_status,
         }
 
     def _build_payload(
@@ -1056,7 +1155,11 @@ class Monitor:
             if stop_exit is not None:
                 return stop_exit
             debounce_deadline = self._update_debounce_deadline(
-                accumulated, debounce_deadline, now, cfg.poll_s, getattr(args, "daemon", False)
+                accumulated,
+                debounce_deadline,
+                now,
+                cfg.poll_s,
+                getattr(args, "daemon", False),
             )
             exit_code, debounce_deadline = self._wait_and_refresh(
                 now, timers, debounce_deadline, timeout_deadline, cfg, accumulated, args
@@ -1195,6 +1298,25 @@ class Monitor:
             )
         return None
 
+    def _canonicalize_with_gh(self, keys: list[str]) -> None:
+        """Fetches ``keys`` via ``gh``, caches the raw PRs, and rekeys to canonical slugs."""
+        if not keys:
+            return
+        viewer, raw_map = fetch_prs(self.runner, keys)
+        if viewer:
+            self.viewer = viewer
+        mapping: dict[str, str] = {}
+        for key in keys:
+            raw = raw_map.get(key)
+            if not raw:
+                continue
+            repo, number = parse_pr_ref(key)
+            canon_repo = canonical_pr_repo(raw, repo)
+            canon_key = pr_key(canon_repo, int(raw.get("number") or number))
+            self._prefetched_raw[canon_key] = raw
+            mapping[key] = canon_key
+        self._rekey_watched(mapping)
+
     def _start_packrat(self) -> None:
         """Leases the watched PRs and waits briefly for packrat to refresh missing ones.
 
@@ -1203,6 +1325,11 @@ class Monitor:
         """
         source = self.packrat
         assert source is not None
+        known = source.known_keys(self.watched_keys)
+        self._rekey_watched({k: v for k, v in known.items() if k != v})
+        unknown = [k for k in self.watched_keys if k not in known]
+        if unknown:
+            self._canonicalize_with_gh(unknown)
         keys = list(self.watched_keys)
         source.lease(keys)
         self._next_renew = self.clock() + PACKRAT_RENEW_S

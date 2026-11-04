@@ -111,7 +111,7 @@ class TestMigrations(unittest.TestCase):
     def test_fresh_db_reaches_latest_version_with_views(self) -> None:
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6])
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
             stored = store.conn.execute(
@@ -131,7 +131,7 @@ class TestMigrations(unittest.TestCase):
         _build_pre_migration_db(self.db_path)
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6])
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
             self.assertEqual(repo.mode, "mirror")
@@ -228,7 +228,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -300,7 +300,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5])
+            self.assertEqual(store.applied_migrations, [5, 6])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -316,6 +316,31 @@ class TestMigrations(unittest.TestCase):
             self.assertGreater(cosine, 0.999)
         finally:
             store.close()
+
+    def test_migration_0006_adds_repo_aliases_with_nocase_and_cascade(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:5]:
+                db_migrations._run_migration(conn, version, migrate)
+            self.assertEqual(apply_migrations(conn), [6])
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO repo_aliases (alias_full_name, repo_id, created_at) "
+                "VALUES ('Old-Org/Old-Widgets', 1, 'now')"
+            )
+            hit = conn.execute(
+                "SELECT repo_id FROM repo_aliases WHERE alias_full_name = 'old-org/old-widgets'"
+            ).fetchone()
+            self.assertEqual(hit, (1,))
+            conn.execute("DELETE FROM repos WHERE repo_id = 1")
+            remaining = conn.execute("SELECT COUNT(*) FROM repo_aliases").fetchone()[0]
+            self.assertEqual(remaining, 0)
+        finally:
+            conn.close()
 
     def test_reader_indexes_exist_and_comment_lookups_use_them(self) -> None:
         # L8

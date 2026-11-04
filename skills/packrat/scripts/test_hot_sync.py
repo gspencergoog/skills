@@ -331,6 +331,24 @@ class TestHotRefresher(unittest.TestCase):
         self.assertEqual(replaced[0][1], 7)
         self.assertEqual(replaced[0][2], 2)
 
+    def test_redirected_repo_merges_alias_and_writes_canonical_repo(self) -> None:
+        old_key = "old-org/old-widgets#7"
+        leased = self.store.add_watch("monitor", "c1", [old_key], 60, 600)
+        self.assertEqual(leased, [old_key])
+        self.assertEqual(
+            [r.full_name for r in self.store.list_repos()], ["old-org/old-widgets"]
+        )
+
+        changed = self.hot.refresh_hot([old_key])
+        self.assertEqual(changed, [KEY7])
+        self.assertEqual(
+            [r.full_name for r in self.store.list_repos()], ["octo-org/widgets"]
+        )
+        self.assertEqual(self.store.canonical_item_key(old_key), KEY7)
+        self.assertEqual([w.item_key for w in self.store.active_watches()], [KEY7])
+        live = self._rows("SELECT item_key FROM v_pr_live")
+        self.assertEqual(live, [(KEY7,)])
+
 
 if __name__ == "__main__":
     unittest.main()

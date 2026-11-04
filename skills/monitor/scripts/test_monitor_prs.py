@@ -111,8 +111,10 @@ class TestMonitorPrs(unittest.TestCase):
             self.assertIn("a2ui", payload1)
             self.assertNotIn("dsl", payload1["a2ui"])
             self.assertTrue(payload1["a2ui"]["store_updated"])
+            self.assertEqual(payload1["a2ui"]["store_status"], "written")
             self.assertTrue(Path(payload1["a2ui"]["dsl_file"]).exists())
-            self.assertTrue((Path(store_dir) / "conversations" / "conv-test-1.jsonl").exists())
+            board_file = Path(store_dir) / "conversations" / "conv-test-1" / "monitor.jsonl"
+            self.assertTrue(board_file.exists())
             self.assertTrue(Path(out_path).exists())
             self.assertTrue(Path(log_path).exists())
 
@@ -139,7 +141,13 @@ class TestMonitorPrs(unittest.TestCase):
             kinds2 = {e["kind"] for e in payload2["events"]}
             self.assertEqual(
                 kinds2,
-                {"review_decision", "review_requests", "human_threads", "merge_state", "ci_check"},
+                {
+                    "review_decision",
+                    "review_requests",
+                    "human_threads",
+                    "merge_state",
+                    "ci_check",
+                },
             )
 
     def test_actionable_only_updates_pane_in_place_on_passive_events(self) -> None:
@@ -192,13 +200,77 @@ class TestMonitorPrs(unittest.TestCase):
             self.assertEqual(code, 0)
             payload = json.loads(stdout)
             self.assertTrue(all(ev["actionable"] for ev in payload["events"]))
-            conv_lines = (
-                (Path(store_dir) / "conversations" / "conv-passive.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
+            conv_dir = Path(store_dir) / "conversations" / "conv-passive"
+            board_lines = (conv_dir / "monitor.jsonl").read_text(encoding="utf-8").splitlines()
+            # The board file is replaced in place: seed create, passive tick, actionable emit.
+            self.assertEqual(len(board_lines), 1)
+            self.assertEqual(json.loads(board_lines[0])["seq"], 3)
+            self.assertEqual((conv_dir / "_seq").read_text(encoding="utf-8").strip(), "3")
+
+    def test_dismissed_board_returns_only_for_actionable_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir = Path(tmp) / "a2ui_store"
+            args = parse_args(
+                [
+                    "acme/widget#3339",
+                    "--state",
+                    str(Path(tmp) / "state.json"),
+                    "--conversation-id",
+                    "conv-dismiss",
+                    "--a2ui-store-dir",
+                    str(store_dir),
+                ]
             )
-            # 1 createSurface + 5 updateDataModel (passive tick) + 5 updateDataModel (actionable emit) = 11 lines
-            self.assertEqual(len(conv_lines), 11)
+            clk = FakeClock()
+            mon = Monitor(
+                runner=FakeGh([]),
+                state_path=args.state,
+                clock=clk,
+                sleep=clk.sleep,
+                now=lambda: "2026-10-27T21:15:00Z",
+                epoch_now=lambda: 1793135700.0,
+            )
+            passive = Event(
+                pr="acme/widget#3339",
+                kind="draft",
+                from_value=False,
+                to_value=True,
+                actionable=False,
+                suggested_action=None,
+                summary="Marked as draft",
+            )
+            actionable = Event(
+                pr="acme/widget#3339",
+                kind="ci_check",
+                from_value=None,
+                to_value="FAILURE",
+                actionable=True,
+                suggested_action="diagnose_ci",
+                summary="CI failed (build)",
+            )
+            board_file = store_dir / "conversations" / "conv-dismiss" / "monitor.jsonl"
+
+            # The first sync of the process creates the board.
+            meta = mon._sync_board([], args)
+            assert meta is not None
+            self.assertEqual(meta["store_status"], "written")
+            self.assertTrue(board_file.exists())
+
+            # The user dismisses it: passive ticks leave it gone.
+            board_file.unlink()
+            for _ in range(2):
+                meta = mon._sync_board([passive], args)
+                assert meta is not None
+                self.assertEqual(meta["store_status"], "dismissed")
+                self.assertFalse(meta["store_updated"])
+                self.assertFalse(board_file.exists())
+
+            # An actionable event brings it back.
+            meta = mon._sync_board([passive, actionable], args)
+            assert meta is not None
+            self.assertEqual(meta["store_status"], "written")
+            self.assertTrue(meta["store_updated"])
+            self.assertTrue(board_file.exists())
 
     def test_no_a2ui_omits_board_file_and_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,7 +324,12 @@ class TestMonitorPrs(unittest.TestCase):
             fake = FakeGh(
                 [
                     ("graphql", 0, load_fixture("pr_open_ci_running.json"), ""),
-                    ("notifications", 1, load_fixture("notifications_304.txt"), "gh: HTTP 304"),
+                    (
+                        "notifications",
+                        1,
+                        load_fixture("notifications_304.txt"),
+                        "gh: HTTP 304",
+                    ),
                 ]
             )
             code, stdout, _ = self._run_monitor(
@@ -299,7 +376,13 @@ class TestMonitorPrs(unittest.TestCase):
             fake_seed = FakeGh([("graphql", 0, json.dumps(stack_both_open), "")])
             self._run_monitor(
                 fake_seed,
-                ["acme/widget#3338", "acme/widget#3339", "--state", state_path, "--once"],
+                [
+                    "acme/widget#3338",
+                    "acme/widget#3339",
+                    "--state",
+                    state_path,
+                    "--once",
+                ],
             )
 
             # Now sibling pr0 (#3338) merges while pr1 (#3339) stays OPEN.
@@ -471,7 +554,11 @@ def _two_open_prs() -> dict[str, Any]:
     raw = json.loads(load_fixture("pr_stack.json"))
     first = raw["data"]["pr0"]["pullRequest"]
     first.update(
-        state="OPEN", merged=False, mergedAt=None, mergeable="MERGEABLE", mergeStateStatus="CLEAN"
+        state="OPEN",
+        merged=False,
+        mergedAt=None,
+        mergeable="MERGEABLE",
+        mergeStateStatus="CLEAN",
     )
     raw["data"]["pr1"]["pullRequest"]["baseRefName"] = "main"
     return raw
@@ -486,7 +573,12 @@ def _graphql_queries(fake: FakeGh) -> list[str]:
     return [" ".join(args) for args, _ in fake.calls if "graphql" in args]
 
 
-NOT_MODIFIED = ("notifications", 1, load_fixture("notifications_304.txt"), "gh: HTTP 304")
+NOT_MODIFIED = (
+    "notifications",
+    1,
+    load_fixture("notifications_304.txt"),
+    "gh: HTTP 304",
+)
 TWO_PRS = ["acme/widget#3338", "acme/widget#3339"]
 
 
@@ -1103,17 +1195,22 @@ class TestPackratMode(unittest.TestCase):
         self.assertEqual(list((payload or {})["prs"]), ["acme/widget#3338", "acme/widget#3339"])
         self.assertEqual(len(fake.calls), 3)  # stack walk only; snapshots come from packrat
 
-    def test_missing_pr_is_refreshed_then_fetched_with_gh_after_startup_wait(self) -> None:
+    def test_missing_pr_is_refreshed_then_fetched_with_gh_after_startup_wait(
+        self,
+    ) -> None:
         fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
         code, payload, _ = self._run(["acme/widget#3339", "--once"], fake)
         self.assertEqual(code, 0)
         self.assertEqual(
-            self.cli.by_command("refresh"), [["refresh", "--json", "--", "acme/widget#3339"]]
+            self.cli.by_command("refresh"),
+            [["refresh", "--json", "--", "acme/widget#3339"]],
         )
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual((payload or {})["source"], "packrat")
 
-    def test_daemon_arms_with_source_renews_lease_and_refreshes_pushed_sha(self) -> None:
+    def test_daemon_arms_with_source_renews_lease_and_refreshes_pushed_sha(
+        self,
+    ) -> None:
         store_fixture_prs(self.db, "pr_open_ci_running.json")
         control = self.dir / "control.jsonl"
         seen_armed: list[dict[str, Any]] = []
@@ -1139,7 +1236,8 @@ class TestPackratMode(unittest.TestCase):
         self.assertEqual(seen_armed[0]["source"], "packrat")
         self.assertEqual(seen_armed[0]["packrat_db"], str(self.db.resolve()))
         self.assertEqual(
-            self.cli.by_command("refresh"), [["refresh", "--json", "--", "acme/widget#3339"]]
+            self.cli.by_command("refresh"),
+            [["refresh", "--json", "--", "acme/widget#3339"]],
         )
         self.assertEqual(len(self.cli.by_command("renew")), 0)  # stop came first
         self.assertEqual(len(self.cli.by_command("remove")), 1)  # lease released on exit
@@ -1149,6 +1247,23 @@ class TestPackratMode(unittest.TestCase):
         code, _, _ = self._run(["acme/widget#3339", "--events", "terminal", "--timeout", "650"])
         self.assertEqual(code, 2)
         self.assertEqual(len(self.cli.by_command("renew")), 2)  # at ~300 s and ~600 s
+
+    def test_redirected_repo_slug_is_canonicalized_before_packrat_watch_add(
+        self,
+    ) -> None:
+        store_fixture_prs(self.db, "pr_open_ci_running.json")
+        fake = FakeGh([("graphql", 0, load_fixture("pr_open_ci_running.json"), "")])
+        code, payload, _ = self._run(["--repo", "legacy/Widget", "3339", "--once"], fake)
+        self.assertEqual(code, 0)
+        assert payload is not None
+        self.assertEqual(list(payload["prs"]), ["acme/widget#3339"])
+        self.assertEqual(payload["prs"]["acme/widget#3339"]["repo"], "acme/widget")
+        add_calls = self.cli.by_command("add")
+        self.assertEqual(len(add_calls), 1)
+        self.assertEqual(add_calls[0][-2:], ["--", "acme/widget#3339"])
+        self.assertEqual(self.cli.by_command("refresh"), [])
+        saved = load_state(self.state_path)
+        self.assertEqual(list(saved.snapshots), ["acme/widget#3339"])
 
 
 if __name__ == "__main__":

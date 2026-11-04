@@ -208,11 +208,29 @@ def _extract_assignees(raw: dict[str, Any]) -> list[str]:
     return sorted({str(n["login"]) for n in nodes if isinstance(n, dict) and n.get("login")})
 
 
+def canonical_pr_repo(raw: dict[str, Any], fallback_repo: str | None = None) -> str:
+    """Returns the canonical ``owner/repo`` from a raw PR payload (`nameWithOwner` or `url`)."""
+    repo_node = raw.get("repository")
+    if isinstance(repo_node, dict):
+        name_with_owner = str(repo_node.get("nameWithOwner") or "").strip()
+        if name_with_owner:
+            return name_with_owner
+    url = str(raw.get("url") or "").strip()
+    if url:
+        try:
+            return parse_pr_ref(url)[0]
+        except ValueError:
+            pass
+    if fallback_repo:
+        return fallback_repo
+    raise ValueError("Cannot determine repository from PR payload")
+
+
 def normalize_pr(raw: dict[str, Any], viewer: str, repo: str | None = None) -> PrSnapshot:
     """Maps a GraphQL ``pullRequest`` node into a ``PrSnapshot``."""
     url = str(raw.get("url") or "")
     number = int(raw["number"])
-    resolved_repo = repo or parse_pr_ref(url)[0]
+    resolved_repo = canonical_pr_repo(raw, repo)
     author_obj = raw.get("author") if isinstance(raw.get("author"), dict) else {}
     author = str(author_obj.get("login") or "")
 

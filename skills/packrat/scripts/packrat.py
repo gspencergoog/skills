@@ -171,8 +171,14 @@ def _backfill_summary(repo: RepoConfig) -> dict[str, dict[str, Any]]:
 
 
 def _backfill_warnings(repo: RepoConfig) -> list[str]:
-    """Returns one warning per stream whose full history has not been fetched yet."""
+    """Returns one warning per stream whose full history has not been fetched yet.
+
+    `items` repositories never backfill (they hold only watched, notified, or
+    viewer items), so they get no warnings.
+    """
     warnings: list[str] = []
+    if not repo.is_mirror:
+        return warnings
     for stream in BACKFILL_STREAMS:
         state = repo.backfill(stream)
         if state.complete:

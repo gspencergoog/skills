@@ -225,6 +225,17 @@ class TestPackratCli(unittest.TestCase):
             )
             self.assertNotIn("Warning: issues", text)
 
+            store = packrat.PackratStore(Path(db_path))
+            try:
+                store.ensure_items_repo("other-org", "gadgets")
+            finally:
+                store.close()
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                self.assertEqual(packrat.main(["--db", db_path, "status"]), 0)
+            items_section = buf.getvalue().split("[other-org/gadgets]")[1]
+            self.assertNotIn("Warning:", items_section)
+
             buf = io.StringIO()
             with mock.patch("sys.stdout", buf):
                 self.assertEqual(packrat.main(["--db", db_path, "status", "--json"]), 0)

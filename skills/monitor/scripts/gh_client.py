@@ -23,6 +23,9 @@ fragment PrFields on PullRequest {
   number
   title
   url
+  repository {
+    nameWithOwner
+  }
   state
   isDraft
   merged

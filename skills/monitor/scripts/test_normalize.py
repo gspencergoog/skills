@@ -80,6 +80,20 @@ class TestNormalize(unittest.TestCase):
         resolve_stack_parents({s_child.key: s_child})
         self.assertIsNone(s_child.stack_parent)
 
+    def test_normalize_pr_prefers_canonical_name_with_owner_or_url_over_caller_repo(
+        self,
+    ) -> None:
+        payload = json.loads(load_fixture("pr_open_ci_running.json"))
+        raw = payload["data"]["pr0"]["pullRequest"]
+        snap_from_url = normalize_pr(raw, viewer="alice", repo="legacy/Widget")
+        self.assertEqual(snap_from_url.repo, "acme/widget")
+        self.assertEqual(snap_from_url.key, "acme/widget#3339")
+
+        raw_with_repo = {**raw, "repository": {"nameWithOwner": "canonical/widget"}}
+        snap_from_repo = normalize_pr(raw_with_repo, viewer="alice", repo="legacy/Widget")
+        self.assertEqual(snap_from_repo.repo, "canonical/widget")
+        self.assertEqual(snap_from_repo.key, "canonical/widget#3339")
+
 
 if __name__ == "__main__":
     unittest.main()

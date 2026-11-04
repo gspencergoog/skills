@@ -155,6 +155,7 @@ _WRITE_PREFIXES = (
 
 _DRY_RUN_READS: frozenset[str] = frozenset(
     {
+        "find_repo_by_node_id",
         "get_node_ids",
         "get_live_fetched_at",
         "get_pr_head_sha",
@@ -220,6 +221,13 @@ class DryRunStore:
         return RepoConfig(
             repo_id=0, owner=owner, name=name, full_name=full_name, mode=REPO_MODE_ITEMS
         )
+
+    def merge_repo_alias(
+        self, _alias_repo_id: int, canonical_full_name: str, *_args: Any, **_kwargs: Any
+    ) -> RepoConfig:
+        """Returns the canonical repository without mutating the database."""
+        owner, name = canonical_full_name.split("/", 1)
+        return self.ensure_items_repo(owner, name)
 
 
 class MirrorAdapter:

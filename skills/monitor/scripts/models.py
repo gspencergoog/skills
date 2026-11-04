@@ -174,12 +174,20 @@ class PrSnapshot:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PrSnapshot:
+        url = str(data["url"])
+        repo = str(data["repo"])
+        number = int(data["number"])
+        if url:
+            try:
+                repo, number = parse_pr_ref(url)
+            except ValueError:
+                pass
         return cls(
-            key=str(data["key"]),
-            number=int(data["number"]),
-            repo=str(data["repo"]),
+            key=pr_key(repo, number),
+            number=number,
+            repo=repo,
             title=str(data["title"]),
-            url=str(data["url"]),
+            url=url,
             author=str(data["author"]),
             mine=bool(data["mine"]),
             state=str(data["state"]),
@@ -300,17 +308,26 @@ class MonitorState:
             raise ValueError(
                 f"Unsupported state schema version {schema} (max supported: {SCHEMA_VERSION})"
             )
+        snapshots: dict[str, PrSnapshot] = {}
+        aliases: dict[str, str] = {}
+        for k, v in (data.get("snapshots") or {}).items():
+            snap = PrSnapshot.from_dict(v)
+            snapshots[snap.key] = snap
+            if str(k) != snap.key:
+                aliases[str(k)] = snap.key
+        rekey = lambda k: aliases.get(str(k), str(k))
+        reported = {
+            rekey(k): v for k, v in _parse_reported_threads(data.get("reported_threads")).items()
+        }
         return cls(
             schema=schema,
-            snapshots={
-                str(k): PrSnapshot.from_dict(v) for k, v in (data.get("snapshots") or {}).items()
-            },
+            snapshots=snapshots,
             notifications_last_modified=data.get("notifications_last_modified"),
             check_durations={
                 str(k): [int(x) for x in v] for k, v in (data.get("check_durations") or {}).items()
             },
-            pushed_shas={str(k): str(v) for k, v in (data.get("pushed_shas") or {}).items()},
-            reruns={str(k): [str(x) for x in v] for k, v in (data.get("reruns") or {}).items()},
-            reported_threads=_parse_reported_threads(data.get("reported_threads")),
+            pushed_shas={rekey(k): str(v) for k, v in (data.get("pushed_shas") or {}).items()},
+            reruns={rekey(k): [str(x) for x in v] for k, v in (data.get("reruns") or {}).items()},
+            reported_threads=reported,
             daemon=dict(data.get("daemon") or {}),
         )

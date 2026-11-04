@@ -1112,6 +1112,49 @@
     overlay.innerHTML = innerHtml;
   }
 
+  function doneOverlayHtml(color, title, detailsHtml, closeCopy) {
+    return `
+      <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
+        <h1 style="color: ${color}; margin-bottom: 16px;">${title}</h1>
+        <p>${detailsHtml}</p>
+        <p style="color: #8b949e; margin-top: 16px;">${closeCopy}</p>
+      </div>
+    `;
+  }
+
+  function submittedOverlayHtml(closeCopy, detailsHtml) {
+    return doneOverlayHtml('#3fb950', '✓ Review Submitted!', detailsHtml, closeCopy);
+  }
+
+  function abortedOverlayHtml(closeCopy) {
+    return doneOverlayHtml(
+      '#ff7b72', 'Review Aborted', 'No changes or comments were posted to GitHub.', closeCopy
+    );
+  }
+
+  // Returns the done page for a reconstituted frame whose session is no longer open
+  // (`_session_status` from dashboard_load or the launch tool), or null for a live session.
+  function terminalOverlayHtml(data) {
+    const status = data && data._session_status;
+    if (!status || status === 'open') return null;
+    const closeCopy = 'You can close this pane now.';
+    if (status === 'saved') {
+      const savedAt = data.saved_at ? ` at ${escapeHtml(data.saved_at)}` : '';
+      const savedTo = data.output_file
+        ? ` to <code>${escapeHtml(data.output_file)}</code>` : '';
+      return submittedOverlayHtml(closeCopy, `Review decisions were saved${savedAt}${savedTo}.`);
+    }
+    if (status === 'aborted') return abortedOverlayHtml(closeCopy);
+    if (status === 'superseded') {
+      return doneOverlayHtml(
+        '#8b949e', 'Review Replaced', 'This review was replaced by a newer one.', closeCopy
+      );
+    }
+    return doneOverlayHtml(
+      '#8b949e', 'No Active Review', 'No active review in this conversation.', closeCopy
+    );
+  }
+
   let activeFilters = {
     status: 'all',
     hunk: 'all'
@@ -1131,6 +1174,11 @@
       try {
         const loaded = await dashboardHost.load();
         if (seq !== initSeq) return;
+        const terminalHtml = terminalOverlayHtml(loaded);
+        if (terminalHtml) {
+          showDoneOverlay(terminalHtml);
+          return;
+        }
         reviewData = loaded;
       } catch (e) {
         if (seq !== initSeq) return;
@@ -2898,13 +2946,10 @@
       const closeCopy = dashboardHost.kind === 'mcp-app'
         ? 'You can close this pane now.'
         : 'You can now safely close this browser window.';
-      showDoneOverlay(`
-        <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
-          <h1 style="color: #3fb950; margin-bottom: 16px;">✓ Review Submitted!</h1>
-          <p>Your review decisions have been saved. The background process is submitting the batch review to GitHub.</p>
-          <p style="color: #8b949e; margin-top: 16px;">${closeCopy}</p>
-        </div>
-      `);
+      showDoneOverlay(submittedOverlayHtml(
+        closeCopy,
+        'Your review decisions have been saved. The background process is submitting the batch review to GitHub.'
+      ));
     } catch (e) {
       alert('Failed to save review decisions: ' + (e && e.message ? e.message : e));
     }
@@ -2918,13 +2963,7 @@
     const closeCopy = dashboardHost.kind === 'mcp-app'
       ? 'You can close this pane now.'
       : 'You can safely close this window.';
-    showDoneOverlay(`
-      <div style="max-width: 600px; margin: 100px auto; text-align: center; font-family: sans-serif; color: #c9d1d9;">
-        <h1 style="color: #ff7b72; margin-bottom: 16px;">Review Aborted</h1>
-        <p>No changes or comments were posted to GitHub.</p>
-        <p style="color: #8b949e; margin-top: 16px;">${closeCopy}</p>
-      </div>
-    `);
+    showDoneOverlay(abortedOverlayHtml(closeCopy));
   }
 
   function escapeHtml(str) {

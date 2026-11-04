@@ -371,6 +371,21 @@ def migrate_0005_quantized_embeddings(conn: sqlite3.Connection) -> None:
         )
 
 
+REPO_ALIASES_SQL = """
+CREATE TABLE IF NOT EXISTS repo_aliases (
+  alias_full_name TEXT PRIMARY KEY COLLATE NOCASE,
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_repo_aliases_repo_id ON repo_aliases(repo_id);
+"""
+
+
+def migrate_0006_repo_aliases(conn: sqlite3.Connection) -> None:
+    """Adds `repo_aliases` for repository rename and redirect resolution."""
+    _execute_script(conn, REPO_ALIASES_SQL)
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -379,6 +394,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (3, migrate_0003_check_run_keys),
     (4, migrate_0004_reader_indexes),
     (5, migrate_0005_quantized_embeddings),
+    (6, migrate_0006_repo_aliases),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
