@@ -7,11 +7,11 @@ description: >-
   (duckdb, packrat, context-indexer, rg, sem), concrete file-level changes, and
   per-track verification commands, checked by a plan linter and an optional
   independent review. Use when the user asks to plan, "create a plan", "make an
-  implementation plan", or runs /plan, when a brainstorm has settled on a
+  implementation plan", or runs /plan, when a design session has settled on a
   direction, when a task spans several files or a migration, or when the user
   wants steps laid out before code is written. Don't use for exploring options
-  before a direction is chosen, or for stakeholder-facing RFCs and design
-  documents (use proposal-writer).
+  before a direction is chosen (use design), or for stakeholder-facing RFCs
+  (use proposal-writer).
 ---
 
 # Implementation Plan
@@ -144,7 +144,7 @@ ______________________________________________________________________
 
 ## Relationship to Other Skills
 
-- Use [just-brainstorm](../just-brainstorm/SKILL.md) to explore candidate architectures, weigh tradeoffs interactively, and converge on a single-direction design spec before running `plan`.
+- Use [design](../design/SKILL.md) to explore candidate architectures, weigh tradeoffs interactively, and converge on a single-direction design spec before running `plan`.
 - Use [proposal-writer](../proposal-writer/SKILL.md) for stakeholder-facing RFCs and architecture documents ("why" and "what"), whereas `plan` produces the execution blueprint ("how").
 - Use [grill-me](../grill-me/SKILL.md) and the `genui` skill when requirements are underspecified or wave ordering needs interactive alignment (`wave_sequencer`, `decision_batch`, `assumption_ledger`).
 - Use [duckdb](../duckdb/SKILL.md), [packrat](../packrat/SKILL.md), [context-indexer](../context-indexer/SKILL.md), and [sem-semantic-info](../sem-semantic-info/SKILL.md) in Step 2 to query specs, repo history, diffs, and symbol blast radius with low token cost.

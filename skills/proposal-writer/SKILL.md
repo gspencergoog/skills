@@ -6,13 +6,13 @@ description: >-
   size and including non-goals, diagrams, an API review, and a self-critique
   pass. Use when the user asks for an RFC, stakeholder proposal, or formal
   design document for team or cross-team sign-off. Don't use for interactive
-  option exploration and in-session design convergence (use just-brainstorm) or
-  for the engineering execution plan with file-level steps (use plan).
+  option exploration and in-session design convergence (use design) or for the
+  engineering execution plan with file-level steps (use plan).
 ---
 
 # Writing technical proposals
 
-Use this skill to write formal, stakeholder-facing technical proposals and RFCs for human review and sign-off. For interactive design exploration, weighing candidate architectures, and converging an in-session design spec before `/plan`, use [just-brainstorm](../just-brainstorm/SKILL.md) instead.
+Use this skill to write formal, stakeholder-facing technical proposals and RFCs for human review and sign-off. For interactive design exploration, weighing candidate architectures, and converging an in-session design spec before `/plan`, use [design](../design/SKILL.md) instead.
 
 ## Choose the proposal depth
 
