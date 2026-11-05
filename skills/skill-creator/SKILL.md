@@ -227,7 +227,7 @@ Skip this step only when the skill's usage patterns are already clearly understo
 
 To create an effective skill, clearly understand concrete examples of how the skill will be used. This understanding can come from either direct user examples or generated examples that are validated with user feedback.
 
-If the user wants to convert an existing workflow from the current conversation or analyze execution transcripts for repeated code patterns across runs, consult the [conversation-auditor](../conversation-auditor/SKILL.md) skill.
+If the user wants to convert an existing workflow from the current conversation, inspect the session's recent tool calls and commands to extract repeated steps before drafting.
 
 For example, when building an image-editor skill, relevant questions include:
 

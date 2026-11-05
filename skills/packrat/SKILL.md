@@ -4,18 +4,13 @@ description: >-
   Synchronizes and queries a local multi-repository SQLite WAL, DuckDB v2.0, and
   offline 384-dim vector mirror of GitHub issues, pull requests, review threads,
   discussions, git commits, AST code symbols, and Markdown sections. Use when
-  searching across repositories with Reciprocal Rank Fusion (FTS5 BM25 + cosine
-  similarity), running SQL joins over PR review history and file churn, finding
-  collaboration history or co-reviewed PRs between engineers, building peer
-  feedback or performance-review digests, checking issue-to-PR links, or
-  syncing repository metadata via ETag and git diff-tree watermarks. Also runs
-  the background service (`packrat serve`) that keeps live PR state, checks,
-  reviews, and notifications current for readers such as /monitor and
-  inflight, through leases (`packrat watch`) and a change feed (`packrat
-  changes`). Don't use
-  for exact string or symbol lookups in an active worktree (use
-  unix-cli-best-practices or sem-semantic-info) or for posting GitHub reviews
-  (use pr-review).
+  running hybrid keyword + vector search (FTS5 BM25 + cosine RRF), joining PR
+  review history and file churn in SQL, finding collaboration history or peer
+  review digests, checking issue-to-PR links, syncing repository metadata via
+  ETag and git diff-tree watermarks, or running `packrat serve` (`watch`,
+  `changes`, `refresh`) for live PR readers such as /monitor and inflight. Don't
+  use for exact working-tree lookups (use unix-cli-best-practices or
+  sem-semantic-info) or for posting GitHub reviews (use pr-review).
 ---
 
 # Repository Knowledge Base (`packrat`)
@@ -43,13 +38,13 @@ The name comes from packrat middens: nests where packrats hoard material for tho
 Invoke the CLI via `packrat` (when on `PATH`) or directly through [scripts/packrat.py](scripts/packrat.py). Install `packrat` onto `PATH` (`~/.local/bin/packrat`) with `install-cli`.
 
 ```bash
-python3 agents/skills/packrat/scripts/packrat.py install-cli
+python3 <skill-dir>/scripts/packrat.py install-cli
 ```
 
 1. Check synchronization watermarks, local git worktree paths, last auto-sync health, and table counts.
 
    ```bash
-   python3 agents/skills/packrat/scripts/packrat.py status
+   python3 <skill-dir>/scripts/packrat.py status
    ```
 
    `status` also shows the service heartbeat age, the number of active leases per consumer, and the latest snapshot of the GitHub rate budget.
@@ -65,30 +60,30 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
    - When a tracked GitHub repository is transferred or renamed, run `repo rename` so existing rows and embeddings carry over without re-syncing.
 
    ```bash
-   python3 agents/skills/packrat/scripts/packrat.py repo list
-   python3 agents/skills/packrat/scripts/packrat.py repo add <owner>/<name> --path /path/to/checkout --branch main
-   python3 agents/skills/packrat/scripts/packrat.py repo set-path <owner>/<name> /path/to/checkout
-   python3 agents/skills/packrat/scripts/packrat.py repo rename <old-owner>/<old-name> <new-owner>/<new-name>
-   python3 agents/skills/packrat/scripts/packrat.py repo remove <owner>/<name>
+   python3 <skill-dir>/scripts/packrat.py repo list
+   python3 <skill-dir>/scripts/packrat.py repo add <owner>/<name> --path /path/to/checkout --branch main
+   python3 <skill-dir>/scripts/packrat.py repo set-path <owner>/<name> /path/to/checkout
+   python3 <skill-dir>/scripts/packrat.py repo rename <old-owner>/<old-name> <new-owner>/<new-name>
+   python3 <skill-dir>/scripts/packrat.py repo remove <owner>/<name>
    ```
 
 3. Run incremental synchronization. Polling `/repos/<owner>/<name>/events` with `ETag` costs 0 rate-limit points on `HTTP 304`. Modified items sync via GraphQL `UPDATED_AT DESC` watermarks, `git diff-tree`, and `content_sha256` embeddings.
 
    ```bash
    # Sync all registered repositories (exits 2 interactively if none exist or local_path is unset)
-   python3 agents/skills/packrat/scripts/packrat.py sync
+   python3 <skill-dir>/scripts/packrat.py sync
 
    # Sync only local git commits, AST symbols, and Markdown sections (0 network calls)
-   python3 agents/skills/packrat/scripts/packrat.py sync --repo <owner>/<name> --git-only
+   python3 <skill-dir>/scripts/packrat.py sync --repo <owner>/<name> --git-only
 
    # Sync only GitHub issues, PRs, reviews, and discussions (no local git checkout required)
-   python3 agents/skills/packrat/scripts/packrat.py sync --repo <owner>/<name> --github-only
+   python3 <skill-dir>/scripts/packrat.py sync --repo <owner>/<name> --github-only
 
    # Run only the backfill walks plus the git and embedding index steps (no incremental GitHub delta)
-   python3 agents/skills/packrat/scripts/packrat.py sync --backfill-only
+   python3 <skill-dir>/scripts/packrat.py sync --backfill-only
 
    # Skip the timeline event passes (for debugging or rollback)
-   python3 agents/skills/packrat/scripts/packrat.py sync --repo <owner>/<name> --github-only --no-timeline
+   python3 <skill-dir>/scripts/packrat.py sync --repo <owner>/<name> --github-only --no-timeline
    ```
 
    The service runs `sync --auto --backfill-only --fetch --json` as a low-priority child process, because its own mirror worker already fetches the incremental delta. `--backfill-only` takes `sync.lock` like any other sync run.
@@ -109,10 +104,10 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
 
    ```bash
    # Hybrid search across all chunk types in a repository
-   python3 agents/skills/packrat/scripts/packrat.py search "keyboard focus navigation" --repo <owner>/<name>
+   python3 <skill-dir>/scripts/packrat.py search "keyboard focus navigation" --repo <owner>/<name>
 
    # Filter by chunk kind, file path prefix, or issue/PR state
-   python3 agents/skills/packrat/scripts/packrat.py search "catalog component registration" \
+   python3 <skill-dir>/scripts/packrat.py search "catalog component registration" \
      --kind issue,pr,review_thread,code_symbol \
      --state OPEN \
      --json
@@ -121,7 +116,7 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
 5. Execute read-only DuckDB v2.0 analytical SQL over `kb.*` tables and `v_*` views.
 
    ```bash
-   python3 agents/skills/packrat/scripts/packrat.py sql "
+   python3 <skill-dir>/scripts/packrat.py sql "
      SELECT repo, file_path, commit_count, review_thread_count, unresolved_thread_count
      FROM v_file_hotspots
      WHERE repo = '<owner>/<name>'
@@ -136,13 +131,13 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
 
    ```bash
    # Run the service in the foreground (normally started by `packrat auto-sync on`)
-   python3 agents/skills/packrat/scripts/packrat.py serve
+   python3 <skill-dir>/scripts/packrat.py serve
 
    # Run one tick and exit, without spawning the backfill child
-   python3 agents/skills/packrat/scripts/packrat.py serve --once --json
+   python3 <skill-dir>/scripts/packrat.py serve --once --json
 
    # Record the GitHub calls one tick would make, without calling GitHub or writing to the database
-   python3 agents/skills/packrat/scripts/packrat.py serve --once --dry-run --json
+   python3 <skill-dir>/scripts/packrat.py serve --once --dry-run --json
    ```
 
    Only one service runs at a time. `serve` holds `<db_dir>/serve.lock` for its whole life and exits `4` with the holder PID when another service already holds it. The service takes `sync.lock` only around each mirror run and skips that run when a manual `packrat sync` or its backfill child holds the lock.
@@ -162,23 +157,23 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
 
    ```bash
    # Lease PRs for one consumer instance (defaults: --freshness 120, --ttl 900)
-   python3 agents/skills/packrat/scripts/packrat.py watch add --consumer monitor --id <conversation-hash> \
+   python3 <skill-dir>/scripts/packrat.py watch add --consumer monitor --id <conversation-hash> \
      --freshness 120 --ttl 900 <owner>/<name>#123 <owner>/<name>#124
 
    # Extend leases before the TTL lapses; with no ITEM, renew all of that consumer instance's leases
-   python3 agents/skills/packrat/scripts/packrat.py watch renew --consumer monitor --id <conversation-hash>
+   python3 <skill-dir>/scripts/packrat.py watch renew --consumer monitor --id <conversation-hash>
 
    # Drop leases; with no ITEM, remove all of that consumer instance's leases
-   python3 agents/skills/packrat/scripts/packrat.py watch remove --consumer monitor --id <conversation-hash> <owner>/<name>#124
+   python3 <skill-dir>/scripts/packrat.py watch remove --consumer monitor --id <conversation-hash> <owner>/<name>#124
 
    # Start following the feed: a --since above every seq returns {"reset": true, "seq": <max>}
-   python3 agents/skills/packrat/scripts/packrat.py changes --since 9007199254740991 --json
+   python3 <skill-dir>/scripts/packrat.py changes --since 9007199254740991 --json
 
    # Read changes after a sequence number, waiting up to 30 seconds for a new row (default --limit 500)
-   python3 agents/skills/packrat/scripts/packrat.py changes --since <seq> --wait 30 --json
+   python3 <skill-dir>/scripts/packrat.py changes --since <seq> --wait 30 --json
 
    # Ask the service to refresh items now, for example right after a push
-   python3 agents/skills/packrat/scripts/packrat.py refresh <owner>/<name>#123
+   python3 <skill-dir>/scripts/packrat.py refresh <owner>/<name>#123
    ```
 
    `watch` accepts `--json`. Item keys are `owner/name#number` and match repository names case-insensitively. Leasing a PR in a repository nobody registered creates an `items` repository (see [Repository modes](#repository-modes)).
@@ -195,19 +190,19 @@ python3 agents/skills/packrat/scripts/packrat.py install-cli
 
    ```bash
    # Check the service or timer state and last run outcome (also shown in `packrat status`)
-   python3 agents/skills/packrat/scripts/packrat.py auto-sync status
+   python3 <skill-dir>/scripts/packrat.py auto-sync status
 
    # Install and start the long-running service (packrat.service), and stop the old timer if present
-   python3 agents/skills/packrat/scripts/packrat.py auto-sync on
+   python3 <skill-dir>/scripts/packrat.py auto-sync on
 
    # Roll back to the periodic sync timer (packrat-sync.timer), and stop the service
-   python3 agents/skills/packrat/scripts/packrat.py auto-sync on --timer
+   python3 <skill-dir>/scripts/packrat.py auto-sync on --timer
 
    # Timer mode only: update the interval or toggle remote git fetches
-   python3 agents/skills/packrat/scripts/packrat.py auto-sync on --timer --interval-min 15 --no-fetch
+   python3 <skill-dir>/scripts/packrat.py auto-sync on --timer --interval-min 15 --no-fetch
 
    # Stop and remove both the service and the timer
-   python3 agents/skills/packrat/scripts/packrat.py auto-sync off
+   python3 <skill-dir>/scripts/packrat.py auto-sync off
    ```
 
    `packrat auto-sync on` is idempotent. It doesn't rewrite or restart a unit that is already active and unchanged. Concurrent manual and background syncs coordinate through `<db_dir>/sync.lock`, where background `--auto` runs exit `0` (`skipped_locked`) if another sync holds the lock. When the OS keyring is locked, `--auto` skips GitHub calls, indexes local git commits and embeddings, records `degraded_keyring_locked`, and exits `0`.
@@ -240,12 +235,12 @@ A `packrat sync` run that stops because of the budget saves its cursors, lists t
 The test modules import their sibling modules by name, so run them from the scripts directory:
 
 ```bash
-cd agents/skills/packrat/scripts
+cd <skill-dir>/scripts
 python3 -m unittest discover -p "test_*.py"   # the whole suite
 python3 -m unittest test_viewer_sync          # one module
 ```
 
-The repository-root form `python3 -m unittest agents/skills/packrat/scripts/test_x.py` fails with `ModuleNotFoundError`.
+The repository-root form `python3 -m unittest <skill-dir>/scripts/test_x.py` fails with `ModuleNotFoundError`.
 
 ## Security and Operational Guardrails
 

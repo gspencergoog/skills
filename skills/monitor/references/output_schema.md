@@ -24,7 +24,7 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--no-a2ui` | `false` | Disable writing `board.a2ui` and the A2UI Pane board file |
 | `--a2ui-file FILE` | `<state-dir>/board.a2ui` | Path to write the `stack_board` A2UI Express DSL file |
 | `--conversation-id ID` | none | Target Jetski conversation ID for direct A2UI Pane store updates (`conversations/<ID>/monitor.jsonl`) |
-| `--a2ui-store-dir DIR` | First existing of `$A2UI_PANE_DATA`, `$PLUGIN_DATA`, `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/a2ui-pane`, or `~/.gemini/jetski/plugin_data/a2ui-pane` | Override the `a2ui-pane` plugin data directory |
+| `--a2ui-store-dir DIR` | First existing of `$A2UI_PANE_DATA`, `$PLUGIN_DATA`, or `$ANTIGRAVITY_APP_DATA_DIR/plugin_data/a2ui-pane` (falling back to the host default plugin data dir) | Override the `a2ui-pane` plugin data directory |
 | `--log FILE` | none | Append each emitted JSON payload as one line to this JSONL file |
 | `--output FILE` | none | Write the emitted JSON payload to this file in addition to `stdout` |
 | `--pushed-sha PR=SHA` | repeatable | Record a commit SHA pushed by the agent so `head_push` is suppressed for that SHA |
@@ -36,6 +36,8 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--notify-scope SCOPE` | `mine` | Which pull request events trigger conversation notifications: `mine` (viewer PRs + terminal) or `all` |
 | `--source MODE` | `auto` | Data source: `packrat` (read a running `packrat serve`), `github` (poll GitHub directly), or `auto` (`packrat` when its heartbeat is fresh, else `github`) |
 | `--packrat-db FILE` | `~/.local/share/packrat/repos.sqlite` | `packrat` database to read in `packrat` mode |
+
+Direct GitHub polling (`--source github` or fallback) uses `gh` with a standard `repo`-scoped token; no extra `notifications` scope is needed.
 
 ## 2. Exit Codes and Precedence
 
@@ -172,7 +174,7 @@ Example:
 
 ### Monitored Checks and Conclusions
 
-GitHub repositories frequently run test and lint workflows (`python-ci`, `python-performance`, changelog or PR health checks) that are not listed in branch-protection rulesets (`isRequired: false`), yet their failure sets `statusCheckRollup.state` to `FAILURE`. `PrSnapshot.effective_required_checks()` therefore includes all checks on the pull request so `required_summary()`, `ALL_GREEN`, `_ci_badge()`, and `_detail_bullets()` always agree with GitHub's rollup state. Cancelled check runs (`conclusion: "CANCELLED"`) are treated as neutral rather than failed so superseded runs do not emit false failure alerts.
+GitHub repositories frequently run test and lint workflows (`python-ci`, `python-performance`, changelog or PR health checks) that are not listed in branch-protection rulesets (`isRequired: false`), yet their failure sets `statusCheckRollup.state` to `FAILURE`. `PrSnapshot.effective_required_checks()` therefore includes all checks on the pull request so `required_summary()`, `ALL_GREEN`, `_ci_badge()`, and `_detail_bullets()` always agree with GitHub's rollup state. Cancelled check runs (`conclusion: "CANCELLED"`) are treated as neutral rather than failed so superseded runs do not emit false failure alerts. External status checks that do not run on GitHub Actions set `run_id` to `null`.
 
 ## 5. State File Layout (`--state`)
 
@@ -185,10 +187,3 @@ The state file is written atomically (`tmp` + `os.replace`) and holds:
 - `pushed_shas`: map of `owner/repo#N` to the last commit SHA pushed by the agent.
 - `reruns`: map of `owner/repo#N` to `["<check>@<head_sha>", ...]` tokens already rerun.
 - `reported_threads`: map of `owner/repo#N` to `{thread_id: last_comment_at}` watermarks recorded after each successful `emit`. Entries for merged or closed pull requests are pruned automatically.
-
-## 6. API Verification Note
-
-Verified live on `2026-10-27` against `a2ui-project/a2ui#3684` (`X-GitHub-Api-Version-Selected: 2022-11-28`):
-
-- GraphQL `CheckRun.isRequired(pullRequestNumber:)`, `StatusContext.isRequired(pullRequestNumber:)`, `CheckRun.checkSuite.workflowRun.databaseId`, `latestOpinionatedReviews`, and `commit.committer.user.login` all resolve with a standard `repo`-scoped token. External check runs such as `cla/google` return `checkSuite.workflowRun: null`.
-- `GET /notifications?per_page=50&all=true` accepts the `repo` token scope, includes `ci_activity` notifications, and returns `HTTP/2.0 304 Not Modified` with `X-Poll-Interval: 60` when `If-Modified-Since` matches the previous `Last-Modified` header.

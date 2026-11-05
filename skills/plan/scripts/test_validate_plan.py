@@ -349,23 +349,6 @@ None.
         errors = [issue for issue in validator.validate() if issue.is_error]
         self.assertEqual(errors, [])
 
-    def test_dogfood_plan_skill_ux_plan(self) -> None:
-        plan_path = Path(
-            "/usr/local/google/home/gspencer/.gemini/jetski/brain/"
-            "0322f57a-2164-4c8a-ab76-e11d9315cf05/plan_skill_ux_plan.md"
-        )
-        if not plan_path.exists():
-            self.skipTest("plan_skill_ux_plan.md artifact not present on disk")
-        worktree = Path("/usr/local/google/home/gspencer/code/cheats-plan-ux")
-        ws = worktree if worktree.is_dir() else Path(__file__).resolve().parents[4]
-        validator = PlanValidator(
-            plan_path.read_text(encoding="utf-8"),
-            workspace_dir=ws,
-        )
-        issues = validator.validate()
-        errors = [issue for issue in issues if issue.is_error]
-        self.assertEqual(errors, [])
-
     def test_at_a_glance_missing_or_not_first_or_over_budget_is_error(self) -> None:
         no_glance = VALID_PLAN.replace("## At a glance\n", "## Overview\n")
         errors = [i for i in PlanValidator(no_glance).validate() if i.is_error]

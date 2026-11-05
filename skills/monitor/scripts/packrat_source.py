@@ -1,7 +1,7 @@
 """Reads live pull request data for /monitor from a running `packrat serve`.
 
 This module follows the packrat reader contract
-(`agents/skills/packrat/references/reader_contract.md`) and never imports packrat
+(`packrat/references/reader_contract.md`) and never imports packrat
 code. It reads the contract's SQLite views through a read-only connection
 (`file:<db>?mode=ro`) and writes only through the `packrat` CLI: `watch` leases,
 `refresh` requests, and the `changes` feed.

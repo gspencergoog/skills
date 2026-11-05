@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for agents/skills/context-indexer/scripts/staged_diff_macros.sql."""
+"""Unit tests for staged_diff_macros.sql."""
 
 from __future__ import annotations
 

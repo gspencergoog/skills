@@ -1,6 +1,6 @@
 -- Relational Staged Markdown Macros for DuckDB (Layer 2)
--- Load with: duckdb -batch -dark-mode -init agents/skills/context-indexer/scripts/staged_md_macros.sql
--- Queries JSONL tables emitted by agents/skills/context-indexer/scripts/stage_markdown.py
+-- Load with: duckdb -batch -dark-mode -init <skill-dir>/scripts/staged_md_macros.sql
+-- Queries JSONL tables emitted by <skill-dir>/scripts/stage_markdown.py
 
 -- 1. Read staged md_sections.jsonl emitted by stage_markdown.py
 CREATE OR REPLACE MACRO staged_md_sections(md_dir) AS TABLE

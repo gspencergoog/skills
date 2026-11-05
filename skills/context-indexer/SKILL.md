@@ -8,7 +8,7 @@ description: >-
   staged_md_macros.sql). Use when splitting a diff (> 150 lines) or spec (> 500
   lines) into chunks, ranking modified functions by churn, detecting signature
   drift or untested changes, querying Markdown tables, frontmatter, or sections
-  across docs and conversation artifacts (brain/*/*.md), extracting RFC 2119
+  across docs and session artifacts, extracting RFC 2119
   statements, or checking broken file and #anchor links. Flags: --grouped,
   --with-entities, --split-chunks. Don't use for single-pattern text searches
   (use unix-cli-best-practices).
@@ -27,11 +27,11 @@ Choose the lightest tool that fits the file size and query structure:
 | Artifact & Size | Recommended Tool | Why |
 | :--- | :--- | :--- |
 | Single-line pattern in working tree | `rg -n` and `fd` | Runs in under 5 ms when code-fence state, section hierarchy, and hunk line numbers do not matter. |
-| Searching past conversations (`transcript.jsonl` + `conversation_summaries.db`) | `skills/duckdb` (`ATTACH ... TYPE SQLITE` + `read_json`) | Joins `transcript.jsonl` matches (`content` and `tool_calls`) with top-level conversation titles in a single SQL query without staging files. |
+| Searching past conversations (`transcript.jsonl` + `conversation_summaries.db`) | [duckdb](../duckdb/SKILL.md) (`ATTACH ... TYPE SQLITE` + `read_json`) | Joins `transcript.jsonl` matches (`content` and `tool_calls`) with top-level conversation titles in a single SQL query without staging files. |
 | Single Markdown file `< 350` lines (`< 15 KB`) | `read_file` (`view_file`) | One call loads the entire document in 1,500 to 3,500 tokens. |
-| Markdown file `>= 350` lines or `10+` files (section outlines & code blocks across docs or `brain/*/*.md` artifacts) | Pure-SQL `skills/duckdb/scripts/markdown_macros.sql` (`read_md_sections`, `read_md_code_blocks`) | Indexes ATX headings and 3/4/5-backtick code fences in 70 to 320 ms without staging files. |
-| Markdown spec `> 500` lines, pipe tables, YAML frontmatter, Setext headings, `#anchor` link checks, or `brain/*/*.md` artifact tables | [scripts/stage_markdown.py](scripts/stage_markdown.py) + [scripts/staged_md_macros.sql](scripts/staged_md_macros.sql) | Extracts keyed JSON table cells, multi-line YAML frontmatter, RFC 2119 statements, broken `#anchor` links, and size-bounded `md_chunk_NN.md` chunks. |
-| Raw unified diff (`<= 500` lines, line/hunk filtering only) | Pure-SQL `skills/duckdb/scripts/diff_macros.sql` (`read_diff_lines`, `read_diff_hunks`) | Streams `git diff` over `/dev/stdin` with zero disk staging. |
+| Markdown file `>= 350` lines or `10+` files (section outlines & code blocks across docs or `<conversation-artifact-dir>/../*/*.md` artifacts) | Pure-SQL [../duckdb/scripts/markdown_macros.sql](../duckdb/scripts/markdown_macros.sql) (`read_md_sections`, `read_md_code_blocks`) | Indexes ATX headings and 3/4/5-backtick code fences in 70 to 320 ms without staging files. |
+| Markdown spec `> 500` lines, pipe tables, YAML frontmatter, Setext headings, `#anchor` link checks, or `<conversation-artifact-dir>/../*/*.md` artifact tables | [scripts/stage_markdown.py](scripts/stage_markdown.py) + [scripts/staged_md_macros.sql](scripts/staged_md_macros.sql) | Extracts keyed JSON table cells, multi-line YAML frontmatter, RFC 2119 statements, broken `#anchor` links, and size-bounded `md_chunk_NN.md` chunks. |
+| Raw unified diff (`<= 500` lines, line/hunk filtering only) | Pure-SQL [../duckdb/scripts/diff_macros.sql](../duckdb/scripts/diff_macros.sql) (`read_diff_lines`, `read_diff_hunks`) | Streams `git diff` over `/dev/stdin` with zero disk staging. |
 | Diff `> 150` lines (chunking) or `> 500` lines (AST entity churn, signature drift, untested functions) | [scripts/stage_diffs.py](scripts/stage_diffs.py) + [scripts/staged_diff_macros.sql](scripts/staged_diff_macros.sql) | Packs hunks into `diff_chunk_NN.diff` files (`<= 35 KB`, `<= 700` lines) and range-joins modified lines to enclosing AST functions and classes. |
 
 Always pass `-batch -dark-mode` when invoking `duckdb` in non-interactive

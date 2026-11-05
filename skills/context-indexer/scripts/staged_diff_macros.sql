@@ -1,6 +1,6 @@
 -- Relational Staged Diff Macros for DuckDB (Layer 2 & Layer 3)
--- Load with: duckdb -batch -dark-mode -init agents/skills/context-indexer/scripts/staged_diff_macros.sql
--- Queries JSONL tables emitted by agents/skills/context-indexer/scripts/stage_diffs.py --grouped
+-- Load with: duckdb -batch -dark-mode -init <skill-dir>/scripts/staged_diff_macros.sql
+-- Queries JSONL tables emitted by <skill-dir>/scripts/stage_diffs.py --grouped
 
 -- 1. Layer 2: Read staged diff_lines.jsonl emitted by stage_diffs.py --grouped
 CREATE OR REPLACE MACRO staged_diff_lines(diff_dir) AS TABLE

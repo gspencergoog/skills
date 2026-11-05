@@ -35,7 +35,7 @@ Analyze the differences between the current branch and the main branch and const
 
    - Draft a well-written pull request description following the guidelines and mandatory structure below.
    - Follow the Two-Pass Drafting Protocol in [`write-prose`](../write-prose/SKILL.md) to audit the draft for banned words, fluff, and sentence length before saving.
-   - Write the description to your temporary scratch area (`<appDataDir>/brain/<conversation-id>/scratch/`) as a Markdown file.
+   - Write the description to your temporary scratch area (`<conversation-scratch-dir>/`) as a Markdown file.
    - If the PR already exists, update the PR body using the GitHub CLI command:
      `env -u GITHUB_TOKEN gh pr edit --body-file <file>`
    - Avoid hashtag notation when not intending to reference a GitHub issue or PR (for example, "Step #1" or "UAX #31"), because GitHub auto-links these to unrelated issues or PRs. Either reword to omit the hashtag (e.g., "Step 1") or enclose the hashtag in backticks (e.g., "UAX `#31`").

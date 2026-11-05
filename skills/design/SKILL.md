@@ -58,7 +58,7 @@ Write the design artifact in the session artifact directory (`<conversation-arti
 
 1. Open with an `At a Glance` block (`<= 80` words) stating the problem, hard constraints, and recommended synthesis.
 2. Summarize the current baseline with clickable `[basename](file:///...)` links, then list 2 to 4 explicit `Non-Goals`. Dismiss unviable strawman options in 1 to 2 sentences under `Non-Goals` instead of giving them full option sections.
-3. Present 2 to 4 viable options (or orthogonal design axes) with one `flowchart` or `sequenceDiagram` per distinct architecture (`mermaid-diagrams`) and **one** unified comparison table. Never repeat the same tradeoffs in both prose bullets and a separate Pros/Cons table.
+3. Present 2 to 4 viable options (or orthogonal design axes) with one `flowchart` or `sequenceDiagram` per distinct architecture ([mermaid-diagrams](../mermaid-diagrams/SKILL.md)) and **one** unified comparison table. Never repeat the same tradeoffs in both prose bullets and a separate Pros/Cons table.
 4. When 2 or more open decisions exist, pair the artifact link with an interactive decision surface instead of trailing prose questions:
    - When `render_a2ui` is available (`a2ui-pane`), read `genui` and call `a2ui_instructions` once per session. Treat named templates (`consequence_cards`, `comparison_matrix`, `decision_batch`) and improvised A2UI Express (`dsl` without `template`, such as axis mixers, `Tabs`, or `Slider` tuners) as co-equal peers.
    - Use `"multipleSelection"` chips or separate per-axis pickers whenever options can combine into a hybrid.
@@ -82,7 +82,7 @@ Once decisions arrive on an architectural or feature session, update the **same*
 
 ## Relationship to Other Skills
 
-- Use `grill-me` for targeted alignment interviews on an existing task or mid-flight pivot when a full design exploration artifact is unnecessary.
+- Use [grill-me](../grill-me/SKILL.md) for targeted alignment interviews on an existing task or mid-flight pivot when a full design exploration artifact is unnecessary.
 - Use [proposal-writer](../proposal-writer/SKILL.md) when writing a formal RFC or stakeholder review document for external human sign-off rather than interactive session design discovery.
 - Use [plan](../plan/SKILL.md) once Phase 3 converges on a direction and you need file-level `[NEW]` / `[MODIFY]` tasks, parallel execution waves, and verification gates.
-- Use `what-if` when evaluating the blast radius and migration cost of one specific proposed change rather than comparing open design alternatives.
+- Do not use this workflow when evaluating the read-only blast radius and migration cost of one already-chosen change rather than comparing open design alternatives.

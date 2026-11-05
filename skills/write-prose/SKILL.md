@@ -20,8 +20,8 @@ description: >-
 > **WORKSPACE HYGIENE & FILE LOCATION RULES**
 >
 > - Never create temporary draft files or scratch markdown in the project repository root or source directories.
-> - Store intermediate drafts, multi-pass review files, or scratch notes in the conversation scratch directory: `<appDataDir>/brain/<conversation-id>/scratch/`.
-> - Write persistent, user-facing markdown reports or documents to the conversation artifacts directory: `<appDataDir>/brain/<conversation-id>/`.
+> - Store intermediate drafts, multi-pass review files, or scratch notes in the conversation scratch directory: `<conversation-scratch-dir>/`.
+> - Write persistent, user-facing markdown reports or documents to the conversation artifacts directory: `<conversation-artifact-dir>/`.
 
 This skill is the central source of truth for clear, plain, accessible, and natural human writing across technical and non-technical documents.
 

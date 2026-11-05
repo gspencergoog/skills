@@ -38,8 +38,8 @@ PLAN_WITH_QUESTIONS = """# Improve the widget
 
 | # | Repo | Commit | Wave |
 | ---: | :--- | :--- | :--- |
-| 1 | cheats | `feat: add cache` | 1 |
-| 2 | a2ui-pane | `feat: wire cache` | 2 |
+| 1 | backend | `feat: add cache` | 1 |
+| 2 | frontend | `feat: wire cache` | 2 |
 
 ## User Review Required
 
@@ -221,8 +221,8 @@ class OverviewSurfaceTest(unittest.TestCase):
         self.assertIn("flowchart LR", dsl)
         self.assertIn("Track 2A: Reader", dsl)
         self.assertNotIn("modeTone", dsl)
-        self.assertIn('repo: "cheats"', dsl)
-        self.assertIn('repo: "a2ui-pane"', dsl)
+        self.assertIn('repo: "backend"', dsl)
+        self.assertIn('repo: "frontend"', dsl)
 
     def test_overview_without_pr_table(self):
         doc = parse_plan(PLAN_ZERO_QUESTIONS)
@@ -261,14 +261,14 @@ class OverviewSurfaceTest(unittest.TestCase):
             "- **Biggest risk:** `plan_model.py` rejects legacy files.\n\n"
             "### PRs\n\n"
             "| # | Repo | PR / Commit | Wave |\n| :--- | :--- | :--- | :--- |\n"
-            "| 1 | `cheats` | `feat: add parser` | 2 (2A to 2C) |\n"
+            "| 1 | `backend` | `feat: add parser` | 2 (2A to 2C) |\n"
             "| 2 | | Add `foo` and `bar` | Wave 3 |\n"
         )
         dsl = plan_surfaces.render_overview(doc)
         self.assertIn('value: "Make briefs easier to scan."', dsl)
         self.assertIn('value: "`plan_model.py` rejects legacy files."', dsl)
         self.assertIn(
-            '{id: "1", title: "feat: add parser", repo: "cheats · 2A to 2C", wave: "Wave 2"}',
+            '{id: "1", title: "feat: add parser", repo: "backend · 2A to 2C", wave: "Wave 2"}',
             dsl,
         )
         self.assertIn(

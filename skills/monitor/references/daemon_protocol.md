@@ -1,6 +1,6 @@
 # Daemon Mode Protocol (`--daemon`)
 
-This document defines the persistent daemon protocol used by `/monitor` and `/monitor-cls`.
+This document defines the persistent daemon protocol used by `/monitor`.
 
 ## Overview
 
@@ -14,7 +14,7 @@ In daemon mode (`--daemon`), the monitor process does not terminate when actiona
 
 ## State Directory Files
 
-All daemon files are located in the state directory (e.g. `<scratch>/monitor/` or `<scratch>/monitor-cls/`):
+All daemon files are located in the state directory (e.g. `<conversation-scratch-dir>/monitor/`):
 
 | File | Writer | Purpose |
 | :--- | :--- | :--- |
@@ -45,19 +45,13 @@ Signals that the agent has received and begun handling batch `1`. Older or equal
 Records a commit SHA pushed by the agent so the subsequent `head_push` event is suppressed.
 In `packrat` mode the daemon also runs `packrat refresh` for that pull request, so the new head shows up without waiting for a signal.
 
-### 3. Suppressing Self-Uploaded Snapshots (CL Monitor)
-```json
-{"uploaded_snapshot": {"cl/123456": 4}}
-```
-Records a snapshot version uploaded by the agent so self-triggered snapshot updates are suppressed.
-
-### 4. Marking CI Reruns
+### 3. Marking CI Reruns
 ```json
 {"mark_rerun": ["owner/repo#123=test-check@c0ffee"]}
 ```
 Records a flaky check rerun performed by the agent.
 
-### 5. Stopping the Daemon
+### 4. Stopping the Daemon
 ```json
 {"stop": true}
 ```
@@ -80,7 +74,7 @@ When `/monitor` reads from `packrat serve` (`--source auto` with a fresh heartbe
 | `0` | `stopped` | Clean exit requested via `{"stop": true}`. `armed.json` removed. | None (monitor stopped). |
 | `1` | `error` | Startup error or consecutive API errors exhausted backoff. | Inspect stderr and notify user. |
 | `2` | `timeout` | `--timeout` elapsed with no events. | Ask user whether to keep watching. |
-| `3` | `terminal` | All watched items reached terminal state (`--until`). | Announce completion (`convo --resume`). |
+| `3` | `terminal` | All watched items reached terminal state (`--until`). | Announce completion (and run `convo --resume` if `convo` is on `PATH`). |
 | `4` | `already_running` | Another process holds `daemon.lock`. | Do not start a duplicate daemon. |
 | `130` / `143` | (none) | `SIGINT` / `SIGTERM` received. State and `armed.json` preserved. | Watchdog will nag to relaunch after restart. |
 

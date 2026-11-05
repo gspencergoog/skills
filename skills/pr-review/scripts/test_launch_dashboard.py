@@ -128,7 +128,7 @@ class TestLaunchDashboard(unittest.TestCase):
         self.findings_file.write_text(
             json.dumps(
                 {
-                    "pr_meta": {"pull_number": 2907, "owner": "a2ui-project"},
+                    "pr_meta": {"pull_number": 2907, "owner": "octo-org"},
                     "head_sha": "010d93e",
                     "verdict": "REQUEST_CHANGES",
                     "summary_comment": "Overall fine.",
@@ -139,7 +139,7 @@ class TestLaunchDashboard(unittest.TestCase):
         )
         meta_file = self.tmp_path / "pr_meta.json"
         meta_file.write_text(
-            json.dumps({"repo": "a2ui", "title": "fix: thing", "pull_number": 1}),
+            json.dumps({"repo": "widgets", "title": "fix: thing", "pull_number": 1}),
             encoding="utf-8",
         )
         ReviewDashboardHandler.meta_file = meta_file
@@ -149,7 +149,7 @@ class TestLaunchDashboard(unittest.TestCase):
         data = json.loads(body)
         meta = data["pr_metadata"]
         self.assertEqual(meta["pull_number"], 2907)  # findings file wins
-        self.assertEqual(meta["repo"], "a2ui")  # filled from meta file
+        self.assertEqual(meta["repo"], "widgets")  # filled from meta file
         self.assertEqual(meta["title"], "fix: thing")
         self.assertEqual(meta["head_sha"], "010d93e")
         self.assertEqual(

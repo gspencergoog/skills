@@ -227,7 +227,7 @@ def build_comments_payload(data_dir, proposals_file=None, project_dir="."):
 
 
 class DashboardHandler(http.server.BaseHTTPRequestHandler):
-    data_dir = os.path.expanduser("~/.gemini/jetski/scratch")
+    data_dir = os.path.expanduser("~/.gemini/scratch")
     project_dir = "."
     git_dir = None
     proposals_file = None
@@ -594,7 +594,7 @@ def main():
     
     import argparse
     parser = argparse.ArgumentParser(description="Launch PR feedback dashboard.")
-    parser.add_argument("--data-dir", default="~/.gemini/jetski/scratch", help="Directory to read/write comments and decisions.")
+    parser.add_argument("--data-dir", default="~/.gemini/scratch", help="Directory to read/write comments and decisions.")
     parser.add_argument("--project-dir", default=".", help="Path to the target codebase/repository directory.")
     parser.add_argument("--allow-dirty", action="store_true", help="Allow launching dashboard even if workspace has uncommitted changes to tracked files.")
     parser.add_argument("--mode", choices=["auto", "web", "artifact", "auto-approve"], default="auto", help="Execution mode: auto (default), web, artifact, or auto-approve.")

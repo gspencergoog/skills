@@ -23,7 +23,7 @@
     },
     {
       "id": "context_indexer_task_3_artifact_tables",
-      "prompt": "Using the context-indexer skill, how can I stage and query pipe tables across past conversation Markdown artifacts ('~/.gemini/jetski/brain/*/*.md') as keyed JSON rows with DuckDB?",
+      "prompt": "Using the context-indexer skill, how can I stage and query pipe tables across past conversation Markdown artifacts ('<conversation-artifact-dir>/../*/*.md') as keyed JSON rows with DuckDB?",
       "expected_chat_output": [
         "References running 'scripts/stage_markdown.py' with '--output-dir' over the Markdown files.",
         "References loading 'scripts/staged_md_macros.sql' into 'duckdb -batch -dark-mode' and querying 'staged_md_tables'."

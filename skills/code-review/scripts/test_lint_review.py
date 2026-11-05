@@ -513,12 +513,12 @@ Verdict: Minor revisions needed.
             "Minor doc fix.": "Minor doc fix.",
             # Exact user repro with Ring 3, file:// links, Citation audit, Flags, and Pre-Execution Security Gate.
             "🛡️ Ring Classification: Ring 3 (Shared Libraries & Public Contracts) -> Review Level: Panel (`--panel`)\n\n"
-            "This change fixes [#3485](https://github.com/a2ui-project/a2ui/issues/3485) by updating "
+            "This change fixes [#3485](https://github.com/octo-org/widgets/issues/3485) by updating "
             "[`prepareRef`](file:///tmp/pr-review-bfp9czs1/typescript/core/web_core/scripts/zod-generator-core.mjs#L245-L295) "
             "in [zod-generator-core.mjs](file:///tmp/pr-review-bfp9czs1/typescript/core/web_core/scripts/zod-generator-core.mjs#L185-L234).\n\n"
             "Citation audit: 2 checked, 0 dropped (`M2` from Lane A was filtered out). "
             "Flags: `--panel` (Ring 3 auto-scaled). Pre-Execution Security Gate: `SAFE_FOR_LOCAL_EXECUTION`.\n\n"
-            "Verdict: Ready": "This change fixes [#3485](https://github.com/a2ui-project/a2ui/issues/3485) by updating "
+            "Verdict: Ready": "This change fixes [#3485](https://github.com/octo-org/widgets/issues/3485) by updating "
             "`prepareRef` in `zod-generator-core.mjs`.",
             # Tier 1a/1b limit, skipped security gate, clean check, and Flags: none / *(none)* / Flags in effect.
             "Refactors X. `--verify` limited to tier 1a/1b: PR author is not a repo collaborator. "

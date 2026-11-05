@@ -19,7 +19,7 @@ Before drafting a plan, the agent rendered **"Express number literals: four deci
 ### Good Example
 
 - When scope is clear, ask nothing before drafting. Write the plan artifact with `### Q1` to `### Q4` under `## Open Questions`, present the brief, and render the post-plan worksheet.
-- When scope is blocked, ask one plain question before drafting: *"Should this change update only `~/code/cheats`, or also sync to the public `skills` repository?"*
+- When scope is blocked, ask one plain question before drafting: *"Should this change target only the CLI package, or also update the web client?"*
 
 ______________________________________________________________________
 

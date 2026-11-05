@@ -462,7 +462,7 @@ def find_skill_md_files(target: Path) -> List[Path]:
     """Finds all SKILL.md files given a file or directory target.
 
     Directory scans skip skills whose directory is a symlink: those point at
-    skills maintained elsewhere (for example a google3 checkout), and this
+    skills maintained elsewhere (for example a large monorepo checkout), and this
     linter's house rules do not apply to them. A symlinked skill passed
     directly as the target is still linted.
     """

@@ -94,7 +94,7 @@ Suggested on `human_threads` or when `review_decision` becomes `CHANGES_REQUESTE
 
 Suggested when a pull request has `review_decision == "APPROVED"` and all required checks pass:
 
-1. Inform the user that the pull request is green and ready to merge, and include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)`.
+1. Inform the user that the pull request is green and ready to merge (and include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` when `a2ui-pane` is installed).
 2. Do not merge the pull request or enable auto-merge unless the user explicitly asks you to do so.
 3. Stop the daemon if monitoring is no longer needed:
    ```bash

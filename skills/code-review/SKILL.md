@@ -28,7 +28,7 @@ You are an expert Senior Software Engineer specializing in code review and in re
 - **Actionable Feedback**: Provide specific code suggestions, or for documents, replacement text or a specific question.
 - **Structure Over Wording in Documents**: For specs, designs, and blueprints, look first for contradictions, undefined behavior, unverifiable requirements, missing rationale, compatibility breaks, and stale downstream artifacts. Wording findings are reported at `low` only.
 - **Write Prose**: Follow the principles in the [write-prose](../write-prose/SKILL.md) skill for all written feedback.
-- **Consult Domain Skills**: Where specialized skills exist for the codebase or language (e.g., `angular-component`, `typescript-advanced-types`), reference them for best practices.
+- **Consult Domain Skills**: Where specialized skills exist for the codebase or language (e.g., `flutter-architecture`, `dart-concurrency`), reference them for best practices.
 
 ## Flags
 
@@ -226,7 +226,7 @@ Audit and combine the refined comments into the final output:
 - **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
 - When writing file paths, write them as Markdown links.
 - Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. `lint_review.py` automatically runs `analyze_prose.py` on every finding and question comment.
-- **Save and Lint Artifact**: Write the synthesized review to `review_results.md` in the conversation artifact directory (`<appDataDir>/brain/<conversation-id>/`) using `write_to_file` (never into the temporary checkout). Then run:
+- **Save and Lint Artifact**: Write the synthesized review to `review_results.md` in the conversation artifact directory (`<conversation-artifact-dir>/`) using `write_to_file` (never into the temporary checkout). Then run:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md
   ```

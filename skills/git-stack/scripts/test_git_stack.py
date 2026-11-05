@@ -41,8 +41,8 @@ class TestGitStackLib(unittest.TestCase):
 
     def test_parse_repo_slug(self):
         test_cases = [
-            ("git@github.com:a2ui-project/a2ui.git", ("a2ui-project", "a2ui")),
-            ("https://github.com/a2ui-project/a2ui.git", ("a2ui-project", "a2ui")),
+            ("git@github.com:octo-org/widgets.git", ("octo-org", "widgets")),
+            ("https://github.com/octo-org/widgets.git", ("octo-org", "widgets")),
             ("https://github.com/user/my-repo", ("user", "my-repo")),
         ]
         for url, expected in test_cases:

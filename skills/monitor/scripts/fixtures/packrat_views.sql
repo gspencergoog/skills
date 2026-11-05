@@ -1,4 +1,4 @@
--- Test double for the packrat reader contract (agents/skills/packrat/references/reader_contract.md).
+-- Test double for the packrat reader contract (../../packrat/references/reader_contract.md).
 -- Each contract view is a plain table with the same name and columns, so /monitor's reader can
 -- be tested without importing packrat.
 

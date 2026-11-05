@@ -138,7 +138,7 @@ def parse_item_key(key: str) -> tuple[str, str, int]:
     """Parses an `owner/name#number` item key.
 
     Args:
-        key: Item key such as "flutter/genui#123".
+        key: Item key such as "octo-org/widgets#123".
 
     Returns:
         `(owner, name, number)`.

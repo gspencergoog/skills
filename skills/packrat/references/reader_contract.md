@@ -40,7 +40,7 @@ WAL caveats for read-only opens:
 ## Item keys
 
 Every item is identified by `owner/name#number`, for example
-`flutter/genui#123`, with the repository's canonical GitHub casing. `packrat`
+`octo-org/widgets#123`, with the repository's canonical GitHub casing. `packrat`
 matches repository names case-insensitively when you pass keys to the CLI and
 returns the canonical form.
 

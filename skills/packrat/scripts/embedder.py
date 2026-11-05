@@ -4,7 +4,7 @@ Supports two offline CPU backends producing 384-dimensional L2-normalized
 FLOAT32 vectors:
 1. OnnxArcticEmbedder: local Snowflake/snowflake-arctic-embed-xs via onnxruntime + tokenizers.
 2. DeterministicHashEmbedder: zero-network 384-dim semantic cluster + feature-hash
-   embedder ported from agents/plugins/inflight/src/arcs/embedder.ts.
+   embedder ported from inflight's src/arcs/embedder.ts.
 """
 
 from __future__ import annotations

@@ -29,7 +29,7 @@ description: >-
 
 `--source packrat` exits with an error when the service isn't running; `--source github` never reads `packrat`. The payload's `source` field and the board subtitle (`via packrat`, or `via GitHub (packrat unavailable)` after a fallback) show which source is in use. `packrat` stores neither assignees nor the head commit's committer, so those keep their last known values in `packrat` mode. Remediation still calls `gh` directly in every mode: `gh run rerun`, `gh run view --log-failed`, pushes, and review replies.
 
-On every refresh, `monitor_prs.py` writes `<scratch>/monitor/board.a2ui` and replaces the `stack_board` surface directly in the `a2ui-pane` store, streaming live badge and CI ETA updates to the open pane at zero LLM tokens. It replaces one file per conversation, `~/.gemini/jetski/plugin_data/a2ui-pane/conversations/<conversationId>/monitor.jsonl`, which always holds a single `createSurface` line with the full board. It never appends. When launched with `--daemon`, it runs as a persistent background process, handles flaky-check reminder logic, and wakes the conversation via `agentapi send-message` whenever actionable events occur on `mine: true` pull requests.
+On every refresh, `monitor_prs.py` writes `<conversation-scratch-dir>/monitor/board.a2ui` and replaces the `stack_board` surface directly in the `a2ui-pane` store, streaming live badge and CI ETA updates to the open pane at zero LLM tokens. It replaces one file per conversation, `<a2ui-pane-plugin-data>/conversations/<conversationId>/monitor.jsonl`, which always holds a single `createSurface` line with the full board. It never appends. When launched with `--daemon`, it runs as a persistent background process, handles flaky-check reminder logic, and wakes the conversation via `agentapi send-message` whenever actionable events occur on `mine: true` pull requests.
 
 Read [references/action_policy.md](references/action_policy.md) before acting on any event, [references/output_schema.md](references/output_schema.md) for the JSON payload contract, CLI flags, event kinds, and exit codes, and [references/daemon_protocol.md](references/daemon_protocol.md) for the control file protocol.
 
@@ -118,4 +118,4 @@ When monitoring is complete or all watched pull requests reached `--until` (`exi
    echo '{"stop": true}' >> <conversation-scratch-dir>/monitor/control.jsonl
    ```
 2. When `convo` is on `PATH`, clear the waiting badge (`convo --resume`).
-3. Summarize the final state of each watched pull request for the user and include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` so they can inspect the completed board.
+3. Summarize the final state of each watched pull request for the user (and include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` when `a2ui-pane` is installed so they can inspect the completed board).

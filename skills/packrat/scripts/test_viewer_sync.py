@@ -368,18 +368,18 @@ class TestViewerSync(unittest.TestCase):
         self.assertEqual(search_strings(30, T0)["reviewRequested"], month["reviewReq"])
 
     def test_keys_use_registered_repo_casing(self) -> None:
-        self.store.register_repo("Flutter", "GenUI")
+        self.store.register_repo("Octo-Org", "Widgets")
         sync, _ = self._sync(
             _page(
-                authored=[_pr("flutter/genui", 5)], issues=[_issue("flutter/genui", 6)]
+                authored=[_pr("octo-org/widgets", 5)], issues=[_issue("octo-org/widgets", 6)]
             )
         )
-        self.assertEqual(sync.refresh_viewer(), ["Flutter/GenUI#5", "Flutter/GenUI#6"])
+        self.assertEqual(sync.refresh_viewer(), ["Octo-Org/Widgets#5", "Octo-Org/Widgets#6"])
         self.assertEqual(
-            [r.full_name for r in self.store.list_repos()], ["Flutter/GenUI"]
+            [r.full_name for r in self.store.list_repos()], ["Octo-Org/Widgets"]
         )
-        self.assertEqual(self.store.get_repo("Flutter/GenUI").mode, REPO_MODE_MIRROR)
-        self.assertEqual(self._leases(), ["Flutter/GenUI#5"])
+        self.assertEqual(self.store.get_repo("Octo-Org/Widgets").mode, REPO_MODE_MIRROR)
+        self.assertEqual(self._leases(), ["Octo-Org/Widgets#5"])
 
     def test_pagination_follows_each_alias_cursor(self) -> None:
         sync, transport = self._sync(

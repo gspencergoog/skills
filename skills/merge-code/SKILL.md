@@ -34,7 +34,7 @@ When invoked as `/merge-code` with no arguments or extra guidance, merge `upstre
 Before running `git merge` or dirtying the working tree, fetch the target remote (`git fetch upstream main` by default). Next, run the bundled `merge_assistant.py analyze` script (`--ours` defaults to `HEAD` and `--theirs` defaults to `upstream/main`). It runs an in-memory 3-way merge (`git merge-tree --write-tree`), detects prior squash-merged sync commits, builds a rename map, and scans for silent contract drift:
 
 ```bash
-python3 /usr/local/google/home/gspencer/code/cheats/agents/skills/merge-code/scripts/merge_assistant.py analyze \
+python3 <skill-dir>/scripts/merge_assistant.py analyze \
   --repo . \
   --ours HEAD \
   --theirs upstream/main
@@ -79,7 +79,7 @@ Resolve Tiers 1, 2, and 3 directly without prompting the user.
 
 - When a file moved across directories (`agent_sdks/python/` $\to$ `python/`) with too much churn for Git's similarity check, run `merge-moved-file`. This merges `BASE:<old_path>` and `THEIRS:<old_path>` directly into `OURS:<new_path>` via `git merge-file`:
   ```bash
-  python3 /usr/local/google/home/gspencer/code/cheats/agents/skills/merge-code/scripts/merge_assistant.py merge-moved-file \
+  python3 <skill-dir>/scripts/merge_assistant.py merge-moved-file \
     --old-path renderers/web_core/src/v0_9/rendering/generic-binder.ts \
     --new-path typescript/web_core/src/rendering/generic-binder.ts \
     --base <base-sha> \
@@ -124,7 +124,7 @@ ______________________________________________________________________
 
 1. Check that zero conflict markers, zero unmerged index entries, and zero temporary remotes remain:
    ```bash
-   python3 /usr/local/google/home/gspencer/code/cheats/agents/skills/merge-code/scripts/merge_assistant.py verify --repo .
+   python3 <skill-dir>/scripts/merge_assistant.py verify --repo .
    ```
 2. Run language analyzers (`dart analyze`, `tsc --noEmit`, `mypy .`, `pyink --check`) and unit or conformance test suites across the entire repository, not only on files that had textual conflicts.
 3. When committing ([commit-changes](../commit-changes/SKILL.md)) and drafting the PR description ([write-pr-description](../write-pr-description/SKILL.md)), record the merged `<theirs-tip-sha>`. Note that if the PR is squash-merged, the next merge should run `git merge -s ours <theirs-tip-sha>` first.

@@ -11,7 +11,7 @@ threads, and linked pull requests or issues wrapped in
 Usage:
   git diff --name-only main...HEAD | packrat_context.py [--root DIR] -
   packrat_context.py [--root DIR] [--pr N] PATH...
-  packrat_context.py --check-skill-budget agents/skills/code-review/SKILL.md
+  packrat_context.py --check-skill-budget <skill-dir>/SKILL.md
 """
 
 from __future__ import annotations
