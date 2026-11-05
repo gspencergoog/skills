@@ -4,12 +4,12 @@ description: >-
   Explores candidate architectures and design tradeoffs with the user, grounds
   options in read-only codebase evidence, collects decisions through genui or
   custom A2UI Express surfaces, and converges the artifact in place into a
-  design spec before planning. Use when the user runs /design, says "help me
-  design...", "let's design...", "let me brainstorm", or "what are some ways we
-  could solve...", or wants to weigh options before committing to a direction.
-  Don't use for formal stakeholder RFCs (use proposal-writer), file-level
-  execution plans (use plan), or read-only impact evaluation of one specific
-  change.
+  design spec before planning. Use when the user runs /design, asks to design a
+  feature, architecture, workflow, or API, wants to brainstorm ideas or explore
+  solution approaches, or wants to weigh tradeoffs before committing to a
+  direction. Don't use for formal stakeholder RFCs (use proposal-writer),
+  file-level execution plans (use plan), or read-only impact evaluation of one
+  specific change.
 ---
 
 # Interactive Design and Brainstorming (`design`)
@@ -20,7 +20,7 @@ Keep every repository, remote service, and local configuration untouched through
 
 - Never create, edit, or delete repository files, stage commits, or change worktree state.
 - Never mutate external systems. Do not open or edit GitHub issues or PRs, change Google Docs, Sheets, Slides, or Drive files, or reconfigure plugins.
-- Write only to the conversation artifact directory (`<appDataDir>/brain/<conversation-id>/*.md`) and to interactive `a2ui-pane` surfaces (`render_a2ui`). Any temporary query output in `<appDataDir>/brain/<conversation-id>/scratch/` must be removed before ending the turn.
+- Write only to the session artifact directory (`<conversation-artifact-dir>/*.md`) and to interactive UI surfaces (such as `render_a2ui`). Delete any temporary query files in the session scratch directory (`<conversation-scratch-dir>/`) before ending the turn.
 - Never jump from design exploration into implementation unless the user explicitly asks for code changes in a later turn.
 
 ## Task-Shape Triage
@@ -54,7 +54,7 @@ flowchart LR
 
 ### Phase 2: Diverge and Ask
 
-Write the design artifact in `<appDataDir>/brain/<conversation-id>/` using [design_convergence_and_ui.md](references/design_convergence_and_ui.md). Keep the Phase 2 draft scannable (`150` to `250` lines, at most `2,000` words):
+Write the design artifact in the session artifact directory (`<conversation-artifact-dir>/`) using [design_convergence_and_ui.md](references/design_convergence_and_ui.md). Keep the Phase 2 draft scannable (`150` to `250` lines, at most `2,000` words):
 
 1. Open with an `At a Glance` block (`<= 80` words) stating the problem, hard constraints, and recommended synthesis.
 2. Summarize the current baseline with clickable `[basename](file:///...)` links, then list 2 to 4 explicit `Non-Goals`. Dismiss unviable strawman options in 1 to 2 sentences under `Non-Goals` instead of giving them full option sections.
