@@ -1,15 +1,19 @@
-#!/usr/bin/env python3
 """
 test_review_engine.py - Unit tests for review_engine.py.
 """
 
+import hashlib
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from diff_parser import normalize_findings_payload
 from review_engine import (
+    ALIGNMENT_HEADINGS,
     _apply_hardened_git_env,
     annotate_stack_status,
     blind_stack_summary,
@@ -18,11 +22,14 @@ from review_engine import (
     cleanup_workspace,
     fetch_pr_context,
     fetch_pr_stack,
+    finalize_review,
     get_pr_diff,
     main,
     merge_stack_status,
     parse_repo_from_url,
+    prepare_code_review,
     prepare_workspace,
+    reconcile_pr_description,
     resolve_pr_coordinates,
     resolve_pr_metadata,
     run_command,
@@ -1321,6 +1328,581 @@ class TestStackDetection(unittest.TestCase):
             self.assertEqual(coords["review_round"], 2)
             self.assertEqual(coords["prev_head_sha"], "sha_old")
             self.assertNotIn("incremental_diff_file", coords)
+
+
+_SAMPLE_BLIND_MD = (
+    "## Summary\n"
+    "Adds retry backoff to the HTTP client.\n\n"
+    "## Inferred Purpose\n"
+    "Prevent transient 503 responses from failing requests immediately.\n\n"
+    "## Quality Assessment\n"
+    "Focused change with unit test coverage.\n\n"
+    "## Security & Execution Gate\n"
+    "- **Gate Verdict**: `SAFE_FOR_LOCAL_EXECUTION`\n"
+    "- **Static Pre-Scan**: `clean`\n\n"
+    "## Changes\n"
+    "- **`src/client.py`**: Adds exponential backoff loop.\n\n"
+    "## Reviewer Focus & Risks\n"
+    "- Verify max retry cap under timeout.\n"
+)
+
+_CLEAN_REPORT_MD = """# Code Review Report
+
+## Summary
+Adds retry backoff to the HTTP client. Ring Classification: Ring 1. Review Level: standard. Flags: `--json`. Citation audit: 1 checked, 0 dropped. Verdict: Minor Revisions Needed.
+
+## Structural Assessment
+- **Implementer**: Clean retry loop structure.
+- **Tester / Verifier**: Covers backoff timing.
+
+## Review Comments
+
+### M1. Retry loop ignores zero max_retries
+- **File**: `src/client.py`
+- **Line**: `11-12`
+- **Severity**: `medium`
+- **Category**: `correctness`
+- **Evidence**: `Read - src/client.py:11-12 shows range(max_retries) skipped when negative`
+- **Body**: Negative `max_retries` skips the initial attempt and returns `None` without sending the request.
+- **Why**: Callers passing `-1` receive `None` instead of a response or error.
+- **Suggestion**:
+```python
+for attempt in range(max(1, max_retries)):
+```
+
+## Questions
+
+### Q1. Should 429 responses use the Retry-After header?
+- **File**: `src/client.py`
+- **Line**: `12`
+- **Evidence**: `Speculation - unclear whether upstream sets Retry-After`
+- **Why**: Fixed backoff can retry too early when the server specifies a longer delay.
+- **To settle**: Check gateway rate-limit headers in `src/gateway.py`.
+
+## Checked and Found Clean
+- Timeout propagation in `src/client.py`: Read - timeout passed to transport call
+"""
+
+
+class TestReconcileAndFinalize(unittest.TestCase):
+    def test_reconcile_pr_description_splices_partial_and_preserves_sections(self):
+        self.assertEqual(ALIGNMENT_HEADINGS["PARTIAL"], "Partial Divergence")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            blind_file = tmp_path / "blind_description.md"
+            rec_file = tmp_path / "intent_reconciliation.json"
+            out_file = tmp_path / "pr_description.md"
+
+            blind_file.write_text(_SAMPLE_BLIND_MD, encoding="utf-8")
+            expected_sha = hashlib.sha256(_SAMPLE_BLIND_MD.encode("utf-8")).hexdigest()
+            rec_file.write_text(
+                json.dumps(
+                    {
+                        "alignment": "PARTIAL",
+                        "callouts": [
+                            {
+                                "section": "Summary",
+                                "kind": "NOTE",
+                                "text": "Author notes this unblocks issue #3810.",
+                            },
+                            {
+                                "section": "Changes",
+                                "kind": "WARNING",
+                                "text": "Default timeout also changed from 30s to 5s.",
+                            },
+                        ],
+                        "stack_markdown": "## Stack Context\n\nStack #10 (2 PRs on `main`), reviewing 1 of 2.",
+                        "prior_resolution_markdown": "Compared Round 1 against Round 2.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reconcile_pr_description(
+                blind_file, rec_file, out_file, expected_blind_sha256=expected_sha
+            )
+            output = out_file.read_text(encoding="utf-8")
+            self.assertTrue(
+                output.startswith("## Intent Alignment: Partial Divergence\n\n")
+            )
+            self.assertEqual(output.count("## Stack Context"), 1)
+            self.assertEqual(output.count("## Prior Review Resolution"), 1)
+            self.assertLess(
+                output.index("## Intent Alignment: Partial Divergence"),
+                output.index("## Stack Context"),
+            )
+            self.assertLess(
+                output.index("## Stack Context"),
+                output.index("## Prior Review Resolution"),
+            )
+            for section_block in _SAMPLE_BLIND_MD.strip().split("\n\n"):
+                self.assertIn(section_block, output)
+            self.assertIn(
+                "## Summary\nAdds retry backoff to the HTTP client.\n\n"
+                "> [!NOTE]\n> Author notes this unblocks issue #3810.",
+                output,
+            )
+            self.assertIn(
+                "> [!WARNING]\n> Default timeout also changed from 30s to 5s.",
+                output,
+            )
+
+    def test_reconcile_pr_description_rejects_unknown_alignment_section_kind_or_hash(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            blind_file = tmp_path / "blind_description.md"
+            rec_file = tmp_path / "intent_reconciliation.json"
+            out_file = tmp_path / "pr_description.md"
+            ctx_file = tmp_path / "pr_context.json"
+            blind_file.write_text(_SAMPLE_BLIND_MD, encoding="utf-8")
+
+            # Unknown alignment raises ValueError
+            rec_file.write_text(
+                json.dumps({"alignment": "BOGUS", "callouts": []}), encoding="utf-8"
+            )
+            with self.assertRaises(ValueError):
+                reconcile_pr_description(blind_file, rec_file, out_file)
+
+            # Unknown section raises ValueError
+            rec_file.write_text(
+                json.dumps(
+                    {
+                        "alignment": "MATCHES",
+                        "callouts": [
+                            {
+                                "section": "Nonexistent Heading",
+                                "kind": "NOTE",
+                                "text": "Context.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                reconcile_pr_description(blind_file, rec_file, out_file)
+
+            # Unknown callout kind raises ValueError
+            rec_file.write_text(
+                json.dumps(
+                    {
+                        "alignment": "MATCHES",
+                        "callouts": [
+                            {
+                                "section": "Summary",
+                                "kind": "CAUTION",
+                                "text": "Bad kind.",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                reconcile_pr_description(blind_file, rec_file, out_file)
+
+            # Hash mismatch via --context exits 1
+            rec_file.write_text(
+                json.dumps({"alignment": "MATCHES", "callouts": []}), encoding="utf-8"
+            )
+            ctx_file.write_text(
+                json.dumps({"blind_sha256": "0" * 64}), encoding="utf-8"
+            )
+            rc = main(
+                [
+                    "--reconcile-description",
+                    "--blind-description",
+                    str(blind_file),
+                    "--reconciliation",
+                    str(rec_file),
+                    "--output-description",
+                    str(out_file),
+                    "--context",
+                    str(ctx_file),
+                ]
+            )
+            self.assertEqual(rc, 1)
+
+    @patch("review_engine.fetch_pr_stack", return_value=None)
+    @patch("review_engine.fetch_pr_context")
+    @patch("review_engine.run_command", return_value=(0, "sha_r2", ""))
+    @patch(
+        "review_engine.get_pr_diff", return_value="diff --git a/a.py b/a.py\n+x = 2\n"
+    )
+    @patch("review_engine.prepare_workspace", return_value=("/tmp/pr-review-r2", True))
+    @patch("review_engine.resolve_pr_coordinates")
+    def test_round_2_fetch_context_produces_matching_blind_hash(
+        self, mock_coords, _prep, _diff, _run, mock_fetch, _stack
+    ):
+        mock_coords.return_value = {
+            "owner": "octocat",
+            "repo": "hello-world",
+            "pull_number": 42,
+            "base_ref": "main",
+            "head_sha": "sha_r2",
+            "pr_url": "https://github.com/octocat/hello-world/pull/42",
+            "state": "OPEN",
+        }
+        mock_fetch.return_value = (
+            {
+                "owner": "octocat",
+                "repo": "hello-world",
+                "pull_number": 42,
+                "title": "T",
+                "head_sha": "sha_r2",
+            },
+            {
+                "title": "T",
+                "body": "B",
+                "comments": [],
+                "reviews": [],
+                "threads": [],
+                "threads_complete": True,
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            coords_file = tmp_path / "pr_coords.json"
+            diff_file = tmp_path / "pr.diff"
+            blind_file = tmp_path / "blind_description.md"
+            meta_file = tmp_path / "pr_meta.json"
+            ctx_file = tmp_path / "pr_context.json"
+            rec_file = tmp_path / "intent_reconciliation.json"
+            out_desc = tmp_path / "pr_description.md"
+
+            # Seed Round 1 state
+            coords_file.write_text(
+                json.dumps(
+                    {
+                        "owner": "octocat",
+                        "repo": "hello-world",
+                        "pull_number": 42,
+                        "head_sha": "sha_r1",
+                        "review_round": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            blind_file.write_text("## Summary\nRound 1 blind text.\n", encoding="utf-8")
+
+            # Round 2 --prepare-workspace archives Round 1 blind file
+            rc_prep = main(
+                [
+                    "--pr",
+                    "42",
+                    "--prepare-workspace",
+                    "--output-coords",
+                    str(coords_file),
+                    "--output-diff",
+                    str(diff_file),
+                ]
+            )
+            self.assertEqual(rc_prep, 0)
+            self.assertFalse(blind_file.exists())
+            self.assertTrue((tmp_path / "prev_blind_description.md").is_file())
+
+            # Write Round 2 blind file and run --fetch-context
+            r2_blind_text = "## Summary\nRound 2 fresh blind description.\n"
+            blind_file.write_text(r2_blind_text, encoding="utf-8")
+            rc_fetch = main(
+                [
+                    "--fetch-context",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind_file),
+                    "--output-meta",
+                    str(meta_file),
+                    "--output-context",
+                    str(ctx_file),
+                ]
+            )
+            self.assertEqual(rc_fetch, 0)
+            ctx_data = json.loads(ctx_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                ctx_data["blind_sha256"],
+                hashlib.sha256(r2_blind_text.encode("utf-8")).hexdigest(),
+            )
+
+            # --reconcile-description succeeds with Round 2 context hash
+            rec_file.write_text(
+                json.dumps({"alignment": "MATCHES", "callouts": []}), encoding="utf-8"
+            )
+            rc_rec = main(
+                [
+                    "--reconcile-description",
+                    "--blind-description",
+                    str(blind_file),
+                    "--reconciliation",
+                    str(rec_file),
+                    "--output-description",
+                    str(out_desc),
+                    "--context",
+                    str(ctx_file),
+                ]
+            )
+            self.assertEqual(rc_rec, 0)
+            self.assertIn(
+                "## Intent Alignment: Matches Stated Purpose",
+                out_desc.read_text(encoding="utf-8"),
+            )
+
+    def test_finalize_review_clean_fixture_and_idempotent_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo_dir = tmp_path / "repo"
+            (repo_dir / "src").mkdir(parents=True)
+            (repo_dir / "src" / "client.py").write_text(
+                "\n".join([f"line_{i} = {i}" for i in range(1, 20)]) + "\n",
+                encoding="utf-8",
+            )
+            report_file = tmp_path / "review_results.md"
+            diff_file = tmp_path / "pr.diff"
+            meta_file = tmp_path / "pr_meta.json"
+            out_results = tmp_path / "review_results.json"
+            out_findings = tmp_path / "review_findings.json"
+
+            report_file.write_text(_CLEAN_REPORT_MD, encoding="utf-8")
+            diff_file.write_text(
+                "diff --git a/src/client.py b/src/client.py\n"
+                "--- a/src/client.py\n"
+                "+++ b/src/client.py\n"
+                "@@ -10,0 +11,3 @@\n"
+                "+line_11 = 11\n"
+                "+line_12 = 12\n"
+                "+line_13 = 13\n",
+                encoding="utf-8",
+            )
+            meta_file.write_text(
+                json.dumps(
+                    {
+                        "owner": "octocat",
+                        "repo": "hello-world",
+                        "pull_number": 42,
+                        "title": "feat: add retry",
+                        "head_sha": "abc1234",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rc = main(
+                [
+                    "--finalize-review",
+                    "--report-md",
+                    str(report_file),
+                    "--diff",
+                    str(diff_file),
+                    "--meta-file",
+                    str(meta_file),
+                    "--repo-dir",
+                    str(repo_dir),
+                    "--output-results",
+                    str(out_results),
+                    "--output-findings",
+                    str(out_findings),
+                ]
+            )
+            self.assertEqual(rc, 0)
+            self.assertTrue(out_results.is_file())
+            self.assertTrue(out_findings.is_file())
+
+            results_data = json.loads(out_results.read_text(encoding="utf-8"))
+            findings_data = json.loads(out_findings.read_text(encoding="utf-8"))
+            self.assertEqual(
+                normalize_findings_payload(normalize_findings_payload(results_data)),
+                normalize_findings_payload(results_data),
+            )
+            self.assertEqual(
+                normalize_findings_payload(normalize_findings_payload(findings_data)),
+                normalize_findings_payload(findings_data),
+            )
+            self.assertEqual(findings_data["pr_metadata"]["pull_number"], 42)
+            self.assertEqual(len(findings_data["findings"]), 2)
+            self.assertTrue(findings_data["findings"][0]["is_diff_hunk"])
+            self.assertEqual(findings_data["findings"][1]["severity"], "question")
+
+    def test_finalize_review_forty_word_sentence_exits_one_and_prints_fix(self):
+        forty_word_sentence = (
+            "When the client receives a retryable status code from the upstream "
+            "gateway during a burst of concurrent requests, the backoff counter "
+            "resets before the sleep timer completes and causes every worker "
+            "thread to hammer the endpoint without waiting for recovery."
+        )
+        bad_report = _CLEAN_REPORT_MD.replace(
+            "Negative `max_retries` skips the initial attempt and returns `None` without sending the request.",
+            forty_word_sentence,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            report_file = tmp_path / "review_results.md"
+            diff_file = tmp_path / "pr.diff"
+            meta_file = tmp_path / "pr_meta.json"
+            out_results = tmp_path / "review_results.json"
+            out_findings = tmp_path / "review_findings.json"
+
+            report_file.write_text(bad_report, encoding="utf-8")
+            diff_file.write_text("diff --git a/a.py b/a.py\n", encoding="utf-8")
+            meta_file.write_text("{}", encoding="utf-8")
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = finalize_review(
+                    report_file,
+                    diff_file,
+                    meta_file,
+                    None,
+                    out_results,
+                    out_findings,
+                )
+            output = buf.getvalue()
+            self.assertEqual(rc, 1)
+            self.assertIn("comment-sentence-length", output)
+            self.assertIn("Fix:", output)
+            self.assertFalse(out_results.exists())
+            self.assertFalse(out_findings.exists())
+
+
+_PREP_DIFF = (
+    "diff --git a/src/app.py b/src/app.py\n"
+    "--- a/src/app.py\n"
+    "+++ b/src/app.py\n"
+    "@@ -1,0 +1,2 @@\n"
+    "+x = compute(1)\n"
+    "+y = compute(2)\n"
+    "diff --git a/package-lock.json b/package-lock.json\n"
+    "--- a/package-lock.json\n"
+    "+++ b/package-lock.json\n"
+    "@@ -1,0 +1,2 @@\n"
+    '+  "a": "1",\n'
+    '+  "b": "2",\n'
+)
+
+
+class TestPrepareCodeReview(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.repo = self.tmp / "checkout"
+        (self.repo / "src").mkdir(parents=True)
+        (self.repo / "src" / "app.py").write_text("x = 1\n", encoding="utf-8")
+        self.diff = self.tmp / "pr.diff"
+        self.diff.write_text(_PREP_DIFF, encoding="utf-8")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run(self, which_result):
+        import shutil as _shutil
+
+        coords = {"base_ref": "", "pull_number": 7}
+        with (
+            patch("review_engine.shutil.which", return_value=which_result),
+            patch("review_engine._run_packrat_context", return_value=None),
+        ):
+            result = prepare_code_review(coords, self.diff, self.repo, self.tmp)
+        self.addCleanup(_shutil.rmtree, result["diff_dir"], True)
+        return result
+
+    def test_classification_and_staging_without_duckdb(self):
+        before = self.diff.read_bytes()
+        result = self._run(None)
+        self.assertEqual(self.diff.read_bytes(), before)
+        substantive = result["classification"]["substantive"]
+        self.assertEqual(substantive["substantive_lines"], 2)
+        self.assertEqual(
+            substantive["excluded_files"], {"package-lock.json": "lockfile"}
+        )
+        manifest = Path(result["diff_dir"]) / "manifest.json"
+        self.assertTrue(manifest.is_file())
+        staged = json.loads(manifest.read_text(encoding="utf-8"))
+        staged_files = {f for chunk in staged["chunks"] for f in chunk["files"]}
+        self.assertIn("package-lock.json", staged_files)
+        self.assertIsNone(result["entity_churn"])
+        self.assertIsNone(result["signature_drift"])
+        self.assertIn(
+            "duckdb not installed; churn and drift skipped", result["warnings"]
+        )
+        self.assertIn("packrat_context.py unavailable or failed", result["warnings"])
+
+    def test_cli_stores_code_review_prep_in_context(self):
+        coords_file = self.tmp / "pr_coords.json"
+        coords_file.write_text(
+            json.dumps(
+                {"owner": "o", "repo": "r", "pull_number": 7, "head_sha": "abc"}
+            ),
+            encoding="utf-8",
+        )
+        (self.tmp / "workspace_dir.txt").write_text(str(self.repo), encoding="utf-8")
+        blind = self.tmp / "blind_description.md"
+        blind.write_text("## Summary\nAdds two values.\n", encoding="utf-8")
+        out_context = self.tmp / "pr_context.json"
+        sentinel = {"warnings": [], "classification": {"ring": {}}}
+        with (
+            patch(
+                "review_engine.fetch_pr_context",
+                return_value=({"head_sha": "abc", "base_ref": "main"}, {}),
+            ),
+            patch("review_engine.fetch_pr_stack", return_value=None),
+            patch("review_engine.prepare_code_review", return_value=sentinel) as prep,
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = main(
+                [
+                    "--fetch-context",
+                    "--prepare-code-review",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind),
+                    "--output-context",
+                    str(out_context),
+                ]
+            )
+        self.assertEqual(rc, 0)
+        self.assertEqual(prep.call_args.args[1], self.diff)
+        self.assertEqual(prep.call_args.args[2], self.repo)
+        context = json.loads(out_context.read_text(encoding="utf-8"))
+        self.assertEqual(context["code_review_prep"], sentinel)
+        self.assertIn("blind_sha256", context)
+
+    def test_cli_skips_with_warning_when_checkout_missing(self):
+        coords_file = self.tmp / "pr_coords.json"
+        coords_file.write_text(
+            json.dumps({"owner": "o", "repo": "r", "pull_number": 7}),
+            encoding="utf-8",
+        )
+        blind = self.tmp / "blind_description.md"
+        blind.write_text("## Summary\nText.\n", encoding="utf-8")
+        out_context = self.tmp / "pr_context.json"
+        with (
+            patch(
+                "review_engine.fetch_pr_context",
+                return_value=({"head_sha": ""}, {}),
+            ),
+            patch("review_engine.fetch_pr_stack", return_value=None),
+            redirect_stdout(io.StringIO()),
+        ):
+            rc = main(
+                [
+                    "--fetch-context",
+                    "--prepare-code-review",
+                    "--input-coords",
+                    str(coords_file),
+                    "--require-blind-description",
+                    str(blind),
+                    "--output-context",
+                    str(out_context),
+                    "--repo-dir",
+                    str(self.tmp / "missing"),
+                ]
+            )
+        self.assertEqual(rc, 0)
+        prep = json.loads(out_context.read_text(encoding="utf-8"))["code_review_prep"]
+        self.assertTrue(prep["warnings"][0].startswith("--prepare-code-review skipped"))
 
 
 if __name__ == "__main__":

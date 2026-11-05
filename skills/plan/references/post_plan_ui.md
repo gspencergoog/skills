@@ -40,9 +40,9 @@ python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md>
 
 The script emits a standalone Express surface (`surface("plan-decisions", sendDataModel=true)`):
 
-1. Block 0 (the review gate) always asks *"Run an independent review of this plan?"* with chips `(Recommended) Yes` (`"yes"`) and `No` (`"no"`), pre-filled to `["yes"]`.
-2. Each `### Q<n>` in `## Open Questions` becomes a Tier 2 block with consequence bullets and chips `(Recommended) A: <text>`, `B: <text>`, and `Defer`. Each block pre-selects the recommended letter.
-3. The shared footer has one notes field (`$/notes`) and one primary button sending `Event("submit_plan_decisions", {review: $/review/choice, q1: $/q1/choice, ..., notes: $/notes})`.
+1. The header shows `### Plan Decisions` and the caption `"Recommended answers are preselected."`.
+2. Each `### Q<n>` in `## Open Questions` becomes a block with a `Q<n>` badge header and `ChoiceCards($/qN/options, $/qN/choice)`. Each option card carries `value`, `label` (`"<letter> · <text>"`), `description` (the option's consequence), and `badge: "Recommended"` with `tone: "success"` on the recommended option, followed by a quiet `{value: "defer", label: "Defer", quiet: true}` toggle. Each block preselects the recommended letter.
+3. The shared footer has one notes field (`$/notes`), a review checkbox (`CheckBox("Run an independent review of this plan (recommended)", $/review)` with `$/review = true`), and one primary button sending `Event("submit_plan_decisions", {review: $/review, q1: $/q1/choice, ..., notes: $/notes})`.
 
 Render the worksheet by passing the script's stdout as `dsl` (do **not** set `template`):
 
@@ -55,13 +55,27 @@ Render the worksheet by passing the script's stdout as `dsl` (do **not** set `te
 }
 ```
 
-Use `mode: "inline"` when the plan has zero open questions and the worksheet contains only the review block.
+Use `mode: "inline"` when the plan has zero open questions and the worksheet contains only the notes field and footer review checkbox.
 
-If review findings later invalidate a recorded decision or add new `### Q<n>` questions, render a second worksheet with only the new or changed `Q<n>` blocks. Omit the review block on that second worksheet.
+If `render_a2ui` fails validation because an older `a2ui-pane` install does not recognize `ChoiceCards`, retry with `--layout list`:
+
+```bash
+python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md> --layout list
+```
+
+The `list` layout replaces `ChoiceCards` with one letter-badge row and consequence caption per option plus short `A`, `B`, ..., `Defer` chips, while keeping the same intro caption, footer review `CheckBox`, and `review: true|false` payload.
+
+| Tier / Format | How the review choice is presented | How to read the review answer |
+| :--- | :--- | :--- |
+| Tier 1 (`plan_surfaces.py questions`, `cards` or `list`) | Footer `CheckBox` bound to `$/review` (`true` by default) | `review: true` or `review: false` in the `submit_plan_decisions` event payload |
+| Tier 2 (`--format ask-question`) | First question (`"Run an independent review of this plan?"`) | `"(Recommended) Yes"` or `"No"` |
+| Tier 3 (`--format markdown`) | Item 1 in the numbered Markdown list | User reply of `Yes` (or option 1) vs `No` |
+
+If review findings later invalidate a recorded decision or add new `### Q<n>` questions, render a second worksheet with only the new or changed `Q<n>` blocks. Omit the review checkbox on that second worksheet.
 
 ### 2.2 Review Findings Triage (`template: "triage_matrix"`)
 
-When the user selects `Yes` on the review gate and the reviewer reports 3 or more findings, save the fenced `json` array (`[{id, severity, title, summary, evidence}]`) to `<scratch>/findings.json`. Run:
+When the review checkbox is checked (or the fallback answer is Yes) and the reviewer reports 3 or more findings, save the fenced `json` array (`[{id, severity, title, summary, evidence}]`) to `<scratch>/findings.json`. Run:
 
 ```bash
 python3 <skill-dir>/scripts/plan_surfaces.py triage <scratch>/findings.json

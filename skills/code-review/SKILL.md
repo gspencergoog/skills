@@ -55,7 +55,7 @@ When no depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`) is spe
 - **Ring 0 (Private / Local)**: Personal dotfiles, ad-hoc scratch scripts, or local configs. Scales to `--fast` (single-pass in-session review, no subagents).
 - **Ring 1 (Internal Tooling & Repo Plumbing)**: CI workflows, linter configs, build scripts, development hooks, repo scripts, or test suites. Scales to **Standard** baseline review (1 Gemini reviewer, Tier 1a/1b checks).
 - **Ring 2 (Application / Service Logic)**: Internal application and service logic, endpoints, UI components, backend business logic, database queries. Scales to **Standard** baseline review (1 Gemini reviewer, Tier 1a/1b checks).
-- **Ring 3 (Shared Libraries & Public Contracts)**: Exported package surfaces, public APIs, schema or protocol contracts (`.proto`, `*.schema.json`), and package manifests (`package.json`, `pubspec.yaml`, `Cargo.toml`). Scales to `--panel` (2 parallel reviewers with non-overlapping criteria).
+- **Ring 3 (Shared Libraries & Public Contracts)**: Exported package surfaces, public APIs, schema or protocol contracts (`.proto`, `*.schema.json`), and package manifests (`package.json`, `pubspec.yaml`, `Cargo.toml`). Scales to `--panel` (2 reviewers) above 225 substantive lines, else Standard plus the API Review Mandate ([volume gates](references/lanes.md#volume-gates)).
 - **Ring 4 (Foundational Runtimes & Core Engines)**: Engine internals, runtimes, virtual machines, compilers, memory allocators, or low-level systems code. Scales to `--max` (`--claude --panel --verify`, two-lane panel with deep verification in throwaway checkouts).
 
 When an explicit depth flag is provided by the user or caller (e.g. `--max`, `--fast`, `--panel`), ring evaluation is skipped and that depth is used directly.
@@ -102,22 +102,14 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
 
 ### Step 1b: Classify Artifacts & Evaluate Reuse Ring
 
-1. **Evaluate Reuse Ring (When No Depth Flag Is Specified)**:
-   - If an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`) was specified by the user or calling skill, skip ring evaluation and proceed with the specified depth.
-   - If no depth flag was specified, evaluate the file list with `classify_artifacts.py --ring`:
-     ```bash
-     <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --ring -
-     ```
-     This returns the highest matched ring (Ring 0 to 4), sets the active flags accordingly (e.g. `--fast` on Ring 0, `--panel` on Ring 3, `--max` on Ring 4, or baseline 1-reviewer Standard on Ring 1 and 2), and generates a ring summary banner.
-   - Record the ring banner in the review summary:
-     `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).
-
-2. **Classify Artifact Types**:
-   Pipe the changed file list into the classifier:
+1. **Reuse Caller Prep**: If the caller passed a `code_review_prep` block (`pr-review` Stage 2), use its `classification`, `diff_dir`, churn, drift, and `packrat` results instead of rerunning them.
+2. **Classify in One Call**: Otherwise run:
    ```bash
-   <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> -
+   <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --combined --diff-file <diff> -
    ```
-   It prints each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), the `rule` that matched, and the `rubric` to use. Group the files into a code partition and a document partition. If a classification is clearly wrong, override it and note why. If there are no document files, skip every document-specific instruction below: code-only reviews work as before. The rules are described in [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
+   `ring` holds the reuse ring and level after the [volume gates](references/lanes.md#volume-gates), `artifacts` holds each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), `rule`, and `rubric`, and `focus_dedicated_allowed` feeds Step 2d.
+   - With an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`), ignore `ring`. Otherwise apply `ring.flags`, add the API Review Mandate when `ring.api_mandate` is true, and record `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).
+   - Group files into code and document partitions, overriding a clearly wrong type with a note. With no document files, skip every document-specific instruction below. See [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
 
 ### Step 2: Pre-Execution Security Gate, Context Enrichment, Tier 1 Verification, and Seed Hypotheses
 
@@ -147,7 +139,7 @@ Then run **Tier 1 verification** yourself per [verification.md](references/verif
 
 #### Step 2d: Focus Triage
 
-Skip this step under `--no-focus`, for a document-only diff, or when the caller pinned themes with `--focus <theme>` (go straight to the depth cap below). Otherwise answer one question for the code partition: *which single change in this diff, if subtly wrong, would be hardest to catch by reading each hunk on its own?* Start from the diff, then read the index in [focus_areas/README.md](references/focus_areas/README.md) and prefer a catalog id when one fits. A mechanism with no catalog entry is an ad hoc theme (`adhoc:<slug>`) with an inline playbook of at most 1 KB (cues, numbered failure modes, 3 to 5 hypothesis templates).
+Skip this step under `--no-focus`, for a document-only diff (when `focus_dedicated_allowed` is false, every theme folds in as Focus Priority), or when the caller pinned themes with `--focus <theme>` (go straight to the depth cap below). Otherwise answer one question for the code partition: *which single change in this diff, if subtly wrong, would be hardest to catch by reading each hunk on its own?* Start from the diff, then read the index in [focus_areas/README.md](references/focus_areas/README.md) and prefer a catalog id when one fits. A mechanism with no catalog entry is an ad hoc theme (`adhoc:<slug>`) with an inline playbook of at most 1 KB (cues, numbered failure modes, 3 to 5 hypothesis templates).
 
 Evidence: the diff stat, the context files, `packrat` file hotspots and recurring review threads, the Tier 1 output, caller-supplied candidates (such as `pr-review`'s `## Reviewer Focus & Risks` bullets), the first chunk of each staged file group, and on any staged diff `diff_signature_drift` and `diff_entity_churn` from `staged_diff_macros.sql`.
 
@@ -211,7 +203,7 @@ Ensure that:
 
 Audit and combine the refined comments into the final output:
 
-- **Collect Reviewer Reports (Tier 1 `swarm`)**: When a worker wakes `@coordinator`, call `read_board` (with `since: <last_seq>` on later passes) to read the report(s) and record the latest `seq` cursor.
+- **Collect Reviewer Reports (Tier 1 `swarm`)**: When a worker wakes `@coordinator`, call `read_board` (with `since: <last_seq>` on later passes), read the `rev_<name>.md` report at the path in each post (or the post itself when it has no path), and record the latest `seq` cursor.
 - **Clean check (`--verify`)**: Before reading citations, run `git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain` on `$pr_review_dir_a` (and `$pr_review_dir_b` under `--panel --verify`) per [verification.md](references/verification.md#orchestrator-clean-check). If anything other than `?? review_scratch_*` appears, restore tracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false restore .`), remove unexpected untracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false clean -fd -e 'review_scratch_*'`), note the leftover edit in the Summary, and audit all findings from that reviewer below.
 - **Citation audit**: For every `critical` and `high` finding (and all findings from a reviewer that failed the clean check), open the cited `path:line` (±10 lines) in the review workspace with `view_file`. If a quoted line, symbol, or signature does not match the file on disk, drop the finding or downgrade it to a Question, and audit the rest of that reviewer's findings regardless of severity. Record `"Citation audit: N checked, M dropped (…)"` in the Summary. If the working-tree guard caught an in-place tier 1 change, note that in the Summary as well.
 - **Reviewer challenge (`--challenge` only)**: When `--challenge` is active and a check refutes a `critical` or `high` finding, challenge that reviewer naming the finding ID and quoting the refuting evidence. Ask it to `"withdraw, or reply with evidence at a tier that supports the severity"`. Use `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, `resume: "<agentId>"` on Tier 2a, or `send_message` on Tier 2b. Allow at most one round trip per disputed reviewer. A reply that pivots to a different argument without supplying `Executed`, `Read`, `Fetched`, or line-cited `Deduction` evidence for the original claim counts as withdrawn. Note `"N disputed (M withdrawn, K upheld)"` in the Summary.

@@ -82,13 +82,8 @@ Follow these steps in order when reviewing a pull request:
    ```
    `review_engine.py` hardens every `git` and `gh` subprocess (`core.hooksPath=/dev/null`, `core.fsmonitor=false`, `diff.external=`, `--no-ext-diff`, `--no-textconv`) so cloning and diffing an untrusted PR cannot execute repository hooks or diff drivers, and writes a deterministic `security_prescan` summary into `pr_coords.json`. Do **not** run any build step, toolchain dry-run, repo script, dependency install, or test inside `workspace_dir.txt` during Stage 1.
    The script also asks GitHub whether the PR belongs to a stack (`pullRequest.stack` via GraphQL). If it does, it runs `gh stack checkout <pr>` and `gh stack view --json` in the temporary checkout (restoring the detached `HEAD` afterwards), writes the member list with rebase status to `pr_stack.json`, and records a numbers-only summary in `pr_coords.json` under `stack` (`number`, `size`, `position` with 1 = bottom of the stack, `needs_rebase`, and per-entry `number`/`state`/`is_draft`/`needs_rebase`). Without the `gh stack` extension, rebase status comes from git ancestry in the checkout instead. `stack` is `null` for an unstacked PR, and `pr_stack.json` is not written.
-2. **Map Diff Hunks**:
-   Parse valid diff hunks using `diff_parser.py`:
-   ```bash
-   python3 scripts/diff_parser.py --diff <conversation-scratch-dir>/pr.diff
-   ```
-3. **Draft the Blind Diff Description & Pre-Execution Security Gate**:
-   - Inspect `<conversation-scratch-dir>/pr.diff`, `pr_coords.json.security_prescan`, and surrounding code in the temporary checkout (`workspace_dir.txt`) using only read-only file reads (`view_file` / `read_file` and `rg`) or Tier 1a checks ([verification.md](../code-review/references/verification.md#tier-1a-and-tier-1b-commands)).
+2. **Draft the Blind Diff Description & Pre-Execution Security Gate**:
+   - Read only `<conversation-scratch-dir>/pr.diff` and `pr_coords.json` (including `security_prescan`). Open a file in the temporary checkout (`workspace_dir.txt`) only when `security_prescan.signals` names it; do not search or read other repository files in Stage 1, because the code-review workers read surrounding code in Step 3.
    - Do **not** read the PR title, description, commit messages, branch names, or GitHub comments during this step. Do **not** read `pr_stack.json` or run `gh stack view` yet.
    - Audit every file and line flagged in `pr_coords.json.security_prescan.signals`, plus any modified build manifests, git/shell hooks, linter plugin configs, or test files, and determine the Pre-Execution Security Gate verdict per [verification.md](../code-review/references/verification.md#pre-execution-security-gate): `SAFE_FOR_LOCAL_EXECUTION`, `REQUIRES_USER_CONFIRMATION`, or `BLOCKED_UNSAFE`.
    - Write `<conversation-scratch-dir>/blind_description.md` following the **Blind-First PR Description Template** in [review_guidelines.md](references/review_guidelines.md) (`## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, `## Changes`, and `## Reviewer Focus & Risks`).
@@ -99,26 +94,34 @@ Follow these steps in order when reviewing a pull request:
 
 ### Step 3: PR Context Reconciliation & Code Review Analysis (Stage 2)
 
-1. **Fetch PR Narrative Context**:
-   Once `<conversation-scratch-dir>/blind_description.md` is written and non-empty, run `review_engine.py --fetch-context`. The script verifies that `blind_description.md` exists before querying GitHub for the PR title, body, reviews, and review threads:
+1. **Fetch PR Narrative Context and Code-Review Prep**:
+   Once `<conversation-scratch-dir>/blind_description.md` is written and non-empty, run `review_engine.py --fetch-context --prepare-code-review`. The script verifies that `blind_description.md` exists before querying GitHub for the PR title, body, reviews, and review threads, records its SHA-256 as `blind_sha256`, and bundles the `code-review` pre-flight work (reuse ring and substantive line count from `classify_artifacts.py --combined`, staged diff chunks, entity churn and signature drift when `duckdb` is installed, and `packrat` history) under `pr_context.json["code_review_prep"]`:
    ```bash
    python3 scripts/review_engine.py \
-     --fetch-context \
+     --fetch-context --prepare-code-review \
      --input-coords <conversation-scratch-dir>/pr_coords.json \
      --input-stack <conversation-scratch-dir>/pr_stack.json \
      --require-blind-description <conversation-scratch-dir>/blind_description.md \
      --output-meta <conversation-scratch-dir>/pr_meta.json \
      --output-context <conversation-scratch-dir>/pr_context.json
    ```
-   `--input-stack` is ignored when the file does not exist. For a stacked PR, `pr_context.json` gains a `stack` object (members bottom-first with `number`, `title`, `state`, `is_draft`, `head_ref`, `base_ref`, `needs_rebase`, and `is_target`) and `pr_meta.json` gains `stack: {number, size, position}`.
+   `--input-stack` is ignored when the file does not exist. For a stacked PR, `pr_context.json` gains a `stack` object (members bottom-first with `number`, `title`, `state`, `is_draft`, `head_ref`, `base_ref`, `needs_rebase`, and `is_target`) and `pr_meta.json` gains `stack: {number, size, position}`. Optional prep steps that fail are listed in `code_review_prep.warnings` and do not stop the review.
 2. **Reconcile Stated Intent vs. Actual Diff**:
-   - Compare `blind_description.md` against the author's `title`, `body`, `comments`, `reviews`, and `threads` in `pr_context.json` (if `threads_complete` is `false`, or if `pr_meta.json` contains `latest_head_sha` differing from `head_sha`, note this in a `> [!NOTE]` callout).
-   - Copy the text of `blind_description.md` verbatim into `<conversation-scratch-dir>/pr_description.md`: do not rewrite or soften the Stage 1 prose to match the author's framing. Prepend a top-level `## Intent Alignment: <Status>` section (`Matches Stated Purpose`, `Partial Divergence`, `Diverges from Stated Purpose`, or `Unstated Scope`) and weave inline GitHub callouts (`> [!WARNING]`, `> [!IMPORTANT]`, `> [!NOTE]`) directly beneath the relevant items in `## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, and `## Changes`. See [review_guidelines.md](references/review_guidelines.md) for callout rules.
-   - If `pr_context.json` has a non-null `stack`, add a `## Stack Context` section right after `## Intent Alignment` following the template in [review_guidelines.md](references/review_guidelines.md). You may run `gh stack view --short` in the checkout (`workspace_dir.txt`) for the same information in `gh`'s own format. Treat the stack as review context, not as a finding: a predecessor that `needs_rebase` or is still a draft is a `> [!NOTE]`, a claim in the body that a later PR in the stack covers something is checked against that PR's diff (`gh pr diff <n>`) before it is accepted, and anything the diff builds on from a predecessor is reviewed in that predecessor's PR, not here.
-   - **Prior Review Resolution (`review_round > 1` or non-empty `pr_context.json.threads`)**: When re-reviewing after author updates (or when prior review threads exist in `pr_context.json.threads` or `prev_review_results.json`), audit each prior comment against `pr_incremental.diff` (when present) and the current checkout (`HEAD`), and add a `## Prior Review Resolution` table right after `## Intent Alignment` (or after `## Stack Context`) in `pr_description.md` following [review_guidelines.md](references/review_guidelines.md). Classify each item as `Addressed`, `Partially Addressed`, or `Unaddressed`.
+   - Compare `blind_description.md` against the author's `title`, `body`, `comments`, `reviews`, and `threads` in `pr_context.json` (if `threads_complete` is `false`, or if `pr_meta.json` contains `latest_head_sha` differing from `head_sha`, note this in a `NOTE` callout).
+   - Do not copy or rewrite `blind_description.md`. Write only `<conversation-scratch-dir>/intent_reconciliation.json` (schema in [review_guidelines.md](references/review_guidelines.md)): `alignment` (`MATCHES`, `PARTIAL`, `DIVERGES`, or `UNSTATED`), `callouts[]` (`section`, `kind` of `NOTE`/`IMPORTANT`/`WARNING`, `text`), and optional `stack_markdown` and `prior_resolution_markdown`. Then splice it:
+     ```bash
+     python3 scripts/review_engine.py --reconcile-description \
+       --blind-description <conversation-scratch-dir>/blind_description.md \
+       --reconciliation <conversation-scratch-dir>/intent_reconciliation.json \
+       --context <conversation-scratch-dir>/pr_context.json \
+       --output-description <conversation-scratch-dir>/pr_description.md
+     ```
+     It exits 1 if `blind_description.md` changed after `--fetch-context` or the JSON is invalid; fix the JSON (never the blind file) and rerun.
+   - If `pr_context.json` has a non-null `stack`, put a `## Stack Context` table in `stack_markdown` following the template in [review_guidelines.md](references/review_guidelines.md); the splice places it right after `## Intent Alignment`. You may run `gh stack view --short` in the checkout (`workspace_dir.txt`) for the same information in `gh`'s own format. Treat the stack as review context, not as a finding: a predecessor that `needs_rebase` or is still a draft is a `NOTE` callout, a claim in the body that a later PR in the stack covers something is checked against that PR's diff (`gh pr diff <n>`) before it is accepted, and anything the diff builds on from a predecessor is reviewed in that predecessor's PR, not here.
+   - **Prior Review Resolution (`review_round > 1` or non-empty `pr_context.json.threads`)**: When re-reviewing after author updates (or when prior review threads exist in `pr_context.json.threads` or `prev_review_results.json`), audit each prior comment against `pr_incremental.diff` (when present) and the current checkout (`HEAD`), and put the `## Prior Review Resolution` table from [review_guidelines.md](references/review_guidelines.md) in `prior_resolution_markdown`. Classify each item as `Addressed`, `Partially Addressed`, or `Unaddressed`.
 3. **Delegate Code Review Analysis to `code-review`**:
    Execute the [`code-review`](../code-review/SKILL.md) skill workflow against the temporary checkout directory (`<conversation-scratch-dir>/workspace_dir.txt`) on the PR commit range `origin/<base_ref>...<head_sha>` (`base_ref` and `head_sha` from `pr_coords.json`) with `--json` and any explicit flags passed by the user (`--fast`, `--panel`, `--verify`, `--claude`, `--challenge`, `--max`, `--focus`, `--no-focus`):
-   - **Delegated Depth Determination**: If no depth flag was passed by the user, pass no depth flags to `code-review`. `code-review` will run `classify_artifacts.py --ring` in Step 1b to determine the PR's reuse ring and scale the review level automatically.
+   - **Delegated Depth Determination**: If no depth flag was passed by the user, pass no depth flags to `code-review`. Hand `code-review` the `pr_context.json["code_review_prep"]` block so its Step 1b reuses the ring classification (including the substantive-line volume gates in [lanes.md](../code-review/references/lanes.md#volume-gates)), staged `diff_dir`, churn, drift, and `packrat` results instead of recomputing them.
    - **Re-Review Invariants (`review_round > 1` or user asks to "re-review")**:
      - **Full Diff Required**: Always run `code-review` on the full PR commit range `origin/<base_ref>...<head_sha>` (`pr.diff`), never on `<prev_head_sha>..<head_sha>` (`pr_incremental.diff`) alone. Never bypass `code-review` or skip reviewer subagents in favor of an in-session delta check unless `--fast` was explicitly requested or Ring 0 applies.
      - **Fresh Unanchored Reviewer Worker**: Spawn a new `swarm` reviewer (`rev-a-2`, `rev-b-2`, `rev-f-2` via `swarm{action: "add"}`) rather than waking Round 1's `rev-a` worker (whose conversation history is anchored on Round 1's findings). Do **not** pass prior review findings, `prev_review_results.json`, or `Ruled out last pass` into the fresh reviewer's brief.
@@ -137,23 +140,25 @@ Follow these steps in order when reviewing a pull request:
        - If the gate verdict is `REQUIRES_USER_CONFIRMATION`, prompt the user via `confirm_gate` (`genui`) or `ask_question` before running any Tier 1b or Tier 2 command. If the user declines or the gate is `BLOCKED_UNSAFE`, restrict `code-review` to Tier 1a regardless of `author_association`.
      - Under `--fast`: `code-review` performs a single-pass in-session review on the diff and context files without spawning subagents.
      - Under default (or `--claude`, `--panel`, `--verify`, `--challenge`, `--max`): `code-review` manages subagent reviewer lanes, verification tiers, citation audits, and challenge rounds as configured. Under `--verify`, look up collaborator trust with `gh api repos/<owner>/<repo>/pulls/<pull_number> --jq .author_association`, filling in `owner`, `repo`, and `pull_number` from `pr_coords.json` (do not use `gh`'s `{owner}/{repo}` placeholders, which resolve from the current directory, not from the PR under review). See [verification.md](../code-review/references/verification.md#trust-check). State both the collaborator trust result and the Stage 1 Security Gate verdict in the `code-review` prompt: Tier 2 requires both a trusted collaborator (`OWNER`, `MEMBER`, or `COLLABORATOR`) and a cleared Security Gate (`SAFE_FOR_LOCAL_EXECUTION` or user-approved `REQUIRES_USER_CONFIRMATION`).
-   - **Orchestration Continuity**: Run `code-review` Steps 1 through 6 and skip Step 7. Pass `--json <conversation-scratch-dir>/review_results.json` so Step 5's `lint_review.py --export-json` writes where Step 3.4 reads (without a path, `code-review` would write to its own `<artifact-dir>`). Run `code-review`'s Step 6 cleanup loop as written; it is the one exception to the Zero-Approval rule above, and it removes only the directories `code-review` created (`$diff_dir` and any `--verify` checkouts), never the `workspace_dir.txt` checkout. After Step 6 completes, continue to Step 3.4 in the same turn, including when a swarm worker or reviewer subagent wakes you. Do not emit Step 7's hand-off question.
+   - **Orchestration Continuity**: Run `code-review` Steps 1 through 6 and skip Step 7. Have `code-review` write its synthesized report to `<conversation-scratch-dir>/review_results.md` and skip its own Step 5 `lint_review.py` run and `--json` export, because Step 3.4 runs both. Run `code-review`'s Step 6 cleanup loop as written; it is the one exception to the Zero-Approval rule above, and it removes only the directories `code-review` created (`$diff_dir`, including `code_review_prep.diff_dir`, and any `--verify` checkouts), never the `workspace_dir.txt` checkout. After Step 6 completes, continue to Step 3.4 in the same turn, including when a swarm worker or reviewer subagent wakes you. Do not emit Step 7's hand-off question.
    - **Suggestion Syntax**: Formulate code suggestions following [suggestion_syntax.md](references/suggestion_syntax.md) so they serialize into GitHub suggestion blocks. The exporter posts each finding's `Suggestion` as a committable ```` ```suggestion ```` block (except ```` ```diff ````/```` ```patch ```` fences) and a `Repro test` as a plain code block; `lint_review.py` rejects a `Suggestion` with more than one fenced block.
-   - **JSON Output**: The `code-review` workflow validates the report AST and exports `<conversation-scratch-dir>/review_results.json` via `lint_review.py --export-json <conversation-scratch-dir>/review_results.json`.
-4. **Tag Hunk Boundaries and Validate Findings**:
-   - Merge `pr_meta.json` into the review metadata and parse diff hunk boundaries using `diff_parser.py`:
+4. **Finalize: Lint, Export, and Tag Hunk Boundaries**:
+   - Run one post-flight command. It lints `review_results.md`, exports `review_results.json`, merges `pr_meta.json`, and tags each finding's diff hunk:
      ```bash
-     python3 scripts/diff_parser.py \
+     python3 scripts/review_engine.py --finalize-review \
+       --report-md <conversation-scratch-dir>/review_results.md \
        --diff <conversation-scratch-dir>/pr.diff \
-       --findings <conversation-scratch-dir>/review_results.json \
+       --meta-file <conversation-scratch-dir>/pr_meta.json \
        --repo-dir <conversation-scratch-dir>/workspace_dir.txt \
-       --output <conversation-scratch-dir>/review_findings.json
+       --output-results <conversation-scratch-dir>/review_results.json \
+       --output-findings <conversation-scratch-dir>/review_findings.json
      ```
-   - `diff_parser.py` tags each finding with `is_diff_hunk: true` (for comments on lines modified within diff hunks) or `is_diff_hunk: false` (for outside-diff or broader context observations), while preserving enriched metadata:
+   - On exit 1, each lint violation is printed with a `Fix:` line. Apply the fixes to `review_results.md` and rerun; do not read `lint_review.py`'s source.
+   - Each finding gets `is_diff_hunk: true` (comments on lines modified within diff hunks) or `is_diff_hunk: false` (outside-diff or broader context observations), while preserving enriched metadata:
      - Evidence tiers (`evidence_tier`, `evidence_detail`), consequences (`why`), and resolution criteria (`to_settle`).
      - Clarification questions (merged into `findings[]` with `severity: "question"`).
      - Hypotheses checked clean (`checked_clean[]`) and structural assessment (`structural_assessment`).
-   - If manual or legacy findings are used in `<conversation-scratch-dir>/raw_findings.json`, pass `--findings <conversation-scratch-dir>/raw_findings.json` instead.
+   - For manual or legacy findings in `<conversation-scratch-dir>/raw_findings.json`, run `python3 scripts/diff_parser.py --diff <conversation-scratch-dir>/pr.diff --findings <conversation-scratch-dir>/raw_findings.json --repo-dir <conversation-scratch-dir>/workspace_dir.txt --output <conversation-scratch-dir>/review_findings.json` instead.
 
 ---
 

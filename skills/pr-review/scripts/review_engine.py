@@ -5,6 +5,7 @@ diff generation, and review payload construction.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -13,16 +14,56 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-_HARDENED_GIT_CONFIG: Tuple[Tuple[str, str], ...] = (
+_PR_REVIEW_SCRIPTS = Path(__file__).resolve().parent
+_CODE_REVIEW_SCRIPTS = Path(__file__).resolve().parents[2] / "code-review" / "scripts"
+for _script_dir in (_PR_REVIEW_SCRIPTS, _CODE_REVIEW_SCRIPTS):
+    if str(_script_dir) not in sys.path:
+        sys.path.insert(0, str(_script_dir))
+
+import diff_parser
+import lint_review
+
+ALIGNMENT_HEADINGS: dict[str, str] = {
+    "MATCHES": "Matches Stated Purpose",
+    "PARTIAL": "Partial Divergence",
+    "DIVERGES": "Diverges from Stated Purpose",
+    "UNSTATED": "Unstated Scope",
+}
+
+_VALID_CALLOUT_KINDS = frozenset({"NOTE", "IMPORTANT", "WARNING"})
+_SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
+_FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+
+_FALLBACK_FIX_HINTS: dict[str, str] = {
+    "unparsed-comments": "Format each finding under '## Review Comments' with '### <ID>. <Title>' and bold bullet fields.",
+    "id-sequence": "Number findings sequentially by severity class (C1.., H1.., M1.., L1.., Q1..).",
+    "severity-mismatch": "Match each finding ID prefix (C, H, M, L) to its section or Severity field.",
+    "missing-evidence": "Add '- **Evidence**: `<Executed|Read|Fetched|Deduction|Speculation> - <details>`' to each item.",
+    "evidence-cap": "Lower the finding severity or upgrade the evidence tier to Read or Executed.",
+    "missing-why": "Add '- **Why**: <concrete consequence if shipped as-is>' to each finding and question.",
+    "question-format": "Include File, Line, Evidence, Why, and To settle fields on every question.",
+    "clean-missing-evidence": "Append ': <Executed|Read|Fetched|Deduction> - <what was checked>' to each clean item.",
+    "verified-not-removed": "Remove disproved or verified-clean items from Review Comments and list them under Checked and Found Clean.",
+    "invalid-focus": "Format '- **Focus**: `<theme-id>`' using a lowercase slug.",
+    "playbook-feedback-section": "Remove the '## Playbook Feedback' section from the review report.",
+    "multiple-fences": "Keep at most one fenced code block inside each Suggestion or Repro test field.",
+    "comment-word-limit": "Trim the finding Body and Why prose to 80 words or fewer.",
+    "comment-sentence-limit": "Combine or trim sentences so the finding prose has at most 4 sentences.",
+    "comment-sentence-length": "Split or shorten sentences in Body and Why so each sentence is within the word limit.",
+    "comment-sentence-complexity": "Simplify nested clauses and conjunctions so each sentence has PCC <= 5.",
+    "comment-ai-ism": "Remove AI filler words, hyphens used as dashes, and noun clusters from the comment prose.",
+}
+
+_HARDENED_GIT_CONFIG: tuple[tuple[str, str], ...] = (
     ("core.hooksPath", "/dev/null"),
     ("core.fsmonitor", "false"),
     ("diff.external", ""),
 )
 
 
-def _apply_hardened_git_env(env: Dict[str, str]) -> None:
+def _apply_hardened_git_env(env: dict[str, str]) -> None:
     """Appends safe git config overrides to env via GIT_CONFIG_COUNT/KEY/VALUE."""
     try:
         base_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0")))
@@ -36,7 +77,7 @@ def _apply_hardened_git_env(env: Dict[str, str]) -> None:
     env["GIT_CONFIG_COUNT"] = str(base_count + len(_HARDENED_GIT_CONFIG))
 
 
-def run_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, str]:
+def run_command(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:
     """Runs a subprocess command and returns (exit_code, stdout, stderr)."""
     env = os.environ.copy()
     # Unset GITHUB_TOKEN override to match user environment policies
@@ -52,11 +93,11 @@ def run_command(cmd: List[str], cwd: Optional[str] = None) -> Tuple[int, str, st
             check=False,
         )
         return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
-    except Exception as e:
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
         return 1, "", str(e)
 
 
-def parse_repo_from_url(pr_url: str) -> Tuple[str, str]:
+def parse_repo_from_url(pr_url: str) -> tuple[str, str]:
     """Extracts the repository owner and name from a GitHub pull request URL."""
     url_match = re.match(r"https?://[^/]+/([^/]+)/([^/]+)/pull/(\d+)", pr_url or "")
     if url_match:
@@ -71,7 +112,7 @@ def _extract_author_login(author_field: Any) -> str:
     return str(author_field or "")
 
 
-def _resolve_owner_and_repo(pr_url: str, repo_arg: Optional[str]) -> Tuple[str, str]:
+def _resolve_owner_and_repo(pr_url: str, repo_arg: str | None) -> tuple[str, str]:
     """Resolves (owner, repo) from a PR URL or fallback 'owner/repo' string."""
     owner, repo_name = parse_repo_from_url(pr_url)
     if (not owner or not repo_name) and repo_arg and "/" in repo_arg:
@@ -80,8 +121,8 @@ def _resolve_owner_and_repo(pr_url: str, repo_arg: Optional[str]) -> Tuple[str, 
 
 
 def _build_pr_metadata(
-    raw: Dict[str, Any], owner: str, repo: str, pull_number: Optional[int] = None
-) -> Dict[str, Any]:
+    raw: dict[str, Any], owner: str, repo: str, pull_number: int | None = None
+) -> dict[str, Any]:
     """Constructs a canonical pr_metadata dict from GitHub CLI or GraphQL fields."""
     pr_num = raw.get("number") or pull_number
     default_url = (
@@ -104,8 +145,8 @@ def _build_pr_metadata(
 
 
 def resolve_pr_coordinates(
-    pr_identifier: str, repo: Optional[str] = None
-) -> Dict[str, Any]:
+    pr_identifier: str, repo: str | None = None
+) -> dict[str, Any]:
     """Fetches non-narrative PR coordinates without exposing title, body, or branch name.
 
     Queries `gh pr view` for number, base ref, commit SHA, URL, and state
@@ -144,9 +185,7 @@ def resolve_pr_coordinates(
     }
 
 
-def resolve_pr_metadata(
-    pr_identifier: str, repo: Optional[str] = None
-) -> Dict[str, Any]:
+def resolve_pr_metadata(pr_identifier: str, repo: str | None = None) -> dict[str, Any]:
     """Fetches PR metadata from GitHub CLI (`gh pr view`).
 
     Returns a dictionary with owner, repo, pull_number, title, author, base_ref,
@@ -228,9 +267,9 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 """
 
 
-def _format_comment_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
+def _format_comment_nodes(nodes: list[Any] | None) -> list[dict[str, str]]:
     """Normalizes a list of GraphQL or CLI comment nodes."""
-    formatted: List[Dict[str, str]] = []
+    formatted: list[dict[str, str]] = []
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -248,9 +287,9 @@ def _format_comment_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
     return formatted
 
 
-def _format_review_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
+def _format_review_nodes(nodes: list[Any] | None) -> list[dict[str, str]]:
     """Normalizes a list of GraphQL or CLI review nodes."""
-    formatted: List[Dict[str, str]] = []
+    formatted: list[dict[str, str]] = []
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -270,9 +309,9 @@ def _format_review_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, str]]:
     return formatted
 
 
-def _format_thread_nodes(nodes: Optional[List[Any]]) -> List[Dict[str, Any]]:
+def _format_thread_nodes(nodes: list[Any] | None) -> list[dict[str, Any]]:
     """Normalizes a list of GraphQL reviewThread nodes."""
-    threads: List[Dict[str, Any]] = []
+    threads: list[dict[str, Any]] = []
     for node in nodes or []:
         if not isinstance(node, dict):
             continue
@@ -318,8 +357,8 @@ def _are_threads_complete(review_threads_obj: Any) -> bool:
 
 
 def _parse_graphql_context(
-    pr_data: Dict[str, Any], owner: str, repo: str, pull_number: int
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    pr_data: dict[str, Any], owner: str, repo: str, pull_number: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Transforms a GraphQL pullRequest node into (pr_metadata, pr_context)."""
     pr_metadata = _build_pr_metadata(pr_data, owner, repo, pull_number)
     threads_container = pr_data.get("reviewThreads") or {}
@@ -340,7 +379,7 @@ def _parse_graphql_context(
 
 def _fetch_context_via_pr_view(
     owner: str, repo: str, pull_number: int
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetches PR metadata and narrative context using `gh pr view` as a fallback."""
     full_repo = f"{owner}/{repo}"
     cmd = [
@@ -378,7 +417,7 @@ def _fetch_context_via_pr_view(
 
 def fetch_pr_context(
     owner: str, repo: str, pull_number: int
-) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fetches full PR metadata and narrative context (title, body, comments, reviews, threads).
 
     Queries GitHub's GraphQL API first so inline review threads are included,
@@ -444,7 +483,7 @@ query($owner: String!, $repo: String!, $pr: Int!) {
 _NARRATIVE_STACK_ENTRY_KEYS = ("title", "head_ref", "base_ref", "url")
 
 
-def _parse_stack_entry(node: Any, pull_number: int) -> Optional[Dict[str, Any]]:
+def _parse_stack_entry(node: Any, pull_number: int) -> dict[str, Any] | None:
     """Parses one GraphQL stack entry node into a normalized dict."""
     if not isinstance(node, dict):
         return None
@@ -465,7 +504,7 @@ def _parse_stack_entry(node: Any, pull_number: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def _parse_stack(stack_data: Any, pull_number: int) -> Optional[Dict[str, Any]]:
+def _parse_stack(stack_data: Any, pull_number: int) -> dict[str, Any] | None:
     """Normalizes a GraphQL `pullRequest.stack` node into the stack dict used by both stages.
 
     Entries keep GitHub's order (bottom of the stack, closest to the trunk,
@@ -477,7 +516,7 @@ def _parse_stack(stack_data: Any, pull_number: int) -> Optional[Dict[str, Any]]:
     raw_entries = stack_data.get("entries")
     entries_container = raw_entries if isinstance(raw_entries, dict) else {}
     nodes = entries_container.get("nodes") or []
-    entries: List[Dict[str, Any]] = []
+    entries: list[dict[str, Any]] = []
     for node in nodes:
         parsed = _parse_stack_entry(node, pull_number)
         if parsed is not None:
@@ -495,7 +534,7 @@ def _parse_stack(stack_data: Any, pull_number: int) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_pr_stack(owner: str, repo: str, pull_number: int) -> Optional[Dict[str, Any]]:
+def fetch_pr_stack(owner: str, repo: str, pull_number: int) -> dict[str, Any] | None:
     """Returns the GitHub stack the PR belongs to, or None if it is not stacked.
 
     Uses the GraphQL `pullRequest.stack` field, so it works without the
@@ -534,7 +573,7 @@ def fetch_pr_stack(owner: str, repo: str, pull_number: int) -> Optional[Dict[str
     return _parse_stack(pr_data.get("stack"), pull_number)
 
 
-def structural_stack(stack: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def structural_stack(stack: dict[str, Any] | None) -> dict[str, Any] | None:
     """Drops PR titles and URLs from a stack dict, keeping branch names for git checks.
 
     This is what Stage 1 writes to `--output-stack`: enough for Stage 2 to
@@ -550,7 +589,7 @@ def structural_stack(stack: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]
     return result
 
 
-def blind_stack_summary(stack: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def blind_stack_summary(stack: dict[str, Any] | None) -> dict[str, Any] | None:
     """Reduces a stack dict to numbers and states for `pr_coords.json`.
 
     Branch names, titles, and URLs are removed so Stage 1 stays blind to the
@@ -572,9 +611,7 @@ def blind_stack_summary(stack: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     }
 
 
-def capture_stack_view(
-    workspace_dir: str, pull_number: int
-) -> Optional[Dict[str, Any]]:
+def capture_stack_view(workspace_dir: str, pull_number: int) -> dict[str, Any] | None:
     """Imports the PR's stack into the checkout and returns `gh stack view --json`.
 
     `gh stack checkout <pr>` pulls every member branch, records the stack in
@@ -587,7 +624,7 @@ def capture_stack_view(
     if ret != 0 or not start_sha:
         return None
 
-    view: Optional[Dict[str, Any]] = None
+    view: dict[str, Any] | None = None
     ret, _, stderr = run_command(
         ["gh", "stack", "checkout", str(pull_number)], cwd=workspace_dir
     )
@@ -615,7 +652,7 @@ def capture_stack_view(
 
 def _needs_rebase_from_git(
     workspace_dir: str, base_ref: str, head_ref: str
-) -> Optional[bool]:
+) -> bool | None:
     """Returns True when origin/<head_ref> does not contain origin/<base_ref>."""
     if not base_ref or not head_ref:
         return None
@@ -637,12 +674,12 @@ def _needs_rebase_from_git(
 
 
 def _index_stack_branches(
-    stack_view: Optional[Dict[str, Any]],
-) -> Dict[int, Dict[str, Any]]:
+    stack_view: dict[str, Any] | None,
+) -> dict[int, dict[str, Any]]:
     """Indexes `gh stack view --json` branches by pull request number."""
     if not isinstance(stack_view, dict):
         return {}
-    by_number: Dict[int, Dict[str, Any]] = {}
+    by_number: dict[int, dict[str, Any]] = {}
     for branch in stack_view.get("branches") or []:
         if not isinstance(branch, dict):
             continue
@@ -653,10 +690,10 @@ def _index_stack_branches(
 
 
 def annotate_stack_status(
-    stack: Dict[str, Any],
-    stack_view: Optional[Dict[str, Any]],
-    workspace_dir: Optional[str] = None,
-) -> Dict[str, Any]:
+    stack: dict[str, Any],
+    stack_view: dict[str, Any] | None,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
     """Fills `needs_rebase` (and merge/queue flags) on each stack entry in place.
 
     Prefers the `gh stack view --json` output, matched to entries by PR
@@ -685,8 +722,8 @@ def annotate_stack_status(
 
 
 def merge_stack_status(
-    fresh: Optional[Dict[str, Any]], recorded: Optional[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
+    fresh: dict[str, Any] | None, recorded: dict[str, Any] | None
+) -> dict[str, Any] | None:
     """Copies Stage 1 rebase/merge flags onto a freshly fetched Stage 2 stack by PR number."""
     if not fresh:
         return fresh
@@ -710,9 +747,9 @@ def merge_stack_status(
 
 
 def prepare_workspace(
-    pr_metadata: Dict[str, Any],
-    reference_dir: Optional[str] = None,
-) -> Tuple[str, bool]:
+    pr_metadata: dict[str, Any],
+    reference_dir: str | None = None,
+) -> tuple[str, bool]:
     """Prepares a clean local workspace for analyzing the PR.
 
     If reference_dir exists on disk, clones with --reference into a temporary
@@ -766,7 +803,7 @@ def prepare_workspace(
     return temp_dir, True
 
 
-def resolve_workspace_path(path_or_file: Optional[str]) -> str:
+def resolve_workspace_path(path_or_file: str | None) -> str:
     """Resolves a workspace directory path from a directory path, text file, or coords JSON."""
     if not path_or_file:
         return ""
@@ -812,14 +849,14 @@ def cleanup_workspace(workspace_dir: str) -> bool:
     try:
         shutil.rmtree(abs_path)
         return True
-    except Exception:
+    except OSError:
         return False
 
 
 def get_pr_diff(
     workspace_dir: str,
     base_ref: str = "main",
-    pull_number: Optional[int] = None,
+    pull_number: int | None = None,
 ) -> str:
     """Extracts unified diff (-U0) comparing base_ref to HEAD."""
     diff_flags = [
@@ -854,7 +891,7 @@ def get_pr_diff(
 
 def get_incremental_diff(
     workspace_dir: str, prev_head_sha: str, head_sha: str
-) -> Optional[str]:
+) -> str | None:
     """Extracts the unified diff between prev_head_sha and head_sha when available."""
     if not prev_head_sha or not head_sha or prev_head_sha == head_sha:
         return None
@@ -943,7 +980,7 @@ _RISKY_PATH_SEGMENTS = (
 _DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/.+? b/(.+)$")
 _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
-_LINE_RISK_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
+_LINE_RISK_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
     (
         "process_and_dynamic_execution",
         re.compile(
@@ -978,7 +1015,7 @@ _LINE_RISK_PATTERNS: Tuple[Tuple[str, re.Pattern[str], str], ...] = (
 )
 
 
-def _check_config_file_risk(file_path: str) -> Optional[str]:
+def _check_config_file_risk(file_path: str) -> str | None:
     """Returns a risk reason when file_path is a build, linter plugin, or hook config."""
     norm = file_path.strip().replace("\\", "/")
     if not norm:
@@ -995,7 +1032,7 @@ def _check_config_file_risk(file_path: str) -> Optional[str]:
     return None
 
 
-def _extract_header_path(line: str) -> Optional[str]:
+def _extract_header_path(line: str) -> str | None:
     """Extracts the target file path from diff --git, rename to, or +++ b/ headers."""
     if line.startswith("diff --git "):
         m = _DIFF_GIT_HEADER_RE.match(line)
@@ -1007,7 +1044,7 @@ def _extract_header_path(line: str) -> Optional[str]:
     return None
 
 
-def _parse_hunk_new_line(line: str) -> Optional[int]:
+def _parse_hunk_new_line(line: str) -> int | None:
     """Extracts the starting new-file line number from a unified diff @@ header."""
     m = _HUNK_HEADER_RE.match(line)
     return int(m.group(1)) if m else None
@@ -1015,9 +1052,9 @@ def _parse_hunk_new_line(line: str) -> Optional[int]:
 
 def _scan_added_line(
     file_path: str, line_num: int, content: str
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Matches an added diff line against execution, network, and obfuscation patterns."""
-    matches: List[Dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     snippet = content.strip()[:160]
     for category, pattern, reason in _LINE_RISK_PATTERNS:
         if pattern.search(content):
@@ -1034,10 +1071,10 @@ def _scan_added_line(
 
 
 def _record_signal(
-    signal: Dict[str, Any],
-    signals: List[Dict[str, Any]],
-    categories: Dict[str, int],
-    flagged_files: List[str],
+    signal: dict[str, Any],
+    signals: list[dict[str, Any]],
+    categories: dict[str, int],
+    flagged_files: list[str],
 ) -> None:
     """Appends a risk signal and updates category counts and ordered flagged_files."""
     signals.append(signal)
@@ -1052,9 +1089,9 @@ def _record_config_if_needed(
     current_file: str,
     raw_line: str,
     seen_config_files: set[str],
-    signals: List[Dict[str, Any]],
-    categories: Dict[str, int],
-    flagged_files: List[str],
+    signals: list[dict[str, Any]],
+    categories: dict[str, int],
+    flagged_files: list[str],
 ) -> None:
     """Records a build_and_hook_configs signal once per modified config file."""
     if current_file in seen_config_files:
@@ -1081,16 +1118,12 @@ def _step_hunk_line(
     raw_line: str,
     current_file: str,
     new_line: int,
-    signals: List[Dict[str, Any]],
-    categories: Dict[str, int],
-    flagged_files: List[str],
+    signals: list[dict[str, Any]],
+    categories: dict[str, int],
+    flagged_files: list[str],
 ) -> int:
     """Processes one hunk body line and returns the updated new_line counter."""
-    if (
-        raw_line.startswith("+++")
-        or raw_line.startswith("-")
-        or raw_line.startswith("\\")
-    ):
+    if raw_line.startswith(("+++", "-", "\\")):
         return new_line
     if raw_line.startswith("+"):
         for sig in _scan_added_line(current_file, new_line, raw_line[1:]):
@@ -1098,14 +1131,14 @@ def _step_hunk_line(
     return new_line + 1
 
 
-def scan_diff_execution_risks(diff_text: str) -> Dict[str, Any]:
+def scan_diff_execution_risks(diff_text: str) -> dict[str, Any]:
     """Scans a unified diff for local code execution hazards before running local tools."""
-    signals: List[Dict[str, Any]] = []
-    categories: Dict[str, int] = {}
-    flagged_files: List[str] = []
+    signals: list[dict[str, Any]] = []
+    categories: dict[str, int] = {}
+    flagged_files: list[str] = []
     seen_config_files: set[str] = set()
     current_file = ""
-    new_line: Optional[int] = None
+    new_line: int | None = None
 
     for raw_line in (diff_text or "").splitlines():
         header_path = _extract_header_path(raw_line)
@@ -1140,7 +1173,7 @@ def scan_diff_execution_risks(diff_text: str) -> Dict[str, Any]:
     }
 
 
-def _write_json_file(path_str: str, data: Dict[str, Any]) -> None:
+def _write_json_file(path_str: str, data: dict[str, Any]) -> None:
     """Writes a dictionary as formatted JSON, creating parent directories if needed."""
     path = Path(path_str)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1166,8 +1199,8 @@ def _run_security_scan(args: argparse.Namespace) -> int:
 
 
 def _load_matching_prior_coords(
-    output_coords_path: Optional[str], new_coords: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
+    output_coords_path: str | None, new_coords: dict[str, Any]
+) -> dict[str, Any] | None:
     """Loads existing coordinates when they belong to the same PR."""
     if not output_coords_path:
         return None
@@ -1176,7 +1209,7 @@ def _load_matching_prior_coords(
         return None
     try:
         old_coords = json.loads(coords_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return None
     if not isinstance(old_coords, dict):
         return None
@@ -1194,8 +1227,8 @@ def _load_matching_prior_coords(
 
 
 def _archive_prior_round_state(
-    output_coords_path: Optional[str], new_coords: Dict[str, Any]
-) -> Tuple[int, str]:
+    output_coords_path: str | None, new_coords: dict[str, Any]
+) -> tuple[int, str]:
     """Archives prior round state when output_coords_path matches the same PR.
 
     Returns (review_round, prev_head_sha).
@@ -1221,9 +1254,9 @@ def _archive_prior_round_state(
 
 def _write_incremental_diff_if_needed(
     workspace_dir: str,
-    coords: Dict[str, Any],
+    coords: dict[str, Any],
     prev_head_sha: str,
-    output_diff: Optional[str],
+    output_diff: str | None,
 ) -> None:
     """Writes pr_incremental.diff alongside output_diff when prev_head_sha moved."""
     if not prev_head_sha or not output_diff:
@@ -1266,7 +1299,7 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
             base_ref=coords.get("base_ref", "main"),
             pull_number=coords.get("pull_number"),
         )
-    except Exception as e:
+    except (RuntimeError, ValueError, OSError, KeyError, TypeError) as e:
         print(f"Error preparing blind review workspace: {e}", file=sys.stderr)
         return 1
 
@@ -1308,7 +1341,7 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
 
 
 def _is_stale_re_review_blind_description(
-    blind_path: Path, current_text: str, input_coords_path: Optional[str]
+    blind_path: Path, current_text: str, input_coords_path: str | None
 ) -> bool:
     """Returns True when a re-review reused the prior blind description after HEAD moved."""
     if not input_coords_path:
@@ -1318,7 +1351,7 @@ def _is_stale_re_review_blind_description(
         return False
     try:
         coords = json.loads(coords_path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
         return False
     if not isinstance(coords, dict) or int(coords.get("review_round") or 1) <= 1:
         return False
@@ -1342,7 +1375,7 @@ def _is_stale_re_review_blind_description(
 
 
 def _validate_blind_description(
-    path_str: Optional[str], input_coords_path: Optional[str] = None
+    path_str: str | None, input_coords_path: str | None = None
 ) -> bool:
     """Checks that the Stage 1 blind description file exists, is non-empty, and is fresh."""
     if not path_str:
@@ -1368,12 +1401,10 @@ def _validate_blind_description(
             file=sys.stderr,
         )
         return False
-    if _is_stale_re_review_blind_description(path, content, input_coords_path):
-        return False
-    return True
+    return not _is_stale_re_review_blind_description(path, content, input_coords_path)
 
 
-def _resolve_target_from_args(args: argparse.Namespace) -> Tuple[str, str, int, str]:
+def _resolve_target_from_args(args: argparse.Namespace) -> tuple[str, str, int, str]:
     """Resolves (owner, repo, pull_number, stage1_sha) from --input-coords or --pr."""
     stage1_sha = ""
     if args.input_coords:
@@ -1422,10 +1453,11 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
         stack = merge_stack_status(
             fetch_pr_stack(owner, repo, pull_number), recorded_stack
         )
-    except Exception as e:
+    except (RuntimeError, ValueError, OSError, KeyError, TypeError) as e:
         print(f"Error fetching PR context: {e}", file=sys.stderr)
         return 1
 
+    context["blind_sha256"] = _compute_file_sha256(Path(args.require_blind_description))
     context["stack"] = stack
     if stack:
         metadata["stack"] = {
@@ -1450,11 +1482,518 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
     if args.output_meta:
         _write_json_file(args.output_meta, metadata)
         print(f"Wrote PR metadata to {args.output_meta}")
+    if getattr(args, "prepare_code_review", False):
+        context["code_review_prep"] = _prepare_code_review_from_args(args, metadata)
     if args.output_context:
         _write_json_file(args.output_context, context)
         print(f"Wrote PR context to {args.output_context}")
 
     return 0
+
+
+_CONTEXT_INDEXER_SCRIPTS = (
+    Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
+)
+_ENTITY_QUERY_LIMIT = 25
+
+
+def _run_duckdb_macro(macro: str, diff_dir: str) -> list[dict[str, Any]] | None:
+    """Runs a staged_diff_macros.sql table macro and returns rows, or None on failure."""
+    duckdb = shutil.which("duckdb")
+    if not duckdb:
+        return None
+    sql_file = _CONTEXT_INDEXER_SCRIPTS / "staged_diff_macros.sql"
+    escaped_dir = diff_dir.replace("'", "''")
+    query = f"SELECT * FROM {macro}('{escaped_dir}') LIMIT {_ENTITY_QUERY_LIMIT};"
+    ret, stdout, _ = run_command(
+        [duckdb, "-batch", "-json", "-init", str(sql_file), "-c", query]
+    )
+    if ret != 0:
+        return None
+    try:
+        rows = json.loads(stdout or "[]")
+    except ValueError:
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def _run_packrat_context(
+    paths: list[str], repo_dir: Path, pull_number: Any
+) -> dict[str, Any] | None:
+    """Runs code-review's packrat_context.py read-only; returns its JSON or None."""
+    script = _CODE_REVIEW_SCRIPTS / "packrat_context.py"
+    cmd = [sys.executable, str(script), "--root", str(repo_dir)]
+    if pull_number:
+        cmd.extend(["--pr", str(pull_number)])
+    cmd.append("-")
+    try:
+        proc = subprocess.run(
+            cmd,
+            input="\n".join(paths),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        parsed = json.loads(proc.stdout or "{}")
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _stage_diff_for_review(
+    diff_path: Path, repo_dir: Path, base_ref: str, diff_dir: str
+) -> str | None:
+    """Runs stage_diffs.py --grouped --with-entities; returns an error or None.
+
+    The diff is passed as a positional input, so stage_diffs never writes to it.
+    """
+    cmd = [
+        sys.executable,
+        str(_CONTEXT_INDEXER_SCRIPTS / "stage_diffs.py"),
+        str(diff_path),
+        "--output-dir",
+        diff_dir,
+        "--grouped",
+        "--with-entities",
+        "--repo-dir",
+        str(repo_dir),
+    ]
+    if base_ref:
+        cmd.extend(["--base-ref", f"origin/{base_ref}"])
+    ret, _, stderr = run_command(cmd)
+    return None if ret == 0 else (stderr or f"stage_diffs.py exited {ret}")
+
+
+def prepare_code_review(
+    coords: dict[str, Any], diff_path: Path, repo_dir: Path, scratch: Path
+) -> dict[str, Any]:
+    """Bundles code-review pre-flight steps for pr-review Stage 2.
+
+    Runs classify_artifacts.classify_combined(), stage_diffs.py, optional
+    duckdb churn and drift queries, and packrat_context.py. Every optional
+    step degrades to a `warnings` entry instead of failing. `scratch` is the
+    conversation scratch directory, recorded for callers.
+    """
+    import classify_artifacts
+
+    warnings: list[str] = []
+    diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
+    paths = classify_artifacts._extract_paths_from_diff(diff_text)
+    classification = classify_artifacts.classify_combined(paths, repo_dir, diff_text)
+
+    diff_dir = tempfile.mkdtemp(prefix="pr-review-diffs-")
+    stage_error = _stage_diff_for_review(
+        diff_path, repo_dir, str(coords.get("base_ref") or ""), diff_dir
+    )
+    churn = drift = None
+    if stage_error:
+        warnings.append(f"stage_diffs.py failed: {stage_error}")
+    elif not shutil.which("duckdb"):
+        warnings.append("duckdb not installed; churn and drift skipped")
+    else:
+        churn = _run_duckdb_macro("diff_entity_churn", diff_dir)
+        drift = _run_duckdb_macro("diff_signature_drift", diff_dir)
+        if churn is None or drift is None:
+            warnings.append("duckdb churn or drift query failed")
+
+    packrat = _run_packrat_context(paths, repo_dir, coords.get("pull_number"))
+    if packrat is None:
+        warnings.append("packrat_context.py unavailable or failed")
+
+    return {
+        "classification": classification,
+        "diff_dir": diff_dir,
+        "scratch_dir": str(scratch),
+        "entity_churn": churn,
+        "signature_drift": drift,
+        "packrat": packrat,
+        "warnings": warnings,
+    }
+
+
+def _prepare_code_review_from_args(
+    args: argparse.Namespace, metadata: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolves pr.diff, the checkout, and scratch paths, then runs prepare_code_review()."""
+    scratch = Path(args.input_coords).parent if args.input_coords else Path.cwd()
+    diff_path = Path(args.diff) if args.diff else scratch / "pr.diff"
+    repo_arg = args.repo_dir or str(scratch / "workspace_dir.txt")
+    repo_dir = Path(resolve_workspace_path(repo_arg) or repo_arg)
+    if not diff_path.is_file() or not repo_dir.is_dir():
+        return {
+            "warnings": [
+                f"--prepare-code-review skipped: missing {diff_path} or checkout {repo_dir}"
+            ]
+        }
+    return prepare_code_review(metadata, diff_path, repo_dir, scratch)
+
+
+def _compute_file_sha256(path: Path) -> str:
+    """Computes the lowercase hex SHA-256 digest of a file."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _resolve_alignment_heading(raw_alignment: Any) -> str:
+    """Validates and maps an alignment key or label to its canonical heading text."""
+    if not isinstance(raw_alignment, str) or not raw_alignment.strip():
+        raise ValueError("Missing or empty 'alignment' in reconciliation JSON.")
+    token = raw_alignment.strip()
+    if token in ALIGNMENT_HEADINGS:
+        return ALIGNMENT_HEADINGS[token]
+    if token in ALIGNMENT_HEADINGS.values():
+        return token
+    raise ValueError(
+        f"Unknown alignment '{raw_alignment}'. "
+        f"Expected one of {sorted(ALIGNMENT_HEADINGS)}."
+    )
+
+
+def _format_optional_section(heading: str, raw_body: Any) -> str:
+    """Formats an optional top-level markdown block with a single ## heading."""
+    if raw_body is None:
+        return ""
+    if type(raw_body) is not str:
+        raise ValueError(f"Expected string for '{heading}' markdown block.")
+    text = raw_body.strip()
+    if not text:
+        return ""
+    if re.match(rf"^##\s+{re.escape(heading)}\b", text, re.IGNORECASE):
+        return text
+    return f"## {heading}\n\n{text}"
+
+
+def _update_fence_marker(fence_marker: str, line: str) -> str:
+    """Tracks whether the markdown line opens or closes a fenced code block."""
+    match = _FENCE_LINE_RE.match(line)
+    if not match:
+        return fence_marker
+    token = match.group(1)
+    if not fence_marker:
+        return token
+    if token[0] == fence_marker[0] and len(token) >= len(fence_marker):
+        return ""
+    return fence_marker
+
+
+def _split_blind_sections(markdown_text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Splits blind_description.md into (preamble, [(section_name, verbatim_block), ...])."""
+    preamble_lines: list[str] = []
+    sections: list[tuple[str, list[str]]] = []
+    fence_marker = ""
+
+    for line in markdown_text.splitlines():
+        was_fenced = bool(fence_marker)
+        fence_marker = _update_fence_marker(fence_marker, line)
+        heading_match = (
+            None if (was_fenced or fence_marker) else _SECTION_HEADING_RE.match(line)
+        )
+        if heading_match:
+            sections.append((heading_match.group(1).strip(), [line]))
+        elif sections:
+            sections[-1][1].append(line)
+        else:
+            preamble_lines.append(line)
+
+    rendered = [(name, "\n".join(lines).rstrip()) for name, lines in sections]
+    return "\n".join(preamble_lines).strip(), rendered
+
+
+def _format_callout_block(kind: str, text: str) -> str:
+    """Formats a GFM callout (> [!KIND]) from kind and body text."""
+    stripped = text.strip()
+    if stripped.startswith(f"> [!{kind}]"):
+        return stripped
+    body_lines = [
+        f"> {line}" if line.strip() else ">" for line in stripped.splitlines()
+    ]
+    return "\n".join([f"> [!{kind}]", *body_lines])
+
+
+def _validate_single_callout(entry: Any, valid_sections: set[str]) -> tuple[str, str]:
+    """Validates one callout dict and returns (section_name, formatted_callout)."""
+    if type(entry) is not dict:
+        raise ValueError("Each entry in 'callouts' must be a JSON object.")
+    raw_section = entry.get("section")
+    if not isinstance(raw_section, str) or not raw_section.strip():
+        raise ValueError("Callout 'section' must be a non-empty string.")
+    sec_name = raw_section.strip().removeprefix("##").strip()
+    if sec_name not in valid_sections:
+        raise ValueError(
+            f"Unknown section '{raw_section}' in callouts. "
+            f"Available sections: {sorted(valid_sections)}"
+        )
+    kind = entry.get("kind")
+    if not isinstance(kind, str) or kind.strip() not in _VALID_CALLOUT_KINDS:
+        raise ValueError(
+            f"Unknown callout kind '{kind}'. "
+            f"Expected one of {sorted(_VALID_CALLOUT_KINDS)}."
+        )
+    text = entry.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Callout 'text' must be a non-empty string.")
+    return sec_name, _format_callout_block(kind.strip(), text)
+
+
+def _parse_callouts_by_section(
+    raw_callouts: Any, valid_sections: set[str]
+) -> dict[str, list[str]]:
+    """Validates callouts[] entries and groups formatted callout blocks by section name."""
+    if raw_callouts is None:
+        return {}
+    if type(raw_callouts) is not list:
+        raise ValueError("'callouts' in reconciliation JSON must be a list.")
+
+    grouped: dict[str, list[str]] = {}
+    for entry in raw_callouts:
+        sec_name, formatted = _validate_single_callout(entry, valid_sections)
+        grouped.setdefault(sec_name, []).append(formatted)
+    return grouped
+
+
+def _read_json_object(path: Path, label: str) -> dict[str, Any]:
+    """Reads and validates a JSON object file, raising ValueError on failure."""
+    if not path.is_file():
+        raise ValueError(f"{label} file not found: {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in {label} file '{path}': {e}") from e
+    if type(data) is not dict:
+        raise ValueError(f"{label} JSON root must be an object.")
+    return data
+
+
+def reconcile_pr_description(
+    blind_path: Path,
+    reconciliation_path: Path,
+    output_path: Path,
+    expected_blind_sha256: str | None = None,
+) -> None:
+    """Writes `## Intent Alignment: <ALIGNMENT_HEADINGS[alignment]>`, then the
+    optional `## Stack Context` and `## Prior Review Resolution` blocks, then
+    the blind sections verbatim with callouts inserted under their sections.
+    Raises ValueError on a hash mismatch, an unknown section, kind, or alignment.
+    """
+    blind_file = Path(blind_path)
+    out_file = Path(output_path)
+
+    if not blind_file.is_file():
+        raise ValueError(f"Blind description file not found: {blind_file}")
+    blind_text = blind_file.read_text(encoding="utf-8")
+    if not blind_text.strip():
+        raise ValueError(f"Blind description file is empty: {blind_file}")
+
+    if expected_blind_sha256 is not None:
+        actual_sha = _compute_file_sha256(blind_file)
+        if actual_sha != expected_blind_sha256.strip().lower():
+            raise ValueError(
+                f"Blind description SHA-256 mismatch for '{blind_file}': "
+                f"expected {expected_blind_sha256}, got {actual_sha}."
+            )
+
+    rec_data = _read_json_object(Path(reconciliation_path), "Reconciliation")
+    alignment_heading = _resolve_alignment_heading(rec_data.get("alignment"))
+    stack_block = _format_optional_section(
+        "Stack Context", rec_data.get("stack_markdown")
+    )
+    prior_block = _format_optional_section(
+        "Prior Review Resolution", rec_data.get("prior_resolution_markdown")
+    )
+
+    preamble, sections = _split_blind_sections(blind_text)
+    valid_sections = {name for name, _ in sections}
+    callouts_by_section = _parse_callouts_by_section(
+        rec_data.get("callouts"), valid_sections
+    )
+
+    blocks: list[str] = [f"## Intent Alignment: {alignment_heading}"]
+    for optional_block in (stack_block, prior_block, preamble):
+        if optional_block:
+            blocks.append(optional_block)
+    for sec_name, sec_text in sections:
+        sec_callouts = callouts_by_section.get(sec_name)
+        blocks.append(
+            sec_text + "\n\n" + "\n\n".join(sec_callouts) if sec_callouts else sec_text
+        )
+
+    out_file.parent.mkdir(parents=True, exist_ok=True)
+    out_file.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+
+
+def _resolve_expected_blind_sha(args: argparse.Namespace) -> str | None:
+    """Resolves expected blind_sha256 from --expected-blind-sha256 or --context."""
+    if args.expected_blind_sha256 is not None:
+        return args.expected_blind_sha256
+    if not args.context:
+        return None
+    ctx_data = _read_json_object(Path(args.context), "PR context")
+    sha = ctx_data.get("blind_sha256")
+    if not isinstance(sha, str) or not sha.strip():
+        raise ValueError(f"Missing 'blind_sha256' in context file '{args.context}'.")
+    return sha.strip()
+
+
+def _run_reconcile_description(args: argparse.Namespace) -> int:
+    """Executes CLI reconciliation of blind_description.md and reconciliation JSON."""
+    base_dir = Path(args.context).parent if args.context else None
+    blind_arg = args.blind_description or (
+        str(base_dir / "blind_description.md") if base_dir else None
+    )
+    rec_arg = args.reconciliation or (
+        str(base_dir / "intent_reconciliation.json") if base_dir else None
+    )
+    out_arg = args.output_description or (
+        str(base_dir / "pr_description.md") if base_dir else None
+    )
+    if not blind_arg or not rec_arg or not out_arg:
+        print(
+            "Error: --reconcile-description requires --blind-description, "
+            "--reconciliation, and --output-description (or --context).",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        expected_sha = _resolve_expected_blind_sha(args)
+        reconcile_pr_description(
+            Path(blind_arg),
+            Path(rec_arg),
+            Path(out_arg),
+            expected_blind_sha256=expected_sha,
+        )
+    except (ValueError, OSError) as e:
+        print(f"Error reconciling PR description: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Wrote reconciled PR description to {out_arg}")
+    return 0
+
+
+def _print_lint_violations(violations: list[Any]) -> None:
+    """Prints lint violations and their actionable Fix: hints to stdout."""
+    module_hints = getattr(lint_review, "_FIX_HINTS", {})
+    for v in violations:
+        print(f"{v.line}: {v.rule}: {v.message}")
+        hint = (
+            getattr(v, "fix", "")
+            or (module_hints.get(v.rule, "") if isinstance(module_hints, dict) else "")
+            or _FALLBACK_FIX_HINTS.get(
+                v.rule, "Update the report section to satisfy this lint rule."
+            )
+        )
+        if "Fix:" not in str(v.message):
+            print(f"Fix: {hint}")
+
+
+def _merge_pr_metadata(
+    payload: dict[str, Any], meta_path: Path | None
+) -> dict[str, Any]:
+    """Merges pr_meta.json fields into payload['pr_metadata']."""
+    pr_metadata = dict(payload.get("pr_metadata") or {})
+    if meta_path is not None and Path(meta_path).is_file():
+        meta_data = _read_json_object(Path(meta_path), "PR metadata")
+        for key, value in meta_data.items():
+            if not pr_metadata.get(key) and value is not None and value != "":
+                pr_metadata[key] = value
+    payload["pr_metadata"] = pr_metadata
+    return payload
+
+
+def finalize_review(
+    report_md: Path,
+    diff_path: Path,
+    meta_path: Path,
+    repo_dir: Path | None,
+    output_results: Path,
+    output_findings: Path,
+) -> int:
+    """Runs parse_report() and check_report(). On violations prints each with
+    its Fix: hint and returns 1. Otherwise exports review_results.json, merges
+    pr_meta.json, tags hunks via normalize_findings_payload(), writes
+    review_findings.json, and returns 0.
+    """
+    report_file = Path(report_md)
+    diff_file = Path(diff_path)
+    meta_file = Path(meta_path) if meta_path is not None else None
+    results_file = Path(output_results)
+    findings_file = Path(output_findings)
+
+    if not report_file.is_file():
+        print(f"Error: Report file not found: {report_file}", file=sys.stderr)
+        return 1
+
+    raw_report = report_file.read_text(encoding="utf-8")
+    report = lint_review.parse_report(raw_report)
+    violations = lint_review.check_report(report)
+    if violations:
+        _print_lint_violations(violations)
+        return 1
+
+    if not diff_file.is_file():
+        print(f"Error: Diff file not found: {diff_file}", file=sys.stderr)
+        return 1
+    if meta_file is not None and not meta_file.is_file():
+        print(f"Error: Metadata file not found: {meta_file}", file=sys.stderr)
+        return 1
+
+    try:
+        results_payload = lint_review.export_report_to_json(report, results_file)
+        findings_payload = diff_parser.normalize_findings_payload(results_payload)
+        _merge_pr_metadata(findings_payload, meta_file)
+        hunks = diff_parser.parse_diff_hunks(
+            diff_file.read_text(encoding="utf-8", errors="replace")
+        )
+        repo_dir_str = str(repo_dir) if repo_dir is not None else None
+        diff_parser.tag_findings_with_hunk_status(
+            findings_payload["findings"], hunks, repo_dir=repo_dir_str
+        )
+        findings_payload = diff_parser.normalize_findings_payload(findings_payload)
+        _write_json_file(str(findings_file), findings_payload)
+    except (ValueError, OSError, KeyError, TypeError) as e:
+        print(f"Error finalizing review artifacts: {e}", file=sys.stderr)
+        return 1
+
+    return 0
+
+
+def _run_finalize_review(args: argparse.Namespace) -> int:
+    """Executes CLI post-flight review finalization."""
+    if not args.report_md:
+        print("Error: --finalize-review requires --report-md.", file=sys.stderr)
+        return 1
+    base_dir = Path(args.report_md).parent
+    diff_arg = Path(args.diff) if args.diff else base_dir / "pr.diff"
+    meta_arg = Path(args.meta_file) if args.meta_file else base_dir / "pr_meta.json"
+    results_arg = (
+        Path(args.output_results)
+        if args.output_results
+        else base_dir / "review_results.json"
+    )
+    findings_arg = (
+        Path(args.output_findings)
+        if args.output_findings
+        else base_dir / "review_findings.json"
+    )
+    repo_dir_arg: Path | None = None
+    if args.repo_dir:
+        repo_dir_arg = Path(args.repo_dir)
+    elif (base_dir / "workspace_dir.txt").is_file():
+        repo_dir_arg = base_dir / "workspace_dir.txt"
+
+    return finalize_review(
+        Path(args.report_md),
+        diff_arg,
+        meta_arg,
+        repo_dir_arg,
+        results_arg,
+        findings_arg,
+    )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -1470,7 +2009,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--reference",
         "--repo-dir",
         dest="repo_dir",
-        help="Optional local directory to use as clone reference.",
+        help="Optional local directory to use as clone reference or checkout path.",
     )
     parser.add_argument(
         "--prepare-workspace",
@@ -1510,6 +2049,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Path to blind_description.md that must exist and be non-empty before --fetch-context runs.",
     )
     parser.add_argument(
+        "--prepare-code-review",
+        action="store_true",
+        help=(
+            "With --fetch-context: also run classify_artifacts --combined, stage_diffs.py, "
+            "optional duckdb churn/drift, and packrat_context.py, storing the result under "
+            "pr_context.json['code_review_prep']. Reads --diff (default <coords dir>/pr.diff) "
+            "and --repo-dir (default <coords dir>/workspace_dir.txt)."
+        ),
+    )
+    parser.add_argument(
         "--output-meta", help="Output path for resolved PR metadata JSON."
     )
     parser.add_argument(
@@ -1517,6 +2066,56 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output path for PR narrative context JSON (title, body, comments).",
     )
     parser.add_argument("--output-diff", help="Output path for extracted unified diff.")
+    parser.add_argument(
+        "--reconcile-description",
+        action="store_true",
+        help="Stage 2: deterministically splice reconciliation callouts into blind_description.md.",
+    )
+    parser.add_argument(
+        "--blind-description",
+        help="Path to Stage 1 blind_description.md for --reconcile-description.",
+    )
+    parser.add_argument(
+        "--reconciliation",
+        help="Path to Stage 2 intent_reconciliation.json for --reconcile-description.",
+    )
+    parser.add_argument(
+        "--output-description",
+        help="Output path for reconciled pr_description.md.",
+    )
+    parser.add_argument(
+        "--context",
+        help="Path to pr_context.json carrying blind_sha256 for --reconcile-description.",
+    )
+    parser.add_argument(
+        "--expected-blind-sha256",
+        help="Optional explicit SHA-256 hex digest of blind_description.md.",
+    )
+    parser.add_argument(
+        "--finalize-review",
+        action="store_true",
+        help="Post-flight: lint review_results.md, export JSON, merge pr_meta.json, and tag diff hunks.",
+    )
+    parser.add_argument(
+        "--report-md",
+        help="Path to synthesized review_results.md for --finalize-review.",
+    )
+    parser.add_argument(
+        "--diff",
+        help="Path to unified diff (pr.diff) for --finalize-review.",
+    )
+    parser.add_argument(
+        "--meta-file",
+        help="Path to pr_meta.json for --finalize-review.",
+    )
+    parser.add_argument(
+        "--output-results",
+        help="Output path for canonical review_results.json in --finalize-review.",
+    )
+    parser.add_argument(
+        "--output-findings",
+        help="Output path for hunk-tagged review_findings.json in --finalize-review.",
+    )
     parser.add_argument(
         "--security-scan",
         help="Scan a unified diff file (or '-' for stdin) for local execution risks.",
@@ -1529,38 +2128,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def _run_cleanup(cleanup_target: str) -> int:
+    """Runs workspace cleanup and prints status."""
+    if cleanup_workspace(cleanup_target):
+        print(f"Successfully cleaned up temporary directory: {cleanup_target}")
+        return 0
+    print(f"Failed or refused to clean up directory: {cleanup_target}", file=sys.stderr)
+    return 1
+
+
+def main(argv: list[str] | None = None) -> int:
     """Entrypoint for review_engine CLI."""
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
     if args.cleanup:
-        if cleanup_workspace(args.cleanup):
-            print(f"Successfully cleaned up temporary directory: {args.cleanup}")
-            return 0
-        print(
-            f"Failed or refused to clean up directory: {args.cleanup}", file=sys.stderr
-        )
-        return 1
-
+        return _run_cleanup(args.cleanup)
     if args.security_scan:
         return _run_security_scan(args)
-
     if args.prepare_workspace:
         return _run_prepare_workspace(args)
-
     if args.fetch_context:
         return _run_fetch_context(args)
+    if args.reconcile_description:
+        return _run_reconcile_description(args)
+    if args.finalize_review:
+        return _run_finalize_review(args)
 
     if not args.pr:
         parser.error("the following arguments are required: --pr")
-
     if not _validate_blind_description(args.require_blind_description):
         return 1
 
     try:
         metadata = resolve_pr_metadata(args.pr, repo=args.repo)
-    except Exception as e:
+    except (RuntimeError, ValueError, OSError, KeyError, TypeError) as e:
         print(f"Error resolving PR: {e}", file=sys.stderr)
         return 1
 

@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import plan_surfaces
-from plan_model import parse_plan
+from plan_model import OpenQuestion, QuestionOption, parse_plan
 
 A2UI_PANE_ROOT = Path.home() / "code" / "a2ui-pane"
 EXPRESS_WORKER = (
@@ -135,25 +135,83 @@ class QuestionsSurfaceTest(unittest.TestCase):
         self.doc = parse_plan(PLAN_WITH_QUESTIONS)
         self.zero_doc = parse_plan(PLAN_ZERO_QUESTIONS)
 
-    def test_a2ui_review_block_first_and_prefilled_choices(self):
+    def test_a2ui_cards_options_and_footer_review(self):
         dsl = plan_surfaces.render_questions(self.doc, surface_id="custom-surface")
         self.assertIn('surface("custom-surface", sendDataModel=true)', dsl)
-        self.assertIn('$/review/choice = ["yes"]', dsl)
+        self.assertIn('Text("Recommended answers are preselected.", "caption")', dsl)
+        self.assertIn("$/review = true", dsl)
         self.assertIn('$/q1/choice = ["a"]', dsl)
         self.assertIn('$/q2/choice = ["b"]', dsl)
-        self.assertLess(dsl.index("review_block"), dsl.index("q1_block"))
+        self.assertNotIn("review_block", dsl)
+        self.assertIn("q1_cards = ChoiceCards($/q1/options, $/q1/choice)", dsl)
+        self.assertIn("q2_cards = ChoiceCards($/q2/options, $/q2/choice)", dsl)
         self.assertLess(dsl.index("q1_block"), dsl.index("q2_block"))
         self.assertIn(
-            'Event("submit_plan_decisions", {review: $/review/choice, q1: $/q1/choice, q2: $/q2/choice, notes: $/notes})',
+            'review_check = CheckBox("Run an independent review of this plan (recommended)", $/review)',
+            dsl,
+        )
+        self.assertIn(
+            'footer = Row([review_check, submit_btn], "spaceBetween", "center")',
+            dsl,
+        )
+        self.assertIn(
+            'Event("submit_plan_decisions", {review: $/review, q1: $/q1/choice, q2: $/q2/choice, notes: $/notes})',
             dsl,
         )
 
-    def test_a2ui_zero_questions_has_only_review_block(self):
+    def test_card_options_recommended_badge_quiet_defer_and_no_truncation(self):
+        options = plan_surfaces._card_options_for_question(self.doc.questions[0])
+        self.assertEqual(len(options), 3)
+        self.assertEqual(options[0]["value"], "a")
+        self.assertTrue(
+            str(options[0]["label"]).startswith("A · Yes, enable it immediately")
+        )
+        self.assertGreater(len(str(options[0]["label"])), 60)
+        self.assertEqual(options[0]["description"], "faster first load.")
+        self.assertEqual(options[0]["badge"], "Recommended")
+        self.assertEqual(options[0]["tone"], "success")
+        self.assertEqual(options[1]["value"], "b")
+        self.assertEqual(options[1]["label"], "B · No, keep it off.")
+        self.assertEqual(options[1]["description"], "users opt in.")
+        self.assertNotIn("badge", options[1])
+        self.assertNotIn("tone", options[1])
+        self.assertEqual(
+            options[2], {"value": "defer", "label": "Defer", "quiet": True}
+        )
+
+    def test_a2ui_zero_questions_has_only_footer_review(self):
         dsl = plan_surfaces.render_questions(self.zero_doc)
-        self.assertIn("review_block", dsl)
+        self.assertNotIn("review_block", dsl)
         self.assertNotIn("q1_block", dsl)
+        self.assertIn("$/review = true", dsl)
         self.assertIn(
-            'Event("submit_plan_decisions", {review: $/review/choice, notes: $/notes})',
+            'review_check = CheckBox("Run an independent review of this plan (recommended)", $/review)',
+            dsl,
+        )
+        self.assertIn(
+            'Event("submit_plan_decisions", {review: $/review, notes: $/notes})',
+            dsl,
+        )
+
+    def test_a2ui_list_layout_fallback(self):
+        dsl = plan_surfaces.render_questions(self.doc, layout="list")
+        self.assertNotIn("ChoiceCards", dsl)
+        self.assertIn('Text("Recommended answers are preselected.", "caption")', dsl)
+        self.assertIn('Badge("A", "success")', dsl)
+        self.assertIn('Badge("B", "neutral")', dsl)
+        self.assertIn('Text("faster first load.", "caption")', dsl)
+        self.assertIn(
+            'q1_picker = ChoicePicker(_, "mutuallyExclusive", '
+            '[{label: "A", value: "a"}, {label: "B", value: "b"}, {label: "Defer", value: "defer"}], '
+            '$/q1/choice, "chips")',
+            dsl,
+        )
+        self.assertIn(
+            'review_check = CheckBox("Run an independent review of this plan (recommended)", $/review)',
+            dsl,
+        )
+        self.assertIn(
+            'Event("submit_plan_decisions", {review: $/review, q1: $/q1/choice, q2: $/q2/choice, notes: $/notes})',
             dsl,
         )
 
@@ -162,12 +220,31 @@ class QuestionsSurfaceTest(unittest.TestCase):
         self.assertEqual(len(truncated), 60)
         self.assertTrue(truncated.endswith("..."))
 
+        long_q = OpenQuestion(
+            qid="Q9",
+            title="Long label",
+            line=1,
+            options=[
+                QuestionOption(
+                    letter="A" * 80,
+                    text="opt",
+                    consequence="",
+                    recommended=True,
+                )
+            ],
+        )
+        list_chips = plan_surfaces._list_chips_for_question(long_q)
+        self.assertEqual(len(list_chips[0]["label"]), 60)
+        self.assertTrue(list_chips[0]["label"].endswith("..."))
+        self.assertEqual(list_chips[-1], {"label": "Defer", "value": "defer"})
+
         escaped = plan_surfaces.escape_dsl_str('line1 "quote" \\slash\\\nline2')
         self.assertEqual(escaped, 'line1 \\"quote\\" \\\\slash\\\\\\nline2')
 
-        dsl = plan_surfaces.render_questions(self.doc)
-        self.assertIn('\\"quoted\\"', dsl)
-        self.assertIn("\\\\backslashes\\\\", dsl)
+        for layout in ("cards", "list"):
+            dsl = plan_surfaces.render_questions(self.doc, layout=layout)
+            self.assertIn('\\"quoted\\"', dsl)
+            self.assertIn("\\\\backslashes\\\\", dsl)
 
     def test_ask_question_format(self):
         raw = plan_surfaces.render_questions(self.doc, fmt="ask-question")
@@ -329,6 +406,15 @@ class CliEntrypointTest(unittest.TestCase):
 
             buf = io.StringIO()
             with patch("sys.stdout", buf):
+                rc = plan_surfaces.main(
+                    ["questions", str(plan_path), "--layout", "list"]
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn("ChoicePicker(", buf.getvalue())
+            self.assertNotIn("ChoiceCards(", buf.getvalue())
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
                 rc = plan_surfaces.main(["overview", str(plan_path)])
             self.assertEqual(rc, 0)
             self.assertIn("$/waveDiagram =", buf.getvalue())
@@ -396,6 +482,58 @@ class ExpressCompileSmokeTest(unittest.TestCase):
         messages = responses[1]["messages"]
         self.assertTrue(messages)
         self.assertEqual(messages[0]["createSurface"]["surfaceId"], "smoke-test")
+
+    def test_questions_list_layout_dsl_compiles_via_express_worker(self):
+        python_bin = os.environ["A2UI_PANE_PYTHON"]
+        edge_plan = PLAN_WITH_QUESTIONS + (
+            '\n### Q3: Multi-line and special chars "$foo" `bar`?\n'
+            '- (Recommended) A: Keep `$foo` and "quotes". Consequence: line 1\\nline 2.\n'
+            "- B: Drop them.\n"
+        )
+        doc = parse_plan(edge_plan)
+        dsl = plan_surfaces.render_questions(
+            doc, surface_id="smoke-list-test", layout="list"
+        )
+        requests = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "op": "init",
+                        "catalogPaths": CATALOG_PATHS,
+                        "version": "1.0",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "op": "compile",
+                        "surfaceId": "smoke-list-test",
+                        "dsl": dsl,
+                        "version": "1.0",
+                    }
+                ),
+            ]
+        )
+        proc = subprocess.run(
+            [python_bin, str(EXPRESS_WORKER)],
+            input=requests + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        responses = [
+            json.loads(line)
+            for line in proc.stdout.strip().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(responses), 2)
+        self.assertTrue(responses[0].get("ok"), responses[0])
+        self.assertTrue(responses[1].get("ok"), responses[1])
+        messages = responses[1]["messages"]
+        self.assertTrue(messages)
+        self.assertEqual(messages[0]["createSurface"]["surfaceId"], "smoke-list-test")
 
     def test_overview_dsl_compiles_via_express_worker(self):
         python_bin = os.environ["A2UI_PANE_PYTHON"]

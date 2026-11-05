@@ -40,7 +40,7 @@ Use a named `genui` template when every item in the turn shares one uniform shap
 | Shape of the decision | `genui` template | Surface |
 | :--- | :--- | :--- |
 | Confirm 2 to 5 inferred facts by exception | `assumption_ledger` | inline |
-| Batch of uniform `Yes / No / Defer` confirmations | `decision_batch` | inline (<=3 items) or pane (>=4) |
+| Batch of short decisions with per-item options (Yes/No/Defer or named choices) | `decision_batch` | inline (<=3 items) or pane (>=4) |
 | Tune 2 to 4 identifiers, routes, or parameters with live validation | `contract_workbench` | inline |
 | Compare 2 to 3 strategies with stacked consequence cards, badges, trace, and multi-select hybrid chips | `consequence_cards` | inline (1 compact fork) or pane (with trace or 3+ cards) |
 | Compare 3 or more options across criteria with multi-select chips | `comparison_matrix` | pane |
@@ -50,12 +50,12 @@ Use a named `genui` template when every item in the turn shares one uniform shap
 
 ### Mixed-complexity, orthogonal-axis, or improvised Express surfaces (3-Tier Rubric)
 
-Because `ChoicePicker.options` is static in the A2UI v1.0 Basic Catalog, a `_template` list such as `decision_batch` gives every item the exact same chip labels. Templates and bespoke A2UI Express (`dsl` without `template`) are co-equal peers: when a turn needs custom domain choices per question, decomposes independent design axes, previews candidate UI layouts in `Tabs`, tunes thresholds with `Slider`, or steps through >4 deep forks with `Stepper`, author a custom A2UI Express surface. Combine these three block tiers above one shared footer:
+Templates and bespoke A2UI Express (`dsl` without `template`) are co-equal peers: when a turn mixes question tiers, adds question headers, badges, or blast-radius traces, decomposes independent design axes, previews candidate UI layouts in `Tabs`, tunes thresholds with `Slider`, or steps through >4 deep forks with `Stepper`, author a custom A2UI Express surface. Combine these three block tiers above one shared footer:
 
 | Complexity tier | When to use | Express block anatomy |
 | :--- | :--- | :--- |
 | **Tier 1: Simple Choice** (`QuickChoice`) | Scope checks, naming picks, or low-risk defaults where the tradeoff is obvious from the option labels. | `Row([Text(prompt, "body", 1), Badge(tag, tone)])`, optional 1-line `Text(hint, "caption")`, and `ChoicePicker` with 2 to 4 named chips (`(Recommended)` first, `"Defer"` last). Omit per-item text fields. |
-| **Tier 2: Consequence-Aware Decision** (`ConsequenceCard`) | Choices between 2 to 5 named alternatives with downstream blast radius (API contracts, cross-SDK parity, test churn, migration cost). | Header row with semantic impact `Badge`, brief context caption, an inline bulleted `Text` block (`**Consequences of this decision:**\n- ...`), a `Collapsible("Affected files & blast radius", Text(trace, "caption"), summary)` disclosure, and named `ChoicePicker` chips (use `"multipleSelection"` when options can combine). |
+| **Tier 2: Consequence-Aware Decision** (`ConsequenceCard`) | Choices between 2 to 5 named alternatives with downstream blast radius (API contracts, cross-SDK parity, test churn, migration cost). | Header row with semantic impact `Badge`, `ChoiceCards($/q2/options, $/q2/choice)` with `{value, label, description, badge?, tone?}` cards plus a quiet `{value: "defer", label: "Defer", quiet: true}` option (use `"multipleSelection"` when options can combine), and a `Collapsible("Affected files & blast radius", Text(trace, "caption"), summary)` disclosure. |
 | **Tier 3: Complex Architectural Fork** (`ForkCards` / `CriteriaTable` / `ParameterTuner`) | Competing strategies with multi-dimensional tradeoffs, orthogonal axes, live layout previews, or tunable numeric parameters. | Vertically stacked option `Card`s (`Column(_template($/q3/options, ...), _, "stretch")`), a dense `Table` with `kind: "badge"` cells, `Tabs` layout previews, or `Slider` + `CheckBox` controls above `"multipleSelection"` or per-axis `ChoicePicker` chips (use a 1-by-1 `Stepper` pane deck when >4 deep forks exist). |
 
 End the worksheet with a single shared `TextField("Overall notes or overrides", $/notes)` and one primary `Button(Text("Submit Decisions"), "primary", Event("submit_alignment", ...))`. Copy-pasteable Express block recipes are in `genui`'s `references/templates.md`.
@@ -63,8 +63,8 @@ End the worksheet with a single shared `TextField("Overall notes or overrides", 
 ## 3. Prepare the context and defaults
 
 1. In the chat message, state in one or two sentences what the code or plan does now and why alignment is needed, with clickable `[file](file:///...)` links.
-2. Put real option names on the `ChoicePicker` chips. Never encode named alternatives inside caption text as `"Yes = Option A; No = Option B"` just to fit `decision_batch`.
-3. Put consequences inside the surface. On Tier 2 and Tier 3 questions, include an inline **Consequences of this decision** bullet list and a `Collapsible` blast-radius trace of affected files.
+2. Put real option names on `ChoiceCards` labels or per-item `decision_batch` options. Never encode named alternatives inside caption text as `"Yes = Option A; No = Option B"`.
+3. Put consequences inside the surface. On Tier 2 and Tier 3 questions, put each option's consequence in its card `description` and include a `Collapsible` blast-radius trace of affected files.
 4. Keep simple questions clutter-free: omit per-item `Or specify` and `Note` text boxes on Tier 1 questions and rely on the shared footer note field.
 5. Pre-populate your recommendation in the data (`$/q1/choice = ["dual_write"]`, `holds: true`, `bucket: ["p0"]`) so the user edits exceptions in one click.
 

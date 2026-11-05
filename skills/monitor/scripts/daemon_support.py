@@ -1,4 +1,4 @@
-"""Daemon mode utilities for /monitor.
+"""Shared daemon mode utilities for the monitor skills.
 
 Provides liveness locking, heartbeat tracking, agentapi notification delivery,
 control-file parsing, and acknowledgment gating.

@@ -398,7 +398,10 @@ class TestAnalyzeComments(unittest.TestCase):
             "syncStatus": {"warning": "sync warning"}
         }
         mock_parse_args.return_value = MagicMock(dir=".", output="/tmp/test_out/comments.json", json=False, all=False, pr=None)
-        with patch('builtins.open', mock_open()) as mock_file, patch('os.makedirs') as mock_makedirs, patch('builtins.print') as mock_print:
+        # Patch open only inside analyze_comments: patching builtins.open also
+        # intercepts argparse's gettext lookup of .mo catalogs, which then
+        # reads a str instead of bytes and raises TypeError.
+        with patch('analyze_comments.open', mock_open(), create=True) as mock_file, patch('os.makedirs') as mock_makedirs, patch('builtins.print') as mock_print:
             from analyze_comments import main
             main()
             mock_makedirs.assert_called_with("/tmp/test_out", exist_ok=True)

@@ -87,6 +87,12 @@ None currently blocking.
 
 - **Q1 (2026-11-04):** A. Land in three commits.
 
+## Execution Strategy & Parallelization
+
+| Setting | Value |
+| :--- | :--- |
+| Orchestration | `/swarm` with 2 author workers (`workspace: "share"`) |
+
 ## Phased Implementation Plan
 
 ### Wave 1: Foundation [Sequential]
@@ -507,6 +513,47 @@ None.
         self.assertEqual(len(errors), 1)
         self.assertIn("Phase 2B", errors[0].message)
         self.assertIn("Model tier", errors[0].message)
+
+    def test_parallel_orchestration_with_swarm_or_workflow_has_no_warning(self) -> None:
+        validator = PlanValidator(VALID_PARALLEL_WAVE_PLAN)
+        issues = validator.validate()
+        self.assertEqual(issues, [])
+
+        alt_heading_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "## Execution Strategy & Parallelization\n\n"
+            "| Setting | Value |\n"
+            "| :--- | :--- |\n"
+            '| Orchestration | `/swarm` with 2 author workers (`workspace: "share"`) |',
+            "### Execution & Verification Strategy\n\n"
+            "| Setting | Value |\n"
+            "| :--- | :--- |\n"
+            "| Orchestration | `/run-workflow` (`parallel()` script) |",
+        )
+        alt_issues = PlanValidator(alt_heading_plan).validate()
+        self.assertEqual(alt_issues, [])
+
+    def test_parallel_orchestration_missing_swarm_emits_warning(self) -> None:
+        no_swarm_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            '| Orchestration | `/swarm` with 2 author workers (`workspace: "share"`) |',
+            "| Orchestration | Sequential single agent |",
+        )
+        issues = PlanValidator(no_swarm_plan).validate()
+        errors = [i for i in issues if i.is_error]
+        warnings = [i for i in issues if not i.is_error]
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(
+            warnings[0].message,
+            "Plan contains parallel waves but Execution Strategy does not specify /swarm or /run-workflow orchestration.",
+        )
+
+    def test_parallel_orchestration_single_wave_sequential_plan_no_warning(self) -> None:
+        single_wave_plan = VALID_PLAN.replace(
+            "### Cache Subsystem\n",
+            "### Wave 1: Cache Subsystem [Sequential]\n- **Model tier**: Claude Fable 5.1 High\n",
+        )
+        issues = PlanValidator(single_wave_plan).validate()
+        self.assertEqual(issues, [])
 
     def test_cli_human_output_next_line_and_quiet(self) -> None:
         plan_file = self.workspace / "plan.md"

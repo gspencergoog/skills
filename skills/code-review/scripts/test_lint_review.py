@@ -1,12 +1,14 @@
 """Unit tests for lint_review.py."""
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
 import unittest
 
-from lint_review import check_report, main, parse_report
+from lint_review import _FIX_HINTS, check_report, main, parse_report
 
 CLEAN_REPORT = """\
 ## Summary
@@ -633,25 +635,129 @@ return _byte_len(text) <= max_bytes
         rules = [v.rule for v in check_report(parse_report(bad))]
         self.assertIn("comment-prose-length", rules)
 
-    def test_comment_sentence_length_fails(self):
-        long_sentence = (
-            "When the caller passes a dictionary with more than thirty entries "
-            "and the configuration flag for strict validation is enabled in "
-            "the runtime environment, the validator drops every remaining key "
-            "without logging a warning."
+    def test_comment_sentence_length_threshold_28_passes_31_fails(self):
+        sentence_28 = (
+            "The client sends a batch request with ten items to the primary "
+            "server and waits for the response header from the remote worker "
+            "before closing the local socket."
         )
-        bad = f"""\
+        self.assertEqual(len(sentence_28.split()), 28)
+        ok_report = f"""\
 ## Review Comments (Ordered by Severity)
-### M1. Long sentence
+### M1. Twenty-eight word sentence
 - **File**: `foo.py`
 - **Line**: `10`
 - **Severity**: `medium`
 - **Evidence**: `Read` - `foo.py:10`
-- **Body**: {long_sentence}
+- **Body**: {sentence_28}
 - **Why**: Drops keys silently.
 """
-        rules = [v.rule for v in check_report(parse_report(bad))]
+        self.assertEqual(check_report(parse_report(ok_report)), [])
+
+        sentence_31 = (
+            "The client sends a batch request with ten items to the primary "
+            "server and waits for the response header from the remote worker "
+            "in the cluster before closing the local socket."
+        )
+        self.assertEqual(len(sentence_31.split()), 31)
+        bad_report = f"""\
+## Review Comments (Ordered by Severity)
+### M1. Thirty-one word sentence
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `foo.py:10`
+- **Body**: {sentence_31}
+- **Why**: Drops keys silently.
+"""
+        violations = check_report(parse_report(bad_report))
+        rules = [v.rule for v in violations]
         self.assertIn("comment-sentence-length", rules)
+
+    def test_fix_hints_cover_all_rules_and_print_in_cli(self):
+        all_rules_samples = [
+            "## Review Comments\nUnparsed comment text\n",
+            """\
+## Review Comments (Ordered by Severity)
+### M2. Bad id and severity and missing why and recalled
+- **Severity**: `low`
+- **Focus**: bad focus
+- **Verified**: `pytest`
+- **Evidence**: `Recalled` - memory
+- **Body**: We should delve into this parser branch. The parser, which when tokens that are not yet validated arrive while the buffer is still locked, fails unless the caller retries. When the caller passes a dictionary with more than thirty entries and the configuration flag for strict validation is enabled in the runtime environment, the validator drops every remaining key without logging a warning. Fourth sentence here. Fifth sentence here.
+- **Suggestion**:
+```python
+old()
+```
+with:
+```python
+new()
+```
+
+### C1. Speculative critical without tier
+- **Severity**: `critical`
+- **Evidence**: `Speculation` - guess
+- **Why**: Outage.
+
+### H1. Missing evidence tier
+- **Severity**: `high`
+- **Evidence**: no tier here
+- **Why**: Crash.
+
+## Questions
+### Q1. First question?
+- **Evidence**: `Speculation` - guess
+- **Why**: Breaks.
+### Q2. Second question?
+- **Evidence**: `Speculation` - guess
+- **Why**: Breaks.
+- **To settle**: Check `a.py`.
+### Q3. Third question?
+- **Evidence**: `Speculation` - guess
+- **Why**: Breaks.
+- **To settle**: Check `b.py`.
+### Q4. Fourth question?
+- **Evidence**: `Speculation` - guess
+- **Why**: Breaks.
+- **To settle**: Check `c.py`.
+
+## Checked and Found Clean
+- Clean 1: `Read` - `a.py:1`
+- Clean 2: `Read` - `a.py:2`
+- Clean 3: `Read` - `a.py:3`
+- Clean 4: `Read` - `a.py:4`
+- Clean 5: `Read` - `a.py:5`
+- Clean 6: `Read` - `a.py:6`
+- Clean 7: `Read` - `a.py:7`
+- Clean 8: `Read` - `a.py:8`
+- Clean 9: `Read` - `a.py:9`
+- Clean 10: `Read` - `a.py:10`
+- Clean 11 without tier
+
+## Playbook Feedback
+- Leaked feedback.
+""",
+        ]
+        emitted_rules: set[str] = set()
+        for sample in all_rules_samples:
+            for v in check_report(parse_report(sample)):
+                emitted_rules.add(v.rule)
+                self.assertIn(v.rule, _FIX_HINTS)
+                self.assertTrue(v.fix)
+                self.assertEqual(v.fix, _FIX_HINTS[v.rule])
+        self.assertEqual(emitted_rules, set(_FIX_HINTS.keys()))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_path = pathlib.Path(tmp) / "bad.md"
+            bad_path.write_text(all_rules_samples[1], encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                exit_code = main([str(bad_path)])
+            self.assertEqual(exit_code, 1)
+            output = buf.getvalue()
+            self.assertIn("Fix: ", output)
+            for rule in emitted_rules - {"review-comments-unparsed"}:
+                self.assertIn(f"Fix: {_FIX_HINTS[rule]}", output)
 
     def test_comment_sentence_complexity_fails(self):
         complex_sentence = (

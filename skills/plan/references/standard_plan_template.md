@@ -83,11 +83,11 @@ None currently blocking.
 
 | Setting | Value |
 | :--- | :--- |
-| Orchestration | [`Sequential` (single agent) \| `/swarm` (named author + verifier workers) \| `/run-workflow` (`parallel()` script)] |
-| Workspaces | [`inherit` \| `share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree`] |
-| Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks, or inline verification for sequential plans] |
+| Orchestration | [`/swarm` (named author + verifier workers) \| `/run-workflow` (`parallel()` script)] |
+| Workspaces | [`share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree` \| `inherit` (read-only verifier)] |
+| Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks] |
 | Chokepoints | [Barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`) or registries isolated in Wave 1 or Wave 3] |
-| Model tiers | [Capable model (`pro` / `self`) for architecture and coordination; fast tier for bounded tracks] |
+| Model tiers | [Capable model (`pro` / `self`) for architecture and coordination; independent quota pool (`auto`) for parallel author tracks] |
 
 ## Phased Implementation Plan
 

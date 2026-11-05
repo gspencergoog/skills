@@ -89,8 +89,8 @@ None currently blocking.
 | Wave / Track | Execution Mode | Orchestrator / Role | Model Tier | Workspace Isolation | Owned Files / Scope | Verification Gate |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Wave 1** | Sequential | Coordinator / Single Agent | Claude Fable 5.1 High | Primary workspace or base worktree | Shared interfaces & shims | `[Wave 1 typecheck + compatibility suite]` |
-| **Track 2A** | Parallel (Wave 2) | `/swarm` author (`pkg-a`) or `/run-workflow` `parallel()` | Gemini Pro Next (`auto`) | `workspace: "share"` or dedicated `git worktree` | `packages/pkg_a/**` | `[Track 2A unit tests + linter]` |
-| **Track 2B** | Parallel (Wave 2) | `/swarm` author (`pkg-b`) or `/run-workflow` `parallel()` | Gemini Pro Next (`auto`) | `workspace: "share"` or dedicated `git worktree` | `packages/pkg_b/**` | `[Track 2B unit tests + linter]` |
+| **Track 2A** | Parallel (Wave 2) | `/swarm` author (`pkg-a`) | Gemini Pro Next (`auto`) | `workspace: "share"` | `packages/pkg_a/**` | `[Track 2A unit tests + linter]` |
+| **Track 2B** | Parallel (Wave 2) | `/swarm` author (`pkg-b`) | Gemini Pro Next (`auto`) | `workspace: "share"` | `packages/pkg_b/**` | `[Track 2B unit tests + linter]` |
 | **Wave 2 Verifier** | Parallel Critic | `/swarm` `verifier` (`1` per `2-4` authors) | Claude Fable 5.1 High | `workspace: "inherit"` (read-only) | Audits Track 2A & 2B diffs and file bounds | `[Wave 2 cross-package integration gate]` |
 | **Wave 3** | Sequential | Coordinator / Single Agent | Claude Fable 5.1 High | Primary workspace or merged branch | Barrel exports, `CHANGELOG.md`, legacy removal | `[Full repo regression + code-review]` |
 

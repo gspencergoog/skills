@@ -10,6 +10,7 @@ from unittest import mock
 import prose_lexicon
 from analyze_prose import (
     INSTALL_HINT_MESSAGE,
+    _is_likely_noun_token,
     _load_spacy_model,
     _parse_cli_args,
     _probe_nlp_backends,
@@ -204,6 +205,38 @@ class AnalyzeProseTests(unittest.TestCase):
         self.assertEqual(len(rotations), 1)
         rotated_words = {w["word"] for w in rotations[0]["words_used"]}
         self.assertEqual(rotated_words, {"check", "verify"})
+
+    def test_verb_aware_noun_clusters_and_suffix_guards(self):
+        for sentence in (
+            "The branch bypasses cycle detection.",
+            "Each entry alters validation rules.",
+            "Readers see duplicate component configuration.",
+            "The orchestrator sessions hit context compaction.",
+            "The authors merge feature branches.",
+            "The parser normalizes token stream.",
+            "The verifier identifies token drift.",
+        ):
+            with self.subTest(sentence=sentence):
+                report = self._run_on_text(sentence + "\n")
+                self.assertEqual(report["violations"]["noun_clusters_found"], [])
+
+        self.assertFalse(_is_likely_noun_token("normalizes", prev="parser"))
+        self.assertFalse(_is_likely_noun_token("identifies", prev="verifier"))
+        self.assertTrue(_is_likely_noun_token("normalizes", prev="parsers"))
+        self.assertTrue(_is_likely_noun_token("normalizes"))
+        self.assertTrue(_is_likely_noun_token("templates", prev="config"))
+        self.assertTrue(_is_likely_noun_token("branches", prev="feature"))
+
+        for phrase in (
+            "config templates cache invalidation path",
+            "feature branches cache key policy",
+        ):
+            with self.subTest(phrase=phrase):
+                report = self._run_on_text(f"The {phrase} is active.\n")
+                clusters = [
+                    c["cluster"] for c in report["violations"]["noun_clusters_found"]
+                ]
+                self.assertIn(phrase, clusters)
 
     def test_epistemic_modality_hedges_are_not_penalized_as_passive(self):
         report = self._run_on_text(

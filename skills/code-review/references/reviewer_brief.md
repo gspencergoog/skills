@@ -62,7 +62,7 @@ These files are documents. Review them for structure, correctness, completeness,
 - Every document finding has a `Category`, a `Why`, and an `Evidence` field (`Read` or `Fetched`) quoting the text (both sides for an inconsistency). Findings without quoted evidence are dropped.
 - Run the downstream impact pass (at most 10 files outside this diff) and fill in the `## Structural Assessment` section. Each lens verdict names what you checked; a bare "no issues" is not a verdict.
 
-### API Review Mandate  (include only when diff modifies public APIs, signatures, endpoints, or configuration surfaces)
+### API Review Mandate  (include only when diff modifies public APIs, signatures, endpoints, or configuration surfaces, or when `ring.api_mandate` is true)
 These code changes modify public API surfaces, signatures, exported symbols, endpoints, or configuration options.
 - Read `<skill-dir>/references/reviewing_apis.md` first.
 - Apply the Dual-Scope Model: inspect sibling methods and call sites for context, but report only findings anchored to modified lines (+/-).
@@ -87,7 +87,7 @@ These code changes modify public API surfaces, signatures, exported symbols, end
 - Give confirmed findings `Evidence: Executed: <command>: <trimmed output, <=15 lines>`. Drop disproved findings and record them in `## Checked and Found Clean`.
 
 ### Report Format
-If running as a swarm worker (Tier 1), post your complete report on the board via `post_message` addressed strictly to `@coordinator` (never `@all` or a sibling reviewer) and call `swarm_wait` in the same turn. If running as a subagent (Tier 2), return your report via `send_message` (or subagent output). Use this exact structure:
+If running as a swarm worker (Tier 1), write your complete report to `rev_<your-name>.md` in your own artifact directory (never in the coordinator's directory, which you cannot write), then post a 3-line summary (verdict, finding counts by severity, and the report's absolute path) via `post_message` addressed strictly to `@coordinator` (never `@all` or a sibling reviewer) and call `swarm_wait` in the same turn. If the file write fails, post the complete report instead. If running as a subagent (Tier 2), return your report via `send_message` (or subagent output). Use this exact structure:
 
 ## Summary
 <1-2 paragraphs summarizing changes. End with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`.>

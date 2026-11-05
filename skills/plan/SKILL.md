@@ -81,9 +81,10 @@ Draft the plan according to the chosen template and write it using `write_file` 
   - `### Wave 3: Integration, Exports & Cleanup [Sequential]` for barrel exports, central registries, CLI wiring, and end-to-end verification.
 - Isolate shared chokepoint files into sequential foundation or integration waves so parallel tracks never touch the same file path.
 - Specify an **Execution Strategy & Parallelization** table for multi-track plans, selecting the right orchestrator:
-  - `/swarm` (`native_swarm`) when 2 or more tracks edit disjoint files across 3 or more files, pairing `1` verifier per `2-4` authors (`workspace: "share"` or `"branch"`).
+  - `/swarm` (`native_swarm`) when 2 or more tracks edit disjoint files across 3 or more files, pairing `1` verifier per `2-4` authors (`workspace: "share"` or `"branch"`). Multi-track parallel waves (2 or more tracks) must use `/swarm` (or `/run-workflow` for uniform batch scripts), never ad-hoc `invoke_subagent`. Swarm isolates file writes (`workspace: "share"`) and distributes tracks across independent quota pools (such as Gemini Pro Next `auto` or Gemini 4 Argon). It also allows model failover at runtime via `swarm(action="model")`.
   - `/run-workflow` (`parallel()` / `pipeline()`) when tracks follow a uniform per-shard recipe across many files or modules.
   - Single-agent sequential execution when the plan touches 1 to 2 files or has a strictly linear dependency chain.
+  - Reserve `invoke_subagent` strictly for single-shot, isolated tasks (such as a single read-only reviewer when swarm is not active).
 - Format every planned file entry as a task list item without heading hashes (never write `- [ ] #### ...`):
   - `- [ ] [NEW] [basename](file:///absolute/path/to/file)`
   - `- [ ] [MODIFY] [basename](file:///absolute/path/to/file)`
@@ -118,12 +119,12 @@ Resolve all reported validation errors before proceeding. A passing run ends wit
 
 1. Output a concise response in chat with a markdown link to the plan artifact. Highlight the At a glance points that need the user's attention: decisions, breaking changes, and risks.
 2. When `packrat_probe.py` returned a non-empty `user_note` for a GitHub repository (`"not_synced"` or `"unavailable"`), append that single-line note to the chat response. Omit the note when `status` is `"ready"` or `"not_github"`.
-3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 3 or fewer items, `"pane"` otherwise). Its first item always asks whether to run an independent review, with `(Recommended) Yes` preselected; the plan's `Q<n>` questions follow. When `render_a2ui` is unavailable, use the fallback for this surface in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`). Never ask the review question separately.
+3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 3 or fewer questions, `"pane"` otherwise; retry with `--layout list` if `render_a2ui` reports an unknown `ChoiceCards` component). The A2UI worksheet renders each `Q<n>` with `ChoiceCards` and ends with a review checkbox checked by default; the host question and Markdown fallbacks in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`) still list the review item first. Never ask the review question separately.
 4. When the answers arrive, move each answered question into `## Decisions` by hand, in your own words, and leave deferred questions in place. Re-run `validate_plan.py`.
 
-### 7. Independent Review (When the Worksheet Says Yes)
+### 7. Independent Review (When the Review Is Requested)
 
-To prevent confirmation bias from the drafting steps, run this review only when the worksheet's review item is `Yes`. Otherwise skip to step 5 below.
+To prevent confirmation bias from the drafting steps, run this review when `review` is `true` or the fallback answer is Yes, per the review answer table in [post_plan_ui.md](references/post_plan_ui.md#21-post-plan-worksheet-dsl-only-no-template). Otherwise skip to step 5 below.
 
 1. Assemble the **Review Briefing Packet** using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md), covering the goal, constraints, settled decisions (including the recorded Decisions), non-goals, focus areas, and paths. Keep the prompt under 10 KB. For plans or specs over 500 lines, stage chunks (`<= 35 KB`, `<= 700` lines) with `stage_markdown.py --split-chunks` and pass the chunk paths.
 2. Delegate the review using the highest available tier:
@@ -137,8 +138,11 @@ To prevent confirmation bias from the drafting steps, run this review only when 
 
 ### 8. After Proceed: Progress & Landing
 
-1. Drive a `progress_board` pane with one item per wave and track, updated with data-only lines at each wave barrier. Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
-2. After the last wave, render the landing `confirm_gate` (code review, commit, PR) using [post_plan_ui.md](references/post_plan_ui.md), or its fallback question when `render_a2ui` is unavailable.
+1. Execute the approved waves using the orchestrator specified in the plan's `Execution Strategy` table:
+   - When `/swarm` is specified for a parallel wave, initialize the swarm via `swarm(action="add")` with `workspace: "share"` (or `"branch"`). Assign workers to their planned model tiers (for example, `model: "auto"` for author tracks).
+   - Do not downgrade parallel waves to sequential execution or ad-hoc `invoke_subagent` calls due to quota concerns. Swarm manages quota by distributing models across buckets and supports model failover at runtime via `swarm(action="model")`.
+2. Drive a `progress_board` pane with one item per wave and track, updated with data-only lines at each wave barrier. Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
+3. After the last wave, render the landing `confirm_gate` (code review, commit, PR) using [post_plan_ui.md](references/post_plan_ui.md), or its fallback question when `render_a2ui` is unavailable.
 
 ______________________________________________________________________
 

@@ -32,7 +32,7 @@ BRIEF_MAX_AVG_SENTENCE_WORDS = 20
 GLANCE_MAX_WORDS = 180
 NEXT_STEP_MESSAGE = (
     "NEXT: present the brief, then run plan_surfaces.py questions <plan> "
-    "and render the post-plan worksheet (review item first)."
+    "and render the post-plan worksheet (review checkbox in the footer)."
 )
 
 
@@ -179,6 +179,7 @@ class PlanValidator:
         waves = self._parse_parallel_tracks()
         self._check_parallel_waves(waves)
         self._check_model_tiers(waves)
+        self._check_parallel_orchestration(self.doc)
         return self.issues
 
     def _iter_non_fenced_lines(self) -> Iterator[tuple[int, str]]:
@@ -242,9 +243,7 @@ class PlanValidator:
             )
 
         required_fields = (
-            LIGHTWEIGHT_GLANCE_FIELDS
-            if self.doc.is_lightweight
-            else FULL_GLANCE_FIELDS
+            LIGHTWEIGHT_GLANCE_FIELDS if self.doc.is_lightweight else FULL_GLANCE_FIELDS
         )
         missing = [f for f in required_fields if not self.doc.at_a_glance.get(f)]
         if missing:
@@ -683,6 +682,28 @@ class PlanValidator:
                             line_num=track.heading_line,
                         )
                     )
+
+    def _check_parallel_orchestration(self, doc: PlanDocument) -> None:
+        """Warns when a plan has parallel waves without /swarm or /run-workflow in Execution Strategy."""
+        if not doc.parallel_waves:
+            return
+        section = find_section(doc.sections, r"execution.*strategy")
+        exec_text = section_text(self.content, doc, r"execution.*strategy")
+        if "/swarm" not in exec_text and "/run-workflow" not in exec_text:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=False,
+                    message=(
+                        "Plan contains parallel waves but Execution Strategy "
+                        "does not specify /swarm or /run-workflow orchestration."
+                    ),
+                    line_num=(
+                        section.start_line
+                        if section is not None
+                        else doc.parallel_waves[0].line
+                    ),
+                )
+            )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

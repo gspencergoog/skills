@@ -9,7 +9,7 @@ Whenever Phase 2 raises 2 or more decisions, render an interactive surface inste
 | Decision shape | Surface choice | Mode & key mechanics |
 | :--- | :--- | :--- |
 | Verify 2 to 5 inferred scope or portability facts | `template: "assumption_ledger"` | `mode: "inline"`. Pre-check assumptions that hold; user unchecks exceptions. |
-| Confirm 2 to 6 uniform Yes/No/Defer scope items | `template: "decision_batch"` | `mode: "inline"` (`<= 3` items) or `"pane"` (`>= 4` items). Never encode named options as `"Yes = A; No = B"`. |
+| Confirm 2 to 6 short decisions with per-item `options` | `template: "decision_batch"` | `mode: "inline"` (`<= 3` items) or `"pane"` (`>= 4` items). Each item carries its own `options` list rendered by `ChoiceCards`; use `ChoiceCards` in Express when named alternatives need consequences, headers, or traces. Never encode named options as `"Yes = A; No = B"`. |
 | Compare 2 to 3 strategies with rich impact & blast radius | `template: "consequence_cards"` | `mode: "inline"` or `"pane"`. Cards stack vertically in a `Column`; chips use `"multipleSelection"` so hybrids (`A + B`) take two clicks. |
 | Compare 3 or more options across 4 or more criteria | `template: "comparison_matrix"` | `mode: "pane"`. Badge `Table` (`width: "14ch"` on criterion column) + `"multipleSelection"` chips. |
 | Independent design dimensions (Storage x Transport x Trigger) | Improvised Express: **Orthogonal Axis Mixer** | `mode: "pane"` or `"inline"`. One `ChoicePicker` per independent axis instead of bundled cross-product options. |

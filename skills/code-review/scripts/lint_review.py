@@ -24,7 +24,7 @@ CLASS_ORDER = {"C": 0, "H": 1, "M": 2, "L": 3}
 
 MAX_COMMENT_WORDS = 80
 MAX_COMMENT_SENTENCES = 4
-MAX_SENTENCE_WORDS = 25
+MAX_SENTENCE_WORDS = 30
 MAX_SENTENCE_PCC = 5
 
 _STOPWORDS = frozenset(
@@ -137,6 +137,78 @@ class Report:
     playbook_feedback_line: int = 0
 
 
+_FIX_HINTS: dict[str, str] = {
+    "review-comments-unparsed": (
+        "Format each finding as '### <ID>. <title>' (for example '### H1. Missing null check') "
+        "or write 'None.' when there are no findings."
+    ),
+    "ids-sequential": (
+        "Order findings by severity class (C, H, M, L) and number each class sequentially "
+        "starting at 1 (C1, C2, H1, M1, L1; questions Q1, Q2)."
+    ),
+    "severity-matches-id": (
+        "Set '- **Severity**:' to match the heading prefix (C -> critical, H -> high, "
+        "M -> medium, L -> low)."
+    ),
+    "evidence-required": (
+        "Add '- **Evidence**: `<Tier>` - <detail>' with a valid tier (Executed, Read, "
+        "Fetched, Deduction, or Speculation)."
+    ),
+    "evidence-recalled": (
+        "Verify the claim in the repository or docs and replace 'Recalled' with 'Read', "
+        "'Executed', 'Fetched', or 'Deduction', or drop the finding."
+    ),
+    "severity-cap": (
+        "Verify the claim to upgrade Evidence to 'Read', 'Executed', 'Fetched', or "
+        "'Deduction', or downgrade the finding to M/L (medium/low)."
+    ),
+    "why-required": (
+        "Add a non-empty '- **Why**: <concrete consequence>' field explaining the failure "
+        "mode or impact."
+    ),
+    "question-fields": (
+        "Keep at most 3 questions (Q1-Q3) and include a non-empty '- **To settle**: <check>' "
+        "field on each."
+    ),
+    "clean-max-10": "Trim '## Checked and Found Clean' to at most 10 bullet lines.",
+    "clean-line-tier": (
+        "Include a valid verification tier (Executed, Read, Fetched, or Deduction) on every "
+        "'## Checked and Found Clean' bullet."
+    ),
+    "verified-removed": (
+        "Remove '- **Verified**:' and record verification under "
+        "'- **Evidence**: `Executed` - <command and result>'."
+    ),
+    "focus-id-format": (
+        "Format '- **Focus**:' as a single backticked slug such as `sync-to-async` or "
+        "`adhoc:<slug>`."
+    ),
+    "playbook-feedback-leaked": (
+        "Remove the '## Playbook Feedback' section from review_results.md before linting."
+    ),
+    "suggestion-single-fence": (
+        "Keep only one fenced replacement block under '- **Suggestion**:' and move any test "
+        "block to '- **Repro test**:'."
+    ),
+    "comment-prose-length": (
+        "Shorten the combined Body, Why, and prose Suggestion to at most 80 words and "
+        "4 sentences."
+    ),
+    "comment-sentence-length": (
+        "Split or trim sentences in Body, Why, or Suggestion so every sentence has at most "
+        "30 words."
+    ),
+    "comment-sentence-complexity": (
+        "Split subordinate clauses, remove passive voice, or shorten subject-verb distance "
+        "so sentence PCC is at most 5."
+    ),
+    "comment-ai-ism": (
+        "Remove banned AI words/phrases, replace em-dashes with commas or parentheses, and "
+        "break up 4+ noun stacks with prepositions."
+    ),
+}
+
+
 @dataclass
 class Violation:
     """A single lint violation with 1-based line number and rule identifier."""
@@ -144,6 +216,11 @@ class Violation:
     line: int
     rule: str
     message: str
+    fix: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.fix:
+            self.fix = _FIX_HINTS.get(self.rule, "")
 
 
 def _strip_ticks(value: str) -> str:
@@ -685,7 +762,11 @@ def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Viol
             )
         )
 
-    long_sents = v_dict.get("sentences_exceeding_25_words", [])
+    long_sents = [
+        s
+        for s in v_dict.get("sentences_exceeding_25_words", [])
+        if s["word_count"] > MAX_SENTENCE_WORDS
+    ]
     if long_sents:
         longest = max(s["word_count"] for s in long_sents)
         out.append(
@@ -1099,6 +1180,8 @@ def main(argv: list[str] | None = None) -> int:
     violations = check_report(report)
     for v in violations:
         print(f"{v.line}: {v.rule}: {v.message}")
+        if v.fix:
+            print(f"Fix: {v.fix}")
 
     if violations:
         return 1

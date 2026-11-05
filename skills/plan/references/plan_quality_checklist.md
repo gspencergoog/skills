@@ -39,7 +39,7 @@ ______________________________________________________________________
 - [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions).
 - [ ] Every parallel track specifies `- **Model tier**:` matching the complexity of the track.
 - [ ] Shared chokepoint files (barrel exports such as `index.ts`, `lib/*.dart`, `__init__.py`, central registries, and `CHANGELOG.md`) are isolated in sequential foundation or integration waves.
-- [ ] Multi-track plans specify the orchestration mode (`/swarm` with `1` verifier per `2-4` authors, `/run-workflow` `parallel()`, or sequential) and workspace mode (`share`, `branch`, `worktree`, or `inherit`).
+- [ ] Multi-track plans specify the orchestration mode (`/swarm` with `1` verifier per `2-4` authors or `/run-workflow` `parallel()`) and workspace mode (`share`, `branch`, `worktree`, or `inherit`).
 - [ ] Every sequential wave and every parallel track includes an explicit, targeted verification command (`**Track NA Verification**:` or `**Wave N Verification**:`) plus a wave-barrier gate before the next wave begins.
 - [ ] Each file entry describes concrete changes, methods touched, and error handling added.
 

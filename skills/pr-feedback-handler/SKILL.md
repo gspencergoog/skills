@@ -141,7 +141,7 @@ ______________________________________________________________________
 
      This automatically synthesizes approved decisions from `proposals.json`, writes `<conversation-scratch-directory>/feedback_state.json`, and exits immediately with status `0`.
 
-   - *Artifact Mode & A2UI Fallback*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`). When the dashboard is unavailable and the `a2ui-pane` plugin is installed, read the `genui` skill and render thread dispositions using `decision_batch` so the user can interactively review and confirm each thread's disposition.
+   - *Artifact Mode & A2UI Fallback*: In headless or remote cloud environments without browser display, you may specify `--mode artifact` to generate a markdown triage report artifact directly into `data-dir` (`pr_triage_report.md`). When the dashboard is unavailable and the `a2ui-pane` plugin is installed, read the `genui` skill and render thread dispositions using `decision_batch`, passing per-thread `options` (for example Fix, Reply, and Skip) in each item so the user can review and confirm each thread's disposition.
 
 6. **Wait for Completion (Interactive Mode Only)**: In interactive mode, stop calling tools and go idle.
    - In **Interactive Pane Mode**, tell the user the dashboard is open in the side pane and wait for a message starting with `Review dashboard submitted` or `Review dashboard aborted`.

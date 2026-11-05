@@ -77,7 +77,7 @@ To give the human reviewer an unbiased view of what a PR actually does before th
 
 ### Stage 1: Blind Diff Description (`blind_description.md`)
 
-Derive `blind_description.md` **solely** from `pr.diff`, `pr_coords.json.security_prescan`, and the surrounding code in the temporary checkout before fetching the PR title, description, or comments:
+Derive `blind_description.md` **solely** from `pr.diff` and `pr_coords.json` (including `security_prescan`) before fetching the PR title, description, or comments. Read a file in the temporary checkout only when `security_prescan.signals` names it; the code-review workers read surrounding code later:
 
 ```markdown
 ## Summary
@@ -103,19 +103,31 @@ Derive `blind_description.md` **solely** from `pr.diff`, `pr_coords.json.securit
 
 ### Stage 2: Narrative Context Reconciliation (`pr_description.md`)
 
-After running `review_engine.py --fetch-context`, compare `blind_description.md` against `pr_context.json` (the author's PR title, body, general comments, reviews, and `threads`) and produce `pr_description.md`:
+After running `review_engine.py --fetch-context`, compare `blind_description.md` against `pr_context.json` (the author's PR title, body, general comments, reviews, and `threads`) and write `intent_reconciliation.json`. `review_engine.py --reconcile-description` splices it into `pr_description.md` and keeps every Stage 1 section verbatim, so the diff-derived text is never rewritten or softened to match the author's framing. Never edit `blind_description.md` after `--fetch-context`: the splice compares it against the recorded `blind_sha256` and exits 1 on a mismatch.
 
-1. **Preserve the Stage 1 blind prose verbatim**: Copy the sections and bullet points of `blind_description.md` (`## Summary`, `## Inferred Purpose`, `## Quality Assessment`, `## Security & Execution Gate`, `## Changes`, and `## Reviewer Focus & Risks`) unchanged into `pr_description.md`. Do **not** rewrite, delete, or soften the Stage 1 diff-derived text to match the author's framing.
-2. **Prepend an `## Intent Alignment: <Status>` section** at the top of `pr_description.md` using one of four status labels:
-   - `## Intent Alignment: Matches Stated Purpose` — The code changes match the PR title and description with no unstated side effects or missing claims.
-   - `## Intent Alignment: Partial Divergence` — The code mostly implements the stated purpose but includes unmentioned behavior changes, leaves out a claimed change, or differs in scope.
-   - `## Intent Alignment: Diverges from Stated Purpose` — The code changes contradict the stated purpose or do something substantially different from what the PR description claims.
-   - `## Intent Alignment: Unstated Scope` — The PR description is empty or minimal, or the diff includes significant additional changes not described by the author.
-3. **Weave inline callouts** directly beneath the relevant preserved sections or bullet points in `pr_description.md`:
-   - `> [!WARNING]` — **Conflict / Unstated Behavior**: The PR description or comments claim X, but the diff does Y; or a file change introduces a behavioral side effect not mentioned in the PR description.
-   - `> [!IMPORTANT]` — **Unaddressed Review Feedback or Missing Claim**: The PR description claims a fix or test that is absent from the diff, or an open review thread raises a concern that remains unresolved at `HEAD`.
-   - `> [!NOTE]` — **Helpful Context from PR Body or Discussion**: Background rationale, linked issue context, or design constraints from the author's description or discussion threads that explain *why* a non-obvious approach was chosen (or note if `threads_complete` is `false` or `latest_head_sha` moved after Stage 1).
-4. **Add `## Stack Context` when `pr_context.json` has a non-null `stack`**, directly after `## Intent Alignment`. List the members bottom-first (closest to the trunk first), mark the PR under review, and use `gh stack view`'s icons (`✓` merged, `◎` queued, `○` open, `⚠` needs rebase):
+```json
+{
+  "alignment": "PARTIAL",
+  "callouts": [
+    {"section": "Changes", "kind": "WARNING", "text": "The body says only retries changed, but the default timeout also drops from 30s to 5s."},
+    {"section": "Summary", "kind": "NOTE", "text": "Author notes this unblocks issue #3810."}
+  ],
+  "stack_markdown": "",
+  "prior_resolution_markdown": ""
+}
+```
+
+1. **`alignment`** sets the `## Intent Alignment: <Status>` heading at the top of `pr_description.md`:
+   - `MATCHES` gives `Matches Stated Purpose`: the code changes match the PR title and description with no unstated side effects or missing claims.
+   - `PARTIAL` gives `Partial Divergence`: the code mostly implements the stated purpose but includes unmentioned behavior changes, leaves out a claimed change, or differs in scope.
+   - `DIVERGES` gives `Diverges from Stated Purpose`: the code changes contradict the stated purpose or do something substantially different from what the PR description claims.
+   - `UNSTATED` gives `Unstated Scope`: the PR description is empty or minimal, or the diff includes significant additional changes not described by the author.
+2. **`callouts[]`** places each callout as `> [!<kind>]` directly under the named `section`, which must be an existing `##` heading in `blind_description.md` (for example `Summary`, `Inferred Purpose`, `Quality Assessment`, `Security & Execution Gate`, or `Changes`):
+   - `WARNING`: **Conflict / Unstated Behavior**. The PR description or comments claim X, but the diff does Y; or a file change introduces a behavioral side effect not mentioned in the PR description.
+   - `IMPORTANT`: **Unaddressed Review Feedback or Missing Claim**. The PR description claims a fix or test that is absent from the diff, or an open review thread raises a concern that remains unresolved at `HEAD`.
+   - `NOTE`: **Helpful Context from PR Body or Discussion**. Background rationale, linked issue context, or design constraints that explain *why* a non-obvious approach was chosen (or note if `threads_complete` is `false` or `latest_head_sha` moved after Stage 1).
+3. **`stack_markdown`** and **`prior_resolution_markdown`** are optional. The splice places them after `## Intent Alignment`, in that order.
+4. **Put a `## Stack Context` table in `stack_markdown` when `pr_context.json` has a non-null `stack`**. List the members bottom-first (closest to the trunk first), mark the PR under review, and use `gh stack view`'s icons (`✓` merged, `◎` queued, `○` open, `⚠` needs rebase):
 
    ```markdown
    ## Stack Context
@@ -137,7 +149,7 @@ After running `review_engine.py --fetch-context`, compare `blind_description.md`
    - When the PR body says a later PR in the stack handles something, confirm it with `gh pr diff <n>` before accepting the claim; if it is not there, use a `> [!IMPORTANT]` callout.
    - A predecessor that is a draft, closed, or `needs_rebase` is a `> [!NOTE]`. A predecessor whose state is `CLOSED` (not merged) means this PR's base will not land; say so in `## Stack Context`.
    - Do not repeat findings that were already raised and resolved on a predecessor PR.
-5. **Add `## Prior Review Resolution` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**, directly after `## Intent Alignment` (or after `## Stack Context`). Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
+5. **Put a `## Prior Review Resolution` table in `prior_resolution_markdown` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**. Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
 
    ```markdown
    ## Prior Review Resolution

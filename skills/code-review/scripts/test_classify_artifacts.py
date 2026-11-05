@@ -4,11 +4,15 @@ import os
 import shutil
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import classify_artifacts
 from classify_artifacts import (
+    FOCUS_MIN_LINES,
+    PANEL_MIN_LINES,
     classify,
+    classify_combined,
     classify_file_ring,
     classify_ring,
     main,
@@ -310,6 +314,158 @@ class TestClassifyRing(unittest.TestCase):
         data = json.loads(out.getvalue())
         self.assertEqual(data["ring"], 2)
         self.assertEqual(data["review_level"], "standard")
+        self.assertFalse(data["api_mandate"])
+        self.assertIsNone(data["gate_reason"])
+        for key in (
+            "ring",
+            "label",
+            "review_level",
+            "flags",
+            "summary",
+            "highest_file",
+            "highest_rule",
+            "files",
+            "api_mandate",
+            "gate_reason",
+        ):
+            self.assertIn(key, data)
+
+    def test_ring_3_volume_gate_boundary_225_vs_226(self):
+        files = ["protos/service.proto"]
+        at_gate = classify_ring(files, substantive_lines=PANEL_MIN_LINES)
+        self.assertEqual(at_gate["ring"], 3)
+        self.assertEqual(at_gate["review_level"], "standard")
+        self.assertEqual(at_gate["flags"], [])
+        self.assertTrue(at_gate["api_mandate"])
+        self.assertTrue(at_gate["gate_reason"])
+
+        above_gate = classify_ring(files, substantive_lines=PANEL_MIN_LINES + 1)
+        self.assertEqual(above_gate["ring"], 3)
+        self.assertEqual(above_gate["review_level"], "panel")
+        self.assertEqual(above_gate["flags"], ["--panel"])
+        self.assertFalse(above_gate["api_mandate"])
+        self.assertIsNone(above_gate["gate_reason"])
+
+    def test_other_rings_keep_levels_under_gate(self):
+        ring_4 = classify_ring(["engine/skwasm/core.cc"], substantive_lines=10)
+        self.assertEqual(ring_4["ring"], 4)
+        self.assertEqual(ring_4["review_level"], "max")
+        self.assertEqual(ring_4["flags"], ["--max"])
+        self.assertFalse(ring_4["api_mandate"])
+        self.assertIsNone(ring_4["gate_reason"])
+
+        ring_0 = classify_ring([".bashrc"], substantive_lines=5)
+        self.assertEqual(ring_0["ring"], 0)
+        self.assertEqual(ring_0["review_level"], "fast")
+        self.assertEqual(ring_0["flags"], ["--fast"])
+        self.assertFalse(ring_0["api_mandate"])
+
+
+def _make_diff_block(path: str, num_lines: int) -> str:
+    added = "".join(f"+x{i} = compute({i})\n" for i in range(num_lines))
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        f"index 1111111..2222222 100644\n"
+        f"--- a/{path}\n"
+        f"+++ b/{path}\n"
+        f"@@ -1,0 +1,{num_lines} @@\n"
+        f"{added}"
+    )
+
+
+class TestClassifyCombined(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def test_focus_dedicated_allowed_flips_above_400(self):
+        diff_400 = _make_diff_block("src/service.py", FOCUS_MIN_LINES)
+        res_400 = classify_combined([], self.root, diff_400)
+        self.assertEqual(res_400["substantive"]["substantive_lines"], 400)
+        self.assertFalse(res_400["focus_dedicated_allowed"])
+
+        diff_401 = _make_diff_block("src/service.py", FOCUS_MIN_LINES + 1)
+        res_401 = classify_combined([], self.root, diff_401)
+        self.assertEqual(res_401["substantive"]["substantive_lines"], 401)
+        self.assertTrue(res_401["focus_dedicated_allowed"])
+
+    def test_lockfile_heavy_diff_stays_under_gate_and_retains_all_files(self):
+        diff_text = (
+            _make_diff_block("package.json", 4)
+            + _make_diff_block("package-lock.json", 7000)
+            + _make_diff_block("src/app.ts", 40)
+            + _make_diff_block("SKILL.md", 20)
+            + _make_diff_block("docs/guide.rst", 15)
+        )
+        res = classify_combined([], self.root, diff_text)
+        self.assertEqual(res["substantive"]["substantive_lines"], 64)
+        self.assertEqual(
+            res["substantive"]["excluded_files"],
+            {"package-lock.json": "lockfile", "docs/guide.rst": "docs"},
+        )
+        self.assertEqual(res["ring"]["ring"], 3)
+        self.assertEqual(res["ring"]["review_level"], "standard")
+        self.assertEqual(res["ring"]["flags"], [])
+        self.assertTrue(res["ring"]["api_mandate"])
+        self.assertFalse(res["focus_dedicated_allowed"])
+        artifact_paths = [a["path"] for a in res["artifacts"]]
+        self.assertEqual(
+            artifact_paths,
+            [
+                "package.json",
+                "package-lock.json",
+                "src/app.ts",
+                "SKILL.md",
+                "docs/guide.rst",
+            ],
+        )
+
+    def test_cli_combined_and_diff_file_without_paths(self):
+        diff_file = self.root / "pr.diff"
+        diff_file.write_text(
+            _make_diff_block("lib/public_api.dart", 50)
+            + _make_diff_block("README.md", 10),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        with (
+            patch("sys.stdout", out),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            code = main(
+                ["--root", str(self.root), "--combined", "--diff-file", str(diff_file)]
+            )
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["ring"]["ring"], 3)
+        self.assertEqual(data["ring"]["review_level"], "standard")
+        self.assertTrue(data["ring"]["api_mandate"])
+        self.assertEqual(data["substantive"]["substantive_lines"], 60)
+        self.assertFalse(data["focus_dedicated_allowed"])
+        self.assertEqual(
+            [a["path"] for a in data["artifacts"]],
+            ["lib/public_api.dart", "README.md"],
+        )
+
+    def test_cli_ring_with_diff_file_gates_panel(self):
+        diff_file = self.root / "pr.diff"
+        diff_file.write_text(
+            _make_diff_block("protos/service.proto", 100),
+            encoding="utf-8",
+        )
+        out = io.StringIO()
+        with (
+            patch("sys.stdout", out),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            code = main(["--ring", "--diff-file", str(diff_file)])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["ring"], 3)
+        self.assertEqual(data["review_level"], "standard")
+        self.assertTrue(data["api_mandate"])
 
 
 if __name__ == "__main__":

@@ -201,6 +201,8 @@ _FINITE_VERBS_SET = frozenset(
         "adds",
         "allow",
         "allows",
+        "alter",
+        "alters",
         "am",
         "apply",
         "applies",
@@ -215,6 +217,8 @@ _FINITE_VERBS_SET = frozenset(
         "blocks",
         "build",
         "builds",
+        "bypass",
+        "bypasses",
         "call",
         "calls",
         "can",
@@ -344,6 +348,8 @@ _FINITE_VERBS_SET = frozenset(
         "goes",
         "govern",
         "governs",
+        "guard",
+        "guards",
         "had",
         "handle",
         "handles",
@@ -351,6 +357,8 @@ _FINITE_VERBS_SET = frozenset(
         "happens",
         "has",
         "have",
+        "hit",
+        "hits",
         "hold",
         "holds",
         "ignore",
@@ -438,6 +446,8 @@ _FINITE_VERBS_SET = frozenset(
         "move",
         "moves",
         "must",
+        "mutate",
+        "mutates",
         "need",
         "needs",
         "notify",
@@ -482,6 +492,8 @@ _FINITE_VERBS_SET = frozenset(
         "protects",
         "provide",
         "provides",
+        "prune",
+        "prunes",
         "publish",
         "publishes",
         "pull",
@@ -569,6 +581,8 @@ _FINITE_VERBS_SET = frozenset(
         "scores",
         "search",
         "searches",
+        "see",
+        "sees",
         "select",
         "selects",
         "send",
@@ -715,6 +729,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "along",
         "already",
         "also",
+        "alter",
+        "alters",
         "although",
         "always",
         "among",
@@ -750,9 +766,12 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "broken",
         "but",
         "by",
+        "bypass",
+        "bypasses",
         "certain",
         "clean",
         "clear",
+        "clears",
         "close",
         "cold",
         "common",
@@ -844,6 +863,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "great",
         "greater",
         "green",
+        "guard",
+        "guards",
         "half",
         "hard",
         "harder",
@@ -860,6 +881,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "him",
         "himself",
         "his",
+        "hit",
+        "hits",
         "hot",
         "how",
         "however",
@@ -950,6 +973,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "most",
         "much",
         "multiple",
+        "mutate",
+        "mutates",
         "mutual",
         "my",
         "myself",
@@ -1013,6 +1038,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "overall",
         "own",
         "parallel",
+        "parse",
+        "parses",
         "partial",
         "particular",
         "past",
@@ -1038,6 +1065,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "practical",
         "precise",
         "preferable",
+        "preserve",
+        "preserves",
         "previous",
         "primary",
         "principal",
@@ -1045,6 +1074,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "private",
         "probable",
         "proper",
+        "prune",
+        "prunes",
         "public",
         "pure",
         "quick",
@@ -1062,11 +1093,15 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "red",
         "redundant",
         "regular",
+        "reject",
+        "rejects",
         "relative",
         "relevant",
         "reliable",
         "remote",
         "repeated",
+        "resolve",
+        "resolves",
         "respective",
         "responsible",
         "rich",
@@ -1081,6 +1116,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "same",
         "second",
         "secondary",
+        "see",
+        "sees",
         "separate",
         "sequential",
         "serial",
@@ -1103,6 +1140,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "single",
         "singular",
         "six",
+        "skip",
+        "skips",
         "slow",
         "slower",
         "small",
@@ -1135,6 +1174,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "straightforward",
         "strange",
         "strict",
+        "strip",
+        "strips",
         "strong",
         "stronger",
         "strongest",
@@ -1174,6 +1215,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "three",
         "through",
         "throughout",
+        "throw",
+        "throws",
         "thus",
         "tight",
         "tiny",
@@ -1188,6 +1231,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "toward",
         "towards",
         "traditional",
+        "trigger",
+        "triggers",
         "true",
         "twelve",
         "twenty",
@@ -1218,6 +1263,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "until",
         "unusual",
         "up",
+        "update",
+        "updates",
         "upon",
         "upper",
         "usable",
@@ -1225,6 +1272,8 @@ _NON_NOUN_CLUSTER_WORDS = _FINITE_VERBS_SET | frozenset(
         "usual",
         "vague",
         "valid",
+        "validate",
+        "validates",
         "valuable",
         "various",
         "vast",
@@ -1691,12 +1740,20 @@ def _flush_paragraph(
         sentences_with_lines.append((buffer_text.strip(), buffer_line))
 
 
-def _is_likely_noun_token(word: str) -> bool:
+def _is_likely_noun_token(word: str, prev: str | None = None) -> bool:
     """Heuristically determines whether `word` can act as a noun in a noun cluster."""
     if prose_lexicon.is_code_or_identifier(word):
         return False
     low = word.lower().strip("'-")
     if len(low) <= 2 or low in _NON_NOUN_CLUSTER_WORDS:
+        return False
+    if (
+        prev is not None
+        and word.islower()
+        and low.endswith(("izes", "ifies"))
+        and not prev.lower().strip("'-").endswith("s")
+        and _is_likely_noun_token(prev)
+    ):
         return False
     if low in _EXCEPT_NOUNS_WITH_ADJ_SUFFIX:
         return True
@@ -1717,13 +1774,15 @@ def _find_stdlib_noun_clusters(cleaned_line: str) -> list[list[str]]:
     segments = re.split(r"[,.;:!?()\[\]{}\"/\\&+=|<>]+", cleaned_line)
     for seg in segments:
         run: list[str] = []
+        prev: str | None = None
         for token in re.findall(r"\b[a-zA-Z0-9_'-]+\b", seg):
-            if _is_likely_noun_token(token):
+            if _is_likely_noun_token(token, prev):
                 run.append(token)
             else:
                 if len(run) >= 4:
                     clusters.append(run)
                 run = []
+            prev = token
         if len(run) >= 4:
             clusters.append(run)
     return clusters

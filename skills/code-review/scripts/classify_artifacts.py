@@ -12,9 +12,11 @@ matched so the caller can override a wrong call.
 
 Usage:
   classify_artifacts.py [--root DIR] [--no-content] PATH...
+  classify_artifacts.py [--root DIR] [--ring | --combined] [--diff-file DIFF] [PATH...]
   git diff --name-only main...HEAD | classify_artifacts.py [--root DIR] -
 
-Prints a JSON list of {"path", "type", "rule", "rubric"} objects.
+Prints a JSON list of {"path", "type", "rule", "rubric"} objects (or a JSON
+object under --ring or --combined).
 Exits 0 on success and 2 on a usage error.
 """
 
@@ -25,8 +27,18 @@ import json
 import re
 import sys
 from collections.abc import Callable
+from dataclasses import asdict
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
+
+_CONTEXT_INDEXER_SCRIPTS = str(
+    Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
+)
+if _CONTEXT_INDEXER_SCRIPTS not in sys.path:
+    sys.path.insert(0, _CONTEXT_INDEXER_SCRIPTS)
+
+import diff_weight
+from stage_diffs import _extract_file_name, _split_into_file_diffs
 
 DOC_TYPES = ("normative-spec", "design", "blueprint", "reference-doc")
 PROSE_EXTENSIONS = (".md", ".rst", ".adoc", ".txt")
@@ -153,6 +165,9 @@ RING_LEVELS: dict[int, tuple[str, list[str]]] = {
     3: ("panel", ["--panel"]),
     4: ("max", ["--max"]),
 }
+
+PANEL_MIN_LINES = 225
+FOCUS_MIN_LINES = 400
 
 _CI_DIRS = frozenset({".github", ".gitlab", ".circleci", ".buildkite", "jenkins"})
 _CI_FILES = frozenset(
@@ -370,8 +385,35 @@ def classify_file_ring(path: str) -> tuple[int, str]:
     return 2, "application-logic"
 
 
-def classify_ring(paths: list[str], root: Path | str | None = None) -> dict:
-    """Classifies a changeset into an effective ring and default review level."""
+def _score_ring_files(
+    paths: list[str],
+) -> tuple[list[dict], int, str | None, str | None]:
+    scored_files = []
+    max_ring = -1
+    highest_file = None
+    highest_rule = None
+    for path in paths:
+        ring, rule = classify_file_ring(path)
+        scored_files.append({"path": path, "ring": ring, "rule": rule})
+        if ring > max_ring:
+            max_ring = ring
+            highest_file = path
+            highest_rule = rule
+    return scored_files, max(0, max_ring), highest_file, highest_rule
+
+
+def classify_ring(
+    paths: list[str],
+    root: Path | str | None = None,
+    substantive_lines: float | None = None,
+    panel_min_lines: int = PANEL_MIN_LINES,
+) -> dict:
+    """Classifies a changeset into an effective ring and default review level.
+
+    When ring == 3 and substantive_lines <= panel_min_lines, returns
+    review_level "standard", flags [], api_mandate True, and a gate_reason
+    string, instead of review_level "panel" and flags ["--panel"].
+    """
     del root  # Reserved for future manifest inspection.
     if not paths:
         level, flags = RING_LEVELS[2]
@@ -379,7 +421,9 @@ def classify_ring(paths: list[str], root: Path | str | None = None) -> dict:
             "ring": 2,
             "label": RING_LABELS[2],
             "review_level": level,
-            "flags": flags,
+            "flags": list(flags),
+            "api_mandate": False,
+            "gate_reason": None,
             "summary": (
                 f"{RING_LABELS[2]} -> Review Level: {level.capitalize()} (1 reviewer)"
             ),
@@ -388,21 +432,25 @@ def classify_ring(paths: list[str], root: Path | str | None = None) -> dict:
             "files": [],
         }
 
-    scored_files = []
-    max_ring = -1
-    highest_file = None
-    highest_rule = None
+    scored_files, effective_ring, highest_file, highest_rule = _score_ring_files(paths)
+    level, default_flags = RING_LEVELS[effective_ring]
+    flags = list(default_flags)
+    api_mandate = False
+    gate_reason: str | None = None
 
-    for path in paths:
-        ring, rule = classify_file_ring(path)
-        scored_files.append({"path": path, "ring": ring, "rule": rule})
-        if ring > max_ring:
-            max_ring = ring
-            highest_file = path
-            highest_rule = rule
+    if (
+        effective_ring == 3
+        and substantive_lines is not None
+        and substantive_lines <= panel_min_lines
+    ):
+        level = "standard"
+        flags = []
+        api_mandate = True
+        gate_reason = (
+            f"substantive_lines ({substantive_lines:g}) <= "
+            f"panel_min_lines ({panel_min_lines})"
+        )
 
-    effective_ring = max(0, max_ring)
-    level, flags = RING_LEVELS[effective_ring]
     summary_extra = f" ({' '.join(flags)})" if flags else " (1 reviewer)"
     summary = (
         f"{RING_LABELS[effective_ring]} -> Review Level:"
@@ -414,10 +462,57 @@ def classify_ring(paths: list[str], root: Path | str | None = None) -> dict:
         "label": RING_LABELS[effective_ring],
         "review_level": level,
         "flags": flags,
+        "api_mandate": api_mandate,
+        "gate_reason": gate_reason,
         "summary": summary,
         "highest_file": highest_file,
         "highest_rule": highest_rule,
         "files": scored_files,
+    }
+
+
+def _extract_paths_from_diff(diff_text: str) -> list[str]:
+    """Extracts unique repo-relative file paths from a unified diff in order."""
+    seen: set[str] = set()
+    paths: list[str] = []
+    for i, block in enumerate(_split_into_file_diffs(diff_text)):
+        path = _extract_file_name(block, i)
+        if path and path not in seen:
+            seen.add(path)
+            paths.append(path)
+    return paths
+
+
+def classify_combined(
+    paths: list[str],
+    root: Path | str = Path("."),
+    diff_text: str | None = None,
+    *,
+    no_content: bool = False,
+) -> dict:
+    """Returns {"ring": ..., "artifacts": [...], "substantive": asdict(stats),
+    "focus_dedicated_allowed": substantive_lines > FOCUS_MIN_LINES}.
+    """
+    root_path = Path(root)
+    if diff_text is not None:
+        stats = diff_weight.compute_substantive_diff_stats(diff_text)
+        substantive_lines: float | None = stats.substantive_lines
+        if not paths:
+            paths = _extract_paths_from_diff(diff_text)
+    else:
+        stats = diff_weight.SubstantiveDiffStats()
+        substantive_lines = None
+
+    ring_result = classify_ring(paths, root_path, substantive_lines=substantive_lines)
+    artifacts = [
+        classify(path, None if no_content else _read_head(root_path, path))
+        for path in paths
+    ]
+    return {
+        "ring": ring_result,
+        "artifacts": artifacts,
+        "substantive": asdict(stats),
+        "focus_dedicated_allowed": stats.substantive_lines > FOCUS_MIN_LINES,
     }
 
 
@@ -456,6 +551,13 @@ def _read_head(root: Path, path: str) -> str | None:
         return None
 
 
+def _read_diff_file(diff_file: str) -> str:
+    if diff_file == "-":
+        return sys.stdin.read()
+    with open(diff_file, encoding="utf-8", errors="replace") as handle:
+        return handle.read()
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Classify changed files for code-review.",
@@ -470,33 +572,72 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Classify changeset reuse ring (0-4) and default review level.",
     )
-    parser.add_argument("paths", nargs="+", help="File paths, or - to read stdin.")
+    parser.add_argument(
+        "--combined",
+        action="store_true",
+        help="Output combined ring, artifact, and substantive diff classification.",
+    )
+    parser.add_argument(
+        "--diff-file",
+        default=None,
+        help="Unified diff file for substantive line counting and path extraction.",
+    )
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        help="File paths, or - to read stdin (optional when --diff-file is set).",
+    )
     return parser.parse_args(argv)
+
+
+def _resolve_paths_and_diff(
+    args: argparse.Namespace,
+) -> tuple[list[str], str | None]:
+    diff_text = _read_diff_file(args.diff_file) if args.diff_file else None
+    paths = list(args.paths)
+    if paths == ["-"]:
+        paths = [line.strip() for line in sys.stdin if line.strip()]
+    elif not paths and diff_text is not None:
+        paths = _extract_paths_from_diff(diff_text)
+    return paths, diff_text
+
+
+def _write_json(payload: object) -> int:
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
 
 
 def main(argv: list[str]) -> int:
     """Runs the CLI. Returns the process exit code."""
     try:
         args = _parse_args(argv)
-    except (argparse.ArgumentError, SystemExit):
+        if not args.paths and not args.diff_file:
+            raise argparse.ArgumentError(None, "paths or --diff-file required")
+        paths, diff_text = _resolve_paths_and_diff(args)
+    except (argparse.ArgumentError, OSError, SystemExit):
         print(__doc__, file=sys.stderr)
         return 2
-    paths = args.paths
-    if paths == ["-"]:
-        paths = [line.strip() for line in sys.stdin if line.strip()]
+
     root = Path(args.root)
+    if args.combined:
+        return _write_json(
+            classify_combined(paths, root, diff_text, no_content=args.no_content)
+        )
     if args.ring:
-        ring_result = classify_ring(paths, root)
-        json.dump(ring_result, sys.stdout, indent=2)
-        sys.stdout.write("\n")
-        return 0
-    results = []
-    for path in paths:
-        content = None if args.no_content else _read_head(root, path)
-        results.append(classify(path, content))
-    json.dump(results, sys.stdout, indent=2)
-    sys.stdout.write("\n")
-    return 0
+        substantive_lines = (
+            diff_weight.compute_substantive_diff_stats(diff_text).substantive_lines
+            if diff_text is not None
+            else None
+        )
+        return _write_json(
+            classify_ring(paths, root, substantive_lines=substantive_lines)
+        )
+    results = [
+        classify(path, None if args.no_content else _read_head(root, path))
+        for path in paths
+    ]
+    return _write_json(results)
 
 
 if __name__ == "__main__":

@@ -84,6 +84,23 @@ When a focus reviewer covers a theme, add this line under `### Hypotheses` in th
 
 Ad hoc theme ids use the form `adhoc:<slug>` (for example `adhoc:retry-storm-on-new-client`) in the `Focus` field and on the Summary flags line.
 
+## Volume Gates
+
+`classify_artifacts.py --combined --diff-file <diff>` weights the diff with [diff_weight.py](../../context-indexer/scripts/diff_weight.py) before choosing reviewers. The weighted count only gates reviewer count. Every changed file, including lockfiles and generated code, is still staged and reviewed.
+
+| Gate | Threshold | Above the threshold | At or below the threshold |
+| :--- | :--- | :--- | :--- |
+| `panelMinLines` | 225 substantive lines | Ring 3 runs `--panel` (`rev-a` + `rev-b`) | Ring 3 runs Standard with `rev-a` only, and `rev-a` gets the API Review Mandate block (`ring.api_mandate`) |
+| `focusMinLines` | 400 substantive lines | Step 2d may give strong themes a dedicated `rev-f*` (`focus_dedicated_allowed`) | Every theme folds into `rev-a` (or `rev-b`) as Focus Priority |
+
+Substantive lines:
+
+- Count 0: lockfiles, generated or build output, snapshots and fixtures, assets and l10n files, `.rst`/`.txt`/`.adoc` and extensionless `CHANGELOG`/`LICENSE`/`NOTICE` files, pure renames, blank, comment, import, and bare delimiter lines, and whitespace-only reflows.
+- Count 1.0x: production code logic lines, and every non-blank line in Markdown (`.md`, `.mdx`), since skills, references, blueprints, and docs are reviewed like code.
+- Count 0.25x: logic lines in test files.
+
+Explicit `--panel`, `--max`, and `--focus` flags bypass both gates. The thresholds come from an audit of 98 past reviews: below about 225 lines a second reviewer added no unique findings, and below 400 lines dedicated focus reviewers found nothing in 4 of 5 runs.
+
 ## Depth Cap
 
 Step 2d ranks candidate themes by verdict strength and then by anchor count. The number that get a dedicated focus reviewer depends on depth:
@@ -91,8 +108,8 @@ Step 2d ranks candidate themes by verdict strength and then by anchor count. The
 | Depth | Focus reviewers |
 | :--- | :--- |
 | `--fast` | 0 (every theme folds in as Focus Priority) |
-| Standard | 1 |
-| `--panel`, `--max` | 2 |
+| Standard | 1 (0 when `focus_dedicated_allowed` is false) |
+| `--panel`, `--max` | 2 (0 when `focus_dedicated_allowed` is false) |
 | Explicit `--focus <theme>` flags | One per flag, up to 3, regardless of depth (except `--fast`) |
 
 Strong themes beyond the cap fold in as Focus Priority: the first overflow theme goes to `rev-a` and the second to `rev-b` when it exists, otherwise also to `rev-a`. The Step 2d chat banner lists every theme and its disposition, so the user can ask for a late focus pass on any of them.

@@ -3,9 +3,9 @@
 
 Provides three subcommands consumed after `validate_plan.py` passes:
 
-- `questions <plan.md> [--surface-id ID] [--format a2ui|ask-question|markdown]`
+- `questions <plan.md> [--surface-id ID] [--format a2ui|ask-question|markdown] [--layout cards|list]`
   Emits a Composable Express Question Blocks worksheet (or Tier 2/3 fallbacks)
-  with the independent review gate first, followed by one block per `Q<n>`.
+  with one block per `Q<n>` and an independent review checkbox in the footer.
 - `overview <plan.md>`
   Emits `$/...` data lines for the `plan_overview` A2UI template.
 - `triage <findings.json> [--format a2ui|ask-question|markdown]`
@@ -19,6 +19,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -119,29 +120,24 @@ def _format_option_line(opt: QuestionOption) -> str:
     return base
 
 
-def _consequence_bullets(question: OpenQuestion) -> str:
-    """Builds Markdown consequence bullets for a `Q<n>` block."""
-    lines: list[str] = []
+def _card_options_for_question(
+    question: OpenQuestion,
+) -> list[dict[str, str | bool]]:
+    """Builds the `ChoiceCards` option definitions for `question`."""
+    cards: list[dict[str, str | bool]] = []
     for opt in question.options:
-        detail = opt.consequence if opt.consequence else opt.text
-        lines.append(f"- **{opt.letter}:** {detail}")
-    return "\n".join(lines)
-
-
-def _chip_options_for_question(question: OpenQuestion) -> list[dict[str, str]]:
-    """Builds the static ChoicePicker chip definitions for `question`."""
-    chips: list[dict[str, str]] = []
-    for opt in question.options:
-        prefix = "(Recommended) " if opt.recommended else ""
-        raw_label = f"{prefix}{opt.letter}: {opt.text}"
-        chips.append(
-            {
-                "label": truncate_chip_label(raw_label),
-                "value": opt.letter.lower(),
-            }
-        )
-    chips.append({"label": "Defer", "value": "defer"})
-    return chips
+        entry: dict[str, str | bool] = {
+            "value": opt.letter.lower(),
+            "label": f"{opt.letter} · {opt.text}",
+        }
+        if opt.consequence:
+            entry["description"] = opt.consequence
+        if opt.recommended:
+            entry["badge"] = "Recommended"
+            entry["tone"] = "success"
+        cards.append(entry)
+    cards.append({"value": "defer", "label": "Defer", "quiet": True})
+    return cards
 
 
 def _render_question_block(question: OpenQuestion) -> tuple[str, list[str], list[str]]:
@@ -149,47 +145,93 @@ def _render_question_block(question: OpenQuestion) -> tuple[str, list[str], list
     key = question.qid.lower()
     rec = _recommended_option(question)
     default_val = rec.letter.lower() if rec is not None else "defer"
-    consequences = _consequence_bullets(question)
+    options_dsl = format_dsl_value(_card_options_for_question(question))
 
     data_lines = [
         f"$/{key}/choice = [{dsl_str(default_val)}]",
-        f"$/{key}/consequences = {dsl_str(consequences)}",
+        f"$/{key}/options = {options_dsl}",
     ]
 
     head_title = dsl_str(f"**{question.qid}: {question.title}**")
     badge_text = dsl_str(question.qid)
-    chips_dsl = format_dsl_value(_chip_options_for_question(question))
     block_id = f"{key}_block"
     component_lines = [
         f'{key}_head = Row([Text({head_title}, "body", 1), Badge({badge_text}, "warning")], "spaceBetween", "center")',
-        f"{key}_consequences = Text($/{key}/consequences)",
-        f'{key}_picker = ChoicePicker(_, "mutuallyExclusive", {chips_dsl}, $/{key}/choice, "chips")',
-        f"{block_id} = Column([{key}_head, {key}_consequences, {key}_picker])",
+        f"{key}_cards = ChoiceCards($/{key}/options, $/{key}/choice)",
+        f"{block_id} = Column([{key}_head, {key}_cards])",
     ]
     return block_id, data_lines, component_lines
 
 
-def _render_questions_a2ui(doc: PlanDocument, surface_id: str) -> str:
-    """Renders the post-plan decision worksheet in A2UI Express DSL."""
-    data_lines = ['$/review/choice = ["yes"]']
-    review_chips = format_dsl_value(
-        [
-            {"label": "(Recommended) Yes", "value": "yes"},
-            {"label": "No", "value": "no"},
-        ]
-    )
-    comp_lines = [
-        f'review_head = Row([Text({dsl_str(f"**{REVIEW_PROMPT}**")}, "body", 1), Badge("Review", "neutral")], "spaceBetween", "center")',
-        f'review_picker = ChoicePicker(_, "mutuallyExclusive", {review_chips}, $/review/choice, "chips")',
-        "review_block = Column([review_head, review_picker])",
+def _list_chips_for_question(question: OpenQuestion) -> list[dict[str, str]]:
+    """Builds short letter `ChoicePicker` chip definitions for the `list` layout."""
+    chips = [
+        {
+            "label": truncate_chip_label(opt.letter),
+            "value": opt.letter.lower(),
+        }
+        for opt in question.options
     ]
-    block_ids = ["review_block"]
-    payload_entries = ["review: $/review/choice"]
+    chips.append({"label": truncate_chip_label("Defer"), "value": "defer"})
+    return chips
+
+
+def _render_question_block_list(
+    question: OpenQuestion,
+) -> tuple[str, list[str], list[str]]:
+    """Returns (block_id, data_lines, component_lines) for one `OpenQuestion` in list layout."""
+    key = question.qid.lower()
+    rec = _recommended_option(question)
+    default_val = rec.letter.lower() if rec is not None else "defer"
+    data_lines = [f"$/{key}/choice = [{dsl_str(default_val)}]"]
+
+    head_title = dsl_str(f"**{question.qid}: {question.title}**")
+    badge_text = dsl_str(question.qid)
+    component_lines = [
+        f'{key}_head = Row([Text({head_title}, "body", 1), Badge({badge_text}, "warning")], "spaceBetween", "center")'
+    ]
+    block_children = [f"{key}_head"]
+
+    for opt in question.options:
+        opt_id = f"{key}_opt_{opt.letter.lower()}"
+        tone = "success" if opt.recommended else "neutral"
+        text_children = [f"Text({dsl_str(f'**{opt.text}**')})"]
+        if opt.consequence:
+            text_children.append(f'Text({dsl_str(opt.consequence)}, "caption")')
+        text_col = f"Column([{', '.join(text_children)}], _, _, 1)"
+        component_lines.append(
+            f'{opt_id} = Row([Badge({dsl_str(opt.letter)}, "{tone}"), {text_col}], "start", "start")'
+        )
+        block_children.append(opt_id)
+
+    chips_dsl = format_dsl_value(_list_chips_for_question(question))
+    picker_id = f"{key}_picker"
+    component_lines.append(
+        f'{picker_id} = ChoicePicker(_, "mutuallyExclusive", {chips_dsl}, $/{key}/choice, "chips")'
+    )
+    block_children.append(picker_id)
+
+    block_id = f"{key}_block"
+    component_lines.append(f"{block_id} = Column([{', '.join(block_children)}])")
+    return block_id, data_lines, component_lines
+
+
+def _render_questions_surface(
+    doc: PlanDocument,
+    surface_id: str,
+    block_renderer: Callable[[OpenQuestion], tuple[str, list[str], list[str]]],
+) -> str:
+    """Renders an A2UI Express worksheet for `doc` using `block_renderer` per question."""
+    data_lines = ["$/review = true"]
+    comp_lines: list[str] = []
+    block_ids: list[str] = []
+    payload_entries = ["review: $/review"]
 
     for question in doc.questions:
-        block_id, q_data, q_comp = _render_question_block(question)
+        block_id, q_data, q_comp = block_renderer(question)
         data_lines.extend(q_data)
-        comp_lines.append("")
+        if comp_lines:
+            comp_lines.append("")
         comp_lines.extend(q_comp)
         block_ids.append(block_id)
         key = question.qid.lower()
@@ -198,8 +240,10 @@ def _render_questions_a2ui(doc: PlanDocument, surface_id: str) -> str:
     data_lines.append('$/notes = ""')
     payload_entries.append("notes: $/notes")
     payload_dsl = "{" + ", ".join(payload_entries) + "}"
-
-    children = ['Text("### Plan Decisions")']
+    children = [
+        'Text("### Plan Decisions")',
+        'Text("Recommended answers are preselected.", "caption")',
+    ]
     for block_id in block_ids:
         children.append(block_id)
         children.append("Divider()")
@@ -210,16 +254,31 @@ def _render_questions_a2ui(doc: PlanDocument, surface_id: str) -> str:
         f"surface({dsl_str(surface_id)}, sendDataModel=true)",
         "",
         *data_lines,
-        "",
-        *comp_lines,
-        "",
-        'shared_note = TextField("Overall notes or overrides", $/notes)',
-        f'submit_btn = Button(Text("Submit Decisions"), "primary", Event("submit_plan_decisions", {payload_dsl}))',
-        'footer = Row([submit_btn], "end", "center")',
-        "",
-        f"root = Card(Column({children_dsl}))",
     ]
+    if comp_lines:
+        lines.extend(["", *comp_lines])
+    lines.extend(
+        [
+            "",
+            'shared_note = TextField("Overall notes or overrides", $/notes)',
+            'review_check = CheckBox("Run an independent review of this plan (recommended)", $/review)',
+            f'submit_btn = Button(Text("Submit Decisions"), "primary", Event("submit_plan_decisions", {payload_dsl}))',
+            'footer = Row([review_check, submit_btn], "spaceBetween", "center")',
+            "",
+            f"root = Card(Column({children_dsl}))",
+        ]
+    )
     return "\n".join(lines) + "\n"
+
+
+def _render_questions_a2ui(doc: PlanDocument, surface_id: str) -> str:
+    """Renders the post-plan decision worksheet in A2UI Express DSL using `ChoiceCards`."""
+    return _render_questions_surface(doc, surface_id, _render_question_block)
+
+
+def _render_questions_a2ui_list(doc: PlanDocument, surface_id: str) -> str:
+    """Renders the fallback post-plan worksheet using option rows and short letter chips."""
+    return _render_questions_surface(doc, surface_id, _render_question_block_list)
 
 
 def _render_questions_ask_question(doc: PlanDocument) -> str:
@@ -263,12 +322,15 @@ def render_questions(
     doc: PlanDocument,
     surface_id: str = "plan-decisions",
     fmt: str = "a2ui",
+    layout: str = "cards",
 ) -> str:
-    """Renders post-plan questions for `doc` in the requested format."""
+    """Renders post-plan questions for `doc` in the requested format and layout."""
     if fmt == "ask-question":
         return _render_questions_ask_question(doc)
     if fmt == "markdown":
         return _render_questions_markdown(doc)
+    if layout == "list":
+        return _render_questions_a2ui_list(doc, surface_id)
     return _render_questions_a2ui(doc, surface_id)
 
 
@@ -624,6 +686,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="a2ui",
         help="Output format (default: a2ui).",
     )
+    q_parser.add_argument(
+        "--layout",
+        choices=("cards", "list"),
+        default="cards",
+        help="A2UI worksheet layout (default: cards).",
+    )
 
     o_parser = subparsers.add_parser(
         "overview", help="Emit data lines for the plan_overview template."
@@ -651,7 +719,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.subcommand == "questions":
         doc = parse_plan(args.plan.read_text(encoding="utf-8"))
         sys.stdout.write(
-            render_questions(doc, surface_id=args.surface_id, fmt=args.format)
+            render_questions(
+                doc,
+                surface_id=args.surface_id,
+                fmt=args.format,
+                layout=args.layout,
+            )
         )
         return 0
 
