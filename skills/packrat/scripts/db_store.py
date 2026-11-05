@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ try:
     from .models import (
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
+        TIMELINE_LINK_TYPES,
         CodeSymbolRecord,
         CommentRecord,
         CommitRecord,
@@ -25,8 +27,12 @@ try:
         RepoConfig,
         StoredEmbeddingRecord,
         TextChunk,
+        TimelineEventRecord,
+        TimelineMode,
+        TimelineTarget,
         dequantize_u8_vector,
         iso_at,
+        parse_item_key,
         quantize_u8_vector,
     )
 except ImportError:
@@ -36,6 +42,7 @@ except ImportError:
     from models import (  # type: ignore[no-redef]
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
+        TIMELINE_LINK_TYPES,
         CodeSymbolRecord,
         CommentRecord,
         CommitRecord,
@@ -46,8 +53,12 @@ except ImportError:
         RepoConfig,
         StoredEmbeddingRecord,
         TextChunk,
+        TimelineEventRecord,
+        TimelineMode,
+        TimelineTarget,
         dequantize_u8_vector,
         iso_at,
+        parse_item_key,
         quantize_u8_vector,
     )
 
@@ -113,6 +124,98 @@ def _row_to_chunk(row: sqlite3.Row) -> TextChunk:
         file_path=row["file_path"],
         item_number=int(row["item_number"]) if row["item_number"] is not None else None,
         updated_at=str(row["updated_at"] or ""),
+    )
+
+
+TIMELINE_SINCE_OVERLAP_S = 300
+"""Seconds subtracted from a stored sync time to form `timelineItems(since:)`."""
+
+_ITEM_TABLES: dict[str, str] = {"pr": "pull_requests", "issue": "issues"}
+_SUBJECT_ITEM_KINDS: dict[str, str] = {"Issue": "issue", "PullRequest": "pr"}
+_XREF_EVENT_TYPES = frozenset({"CrossReferencedEvent", "ConnectedEvent", "DisconnectedEvent"})
+_CLOSED_BY_LINK, _XREF_LINK = TIMELINE_LINK_TYPES
+_TIMELINE_LINK_MARKS = ", ".join("?" for _ in TIMELINE_LINK_TYPES)
+
+_TIMELINE_MODE_FILTERS: dict[TimelineMode, str] = {
+    TimelineMode.INCREMENTAL: "timeline_synced_at IS NOT NULL AND updated_at > timeline_synced_at",
+    TimelineMode.BACKFILL: "timeline_synced_at IS NULL",
+    TimelineMode.ALL: "(timeline_synced_at IS NULL OR updated_at > timeline_synced_at)",
+}
+
+
+def _timeline_since(synced_at: str | None) -> str | None:
+    """Returns `synced_at` minus `TIMELINE_SINCE_OVERLAP_S` in `iso_at` format, or None."""
+    if not synced_at:
+        return None
+    try:
+        moment = datetime.strptime(synced_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        moment = datetime.fromisoformat(synced_at)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+    return iso_at((moment - timedelta(seconds=TIMELINE_SINCE_OVERLAP_S)).timestamp())
+
+
+def _item_table(item_kind: str) -> str:
+    """Returns the table holding `item_kind` ("pr" or "issue") items.
+
+    Raises:
+        ValueError: If `item_kind` is neither "pr" nor "issue".
+    """
+    table = _ITEM_TABLES.get(item_kind)
+    if table is None:
+        raise ValueError(f"Unknown item kind '{item_kind}'; expected 'pr' or 'issue'.")
+    return table
+
+
+def _derived_link_type(event: TimelineEventRecord, other_kind: str) -> str | None:
+    """Returns the `issue_pr_links` type an event implies, before the same-repo check."""
+    if event.event_type == "ClosedEvent":
+        is_issue_closed_by_pr = event.item_kind == "issue" and other_kind == "pr"
+        return _CLOSED_BY_LINK if is_issue_closed_by_pr else None
+    if event.event_type in _XREF_EVENT_TYPES and {event.item_kind, other_kind} == {
+        "issue",
+        "pr",
+    }:
+        return _XREF_LINK
+    return None
+
+
+def _derived_issue_pr_link(
+    event: TimelineEventRecord, is_same_repo: Callable[[int, str], bool]
+) -> tuple[int, int, int, str] | None:
+    """Maps a timeline event to an `(repo_id, issue, pr, link_type)` row, or None.
+
+    A `ClosedEvent` on an issue whose closer is a pull request yields
+    `closed_by`. A cross-reference, connect, or disconnect event pairing one
+    issue with one pull request yields `xref`. Pairs whose linked item is in
+    another repository, and issue-to-issue or PR-to-PR pairs, yield None.
+    """
+    other_kind = _SUBJECT_ITEM_KINDS.get(event.subject_type or "")
+    if other_kind is None or not event.subject:
+        return None
+    link_type = _derived_link_type(event, other_kind)
+    if link_type is None:
+        return None
+    try:
+        owner, name, number = parse_item_key(event.subject)
+    except ValueError:
+        return None
+    if not is_same_repo(event.repo_id, f"{owner}/{name}"):
+        return None
+    if event.item_kind == "issue":
+        return event.repo_id, event.item_number, number, link_type
+    return event.repo_id, number, event.item_number, link_type
+
+
+def _row_to_timeline_target(row: sqlite3.Row, synced_column: str) -> TimelineTarget:
+    """Converts a candidate or dirty-queue row into a TimelineTarget."""
+    return TimelineTarget(
+        repo_id=int(row["repo_id"]),
+        item_kind=str(row["item_kind"]),
+        item_number=int(row["item_number"]),
+        node_id=str(row["node_id"]),
+        since=_timeline_since(row[synced_column]),
     )
 
 
@@ -242,8 +345,10 @@ class PackratStore(LiveStoreMixin):
 
         Accepts either `rename_repo("old/repo", "new/repo")` or
         `rename_repo("old/repo", "new", "repo")`. Chunk IDs and source references
-        embed the full name, so their prefixes are rewritten too. The events ETag
-        is cleared because the events URL changes with the name.
+        embed the full name, so their prefixes are rewritten too, as are
+        timeline event subjects that link to this repository's issues and pull
+        requests. The events ETag is cleared because the events URL changes
+        with the name.
 
         Raises:
             ValueError: if `old_full_name` is not registered, the new name is
@@ -315,6 +420,7 @@ class PackratStore(LiveStoreMixin):
                     """,
                     (new_full_name, start, repo.repo_id, len(old_prefix), old_prefix),
                 )
+            self._rewrite_timeline_subjects_in_tx(old_prefix, new_full_name)
             self._bump_vector_cache_seq_in_tx(now)
         renamed = self.get_repo(new_full_name)
         if renamed is None:
@@ -454,7 +560,11 @@ class PackratStore(LiveStoreMixin):
             )
 
     def reset_backfill_state(self, repo_id: int, *, now: float | None = None) -> None:
-        """Clears every stream's watermark and backfill state so the next sync refetches full history."""
+        """Clears every stream's watermark and backfill state so the next sync refetches full history.
+
+        Also clears per-item `timeline_synced_at` and `xref_synced_at`, so
+        every stored item's timeline is fetched again from the start.
+        """
         cleared = [f"{col} = NULL" for col in BACKFILL_COLUMNS]
         cleared += [f"{stream}_watermark = NULL" for stream in BACKFILL_STREAMS]
         with self.conn:
@@ -462,6 +572,14 @@ class PackratStore(LiveStoreMixin):
                 f"UPDATE repos SET {', '.join(cleared)}, updated_at = ? WHERE repo_id = ?",
                 (iso_at(now), repo_id),
             )
+            for table in _ITEM_TABLES.values():
+                self.conn.execute(
+                    f"""
+                    UPDATE {table} SET timeline_synced_at = NULL, xref_synced_at = NULL
+                    WHERE repo_id = ?
+                    """,
+                    (repo_id,),
+                )
 
     def get_repo(self, full_name: str) -> RepoConfig | None:
         """Looks up a repository by full_name (case-insensitively, including aliases)."""
@@ -683,12 +801,14 @@ class PackratStore(LiveStoreMixin):
             self.conn.executemany(
                 """
                 INSERT INTO reviews (
-                  repo_id, review_id, pr_number, author, author_association, state, body, submitted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                  repo_id, review_id, pr_number, author, author_association, state, body,
+                  submitted_at, author_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(repo_id, review_id) DO UPDATE SET
                   state = excluded.state,
                   body = excluded.body,
-                  submitted_at = excluded.submitted_at
+                  submitted_at = excluded.submitted_at,
+                  author_type = COALESCE(excluded.author_type, reviews.author_type)
                 """,
                 [
                     (
@@ -700,6 +820,7 @@ class PackratStore(LiveStoreMixin):
                         r.state,
                         r.body,
                         r.submitted_at,
+                        r.author_type,
                     )
                     for r in pr.reviews
                 ],
@@ -744,9 +865,15 @@ class PackratStore(LiveStoreMixin):
                 ],
             )
         self._upsert_comments_in_tx(pr.comments)
+        # Only text-derived links (such as `closes` and `references`) are rebuilt
+        # here; timeline-derived `closed_by` and `xref` rows come from
+        # `upsert_timeline_events` and must survive a PR re-save.
         self.conn.execute(
-            "DELETE FROM issue_pr_links WHERE repo_id = ? AND pr_number = ?",
-            (pr.repo_id, pr.number),
+            f"""
+            DELETE FROM issue_pr_links
+            WHERE repo_id = ? AND pr_number = ? AND link_type NOT IN ({_TIMELINE_LINK_MARKS})
+            """,
+            (pr.repo_id, pr.number, *TIMELINE_LINK_TYPES),
         )
         if pr.issue_links:
             self.conn.executemany(
@@ -852,6 +979,299 @@ class PackratStore(LiveStoreMixin):
                         for f in all_files
                     ],
                 )
+
+    # ----- timeline events -----------------------------------------------------------
+
+    def timeline_candidates(
+        self, repo_id: int, mode: TimelineMode, limit: int
+    ) -> list[TimelineTarget]:
+        """Returns stored PRs and issues whose timeline should be fetched.
+
+        Only items with a `node_id` are eligible. `BACKFILL` selects items never
+        fetched (`timeline_synced_at IS NULL`), `INCREMENTAL` selects fetched
+        items whose `updated_at` is newer than `timeline_synced_at`, and `ALL`
+        selects both. Both sides of that comparison use the `iso_at` format,
+        which keeps the text comparison valid.
+
+        Args:
+            repo_id: Repository to scan.
+            mode: Which items to select.
+            limit: Maximum number of targets.
+
+        Returns:
+            Targets ordered open items first, then by `updated_at` descending,
+            with `since` set to `timeline_synced_at` minus
+            `TIMELINE_SINCE_OVERLAP_S` (None for never-fetched items).
+        """
+        where = _TIMELINE_MODE_FILTERS[TimelineMode(mode)]
+        selects = [
+            f"""
+            SELECT repo_id, '{kind}' AS item_kind, number AS item_number, node_id,
+              timeline_synced_at, state, updated_at
+            FROM {table}
+            WHERE repo_id = ? AND node_id IS NOT NULL AND {where}
+            """
+            for kind, table in _ITEM_TABLES.items()
+        ]
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM ({" UNION ALL ".join(selects)})
+            ORDER BY CASE WHEN upper(state) = 'OPEN' THEN 0 ELSE 1 END,
+              updated_at DESC, item_kind ASC, item_number DESC
+            LIMIT ?
+            """,
+            (repo_id, repo_id, int(limit)),
+        ).fetchall()
+        return [_row_to_timeline_target(r, "timeline_synced_at") for r in rows]
+
+    def get_item_updated_at(
+        self, repo_id: int, item_kind: str, item_number: int
+    ) -> str | None:
+        """Returns the stored `updated_at` of one PR or issue, or None when it isn't stored.
+
+        Raises:
+            ValueError: If `item_kind` is neither "pr" nor "issue".
+        """
+        table = _item_table(item_kind)
+        row = self.conn.execute(
+            f"SELECT updated_at FROM {table} WHERE repo_id = ? AND number = ?",
+            (repo_id, item_number),
+        ).fetchone()
+        return str(row["updated_at"]) if row and row["updated_at"] is not None else None
+
+    def count_timeline_pending(self, repo_id: int) -> int:
+        """Returns how many stored PRs and issues with a `node_id` still need a first timeline fetch."""
+        row = self.conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM pull_requests
+               WHERE repo_id = ? AND node_id IS NOT NULL AND timeline_synced_at IS NULL)
+              + (SELECT COUNT(*) FROM issues
+                 WHERE repo_id = ? AND node_id IS NOT NULL AND timeline_synced_at IS NULL)
+              AS n
+            """,
+            (repo_id, repo_id),
+        ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def _same_repo_checker(self, repo_full_name: str) -> Callable[[int, str], bool]:
+        """Returns a cached `(repo_id, owner/name) -> bool` check for same-repo links.
+
+        `owner/name` matches when it equals `repo_full_name` case-insensitively
+        or resolves (including through `repo_aliases`) to `repo_id`.
+        """
+        cache: dict[tuple[int, str], bool] = {}
+
+        def is_same_repo(repo_id: int, full_name: str) -> bool:
+            key = (repo_id, full_name.lower())
+            if key not in cache:
+                if key[1] == repo_full_name.lower():
+                    cache[key] = True
+                else:
+                    owner, name = full_name.split("/", 1)
+                    row = self._find_repo_row(owner, name)
+                    cache[key] = row is not None and int(row["repo_id"]) == repo_id
+            return cache[key]
+
+        return is_same_repo
+
+    def upsert_timeline_events(
+        self, events: Sequence[TimelineEventRecord], *, repo_full_name: str
+    ) -> int:
+        """Upserts timeline events by `event_id` and derives same-repo issue/PR links.
+
+        Runs in one transaction. A `ClosedEvent` on an issue whose closer is a
+        pull request in the same repository inserts a `closed_by` link; a
+        `CrossReferencedEvent`, `ConnectedEvent`, or `DisconnectedEvent` that
+        pairs one issue with one pull request in the same repository inserts
+        an `xref` link. Existing links are kept (`INSERT OR IGNORE`).
+
+        Args:
+            events: Events to write.
+            repo_full_name: `owner/name` of the repository the events belong
+                to, used to recognize same-repo linked item keys.
+
+        Returns:
+            The number of event rows written.
+        """
+        if not events:
+            return 0
+        is_same_repo = self._same_repo_checker(repo_full_name)
+        links = {
+            link
+            for e in events
+            if (link := _derived_issue_pr_link(e, is_same_repo)) is not None
+        }
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT OR REPLACE INTO timeline_events (
+                  event_id, repo_id, item_kind, item_number, event_type, created_at,
+                  actor, actor_type, subject, subject_type, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        e.event_id,
+                        e.repo_id,
+                        e.item_kind,
+                        e.item_number,
+                        e.event_type,
+                        e.created_at,
+                        e.actor,
+                        e.actor_type,
+                        e.subject,
+                        e.subject_type,
+                        e.payload_json,
+                    )
+                    for e in events
+                ],
+            )
+            if links:
+                self.conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO issue_pr_links (repo_id, issue_number, pr_number, link_type)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    sorted(links),
+                )
+        return len(events)
+
+    def mark_timeline_synced(
+        self,
+        repo_id: int,
+        item_kind: str,
+        item_number: int,
+        *,
+        synced_at: str,
+        xref_only: bool,
+    ) -> None:
+        """Records a completed timeline fetch for one item and clears its dirty-queue row.
+
+        The `timeline_dirty` row is deleted only when it was queued at or
+        before `synced_at`, so a mention queued during the run survives.
+
+        Args:
+            repo_id: Repository of the item.
+            item_kind: "pr" or "issue".
+            item_number: Item number.
+            synced_at: The run's start time in `iso_at` format.
+            xref_only: Whether only cross-reference types were fetched, in
+                which case only `xref_synced_at` is set and
+                `timeline_synced_at` is left unchanged.
+
+        Raises:
+            ValueError: If `item_kind` is neither "pr" nor "issue".
+        """
+        table = _item_table(item_kind)
+        assignments = "xref_synced_at = ?"
+        params: list[Any] = [synced_at]
+        if not xref_only:
+            assignments += ", timeline_synced_at = ?"
+            params.append(synced_at)
+        with self.conn:
+            self.conn.execute(
+                f"UPDATE {table} SET {assignments} WHERE repo_id = ? AND number = ?",
+                (*params, repo_id, item_number),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM timeline_dirty
+                WHERE repo_id = ? AND item_number = ? AND queued_at <= ?
+                """,
+                (repo_id, item_number, synced_at),
+            )
+
+    def enqueue_timeline_dirty(
+        self,
+        targets: Iterable[tuple[int, int]],
+        *,
+        reason: str,
+        now: float | None = None,
+        source: tuple[int, int] | None = None,
+    ) -> int:
+        """Queues items for a cross-reference-only timeline refresh.
+
+        Args:
+            targets: `(repo_id, item_number)` pairs mentioned by another item
+                or commit. Duplicates are ignored, as are items already queued.
+            reason: Why the items were queued, such as "mention" or "commit".
+            now: Queue time in epoch seconds (default: now).
+            source: `(repo_id, item_number)` of the mentioning item, which is
+                skipped so an item never queues itself.
+
+        Returns:
+            The number of rows newly queued.
+        """
+        skip = {source} if source is not None else set()
+        rows = sorted({(int(r), int(n)) for r, n in targets} - skip)
+        if not rows:
+            return 0
+        queued_at = iso_at(now)
+        written = 0
+        with self.conn:
+            for repo_id, number in rows:
+                cur = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO timeline_dirty (repo_id, item_number, reason, queued_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (repo_id, number, reason, queued_at),
+                )
+                written += cur.rowcount
+        return written
+
+    def take_timeline_dirty(self, repo_id: int, limit: int) -> list[TimelineTarget]:
+        """Returns queued items ready for a cross-reference-only timeline refresh.
+
+        Each queued number resolves against `pull_requests` first, then
+        `issues`. Rows whose item has never had its timeline fetched
+        (`timeline_synced_at IS NULL`) are deleted instead of returned, since
+        that item's first full fetch already includes the cross-reference
+        types. Numbers not stored yet (or without a `node_id`) stay queued.
+        Returned rows also stay queued until `mark_timeline_synced` clears them.
+
+        Args:
+            repo_id: Repository whose queue to read.
+            limit: Maximum number of targets.
+
+        Returns:
+            Targets in queue order, with `since` set to `xref_synced_at` (or
+            `timeline_synced_at` when no xref-only fetch has run) minus
+            `TIMELINE_SINCE_OVERLAP_S`.
+        """
+        resolved = """
+            SELECT d.repo_id, d.item_number, d.queued_at,
+              CASE WHEN p.number IS NOT NULL THEN 'pr' ELSE 'issue' END AS item_kind,
+              CASE WHEN p.number IS NOT NULL THEN p.node_id ELSE i.node_id END AS node_id,
+              CASE WHEN p.number IS NOT NULL THEN p.timeline_synced_at
+                ELSE i.timeline_synced_at END AS timeline_synced_at,
+              CASE WHEN p.number IS NOT NULL THEN COALESCE(p.xref_synced_at, p.timeline_synced_at)
+                ELSE COALESCE(i.xref_synced_at, i.timeline_synced_at) END AS xref_since
+            FROM timeline_dirty d
+            LEFT JOIN pull_requests p ON p.repo_id = d.repo_id AND p.number = d.item_number
+            LEFT JOIN issues i ON i.repo_id = d.repo_id AND i.number = d.item_number
+            WHERE d.repo_id = ? AND (p.number IS NOT NULL OR i.number IS NOT NULL)
+        """
+        with self.conn:
+            self.conn.execute(
+                f"""
+                DELETE FROM timeline_dirty WHERE repo_id = ? AND item_number IN (
+                  SELECT item_number FROM ({resolved}) WHERE timeline_synced_at IS NULL
+                )
+                """,
+                (repo_id, repo_id),
+            )
+        rows = self.conn.execute(
+            f"""
+            SELECT * FROM ({resolved})
+            WHERE node_id IS NOT NULL
+            ORDER BY queued_at ASC, item_number ASC
+            LIMIT ?
+            """,
+            (repo_id, int(limit)),
+        ).fetchall()
+        return [_row_to_timeline_target(r, "xref_since") for r in rows]
 
     def list_indexed_file_paths(self, repo_id: int) -> set[str]:
         """Returns all file paths with indexed symbols, doc sections, or file chunks."""
@@ -1128,6 +1548,8 @@ class PackratStore(LiveStoreMixin):
             "code_symbols",
             "doc_sections",
             "chunks",
+            "timeline_events",
+            "timeline_dirty",
         )
         counts: dict[str, int] = {}
         for tbl in tables:

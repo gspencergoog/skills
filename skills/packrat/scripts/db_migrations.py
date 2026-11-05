@@ -386,6 +386,56 @@ def migrate_0006_repo_aliases(conn: sqlite3.Connection) -> None:
     _execute_script(conn, REPO_ALIASES_SQL)
 
 
+TIMELINE_SQL = """
+CREATE TABLE IF NOT EXISTS timeline_events (
+  event_id TEXT PRIMARY KEY,
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  item_kind TEXT NOT NULL,
+  item_number INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  actor TEXT,
+  actor_type TEXT,
+  subject TEXT,
+  subject_type TEXT,
+  payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_timeline_item
+  ON timeline_events(repo_id, item_kind, item_number, created_at);
+CREATE INDEX IF NOT EXISTS idx_timeline_type ON timeline_events(repo_id, event_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_timeline_subject ON timeline_events(subject);
+CREATE TABLE IF NOT EXISTS timeline_dirty (
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  item_number INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  queued_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, item_number)
+);
+CREATE INDEX IF NOT EXISTS idx_prs_timeline_pending ON pull_requests(repo_id)
+  WHERE timeline_synced_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_issues_timeline_pending ON issues(repo_id)
+  WHERE timeline_synced_at IS NULL;
+"""
+
+TIMELINE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("pull_requests", "timeline_synced_at", "TEXT"),
+    ("pull_requests", "xref_synced_at", "TEXT"),
+    ("issues", "timeline_synced_at", "TEXT"),
+    ("issues", "xref_synced_at", "TEXT"),
+)
+"""Per-item timeline progress columns added by migration 7."""
+
+
+def migrate_0007_timeline_events(conn: sqlite3.Connection) -> None:
+    """Adds `timeline_events`, the `timeline_dirty` queue, and per-item timeline progress.
+
+    `timeline_synced_at IS NULL` means an item's timeline has never been
+    fetched, so the partial indexes keep backfill candidate scans cheap.
+    """
+    _add_missing_columns(conn, TIMELINE_COLUMNS)
+    _execute_script(conn, TIMELINE_SQL)
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -395,6 +445,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (4, migrate_0004_reader_indexes),
     (5, migrate_0005_quantized_embeddings),
     (6, migrate_0006_repo_aliases),
+    (7, migrate_0007_timeline_events),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

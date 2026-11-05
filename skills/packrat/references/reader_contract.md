@@ -287,6 +287,10 @@ any row has been pruned it returns `reset` instead.
 | `notification` | `["reason"]` |
 | `viewer` | `[<set_name>]`: the item entered or left that `v_viewer_items` set |
 
+Timeline events (review requests, draft changes, force pushes, merges, and
+similar) are stored in `timeline_events` but don't write change-feed rows yet,
+so don't look for a `timeline` kind.
+
 ## Freshness expectations
 
 | Data | Typical age |

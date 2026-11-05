@@ -24,11 +24,12 @@ from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError, GhTransport
 from github_sync import GhCommandResult, sync_github_metadata
 from hot_sync import HotRefresher
-from models import REPO_MODE_ITEMS, RepoConfig, SyncStats
+from models import REPO_MODE_ITEMS, RepoConfig, SyncStats, TimelineMode, TimelineStats
 from rate_budget import RATE_BUDGET_FILENAME, Priority, RateBudget
 from service import PackratService, TickReport
 from signals import SignalPoller
 from sync_runtime import acquire_serve_lock
+from timeline_sync import sync_repo_timelines
 from viewer_sync import ViewerSync
 
 EXIT_SERVE_LOCKED = 4
@@ -39,6 +40,13 @@ DEFAULT_WATCH_TTL_S = 900
 DEFAULT_CHANGES_LIMIT = 500
 CHANGES_POLL_S = 1.0
 MIRROR_MAX_PAGES = 10
+MIRROR_TIMELINE_MAX_BATCHES = 25
+"""Timeline batches per pass after each service mirror run."""
+ITEMS_TIMELINE_MAX_BATCHES = 10
+"""Timeline batches per pass for each `items` repository per timeline tick."""
+
+_GITHUB_STOP_MARKERS = ("keyring_locked", "rate_limit")
+"""Substrings of a GitHub sync error or skip reason that make the timeline pass skip."""
 
 DRY_RUN_GRAPHQL_STDOUT = 'HTTP/2.0 200 OK\r\n\r\n{"data": {}}'
 """Canned dry-run GraphQL answer: an empty `data` object, so workers find nothing."""
@@ -120,6 +128,10 @@ _DRY_RUN_WRITES: dict[str, Callable[..., Any]] = {
     "set_node_id": _returns(None),
     "append_change": _returns(0),
     "upsert_pr_live": _returns([]),
+    "upsert_timeline_events": _returns(0),
+    "take_timeline_dirty": _returns([]),
+    "enqueue_timeline_dirty": _returns(0),
+    "mark_timeline_synced": _returns(None),
     "upsert_notifications": _returns([]),
     "upsert_thread_activity": _returns(False),
     "replace_thread_activity": _returns(False),
@@ -174,6 +186,9 @@ _DRY_RUN_READS: frozenset[str] = frozenset(
         "db_path",
         "init_sql_path",
         "table_counts",
+        "timeline_candidates",
+        "count_timeline_pending",
+        "get_item_updated_at",
     }
 )
 """Explicit allowlist of read-only store attributes exposed through `DryRunStore`."""
@@ -230,11 +245,41 @@ class DryRunStore:
         return self.ensure_items_repo(owner, name)
 
 
+def github_sync_stopped(stats: SyncStats) -> bool:
+    """Returns whether a GitHub sync stopped for a locked keyring or a rate limit.
+
+    A timeline pass after such a run would fail the same way, so callers skip
+    it. Budget deferrals of single streams don't count: each timeline call
+    checks the budget at its own priority.
+    """
+    texts = [*stats.errors, stats.skipped_reason or ""]
+    return any(marker in text for text in texts for marker in _GITHUB_STOP_MARKERS)
+
+
+def fold_timeline_stats(stats: SyncStats, timeline: TimelineStats) -> None:
+    """Attaches `timeline` to `stats` and folds its outcome into the run's status.
+
+    A deferred timeline run adds "timeline" to `deferred_streams` and turns
+    its errors (the rate-limit reason) into warnings; otherwise its errors
+    become run errors.
+    """
+    stats.timeline = timeline
+    if timeline.deferred:
+        stats.deferred = True
+        if "timeline" not in stats.deferred_streams:
+            stats.deferred_streams.append("timeline")
+        stats.warnings.extend(timeline.errors)
+        return
+    stats.errors.extend(timeline.errors)
+
+
 class MirrorAdapter:
     """Runs the incremental `sync_github_metadata` walk for repos with event changes.
 
-    Calls go through the transport's `as_runner` at `Priority.MIRROR`, so they
-    are budgeted and logged in `api_calls`.
+    Each walk is followed by an incremental timeline pass that also drains the
+    repository's cross-reference queue. Calls go through the transport's
+    `as_runner` at `Priority.MIRROR`, so they are budgeted and logged in
+    `api_calls`.
     """
 
     def __init__(
@@ -262,17 +307,81 @@ class MirrorAdapter:
             repo = self.store.get_repo_by_id(repo_id)
             if repo is None or not repo.is_mirror:
                 continue
-            results.append(
-                sync_github_metadata(
-                    self.store,
-                    repo,
-                    max_pages=MIRROR_MAX_PAGES,
-                    runner=self.runner,
-                    budget=self.budget,
-                    skip_events_poll=True,
-                )
+            stats = sync_github_metadata(
+                self.store,
+                repo,
+                max_pages=MIRROR_MAX_PAGES,
+                runner=self.runner,
+                budget=self.budget,
+                skip_events_poll=True,
             )
+            if not github_sync_stopped(stats):
+                fold_timeline_stats(stats, self._sync_timeline(repo))
+            results.append(stats)
         _raise_if_incomplete(results)
+        return results
+
+    def _sync_timeline(self, repo: RepoConfig) -> TimelineStats:
+        """Runs the incremental timeline pass and xref drain for one mirror repository."""
+        return sync_repo_timelines(
+            self.store,
+            repo,
+            mode=TimelineMode.INCREMENTAL,
+            runner=self.runner,
+            budget=self.budget,
+            max_batches=MIRROR_TIMELINE_MAX_BATCHES,
+            drain_xrefs=True,
+            priority=Priority.MIRROR,
+        )
+
+
+class TimelineAdapter:
+    """Fetches timelines for stored PRs and issues of `items`-mode repositories.
+
+    `items` repositories hold only watched, notified, or viewer items, so
+    there is no cross-reference queue to drain. Calls go through the
+    transport's `as_runner("timeline", Priority.VIEWER)`, so the service gates
+    them at `VIEWER` priority and logs them in `api_calls` under `timeline`.
+    """
+
+    def __init__(
+        self, store: PackratStore, transport: GhTransport, budget: RateBudget
+    ) -> None:
+        """Initializes the adapter."""
+        self.store = store
+        self.runner = transport.as_runner("timeline", Priority.VIEWER)
+        self.budget = budget
+
+    def sync_items_timelines(self) -> list[TimelineStats]:
+        """Runs one bounded timeline pass for each `items`-mode repository.
+
+        Stops at the first deferred repository.
+
+        Raises:
+            BudgetDeferred: A run was deferred by the rate budget.
+            GhApiError: At least one run recorded an error (and none deferred).
+        """
+        results: list[TimelineStats] = []
+        for repo in self.store.list_repos(REPO_MODE_ITEMS):
+            stats = sync_repo_timelines(
+                self.store,
+                repo,
+                mode=TimelineMode.ALL,
+                runner=self.runner,
+                budget=self.budget,
+                max_batches=ITEMS_TIMELINE_MAX_BATCHES,
+                drain_xrefs=False,
+                priority=Priority.VIEWER,
+            )
+            if stats.deferred:
+                detail = "; ".join(stats.errors) or "budget below threshold"
+                raise BudgetDeferred(
+                    "graphql", Priority.VIEWER, f"timeline deferred ({repo.full_name}: {detail})"
+                )
+            results.append(stats)
+        failed = [err for stats in results for err in stats.errors]
+        if failed:
+            raise GhApiError(0, f"timeline sync incomplete ({failed[0]})")
         return results
 
 
@@ -334,6 +443,7 @@ def build_service(
         MirrorAdapter(store, transport, budget),
         None if once or runner is not None else backfill_child_argv(db_path),
         budget=budget,
+        timeline=TimelineAdapter(store, transport, budget),
     )
 
 
@@ -348,7 +458,8 @@ def _print_tick(report: TickReport, runner: DryRunRunner | None, as_json: bool) 
     print(
         f"tick: requested={len(report.requested)} hot={len(report.hot_keys)} "
         f"changed={len(report.changed)} signals={report.signals_polled} "
-        f"checks={report.checks_polled} viewer={report.viewer_ran} mirror={report.mirror_ran}"
+        f"checks={report.checks_polled} viewer={report.viewer_ran} "
+        f"timeline={report.timeline_ran} mirror={report.mirror_ran}"
     )
     for item in report.deferred:
         print(f"  deferred: {item}")

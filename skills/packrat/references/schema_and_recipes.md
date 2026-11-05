@@ -7,21 +7,44 @@ All tables are partitioned by `repo_id` (foreign key to `repos.repo_id`).
 | Table | Primary Key | Key Columns |
 | :--- | :--- | :--- |
 | `repos` | `repo_id` | `owner`, `name`, `full_name`, `mode` (`mirror` or `items`), `local_path`, `default_branch`, `events_etag`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_indexed_sha`, `last_full_sweep_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at` |
-| `issues` | `(repo_id, number)` | `state`, `author`, `author_association`, `title`, `body`, `labels_json`, `assignees_json`, `created_at`, `updated_at`, `closed_at` |
-| `pull_requests` | `(repo_id, number)` | `state`, `is_draft`, `author`, `title`, `body`, `labels_json`, `base_ref`, `head_ref`, `head_sha`, `merge_commit_sha`, `review_decision`, `additions`, `deletions`, `changed_files`, `updated_at`, `merged_at`, plus the live columns `node_id`, `author_type`, `mergeable`, `merge_state_status`, `auto_merge_enabled_at`, `head_committed_date`, `head_repo_owner`, `is_cross_repository`, `live_fetched_at` |
+| `issues` | `(repo_id, number)` | `state`, `author`, `author_association`, `title`, `body`, `labels_json`, `assignees_json`, `created_at`, `updated_at`, `closed_at`, `timeline_synced_at`, `xref_synced_at` |
+| `pull_requests` | `(repo_id, number)` | `state`, `is_draft`, `author`, `title`, `body`, `labels_json`, `base_ref`, `head_ref`, `head_sha`, `merge_commit_sha`, `review_decision`, `additions`, `deletions`, `changed_files`, `updated_at`, `merged_at`, plus the live columns `node_id`, `author_type`, `mergeable`, `merge_state_status`, `auto_merge_enabled_at`, `head_committed_date`, `head_repo_owner`, `is_cross_repository`, `live_fetched_at`, plus `timeline_synced_at` and `xref_synced_at` |
 | `pr_files` | `(repo_id, pr_number, file_path)` | `change_type`, `additions`, `deletions` |
-| `reviews` | `(repo_id, review_id)` | `pr_number`, `author`, `author_association`, `author_type`, `state`, `body`, `submitted_at` |
+| `reviews` | `(repo_id, review_id)` | `pr_number`, `author`, `author_association`, `author_type` (`User`, `Bot`, `Mannequin`, or `Organization`; filled by mirror syncs and the live service), `state`, `body`, `submitted_at` |
 | `review_threads` | `thread_id` | `repo_id`, `pr_number`, `file_path`, `line`, `start_line`, `is_resolved`, `is_outdated`, `reviewer`, `body`, `comments_json` |
 | `comments` | `(repo_id, comment_id)` | `parent_kind` (`issue` or `pr`), `parent_number`, `author`, `author_type`, `body`, `created_at`, `updated_at` |
-| `issue_pr_links` | `(repo_id, issue_number, pr_number, link_type)` | `link_type` (`closes` or `references`) |
+| `issue_pr_links` | `(repo_id, issue_number, pr_number, link_type)` | `link_type`: `closes` or `references` from PR text, `closed_by` from an issue's `ClosedEvent` closer, `xref` from cross-reference and connect events. Re-saving a PR replaces only its text-derived rows |
 | `discussions` | `(repo_id, number)` | `category`, `author`, `title`, `body`, `answer_body`, `updated_at` |
 | `commits` | `(repo_id, sha)` | `author_name`, `author_email`, `committed_at`, `title`, `message`, `pr_number` |
+| `timeline_events` | `event_id` (GraphQL node id) | `repo_id`, `item_kind` (`pr` or `issue`), `item_number`, `event_type` (GraphQL `__typename`, such as `ReviewRequestedEvent`), `created_at`, `actor`, `actor_type`, `subject`, `subject_type`, `payload_json` |
+| `timeline_dirty` | `(repo_id, item_number)` | `reason` (`mention` or `commit`), `queued_at`. Items another item or commit mentioned, waiting for a cross-reference fetch |
 | `commit_files` | `(repo_id, sha, file_path)` | `change_type`, `old_path`, `additions`, `deletions` |
 | `code_symbols` | `(repo_id, file_path, kind, symbol_name, line_start)` | `kind`, `line_end`, `signature`, `docstring`, `sha` |
 | `doc_sections` | `(repo_id, file_path, section_id)` | `level`, `heading`, `breadcrumb`, `anchor_slug`, `line_start`, `line_end`, `subtree_line_end`, `content`, `sha` |
 | `chunks` | `chunk_id` | `repo_id`, `source_kind`, `source_ref`, `file_path`, `item_number`, `title`, `text`, `content_sha256`, `is_untrusted`, `updated_at` |
 | `chunks_fts` | FTS5 virtual table | `chunk_id`, `source_kind`, `source_ref`, `title`, `text` (tokenized with `porter unicode61`) |
 | `chunk_embeddings` | `chunk_id` | `model_id`, `dim` (`384`), `scale` (`REAL`), `vector_u8` (`BLOB`), `content_sha256`, `updated_at` |
+
+### Timeline Events
+
+`timeline_events` holds GitHub timeline items for stored PRs and issues. `subject` depends on `event_type`:
+
+| `event_type` | `actor` | `subject` (`subject_type`) |
+| :--- | :--- | :--- |
+| `PullRequestReview` | review author | review state, such as `APPROVED` (`NULL`). `event_id` equals `reviews.review_id` |
+| `ReviewRequestedEvent`, `ReviewRequestRemovedEvent` | requester | reviewer login, or `org/slug` for a team (`User`, `Bot`, `Mannequin`, or `Team`) |
+| `ClosedEvent` | closer's actor | closing PR as `owner/name#N` (`PullRequest`) or commit SHA (`Commit`) |
+| `MergedEvent` | merger | merge commit SHA (`Commit`) |
+| `CrossReferencedEvent`, `ConnectedEvent`, `DisconnectedEvent` | actor | linked item as `owner/name#N` (`Issue` or `PullRequest`) |
+| `LabeledEvent`, `AssignedEvent`, and similar | actor | label name or assignee login |
+
+`payload_json` keeps the raw GraphQL node with GitHub's camelCase keys. `timeline_synced_at` and `xref_synced_at` on `pull_requests` and `issues` record the last full and cross-reference-only timeline fetch; `timeline_synced_at IS NULL` means the item has no timeline yet.
+
+Known limits:
+
+- Mention queueing reads only the text the mirror query returns, so mentions past its nested caps (for example, older comments on a long thread) don't queue their targets.
+- An item with more than 20 follow-up pages of events is marked synced anyway, with a warning, so it isn't refetched on every run. Some of its events may be missing.
+- Timeline events don't write change-feed rows.
 
 ### Live GitHub Tables
 
@@ -63,6 +86,12 @@ When running `packrat sql "<query>"` (or `duckdb -batch -dark-mode -init ~/.loca
 - `v_chunk_vectors`: `kb.chunks` joined with `kb.chunk_embeddings` and `repo` (`r.full_name`).
 - `v_file_hotspots`: per-file `commit_count`, `review_thread_count`, and `unresolved_thread_count`.
 - `v_item_participants`: unified lowercased `participant` logins and `role` values across PRs, issues, and discussions. Each row exposes `repo`, `kind`, `number`, `title`, `state`, `url`, `item_author`, `created_at`, `updated_at`, `merged_at`, `participant`, and `role`. Roles use `author`, `review:<STATE>`, `comment`, and `inline_comment`. PRs and issues mirror full multi-user comments and inline threads, while discussions mirror `discussions.author` only.
+- `v_timeline_events`: `kb.timeline_events` with `repo` and `item_key`.
+- `v_pr_reviews_all`: every submitted review, from `kb.reviews` and timeline `PullRequestReview` events, one row per `review_id`. `PENDING` reviews are left out. `is_bot` is true for `author_type = 'Bot'` or a `[bot]` login. `is_human` is true for reviews that are not from a bot and not from the PR author.
+- `v_pr_timeline`: one stream per PR (`repo`, `pr_number`, `item_key`, `at`, `event_type`, `actor`, `actor_type`, `subject`, `subject_type`) combining timeline events, reviews (`event_type = 'PullRequestReview'`, `subject` = state), and conversation comments (`IssueComment`).
+- `v_pr_lifecycle`: one row per PR with `opened_at`, `first_ready_at`, `first_review_requested_at`, `first_review_at`, `first_approval_at`, `merged_at`, `merged_by`, `draft_cycles`, `force_pushes_after_first_review`, `reviewed_before_request`, and the minute latencies `ready_to_first_review_min`, `request_to_first_review_min`, and `ready_to_merge_min`. Review columns count human reviews only. `first_ready_at` is the first ready-for-review event for a PR opened as a draft, `NULL` while such a PR is still a draft, and `opened_at` otherwise. `reviewed_before_request` is true when a human review exists and no review request came before it. `request_to_first_review_min` is negative when the review came first.
+- `v_review_request_latency`: one row per review request with `reviewer`, `reviewer_type`, `requested_at`, `requested_by`, `removed_at` (the first removal before the same reviewer is requested again), `first_review_at` (that reviewer's first submitted review after the request), and `latency_min`. Team requests have no `first_review_at`.
+- `v_issue_pr_links`: one row per `(repo, issue_number, pr_number)` with the strongest `link_type` (`closed_by` > `closes` > `xref` > `references`), every type seen in `link_types`, and `issue_key` / `pr_key`. It adds `closed_by` for issues closed by a commit whose `commits.pr_number` is known, and drops pairs whose `issue_number` is a PR.
 - Live GitHub views with the same names and columns as the SQLite reader views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. DuckDB can't evaluate the SQLite views, so `init.sql` defines DuckDB copies of them.
 - `v_watches`: every lease, with an `active` column that is true while `lease_expires_at` is in the future.
 - `v_changes`: the change feed (`seq`, `item_key`, `kind`, `fields`, `at`).
@@ -89,19 +118,20 @@ LIMIT 15;
 
 ### 2. Open Issues Linked to Pull Requests
 
+`v_issue_pr_links` keeps the strongest evidence per issue and PR pair, so each pair appears once.
+
 ```sql
 SELECT
-  r.full_name AS repo,
-  i.number AS issue_number,
+  l.repo,
+  l.issue_number,
   i.title AS issue_title,
   l.link_type,
-  p.number AS pr_number,
+  l.pr_number,
   p.state AS pr_state,
   p.title AS pr_title
-FROM kb.issue_pr_links l
-JOIN kb.repos r ON r.repo_id = l.repo_id
-JOIN kb.issues i ON i.repo_id = l.repo_id AND i.number = l.issue_number
-JOIN kb.pull_requests p ON p.repo_id = l.repo_id AND p.number = l.pr_number
+FROM v_issue_pr_links l
+JOIN v_issues i ON i.repo = l.repo AND i.number = l.issue_number
+JOIN v_pull_requests p ON p.repo = l.repo AND p.number = l.pr_number
 WHERE i.state = 'OPEN'
 ORDER BY i.updated_at DESC;
 ```
@@ -339,3 +369,85 @@ ORDER BY seq;
 ```
 
 Readers that follow the feed continuously use `packrat changes --since SEQ --wait SECONDS --json` instead, which also reports when pruned rows require a full snapshot.
+
+### 11. Reviews Before Any Review Request
+
+PRs that got a human review before anyone requested a reviewer, including PRs that never had a request. Bot reviews, `PENDING` reviews, and the author's own reviews don't count. Check `packrat status` for a pending-timeline warning first: PRs without timeline events have no request times, so any of them with a human review would match.
+
+```sql
+SELECT
+  repo,
+  COUNT(*) AS prs,
+  COUNT(*) FILTER (WHERE reviewed_before_request) AS reviewed_first,
+  COUNT(*) FILTER (WHERE reviewed_before_request AND first_review_requested_at IS NULL)
+    AS never_requested
+FROM v_pr_lifecycle
+WHERE repo = '<owner>/<name>'
+  AND opened_at >= TIMESTAMP '2026-01-01'
+GROUP BY repo;
+```
+
+List the PRs themselves:
+
+```sql
+SELECT item_key, author, opened_at, first_review_at, first_review_requested_at
+FROM v_pr_lifecycle
+WHERE repo = '<owner>/<name>' AND reviewed_before_request
+ORDER BY opened_at DESC;
+```
+
+### 12. Review Request Latency per Reviewer
+
+Median and 90th percentile minutes from a review request to that reviewer's first review. An unanswered request has a `NULL` latency, which the percentiles ignore.
+
+```sql
+SELECT
+  reviewer,
+  COUNT(*) AS requests,
+  COUNT(latency_min) AS answered,
+  quantile_cont(latency_min, 0.5) AS median_min,
+  quantile_cont(latency_min, 0.9) AS p90_min
+FROM v_review_request_latency
+WHERE repo = '<owner>/<name>'
+  AND reviewer_type <> 'Team'
+  AND requested_at >= TIMESTAMP '2026-01-01'
+GROUP BY reviewer
+HAVING COUNT(latency_min) >= 3
+ORDER BY median_min;
+```
+
+### 13. Ready-to-Merge Time by Author
+
+```sql
+SELECT
+  author,
+  COUNT(*) AS merged_prs,
+  ROUND(quantile_cont(ready_to_merge_min, 0.5) / 60.0, 1) AS median_hours,
+  ROUND(quantile_cont(ready_to_merge_min, 0.9) / 60.0, 1) AS p90_hours,
+  ROUND(AVG(draft_cycles), 2) AS avg_draft_cycles
+FROM v_pr_lifecycle
+WHERE repo = '<owner>/<name>'
+  AND merged_at >= TIMESTAMP '2026-01-01'
+  AND ready_to_merge_min IS NOT NULL
+GROUP BY author
+ORDER BY merged_prs DESC;
+```
+
+### 14. Issues and the PRs That Closed Them
+
+`closed_by` comes from the issue's own close event: either the PR that closed it, or a commit whose `commits.pr_number` is known from the local git index.
+
+```sql
+SELECT
+  l.issue_key,
+  i.title AS issue_title,
+  l.pr_key,
+  p.title AS pr_title,
+  p.merged_at,
+  l.link_types
+FROM v_issue_pr_links l
+JOIN v_issues i ON i.repo = l.repo AND i.number = l.issue_number
+LEFT JOIN v_pull_requests p ON p.repo = l.repo AND p.number = l.pr_number
+WHERE l.repo = '<owner>/<name>' AND l.link_type = 'closed_by'
+ORDER BY i.closed_at DESC;
+```

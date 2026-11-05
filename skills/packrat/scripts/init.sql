@@ -380,3 +380,294 @@ SELECT
   (SELECT value FROM kb.service_state WHERE key = 'viewer_login') AS viewer_login
 FROM (SELECT 1 AS one) AS anchor
 LEFT JOIN kb.service_heartbeat h ON h.id = 1;
+
+-- Timeline events (schema version 7). SQLite TEXT timestamps arrive as
+-- VARCHAR, so every comparison and date_diff casts them with ::TIMESTAMP.
+
+CREATE OR REPLACE VIEW v_timeline_events AS
+SELECT
+  r.full_name AS repo,
+  r.full_name || '#' || t.item_number AS item_key,
+  t.*
+FROM kb.timeline_events t
+JOIN kb.repos r ON r.repo_id = t.repo_id;
+
+-- Every submitted review, from `kb.reviews` and timeline `PullRequestReview`
+-- events, one row per review id (the timeline event_id is the review node id).
+-- The timeline row wins for author type and state; otherwise the non-NULL
+-- value is used. PENDING (unsubmitted) reviews are excluded. `is_human` drops
+-- bots (by author type or a `[bot]` login) and the PR author's own reviews.
+CREATE OR REPLACE VIEW v_pr_reviews_all AS
+WITH tl AS (
+  SELECT
+    repo_id,
+    event_id AS review_id,
+    item_number AS pr_number,
+    actor AS author,
+    actor_type AS author_type,
+    UPPER(COALESCE(NULLIF(subject, ''), json_extract_string(payload_json, '$.state'))) AS state,
+    COALESCE(json_extract_string(payload_json, '$.submittedAt'), created_at) AS submitted_at
+  FROM kb.timeline_events
+  WHERE item_kind = 'pr' AND event_type = 'PullRequestReview'
+),
+merged AS (
+  SELECT
+    COALESCE(tl.repo_id, rv.repo_id) AS repo_id,
+    COALESCE(tl.review_id, rv.review_id) AS review_id,
+    COALESCE(tl.pr_number, rv.pr_number) AS pr_number,
+    COALESCE(NULLIF(tl.author, ''), NULLIF(rv.author, '')) AS author,
+    COALESCE(NULLIF(tl.author_type, ''), NULLIF(rv.author_type, '')) AS author_type,
+    COALESCE(NULLIF(tl.state, ''), UPPER(NULLIF(rv.state, ''))) AS state,
+    COALESCE(NULLIF(rv.submitted_at, ''), tl.submitted_at)::TIMESTAMP AS submitted_at,
+    tl.review_id IS NOT NULL AS in_timeline,
+    rv.review_id IS NOT NULL AS in_reviews
+  FROM tl
+  FULL OUTER JOIN kb.reviews rv
+    ON rv.repo_id = tl.repo_id AND rv.review_id = tl.review_id
+)
+SELECT
+  r.full_name AS repo,
+  r.full_name || '#' || m.pr_number AS item_key,
+  m.*,
+  (COALESCE(m.author_type, '') = 'Bot' OR COALESCE(m.author, '') LIKE '%[bot]') AS is_bot,
+  (
+    COALESCE(m.author_type, '') <> 'Bot'
+    AND m.author IS NOT NULL
+    AND m.author NOT LIKE '%[bot]'
+    AND LOWER(m.author) IS DISTINCT FROM LOWER(p.author)
+  ) AS is_human
+FROM merged m
+JOIN kb.repos r ON r.repo_id = m.repo_id
+LEFT JOIN kb.pull_requests p ON p.repo_id = m.repo_id AND p.number = m.pr_number
+WHERE COALESCE(m.state, '') <> 'PENDING';
+
+CREATE OR REPLACE VIEW v_pr_timeline AS
+SELECT repo, pr_number, repo || '#' || pr_number AS item_key, "at", event_type, actor,
+  actor_type, subject, subject_type
+FROM (
+  SELECT
+    r.full_name AS repo,
+    t.item_number AS pr_number,
+    t.created_at::TIMESTAMP AS "at",
+    t.event_type,
+    t.actor,
+    t.actor_type,
+    t.subject,
+    t.subject_type
+  FROM kb.timeline_events t
+  JOIN kb.repos r ON r.repo_id = t.repo_id
+  WHERE t.item_kind = 'pr' AND t.event_type <> 'PullRequestReview'
+
+  UNION ALL
+
+  SELECT
+    repo,
+    pr_number,
+    submitted_at AS "at",
+    'PullRequestReview' AS event_type,
+    author AS actor,
+    author_type AS actor_type,
+    state AS subject,
+    CAST(NULL AS VARCHAR) AS subject_type
+  FROM v_pr_reviews_all
+
+  UNION ALL
+
+  SELECT
+    r.full_name AS repo,
+    c.parent_number AS pr_number,
+    c.created_at::TIMESTAMP AS "at",
+    'IssueComment' AS event_type,
+    c.author AS actor,
+    c.author_type AS actor_type,
+    CAST(NULL AS VARCHAR) AS subject,
+    CAST(NULL AS VARCHAR) AS subject_type
+  FROM kb.comments c
+  JOIN kb.repos r ON r.repo_id = c.repo_id
+  WHERE c.parent_kind = 'pr'
+)
+ORDER BY repo, pr_number, "at";
+
+-- One row per PR. `first_ready_at` is the first ReadyForReviewEvent when the
+-- PR was opened as a draft (no ConvertToDraftEvent before it), NULL while a PR
+-- opened as a draft has never been readied, and `opened_at` otherwise.
+-- Review columns count human reviews only (see v_pr_reviews_all.is_human).
+CREATE OR REPLACE VIEW v_pr_lifecycle AS
+WITH ev AS (
+  SELECT repo_id, item_number AS pr_number, event_type, actor, created_at::TIMESTAMP AS "at"
+  FROM kb.timeline_events
+  WHERE item_kind = 'pr'
+),
+ev_agg AS (
+  SELECT
+    repo_id,
+    pr_number,
+    MIN("at") FILTER (WHERE event_type = 'ReadyForReviewEvent') AS first_ready_event_at,
+    MIN("at") FILTER (WHERE event_type = 'ConvertToDraftEvent') AS first_draft_event_at,
+    MIN("at") FILTER (WHERE event_type = 'ReviewRequestedEvent') AS first_review_requested_at,
+    arg_min(actor, "at") FILTER (WHERE event_type = 'MergedEvent') AS merged_by,
+    COUNT(*) FILTER (WHERE event_type = 'ConvertToDraftEvent') AS draft_cycles
+  FROM ev
+  GROUP BY repo_id, pr_number
+),
+human AS (
+  SELECT
+    repo_id,
+    pr_number,
+    MIN(submitted_at) AS first_review_at,
+    MIN(submitted_at) FILTER (WHERE state = 'APPROVED') AS first_approval_at
+  FROM v_pr_reviews_all
+  WHERE is_human
+  GROUP BY repo_id, pr_number
+),
+pushes AS (
+  SELECT ev.repo_id, ev.pr_number, COUNT(*) AS force_pushes_after_first_review
+  FROM ev
+  JOIN human h ON h.repo_id = ev.repo_id AND h.pr_number = ev.pr_number
+  WHERE ev.event_type = 'HeadRefForcePushedEvent' AND ev."at" > h.first_review_at
+  GROUP BY ev.repo_id, ev.pr_number
+),
+base AS (
+  SELECT
+    r.full_name AS repo,
+    p.number AS pr_number,
+    r.full_name || '#' || p.number AS item_key,
+    p.author,
+    p.state,
+    p.created_at::TIMESTAMP AS opened_at,
+    CASE
+      WHEN a.first_ready_event_at IS NOT NULL
+        AND (a.first_draft_event_at IS NULL OR a.first_ready_event_at < a.first_draft_event_at)
+        THEN a.first_ready_event_at
+      WHEN COALESCE(p.is_draft, 0) <> 0 AND a.first_draft_event_at IS NULL THEN NULL
+      ELSE p.created_at::TIMESTAMP
+    END AS first_ready_at,
+    a.first_review_requested_at,
+    h.first_review_at,
+    h.first_approval_at,
+    p.merged_at::TIMESTAMP AS merged_at,
+    a.merged_by,
+    COALESCE(a.draft_cycles, 0) AS draft_cycles,
+    COALESCE(fp.force_pushes_after_first_review, 0) AS force_pushes_after_first_review
+  FROM kb.pull_requests p
+  JOIN kb.repos r ON r.repo_id = p.repo_id
+  LEFT JOIN ev_agg a ON a.repo_id = p.repo_id AND a.pr_number = p.number
+  LEFT JOIN human h ON h.repo_id = p.repo_id AND h.pr_number = p.number
+  LEFT JOIN pushes fp ON fp.repo_id = p.repo_id AND fp.pr_number = p.number
+)
+SELECT
+  *,
+  CASE
+    WHEN first_review_at IS NULL THEN FALSE
+    WHEN first_review_requested_at IS NULL THEN TRUE
+    ELSE first_review_at < first_review_requested_at
+  END AS reviewed_before_request,
+  date_diff('minute', first_ready_at, first_review_at) AS ready_to_first_review_min,
+  date_diff('minute', first_review_requested_at, first_review_at) AS request_to_first_review_min,
+  date_diff('minute', first_ready_at, merged_at) AS ready_to_merge_min
+FROM base;
+
+-- One row per review request. `removed_at` is the first matching removal
+-- before the same reviewer is requested again; `first_review_at` is that
+-- reviewer's first submitted review after the request (never for teams).
+CREATE OR REPLACE VIEW v_review_request_latency AS
+WITH reqs AS (
+  SELECT
+    event_id,
+    repo_id,
+    item_number AS pr_number,
+    subject AS reviewer,
+    subject_type AS reviewer_type,
+    actor AS requested_by,
+    created_at::TIMESTAMP AS requested_at,
+    LEAD(created_at::TIMESTAMP) OVER (
+      PARTITION BY repo_id, item_number, LOWER(subject) ORDER BY created_at::TIMESTAMP, event_id
+    ) AS next_requested_at
+  FROM kb.timeline_events
+  WHERE item_kind = 'pr' AND event_type = 'ReviewRequestedEvent'
+),
+removals AS (
+  SELECT q.event_id, MIN(rm.created_at::TIMESTAMP) AS removed_at
+  FROM reqs q
+  JOIN kb.timeline_events rm
+    ON rm.repo_id = q.repo_id
+    AND rm.item_kind = 'pr'
+    AND rm.item_number = q.pr_number
+    AND rm.event_type = 'ReviewRequestRemovedEvent'
+    AND LOWER(rm.subject) = LOWER(q.reviewer)
+    AND rm.created_at::TIMESTAMP >= q.requested_at
+    AND (q.next_requested_at IS NULL OR rm.created_at::TIMESTAMP < q.next_requested_at)
+  GROUP BY q.event_id
+),
+first_reviews AS (
+  SELECT q.event_id, MIN(rv.submitted_at) AS first_review_at
+  FROM reqs q
+  JOIN v_pr_reviews_all rv
+    ON rv.repo_id = q.repo_id
+    AND rv.pr_number = q.pr_number
+    AND LOWER(rv.author) = LOWER(q.reviewer)
+    AND rv.submitted_at >= q.requested_at
+  WHERE COALESCE(q.reviewer_type, '') <> 'Team'
+  GROUP BY q.event_id
+)
+SELECT
+  r.full_name AS repo,
+  q.pr_number,
+  r.full_name || '#' || q.pr_number AS item_key,
+  q.reviewer,
+  q.reviewer_type,
+  q.requested_at,
+  q.requested_by,
+  rm.removed_at,
+  fr.first_review_at,
+  date_diff('minute', q.requested_at, fr.first_review_at) AS latency_min
+FROM reqs q
+JOIN kb.repos r ON r.repo_id = q.repo_id
+LEFT JOIN removals rm ON rm.event_id = q.event_id
+LEFT JOIN first_reviews fr ON fr.event_id = q.event_id;
+
+-- Strongest evidence per (repo, issue, PR): closed_by > closes > xref >
+-- references. Adds closed_by for issues closed by a commit that belongs to a
+-- PR, and drops pairs whose `issue_number` is actually a PR.
+CREATE OR REPLACE VIEW v_issue_pr_links AS
+WITH evidence AS (
+  SELECT repo_id, issue_number, pr_number, link_type
+  FROM kb.issue_pr_links
+
+  UNION ALL
+
+  SELECT e.repo_id, e.item_number AS issue_number, c.pr_number, 'closed_by' AS link_type
+  FROM kb.timeline_events e
+  JOIN kb.commits c ON c.repo_id = e.repo_id AND c.sha = e.subject
+  WHERE e.item_kind = 'issue'
+    AND e.event_type = 'ClosedEvent'
+    AND e.subject_type = 'Commit'
+    AND c.pr_number IS NOT NULL
+),
+ranked AS (
+  SELECT
+    *,
+    CASE link_type
+      WHEN 'closed_by' THEN 1
+      WHEN 'closes' THEN 2
+      WHEN 'xref' THEN 3
+      WHEN 'references' THEN 4
+      ELSE 5
+    END AS strength
+  FROM evidence
+)
+SELECT
+  r.full_name AS repo,
+  k.issue_number,
+  k.pr_number,
+  r.full_name || '#' || k.issue_number AS issue_key,
+  r.full_name || '#' || k.pr_number AS pr_key,
+  arg_min(k.link_type, k.strength) AS link_type,
+  list_sort(list(DISTINCT k.link_type)) AS link_types
+FROM ranked k
+JOIN kb.repos r ON r.repo_id = k.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.pull_requests p
+  WHERE p.repo_id = k.repo_id AND p.number = k.issue_number
+)
+GROUP BY r.full_name, k.issue_number, k.pr_number;

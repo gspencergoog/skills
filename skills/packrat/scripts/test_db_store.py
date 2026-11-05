@@ -11,7 +11,7 @@ import tempfile
 import time
 import unittest
 from collections.abc import Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ from models import (
     EMBEDDING_DIM,
     REPO_MODE_ITEMS,
     REPO_MODE_MIRROR,
+    TEXT_LINK_TYPES,
+    TIMELINE_LINK_TYPES,
     CheckRunRecord,
     CodeSymbolRecord,
     CommentRecord,
@@ -41,8 +43,13 @@ from models import (
     ReviewThreadRecord,
     StoredEmbeddingRecord,
     StreamBackfill,
+    SyncStats,
     TextChunk,
     ThreadActivityRecord,
+    TimelineEventRecord,
+    TimelineMode,
+    TimelineStats,
+    TimelineTarget,
     compute_content_sha256,
     dequantize_u8_vector,
     iso_at,
@@ -1632,6 +1639,10 @@ class TestLiveStore(unittest.TestCase):
         self.store.replace_viewer_set("fresh", ["o/r#2"], now=recent)
         self.store.add_watch("monitor", "c1", [self.key], 60, 10, now=recent - 100)
         self.store.add_watch("monitor", "c2", [self.key], 60, 1000, now=recent)
+        self.store.enqueue_timeline_dirty([(self.repo.repo_id, 41)], reason="mention", now=old)
+        self.store.enqueue_timeline_dirty(
+            [(self.repo.repo_id, 42)], reason="mention", now=recent
+        )
 
         deleted = self.store.prune(now=recent + 60)
         # Each viewer-set addition also appends a change row, so two changes are old.
@@ -1640,6 +1651,7 @@ class TestLiveStore(unittest.TestCase):
             "api_calls": 1,
             "notifications": 1,
             "viewer_sets": 1,
+            "timeline_dirty": 1,
             "watches": 1,
             "items_repos": 0,
         }
@@ -1807,6 +1819,411 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(self._count("chunks_fts"), 0)
         for kept_repo in (watched, notified, viewed, fresh, mirror):
             self.assertIsNotNone(self.store.get_repo_by_id(kept_repo.repo_id))
+
+
+class TestTimelineStore(unittest.TestCase):
+    """Tests timeline event storage, candidate selection, the dirty queue, and derived links."""
+
+    SYNCED = "2027-01-10T00:00:00Z"
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="packrat-timeline-"))
+        self.store = PackratStore(self.tmp_dir / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets")
+        self.other = self.store.register_repo("octo-org", "gadgets")
+        self.rid = self.repo.repo_id
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _pr(self, number: int, **overrides: Any) -> PrRecord:
+        base = PrRecord(
+            repo_id=self.rid,
+            number=number,
+            title=f"PR {number}",
+            state="OPEN",
+            updated_at="2027-01-05T00:00:00Z",
+            node_id=f"PR_{number}",
+        )
+        return replace(base, **overrides)
+
+    def _issue(self, number: int, **overrides: Any) -> IssueRecord:
+        base = IssueRecord(
+            repo_id=self.rid,
+            number=number,
+            title=f"Issue {number}",
+            state="OPEN",
+            updated_at="2027-01-05T00:00:00Z",
+            node_id=f"I_{number}",
+        )
+        return replace(base, **overrides)
+
+    def _event(self, event_id: str, **overrides: Any) -> TimelineEventRecord:
+        base = TimelineEventRecord(
+            event_id=event_id,
+            repo_id=self.rid,
+            item_kind="issue",
+            item_number=1,
+            event_type="LabeledEvent",
+            created_at="2027-01-06T00:00:00Z",
+        )
+        return replace(base, **overrides)
+
+    def _links(self) -> list[tuple[int, int, str]]:
+        rows = self.store.conn.execute(
+            "SELECT issue_number, pr_number, link_type FROM issue_pr_links "
+            "WHERE repo_id = ? ORDER BY issue_number, pr_number, link_type",
+            (self.rid,),
+        ).fetchall()
+        return [(int(r[0]), int(r[1]), str(r[2])) for r in rows]
+
+    def _set_synced(self, table: str, number: int, synced: str | None, xref: str | None) -> None:
+        with self.store.conn:
+            self.store.conn.execute(
+                f"UPDATE {table} SET timeline_synced_at = ?, xref_synced_at = ? "
+                "WHERE repo_id = ? AND number = ?",
+                (synced, xref, self.rid, number),
+            )
+
+    def _synced(self, table: str, number: int) -> tuple[str | None, str | None]:
+        row = self.store.conn.execute(
+            f"SELECT timeline_synced_at, xref_synced_at FROM {table} "
+            "WHERE repo_id = ? AND number = ?",
+            (self.rid, number),
+        ).fetchone()
+        return row[0], row[1]
+
+    def _dirty_numbers(self) -> list[int]:
+        rows = self.store.conn.execute(
+            "SELECT item_number FROM timeline_dirty WHERE repo_id = ? ORDER BY item_number",
+            (self.rid,),
+        ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def test_sync_stats_with_timeline_serializes_to_json(self) -> None:
+        stats = SyncStats(
+            repo_full_name="octo-org/widgets",
+            timeline=TimelineStats(items_synced=2, capped_items=["octo-org/widgets#1"]),
+        )
+        decoded = json.loads(json.dumps(asdict(stats)))
+        self.assertEqual(decoded["timeline"]["capped_items"], ["octo-org/widgets#1"])
+        self.assertEqual(decoded["timeline"]["graphql_cost"], 0)
+        self.assertIsNone(asdict(SyncStats(repo_full_name="x/y"))["timeline"])
+        self.assertEqual(set(TEXT_LINK_TYPES) & set(TIMELINE_LINK_TYPES), set())
+
+    def test_resave_pr_keeps_timeline_links_and_replaces_text_links(self) -> None:
+        text_link = IssuePrLink(self.rid, 1, 5, "closes")
+        self.store.upsert_issues([self._issue(1), self._issue(2)])
+        self.store.upsert_pull_requests([self._pr(5, issue_links=(text_link,))])
+        self.store.upsert_timeline_events(
+            [
+                self._event(
+                    "E1",
+                    event_type="ClosedEvent",
+                    subject="octo-org/widgets#5",
+                    subject_type="PullRequest",
+                ),
+                self._event(
+                    "E2",
+                    item_number=2,
+                    event_type="CrossReferencedEvent",
+                    subject="octo-org/widgets#5",
+                    subject_type="PullRequest",
+                ),
+            ],
+            repo_full_name="octo-org/widgets",
+        )
+        self.assertEqual(
+            self._links(), [(1, 5, "closed_by"), (1, 5, "closes"), (2, 5, "xref")]
+        )
+
+        new_link = IssuePrLink(self.rid, 3, 5, "references")
+        self.store.upsert_pull_requests([self._pr(5, issue_links=(new_link,))])
+        self.assertEqual(
+            self._links(), [(1, 5, "closed_by"), (2, 5, "xref"), (3, 5, "references")]
+        )
+
+    def test_mirror_resave_with_none_author_type_keeps_existing(self) -> None:
+        def review(author_type: str | None) -> ReviewRecord:
+            return ReviewRecord(
+                self.rid, "R_1", 5, "APPROVED", author="helper", author_type=author_type
+            )
+
+        def stored() -> str | None:
+            return self.store.conn.execute(
+                "SELECT author_type FROM reviews WHERE review_id = 'R_1'"
+            ).fetchone()[0]
+
+        self.store.upsert_pull_requests([self._pr(5, reviews=(review("Bot"),))])
+        self.assertEqual(stored(), "Bot")
+        self.store.upsert_pull_requests([self._pr(5, reviews=(review(None),))])
+        self.assertEqual(stored(), "Bot")
+        self.store.upsert_pull_requests([self._pr(5, reviews=(review("User"),))])
+        self.assertEqual(stored(), "User")
+
+    def test_timeline_candidates_per_mode_and_since_offset(self) -> None:
+        self.store.upsert_pull_requests(
+            [
+                self._pr(1, state="MERGED", updated_at="2027-01-09T00:00:00Z"),
+                self._pr(2, updated_at="2027-01-08T00:00:00Z"),
+                self._pr(3, updated_at="2027-01-12T00:00:00Z"),
+                self._pr(4, updated_at="2027-01-01T00:00:00Z"),
+                self._pr(9, node_id=None),
+            ]
+        )
+        self.store.upsert_issues(
+            [
+                self._issue(6, state="CLOSED", updated_at="2027-01-11T00:00:00Z"),
+                self._issue(7, updated_at="2027-01-09T00:00:00Z"),
+            ]
+        )
+        self._set_synced("pull_requests", 3, self.SYNCED, self.SYNCED)
+        self._set_synced("pull_requests", 4, self.SYNCED, self.SYNCED)
+        self._set_synced("issues", 6, self.SYNCED, None)
+
+        def keys(mode: TimelineMode) -> list[tuple[str, int]]:
+            targets = self.store.timeline_candidates(self.rid, mode, 50)
+            return [(t.item_kind, t.item_number) for t in targets]
+
+        # Open items first, then updated_at descending; no node_id, no candidate.
+        self.assertEqual(
+            keys(TimelineMode.BACKFILL), [("issue", 7), ("pr", 2), ("pr", 1)]
+        )
+        self.assertEqual(keys(TimelineMode.INCREMENTAL), [("pr", 3), ("issue", 6)])
+        self.assertEqual(
+            keys(TimelineMode.ALL),
+            [("pr", 3), ("issue", 7), ("pr", 2), ("issue", 6), ("pr", 1)],
+        )
+        self.assertEqual(len(self.store.timeline_candidates(self.rid, TimelineMode.ALL, 2)), 2)
+
+        incremental = self.store.timeline_candidates(self.rid, TimelineMode.INCREMENTAL, 1)
+        self.assertEqual(
+            incremental,
+            [TimelineTarget(self.rid, "pr", 3, "PR_3", since="2027-01-09T23:55:00Z")],
+        )
+        backfill = self.store.timeline_candidates(self.rid, TimelineMode.BACKFILL, 1)
+        self.assertIsNone(backfill[0].since)
+        self.assertEqual(self.store.count_timeline_pending(self.rid), 3)
+        self.assertEqual(self.store.count_timeline_pending(self.other.repo_id), 0)
+
+    def test_get_item_updated_at(self) -> None:
+        self.store.upsert_pull_requests([self._pr(2, updated_at="2027-01-08T00:00:00Z")])
+        self.store.upsert_issues([self._issue(4, updated_at="2027-01-09T00:00:00Z")])
+        self.assertEqual(
+            self.store.get_item_updated_at(self.rid, "pr", 2), "2027-01-08T00:00:00Z"
+        )
+        self.assertEqual(
+            self.store.get_item_updated_at(self.rid, "issue", 4), "2027-01-09T00:00:00Z"
+        )
+        self.assertIsNone(self.store.get_item_updated_at(self.rid, "issue", 2))
+        self.assertIsNone(self.store.get_item_updated_at(self.other.repo_id, "pr", 2))
+        with self.assertRaises(ValueError):
+            self.store.get_item_updated_at(self.rid, "discussion", 2)
+
+    def test_mark_timeline_synced_full_and_xref_only(self) -> None:
+        self.store.upsert_pull_requests([self._pr(2)])
+        self.store.mark_timeline_synced(
+            self.rid, "pr", 2, synced_at=self.SYNCED, xref_only=False
+        )
+        self.assertEqual(self._synced("pull_requests", 2), (self.SYNCED, self.SYNCED))
+        later = "2027-01-11T00:00:00Z"
+        self.store.mark_timeline_synced(self.rid, "pr", 2, synced_at=later, xref_only=True)
+        self.assertEqual(self._synced("pull_requests", 2), (self.SYNCED, later))
+        with self.assertRaises(ValueError):
+            self.store.mark_timeline_synced(
+                self.rid, "discussion", 2, synced_at=later, xref_only=True
+            )
+
+    def test_dirty_queue_resolution(self) -> None:
+        self.store.upsert_pull_requests([self._pr(2), self._pr(3)])
+        self.store.upsert_issues([self._issue(4)])
+        self._set_synced("pull_requests", 2, self.SYNCED, "2027-01-11T00:00:00Z")
+        self._set_synced("issues", 4, self.SYNCED, None)
+        # PR 3 has never been fetched; 99 isn't stored yet; 8 is the source itself.
+        queued = self.store.enqueue_timeline_dirty(
+            [(self.rid, n) for n in (4, 2, 3, 99, 8, 2)],
+            reason="mention",
+            now=T0,
+            source=(self.rid, 8),
+        )
+        self.assertEqual(queued, 4)
+        self.assertEqual(
+            self.store.enqueue_timeline_dirty([(self.rid, 2)], reason="commit", now=T0), 0
+        )
+
+        targets = self.store.take_timeline_dirty(self.rid, 10)
+        self.assertEqual(
+            targets,
+            [
+                TimelineTarget(self.rid, "pr", 2, "PR_2", since="2027-01-10T23:55:00Z"),
+                TimelineTarget(self.rid, "issue", 4, "I_4", since="2027-01-09T23:55:00Z"),
+            ],
+        )
+        self.assertEqual(self._dirty_numbers(), [2, 4, 99])
+        self.assertEqual(len(self.store.take_timeline_dirty(self.rid, 1)), 1)
+
+        self.store.mark_timeline_synced(
+            self.rid, "pr", 2, synced_at=iso_at(T0 + 10), xref_only=True
+        )
+        self.assertEqual(self._dirty_numbers(), [4, 99])
+
+    def test_mark_synced_keeps_dirty_row_queued_after_run_start(self) -> None:
+        self.store.upsert_issues([self._issue(4)])
+        self._set_synced("issues", 4, self.SYNCED, self.SYNCED)
+        self.store.enqueue_timeline_dirty([(self.rid, 4)], reason="mention", now=T0 + 60)
+        self.store.mark_timeline_synced(
+            self.rid, "issue", 4, synced_at=iso_at(T0), xref_only=False
+        )
+        self.assertEqual(self._dirty_numbers(), [4])
+
+    def test_derived_link_rules(self) -> None:
+        events = [
+            # Issue 1 closed by PR 5 in the same repo: closed_by.
+            self._event(
+                "C1",
+                event_type="ClosedEvent",
+                subject="Octo-Org/Widgets#5",
+                subject_type="PullRequest",
+            ),
+            # Issue 2 closed by a commit: no link here.
+            self._event(
+                "C2",
+                item_number=2,
+                event_type="ClosedEvent",
+                subject="abc123",
+                subject_type="Commit",
+            ),
+            # PR 5's timeline shows issue 3 connected to it: xref.
+            self._event(
+                "X1",
+                item_kind="pr",
+                item_number=5,
+                event_type="ConnectedEvent",
+                subject="octo-org/widgets#3",
+                subject_type="Issue",
+            ),
+            # PR-to-PR and issue-to-issue references: no link.
+            self._event(
+                "X2",
+                item_kind="pr",
+                item_number=5,
+                event_type="CrossReferencedEvent",
+                subject="octo-org/widgets#6",
+                subject_type="PullRequest",
+            ),
+            self._event(
+                "X3",
+                event_type="CrossReferencedEvent",
+                subject="octo-org/widgets#4",
+                subject_type="Issue",
+            ),
+            # Cross-repo references: no link.
+            self._event(
+                "X4",
+                event_type="CrossReferencedEvent",
+                subject="octo-org/gadgets#5",
+                subject_type="PullRequest",
+            ),
+            self._event(
+                "C3",
+                event_type="ClosedEvent",
+                subject="octo-org/gadgets#9",
+                subject_type="PullRequest",
+            ),
+            # Labels never link, even when named like an item key.
+            self._event("L1", subject="octo-org/widgets#5", subject_type="Label"),
+        ]
+        written = self.store.upsert_timeline_events(events, repo_full_name="octo-org/widgets")
+        self.assertEqual(written, len(events))
+        self.assertEqual(self._links(), [(1, 5, "closed_by"), (3, 5, "xref")])
+
+        # Re-fetches replace by event_id and keep links unique.
+        again = self.store.upsert_timeline_events(
+            [replace(events[0], actor="alice")], repo_full_name="octo-org/widgets"
+        )
+        self.assertEqual(again, 1)
+        self.assertEqual(self.store.table_counts(self.rid)["timeline_events"], len(events))
+        actor = self.store.conn.execute(
+            "SELECT actor FROM timeline_events WHERE event_id = 'C1'"
+        ).fetchone()[0]
+        self.assertEqual(actor, "alice")
+        self.assertEqual(self._links(), [(1, 5, "closed_by"), (3, 5, "xref")])
+        none_written = self.store.upsert_timeline_events([], repo_full_name="octo-org/widgets")
+        self.assertEqual(none_written, 0)
+
+    def test_reset_backfill_state_clears_timeline_progress(self) -> None:
+        self.store.upsert_pull_requests([self._pr(2)])
+        self.store.upsert_issues([self._issue(4)])
+        self._set_synced("pull_requests", 2, self.SYNCED, self.SYNCED)
+        self._set_synced("issues", 4, self.SYNCED, self.SYNCED)
+        self.store.reset_backfill_state(self.rid)
+        self.assertEqual(self._synced("pull_requests", 2), (None, None))
+        self.assertEqual(self._synced("issues", 4), (None, None))
+        self.assertEqual(self.store.count_timeline_pending(self.rid), 2)
+
+    def _subjects(self) -> dict[str, str]:
+        rows = self.store.conn.execute(
+            "SELECT event_id, subject FROM timeline_events ORDER BY event_id"
+        ).fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
+
+    def _seed_subject_events(self) -> None:
+        self.store.upsert_timeline_events(
+            [
+                self._event("A", subject="octo-org/widgets#5", subject_type="PullRequest"),
+                self._event("B", subject="Octo-Org/Widgets#6", subject_type="Issue"),
+                self._event("C", subject="octo-org/widgets#1", subject_type="Label"),
+                self._event("D", subject="octo-org/widgets-extra#2", subject_type="Issue"),
+            ],
+            repo_full_name="octo-org/widgets",
+        )
+        self.store.upsert_timeline_events(
+            [
+                self._event(
+                    "E",
+                    repo_id=self.other.repo_id,
+                    subject="octo-org/widgets#7",
+                    subject_type="PullRequest",
+                )
+            ],
+            repo_full_name="octo-org/gadgets",
+        )
+
+    def test_rename_repo_rewrites_item_subjects_only(self) -> None:
+        self._seed_subject_events()
+        self.store.rename_repo("octo-org/widgets", "octo-org/sprockets")
+        self.assertEqual(
+            self._subjects(),
+            {
+                "A": "octo-org/sprockets#5",
+                "B": "octo-org/sprockets#6",
+                "C": "octo-org/widgets#1",
+                "D": "octo-org/widgets-extra#2",
+                "E": "octo-org/sprockets#7",
+            },
+        )
+
+    def test_merge_repo_alias_rewrites_item_subjects_only(self) -> None:
+        self._seed_subject_events()
+        # The alias is a mirror repo, so it is kept and the merge logs a warning.
+        with self.assertLogs(level="WARNING"):
+            self.store.merge_repo_alias(self.rid, "octo-org/sprockets")
+        subjects = self._subjects()
+        self.assertEqual(subjects["A"], "octo-org/sprockets#5")
+        self.assertEqual(subjects["B"], "octo-org/sprockets#6")
+        self.assertEqual(subjects["C"], "octo-org/widgets#1")
+        self.assertEqual(subjects["D"], "octo-org/widgets-extra#2")
+        self.assertEqual(subjects["E"], "octo-org/sprockets#7")
+
+    def test_remove_repo_cascades_timeline_rows(self) -> None:
+        self._seed_subject_events()
+        self.store.enqueue_timeline_dirty([(self.rid, 5)], reason="mention")
+        counts = self.store.table_counts(self.rid)
+        self.assertEqual((counts["timeline_events"], counts["timeline_dirty"]), (4, 1))
+        self.assertTrue(self.store.remove_repo("octo-org/widgets"))
+        totals = self.store.table_counts()
+        self.assertEqual((totals["timeline_events"], totals["timeline_dirty"]), (1, 0))
 
 
 if __name__ == "__main__":

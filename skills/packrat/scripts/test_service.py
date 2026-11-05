@@ -23,6 +23,7 @@ from service import (
     MAX_CHECK_LEASES_PER_TICK,
     MAX_REFRESH_ATTEMPTS,
     SERVICE_VERSION,
+    VIEWER_INTERVAL_S,
     PackratService,
     spawn_niced_child,
 )
@@ -499,6 +500,74 @@ class TestHousekeepingAndChild(ServiceHarness):
         finally:
             if child.poll() is None:
                 child.terminate_group()
+
+
+class FakeTimeline:
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self.calls = 0
+        self.raise_next: Exception | None = None
+
+    def sync_items_timelines(self) -> list[Any]:
+        self.log.append("timeline")
+        self.calls += 1
+        if self.raise_next is not None:
+            exc, self.raise_next = self.raise_next, None
+            raise exc
+        return []
+
+
+class TestTimelineWorker(ServiceHarness):
+    def make_with_timeline(self) -> tuple[PackratService, FakeTimeline]:
+        timeline = FakeTimeline(self.events)
+        svc = PackratService(
+            self.store,
+            self.signals,
+            self.hot,
+            self.viewer,
+            self.mirror,
+            None,
+            clock=lambda: T0,
+            budget=self.budget,
+            sync_lock=self._lock,
+            spawn=self._spawn,
+            log=self.logs.append,
+            timeline=timeline,
+        )
+        return svc, timeline
+
+    def test_timeline_runs_once_per_viewer_interval(self) -> None:
+        svc, timeline = self.make_with_timeline()
+        self.assertTrue(svc.run_once(T0).timeline_ran)
+        self.assertFalse(svc.run_once(T0 + VIEWER_INTERVAL_S - 1).timeline_ran)
+        self.assertTrue(svc.run_once(T0 + VIEWER_INTERVAL_S).timeline_ran)
+        self.assertEqual(timeline.calls, 2)
+
+    def test_timeline_waits_for_viewer_budget_then_resumes(self) -> None:
+        self.budget.allowed = {Priority.HOT, Priority.MIRROR}
+        svc, timeline = self.make_with_timeline()
+        report = svc.run_once(T0)
+        self.assertFalse(report.timeline_ran)
+        self.assertIn("timeline", report.deferred)
+        self.assertEqual(timeline.calls, 0)
+        self.budget.allowed = set(Priority)
+        self.assertTrue(svc.run_once(T0 + 5).timeline_ran)
+        self.assertIn("timeline resumed", self.logs)
+
+    def test_timeline_failures_are_reported_not_raised(self) -> None:
+        svc, timeline = self.make_with_timeline()
+        timeline.raise_next = BudgetDeferred("graphql", Priority.VIEWER, "rate limited")
+        report = svc.run_once(T0)
+        self.assertFalse(report.timeline_ran)
+        self.assertIn("timeline", report.deferred)
+        timeline.raise_next = GhApiError(502, "bad gateway")
+        report = svc.run_once(T0 + VIEWER_INTERVAL_S)
+        self.assertEqual(report.errors, ["timeline: HTTP 502: bad gateway"])
+
+    def test_no_timeline_worker_is_skipped(self) -> None:
+        report = self.make().run_once(T0)
+        self.assertFalse(report.timeline_ran)
+        self.assertNotIn("timeline", report.deferred)
 
 
 if __name__ == "__main__":

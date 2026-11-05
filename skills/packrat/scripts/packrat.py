@@ -33,6 +33,7 @@ from embedder import (
     get_default_embedder,
     sync_repo_embeddings,
 )
+from gh_transport import run_gh_command
 from git_indexer import sync_git_codebase
 from github_sync import (
     DEFAULT_BACKFILL_MAX_PAGES,
@@ -41,7 +42,14 @@ from github_sync import (
     sync_backfill_only,
     sync_github_metadata,
 )
-from models import BACKFILL_STREAMS, RepoConfig, SearchFilters, SyncStats, utc_now_iso
+from models import (
+    BACKFILL_STREAMS,
+    RepoConfig,
+    SearchFilters,
+    SyncStats,
+    TimelineMode,
+    utc_now_iso,
+)
 from progress import (
     NULL_REPORTER,
     ProgressReporter,
@@ -50,7 +58,14 @@ from progress import (
 )
 from rate_budget import RATE_BUDGET_FILENAME, RateBudget, RateSnapshot
 from search_engine import hybrid_rrf_search
-from serve_cli import add_live_parsers, cmd_serve, format_service_status, service_status
+from serve_cli import (
+    add_live_parsers,
+    cmd_serve,
+    fold_timeline_stats,
+    format_service_status,
+    github_sync_stopped,
+    service_status,
+)
 from sync_runtime import (
     AutoSyncRunRecord,
     LockMode,
@@ -58,8 +73,12 @@ from sync_runtime import (
     acquire_sync_lock,
     write_auto_sync_run_state,
 )
+from timeline_sync import sync_repo_timelines
 
 INIT_SQL_FILENAME = "init.sql"
+
+SYNC_TIMELINE_MAX_BATCHES = 500
+"""Timeline batches per pass in `packrat sync` (20 items each, not counting follow-up pages)."""
 
 
 def _resolve_db_path(db_path_str: str | None) -> Path:
@@ -149,6 +168,7 @@ def _merge_sync_stats(
         combined.backfill_incomplete = list(gh_stats.backfill_incomplete)
         combined.deferred = gh_stats.deferred
         combined.deferred_streams = list(gh_stats.deferred_streams)
+        combined.timeline = gh_stats.timeline
         combined.warnings.extend(gh_stats.warnings)
         combined.errors.extend(gh_stats.errors)
         if gh_stats.skipped_reason:
@@ -192,6 +212,20 @@ def _backfill_warnings(repo: RepoConfig) -> list[str]:
                 f"{stream} backfill incomplete; history not fetched yet, run packrat sync"
             )
     return warnings
+
+
+def _timeline_warnings(store: PackratStore, repo: RepoConfig) -> list[str]:
+    """Returns a warning when stored items of a `mirror` repository lack a first timeline fetch.
+
+    `items` repositories get their timelines from the service's `timeline`
+    worker and are not reported.
+    """
+    if not repo.is_mirror:
+        return []
+    pending = store.count_timeline_pending(repo.repo_id)
+    if not pending:
+        return []
+    return [f"timeline backfill incomplete ({pending} items pending)"]
 
 
 def _format_last_auto_sync(last_run: AutoSyncRunRecord | None) -> str | None:
@@ -272,7 +306,7 @@ def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> No
         print(
             f"  GitHub: issues={c['issues']} prs={c['pull_requests']} "
             f"threads={c['review_threads']} comments={c['comments']} "
-            f"discussions={c['discussions']}"
+            f"discussions={c['discussions']} timeline_events={c['timeline_events']}"
         )
         print(
             f"  Code/Vectors: commits={c['commits']} symbols={c['code_symbols']} "
@@ -318,7 +352,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "last_full_sweep_at": r.last_full_sweep_at,
                     "counts": store.table_counts(r.repo_id),
                     "backfill": _backfill_summary(r),
-                    "warnings": _backfill_warnings(r),
+                    "warnings": _backfill_warnings(r) + _timeline_warnings(store, r),
                 }
             )
         if args.json:
@@ -347,24 +381,47 @@ def _run_github_sync(
     reporter: ProgressReporter,
     budget: RateBudget | None,
 ) -> SyncStats:
-    """Runs the GitHub part of a repo sync: backfill walks only, or the full delta sync."""
-    if getattr(args, "backfill_only", False):
-        return sync_backfill_only(
+    """Runs the GitHub part of a repo sync, then its timeline pass.
+
+    `--backfill-only` runs the backfill walks and then fetches timelines of
+    items never fetched before (`TimelineMode.BACKFILL`). Otherwise the full
+    delta sync runs, then every stale timeline (`TimelineMode.ALL`) and the
+    cross-reference queue. The timeline pass is skipped with `--no-timeline`
+    and after a GitHub sync that stopped for a locked keyring or a rate limit.
+    """
+    backfill_only = bool(getattr(args, "backfill_only", False))
+    if backfill_only:
+        stats = sync_backfill_only(
             store,
             repo,
             backfill_max_pages=args.backfill_max_pages,
             reporter=reporter,
             budget=budget,
         )
-    return sync_github_metadata(
+    else:
+        stats = sync_github_metadata(
+            store,
+            repo,
+            force=args.force,
+            max_pages=args.max_pages,
+            backfill_max_pages=args.backfill_max_pages,
+            reporter=reporter,
+            budget=budget,
+        )
+    if getattr(args, "no_timeline", False) or github_sync_stopped(stats):
+        return stats
+    timeline = sync_repo_timelines(
         store,
-        repo,
-        force=args.force,
-        max_pages=args.max_pages,
-        backfill_max_pages=args.backfill_max_pages,
-        reporter=reporter,
+        store.get_repo(repo.full_name) or repo,
+        mode=TimelineMode.BACKFILL if backfill_only else TimelineMode.ALL,
+        runner=run_gh_command,
         budget=budget,
+        max_batches=SYNC_TIMELINE_MAX_BATCHES,
+        drain_xrefs=not backfill_only,
+        reporter=reporter,
     )
+    fold_timeline_stats(stats, timeline)
+    return stats
 
 
 def _sync_single_repo(
@@ -465,6 +522,17 @@ def _validate_git_sync_paths(
     return None
 
 
+def _timeline_summary(res: dict[str, Any]) -> str:
+    """Formats the timeline counts of a sync result for the completion line, or ""."""
+    timeline = res.get("timeline")
+    if not timeline:
+        return ""
+    return (
+        f" timeline=+{timeline['items_synced']} xrefs=+{timeline['xref_items_synced']} "
+        f"events=+{timeline['events_written']} graphql_cost={timeline['graphql_cost']}"
+    )
+
+
 def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) -> None:
     """Prints a single repository's sync summary and notes immediately to stdout."""
     reporter.clear_active_line()
@@ -478,9 +546,11 @@ def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) ->
         f"commits=+{res['commits_upserted']} symbols=+{res['symbols_upserted']} "
         f"docs=+{res['doc_sections_upserted']} issues=+{res['issues_upserted']} "
         f"prs=+{res['prs_upserted']} discussions=+{res['discussions_upserted']} "
-        f"embeddings=+{res['embeddings_updated']}{dur_suffix}",
+        f"embeddings=+{res['embeddings_updated']}{_timeline_summary(res)}{dur_suffix}",
         flush=True,
     )
+    for key in (res.get("timeline") or {}).get("capped_items") or []:
+        print(f"  note: timeline of {key} has too many pages; marked synced", flush=True)
     if res.get("skipped_reason"):
         print(f"  note: {res['skipped_reason']}", flush=True)
     for stream in res.get("backfill_incomplete") or []:
@@ -1143,6 +1213,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument(
         "--max-commits", type=int, default=300, help="Max git commits to ingest."
+    )
+    p_sync.add_argument(
+        "--no-timeline",
+        action="store_true",
+        help="Skip the PR and issue timeline pass (for rollback and debugging).",
     )
     model_dl = p_sync.add_mutually_exclusive_group()
     model_dl.add_argument(

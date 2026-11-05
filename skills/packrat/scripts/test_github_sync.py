@@ -18,6 +18,9 @@ from github_sync import (
     GhCommandResult,
     _classify_gh_failure,
     _parse_pr_node,
+    _persist_discussions,
+    _persist_issues,
+    _persist_prs,
     _split_http_response,
     extract_issue_links,
     needs_safety_sweep,
@@ -29,7 +32,7 @@ from github_sync import (
     sync_backfill_only,
     sync_github_metadata,
 )
-from models import BACKFILL_STREAMS, RepoConfig
+from models import BACKFILL_STREAMS, RepoConfig, SyncStats
 from rate_budget import RATE_BUDGET_FILENAME, Priority, RateBudget
 from sync_runtime import BoundedCmdResult
 
@@ -1651,6 +1654,131 @@ class TestReviewFixes(unittest.TestCase):
         status, headers, body = _split_http_response(raw)
         self.assertEqual(
             (status, headers["x-ratelimit-remaining"], body), (200, "7", '{"ok": true}')
+        )
+
+
+class TestMentionQueueing(unittest.TestCase):
+    """Tests that persisting synced items queues mentioned items and review author types."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = PackratStore(Path(self.tmp.name) / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets")
+        self.stats = SyncStats(repo_full_name=self.repo.full_name)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _queued(self) -> set[tuple[str, int, str]]:
+        rows = self.store.conn.execute(
+            """
+            SELECT r.full_name, d.item_number, d.reason
+            FROM timeline_dirty d JOIN repos r USING (repo_id)
+            """
+        ).fetchall()
+        return {(r[0], int(r[1]), r[2]) for r in rows}
+
+    def _mention_pr(self, body: str, **extra: object) -> dict[str, object]:
+        node = _pr_node(20, head_owner="octo-org", cross_repo=False)
+        node["body"] = body
+        node.update(extra)
+        return node
+
+    def test_pr_body_queues_same_repo_and_mirrored_cross_repo_mentions(self) -> None:
+        self.store.register_repo("octo-org", "gadgets")
+        node = self._mention_pr("Fixes #7, see octo-org/gadgets#3 and #20.")
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        self.assertEqual(
+            self._queued(),
+            {("octo-org/widgets", 7, "mention"), ("octo-org/gadgets", 3, "mention")},
+        )
+
+    def test_unregistered_cross_repo_mention_is_not_queued(self) -> None:
+        node = self._mention_pr("Fixes #7, see octo-org/gadgets#3.")
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        self.assertEqual(self._queued(), {("octo-org/widgets", 7, "mention")})
+
+    def test_thread_reply_in_comments_json_is_queued(self) -> None:
+        thread = {
+            "id": "T1",
+            "path": "src/a.py",
+            "comments": {
+                "nodes": [
+                    {"id": "C1", "body": "Looks odd.", "author": {"login": "bob"}},
+                    {"id": "C2", "body": "Tracked in #31", "author": {"login": "alice"}},
+                ]
+            },
+        }
+        node = self._mention_pr("Body", reviewThreads={"nodes": [thread]})
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        self.assertEqual(self._queued(), {("octo-org/widgets", 31, "mention")})
+
+    def test_review_and_comment_bodies_are_queued(self) -> None:
+        node = self._mention_pr(
+            "Body",
+            reviews={"nodes": [{"id": "R1", "state": "COMMENTED", "body": "dup of #41"}]},
+            comments={"nodes": [{"id": "IC1", "body": "also #42"}]},
+        )
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        self.assertEqual(
+            self._queued(),
+            {("octo-org/widgets", 41, "mention"), ("octo-org/widgets", 42, "mention")},
+        )
+
+    def test_issue_body_and_comments_are_queued_without_self_reference(self) -> None:
+        node = {
+            "id": "I_5",
+            "number": 5,
+            "title": "Issue 5",
+            "state": "OPEN",
+            "updatedAt": "2026-10-05T00:00:00Z",
+            "body": "Same as #5, blocked by #6",
+            "comments": {"nodes": [{"id": "IC5", "body": "See #8"}]},
+        }
+        _persist_issues(self.store, self.repo, [node], self.stats)
+        self.assertEqual(
+            self._queued(),
+            {("octo-org/widgets", 6, "mention"), ("octo-org/widgets", 8, "mention")},
+        )
+
+    def test_discussion_body_and_answer_are_queued(self) -> None:
+        node = {
+            "id": "D_9",
+            "number": 9,
+            "title": "Question",
+            "updatedAt": "2026-10-09T00:00:00Z",
+            "body": "Related to #12",
+            "answer": {"body": "Fixed by https://github.com/octo-org/widgets/pull/13"},
+        }
+        _persist_discussions(self.store, self.repo, [node], self.stats)
+        self.assertEqual(
+            self._queued(),
+            {("octo-org/widgets", 12, "mention"), ("octo-org/widgets", 13, "mention")},
+        )
+
+    def test_review_author_typename_is_stored_as_author_type(self) -> None:
+        self.assertIn("author { login __typename }", PRS_DELTA_QUERY)
+        node = self._mention_pr(
+            "Body",
+            reviews={
+                "nodes": [
+                    {
+                        "id": "R_bot",
+                        "state": "COMMENTED",
+                        "author": {"login": "helper", "__typename": "Bot"},
+                    },
+                    {"id": "R_old", "state": "APPROVED", "author": {"login": "bob"}},
+                ]
+            },
+        )
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        rows = self.store.conn.execute(
+            "SELECT review_id, author, author_type FROM reviews ORDER BY review_id"
+        ).fetchall()
+        self.assertEqual(
+            [tuple(r) for r in rows],
+            [("R_bot", "helper", "Bot"), ("R_old", "bob", None)],
         )
 
 

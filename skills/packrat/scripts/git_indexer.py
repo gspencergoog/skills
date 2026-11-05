@@ -27,6 +27,7 @@ except ImportError:
     )
 
 from db_store import PackratStore
+from mentions import caching_resolver, extract_item_mentions
 from models import (
     CodeSymbolRecord,
     CommitFileRecord,
@@ -693,6 +694,26 @@ def _list_indexed_file_paths(store: PackratStore, repo_id: int) -> set[str]:
     return {str(r["file_path"]) for r in rows if r["file_path"]}
 
 
+def _enqueue_commit_mentions(
+    store: PackratStore, repo: RepoConfig, commits: Sequence[CommitRecord]
+) -> None:
+    """Queues items mentioned in commit messages for a timeline refresh.
+
+    This catches `ReferencedEvent` targets on the indexed branch without any
+    GitHub calls. A squash-merge commit's mention of its own PR (`(#N)` in the
+    subject) is skipped, since merging already refreshes that PR's timeline.
+    """
+    resolve = caching_resolver(store.get_repo)
+    for commit in commits:
+        targets = extract_item_mentions(commit.message, repo, resolve)
+        if not targets:
+            continue
+        source = (
+            (repo.repo_id, commit.pr_number) if commit.pr_number is not None else None
+        )
+        store.enqueue_timeline_dirty(targets, reason="commit", source=source)
+
+
 def sync_git_codebase(
     store: PackratStore,
     repo: RepoConfig,
@@ -729,6 +750,7 @@ def sync_git_codebase(
     if commits:
         store.upsert_commits(commits)
         store.upsert_chunks(commit_chunks)
+        _enqueue_commit_mentions(store, repo, commits)
 
     modified_files, deleted_files = list_changed_files(
         repo_dir, old_sha, target_sha, force=force

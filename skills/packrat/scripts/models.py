@@ -10,6 +10,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Literal
 
 EMBEDDING_DIM = 384
@@ -265,6 +266,7 @@ class ReviewRecord:
     author_association: str | None = None
     body: str = ""
     submitted_at: str | None = None
+    author_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -485,6 +487,99 @@ class SearchHit:
     item_number: int | None = None
 
 
+TEXT_LINK_TYPES: tuple[str, ...] = ("closes", "references")
+"""`issue_pr_links.link_type` values derived from PR text; replaced on every PR save."""
+
+TIMELINE_LINK_TYPES: tuple[str, ...] = ("closed_by", "xref")
+"""`issue_pr_links.link_type` values derived from timeline events; kept across PR saves."""
+
+
+class TimelineMode(StrEnum):
+    """Which stored items a timeline sync run selects.
+
+    Attributes:
+        INCREMENTAL: Items fetched before whose `updated_at` is newer than
+            their `timeline_synced_at`.
+        BACKFILL: Items whose timeline has never been fetched
+            (`timeline_synced_at IS NULL`).
+        ALL: Both of the above.
+    """
+
+    INCREMENTAL = "incremental"
+    BACKFILL = "backfill"
+    ALL = "all"
+
+
+@dataclass(frozen=True)
+class TimelineEventRecord:
+    """One issue or pull request timeline event.
+
+    Attributes:
+        event_id: GraphQL node id, so re-fetches upsert.
+        item_kind: "pr" or "issue".
+        event_type: GraphQL `__typename`, such as "ReadyForReviewEvent".
+        actor_type: "User", "Bot", "Mannequin", or "Organization".
+        subject: Reviewer login, team `org/slug`, label, assignee, ref name,
+            linked item key `owner/name#N`, or commit sha.
+        subject_type: "User", "Team", "Label", "Ref", "Issue",
+            "PullRequest", "Commit", or "Milestone".
+        payload_json: Raw event fields as JSON. Untrusted repository text.
+    """
+
+    event_id: str
+    repo_id: int
+    item_kind: str
+    item_number: int
+    event_type: str
+    created_at: str
+    actor: str | None = None
+    actor_type: str | None = None
+    subject: str | None = None
+    subject_type: str | None = None
+    payload_json: str = "{}"
+
+
+@dataclass(frozen=True)
+class TimelineTarget:
+    """An issue or pull request whose timeline should be fetched.
+
+    Attributes:
+        item_kind: "pr" or "issue".
+        node_id: GraphQL node id of the item.
+        since: ISO-8601 UTC lower bound for `timelineItems(since:)`, or None
+            for a first (backfill) fetch.
+    """
+
+    repo_id: int
+    item_kind: str
+    item_number: int
+    node_id: str
+    since: str | None
+
+
+@dataclass
+class TimelineStats:
+    """Summary counts from a timeline sync run.
+
+    JSON-safe on purpose: `SyncStats` is serialized with `asdict()` and
+    `json.dumps`. Per-item new event types for a future change feed are left
+    out of v1.
+
+    Attributes:
+        capped_items: Item keys that still had pages after the page cap.
+        graphql_cost: Sum of `rateLimit.cost` over the run.
+    """
+
+    items_synced: int = 0
+    events_written: int = 0
+    xref_items_synced: int = 0
+    pending_backfill: int = 0
+    capped_items: list[str] = field(default_factory=list)
+    graphql_cost: int = 0
+    deferred: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
 @dataclass
 class SyncStats:
     """Summary counts from a repository sync run."""
@@ -508,6 +603,7 @@ class SyncStats:
     duration_sec: float = 0.0
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    timeline: TimelineStats | None = None
 
 
 @dataclass(frozen=True)

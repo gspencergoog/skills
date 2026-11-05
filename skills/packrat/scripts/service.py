@@ -2,11 +2,11 @@
 
 `PackratService` owns every GitHub read the long-running service makes. Each
 tick it drains queued refresh requests, polls cheap change signals, refreshes
-dirty and leased pull requests, and runs the viewer and mirror workers on their
-own cadences. Backfill and indexing run in a niced child process so that slow
+dirty and leased pull requests, and runs the viewer, timeline, and mirror
+workers on their own cadences. Backfill and indexing run in a niced child process so that slow
 git and embedding work never delays the hot path.
 
-The workers (`signals`, `hot`, `viewer`, `mirror`) are injected and used only
+The workers (`signals`, `hot`, `viewer`, `timeline`, `mirror`) are injected and used only
 through the `Protocol`s below, so this module does not import the worker
 modules. `packrat.py serve` wires the real implementations together.
 
@@ -104,6 +104,12 @@ class ViewerRefresh(Protocol):
     def refresh_viewer(self, lookback_days: int = 7) -> list[str]: ...
 
 
+class TimelineRefresh(Protocol):
+    """Timeline events for stored `items`-mode PRs and issues (`serve_cli.TimelineAdapter`)."""
+
+    def sync_items_timelines(self) -> Any: ...
+
+
 class MirrorSync(Protocol):
     """Incremental repository delta (Wave 3 adapter over `sync_github_metadata()`)."""
 
@@ -167,6 +173,7 @@ class TickReport:
         signals_polled: Whether notifications and repo events were polled.
         checks_polled: Number of leases whose check runs were polled.
         viewer_ran: Whether the viewer refresh ran.
+        timeline_ran: Whether the `items`-repo timeline refresh ran.
         mirror_ran: Whether a mirror run happened.
         mirror_skipped_locked: Whether a due mirror run was skipped for `sync.lock`.
         child_spawned: Whether a backfill child was started.
@@ -184,6 +191,7 @@ class TickReport:
     signals_polled: bool = False
     checks_polled: int = 0
     viewer_ran: bool = False
+    timeline_ran: bool = False
     mirror_ran: bool = False
     mirror_skipped_locked: bool = False
     child_spawned: bool = False
@@ -285,6 +293,7 @@ class PackratService:
         spawn: ChildSpawner = spawn_niced_child,
         log: Callable[[str], None] = _stderr_log,
         tick_s: float = TICK_S,
+        timeline: TimelineRefresh | None = None,
     ) -> None:
         """Initializes the scheduler; nothing runs until `run()` or `run_once()`.
 
@@ -302,6 +311,8 @@ class PackratService:
             spawn: Starts the backfill child.
             log: Receives one-line status messages.
             tick_s: Seconds between ticks in `run()`.
+            timeline: Timeline refresh for `items` repositories, run at
+                `VIEWER` priority every `VIEWER_INTERVAL_S`; None skips it.
         """
         self.store = store
         self.signals = signals
@@ -315,9 +326,11 @@ class PackratService:
         self.spawn = spawn
         self.log = log
         self.tick_s = tick_s
+        self.timeline = timeline
         self.child: ChildProcess | None = None
         self._next_signals = 0.0
         self._next_viewer = 0.0
+        self._next_timeline = 0.0
         self._next_prune = 0.0
         self._next_child = 0.0
         self._last_mirror: float | None = None
@@ -516,6 +529,21 @@ class PackratService:
         report.viewer_ran = ok
         self._next_viewer = now + VIEWER_INTERVAL_S
 
+    def _run_timeline(self, now: float, report: TickReport) -> None:
+        """Refreshes `items`-repo timelines every `VIEWER_INTERVAL_S` at `VIEWER` priority.
+
+        Like the hot and viewer workers, it writes without `sync.lock`; each
+        batch is a short transaction.
+        """
+        timeline = self.timeline
+        if timeline is None or now < self._next_timeline:
+            return
+        if not self._gate("timeline", Priority.VIEWER, now, report):
+            return
+        ok, _ = self._guarded("timeline", report, timeline.sync_items_timelines)
+        report.timeline_ran = ok
+        self._next_timeline = now + VIEWER_INTERVAL_S
+
     def _mirror_due(self, now: float) -> bool:
         if not self._pending_mirror:
             return False
@@ -599,7 +627,7 @@ class PackratService:
 
         Order: heartbeat, reap the child, drain refresh requests, poll signals and
         due check runs, refresh dirty and sweep-due leased items, then the viewer,
-        mirror, and backfill child when due, and finally heartbeat and pruning.
+        `items` timelines, mirror, and backfill child when due, and finally heartbeat and pruning.
         Beating at both ends keeps `beat_age_s` low during long ticks and right
         after a restart. Refresh requests are also drained between the slower
         phases, so a reader's `packrat refresh` waits seconds, not a whole tick.
@@ -616,6 +644,7 @@ class PackratService:
         self._drain_requests(moment, report)
         self._run_hot(leases, moment, dirty, report)
         self._run_viewer(moment, dirty, report)
+        self._run_timeline(moment, report)
         self._drain_requests(moment, report)
         self._run_mirror(moment, dirty, report)
         self._drain_requests(moment, report)

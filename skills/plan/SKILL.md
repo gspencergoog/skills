@@ -26,7 +26,7 @@ Use this skill to produce actionable, wave-structured implementation plans for s
    - Set `RequestFeedback: true` to display the interactive **"Proceed"** button in the UI.
    - Set `UserFacing: true` to open the plan in the artifacts panel for inline comments.
    - Set `Summary: "<multi-line summary>"` to describe the plan's scope and waves.
-4. Do not copy or re-summarize the full plan in chat. Output a concise message linking to the artifact, highlight key open questions or decisions, and stop to await user approval.
+4. Do not copy or re-summarize the full plan in chat. Output a concise message linking to the artifact, highlight key open questions or decisions, render the post-plan worksheet (Step 6), and stop to await user approval.
 
 ______________________________________________________________________
 
@@ -39,7 +39,8 @@ Establish clear boundaries before inspecting implementation details:
 - Define the engineering objective and the problem being solved.
 - Identify constraints such as language version, backward compatibility, and performance targets.
 - List explicit non-goals to prevent scope creep.
-- When requirements, assumptions, or wave dependencies are unclear, recommend `/grill-me` or render a `decision_batch`, `assumption_ledger`, or `wave_sequencer` surface via the `genui` skill. Fall back to your host's structured question tool or a numbered chat prompt when `a2ui-pane` is not installed.
+- **Write first, ask second.** Before the plan exists, ask only scope-blocking questions (for example, "which repository?" or "is X in scope?"), in plain terms with no option letters, wave names, or `Q<n>` labels. Every other question goes into the plan's Open Questions and is asked after the plan is presented (Step 6). See the examples in [post_plan_ui.md](references/post_plan_ui.md#1-pre-plan-question-rule-write-first-ask-second).
+- When requirements are too unclear to draft any plan, recommend `/grill-me`. Fall back to your host's structured question tool or a numbered chat prompt when `a2ui-pane` is not installed.
 
 ### 2. Size-Routed Read-Only Codebase Discovery
 
@@ -72,6 +73,8 @@ Choose the reference template that matches the scope of work:
 
 Draft the plan according to the chosen template and write it using `write_file` (`write_to_file`):
 
+- Open with the **brief layer**, in this order: `## At a glance` (Goal, Shape, Decisions needed from you, Biggest risk, Not doing; field bullets at most 180 words), the wave diagram, a `### Commits` or `### PRs` table for plans with 2 or more waves, `## User Review Required`, `## Open Questions` with `### Q<n>: <title>` blocks whose option bullets read `- (Recommended) A: <text>. Consequence: <effect>` (exactly one recommended), or "None currently blocking.", and `## Decisions`.
+- Apply two prose layers ([write-prose](../write-prose/SKILL.md) `references/audiences.md`, "Implementation Plans"): the brief layer follows strict `write-prose` rules (average sentence at most 20 words); the execution layer below it uses tables, checklists, and dense code spans, keeping only the `write-prose` vocabulary rules.
 - Organize multi-component work using the **Sandwich Wave Topology**:
   - `### Wave 1: Foundation & Shared Contracts [Sequential]` for shared types, schemas, interfaces, and test harnesses.
   - `### Wave 2: Core Implementation [Parallel]` divided into `#### Track 2A: ...` and `#### Track 2B: ...` where each track edits a strictly disjoint set of files.
@@ -87,7 +90,8 @@ Draft the plan according to the chosen template and write it using `write_file` 
   - `- [ ] [DELETE] [basename](file:///absolute/path/to/file)`
 - Describe concrete function signatures, methods, error handling, and parameters rather than placeholders.
 - Include a Mermaid architecture or wave-DAG diagram following [mermaid-diagrams](../mermaid-diagrams/SKILL.md) for multi-component or multi-wave workflows.
-- Enforce function maintainability budgets ($\le 15$ per [cognitive-complexity](../cognitive-complexity/SKILL.md)) and clear prose ([write-prose](../write-prose/SKILL.md)).
+- Enforce function maintainability budgets ($\le 15$ per [cognitive-complexity](../cognitive-complexity/SKILL.md)).
+- Give every wave and parallel track a `- **Model tier**:` line naming the model that should execute it (top-tier for design-heavy or risky work, a lighter tier for rote edits).
 - End every sequential wave and parallel track with a runnable test command (`**Track 2A Verification**:` or `**Wave 1 Verification**:`) and a wave-barrier gate.
 
 ### 5. Automated Plan Validation
@@ -106,39 +110,41 @@ The validator checks:
 - Parallel tracks within the same `[Parallel]` wave edit strictly disjoint file sets (emitting `ERROR` on any intra-wave file collision).
 - Every parallel track (`#### Track NA`) includes its own verification command (`WARNING` by default, `ERROR` with `--strict`).
 - No unresolved placeholders (`TODO`, `TBD`, `implement rest here`) remain.
+- The brief layer is complete (errors by default): At a glance comes first with its fields and word budget, brief sentences average at most 20 words, every `Q<n>` has 2 or more options and exactly one `(Recommended)`, plans with 2 or more waves have a PR or commit table, and every parallel track has a model tier. Lightweight plans need only Goal, Decisions needed from you, and Not doing.
 
-Resolve all reported validation errors before proceeding.
+Resolve all reported validation errors before proceeding. A passing run ends with a `NEXT:` line (`next_step` in `--json`) that points to Step 6.
 
-### 6. Independent Review Decision & Execution (Anti-Contamination)
+### 6. Present the Brief & Ask Post-Plan Questions
 
-To prevent confirmation bias from the drafting steps, offer an independent quality review of the plan before final presentation.
+1. Output a concise response in chat with a markdown link to the plan artifact. Highlight the At a glance points that need the user's attention: decisions, breaking changes, and risks.
+2. When `packrat_probe.py` returned a non-empty `user_note` for a GitHub repository (`"not_synced"` or `"unavailable"`), append that single-line note to the chat response. Omit the note when `status` is `"ready"` or `"not_github"`.
+3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 3 or fewer items, `"pane"` otherwise). Its first item always asks whether to run an independent review, with `(Recommended) Yes` preselected; the plan's `Q<n>` questions follow. When `render_a2ui` is unavailable, use the fallback for this surface in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`). Never ask the review question separately.
+4. When the answers arrive, move each answered question into `## Decisions` by hand, in your own words, and leave deferred questions in place. Re-run `validate_plan.py`.
 
-1. Prompt the user via an interactive UI tool before launching the review. Call your host's question tool (`ask_question` or `AskUserQuestion`) or render an inline `confirm_gate` surface via the `genui` skill (`render_a2ui` with `mode: "inline"`). Do not ask this question as plain chat text unless neither tool is available:
-   - `(Recommended) Yes, run an independent review`
-   - `No, skip independent review and proceed directly to presentation`
-   - If the user skips the review, jump to **Step 7**.
-2. Assemble the **Review Briefing Packet** using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md), covering the goal, constraints, settled decisions, non-goals, focus areas, and paths. Keep the prompt under 10 KB. For plans or specs over 500 lines, stage chunks (`<= 35 KB`, `<= 700` lines) with `stage_markdown.py --split-chunks` and pass the chunk paths.
-3. Delegate the review using the highest available tier:
+### 7. Independent Review (When the Worksheet Says Yes)
+
+To prevent confirmation bias from the drafting steps, run this review only when the worksheet's review item is `Yes`. Otherwise skip to step 5 below.
+
+1. Assemble the **Review Briefing Packet** using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md), covering the goal, constraints, settled decisions (including the recorded Decisions), non-goals, focus areas, and paths. Keep the prompt under 10 KB. For plans or specs over 500 lines, stage chunks (`<= 35 KB`, `<= 700` lines) with `stage_markdown.py --split-chunks` and pass the chunk paths.
+2. Delegate the review using the highest available tier:
    - **Tier 1 (Jetski Root Session with `swarm`)**: Spawn a read-only `plan-reviewer` worker via `swarm(action="add", name="plan-reviewer", workspace="inherit", brief=...)` and forbid helper workers. Wait for its board report, then stop it with `swarm(action="kill", name="plan-reviewer")`.
    - **Tier 2 (Subagent Tool Available)**: Spawn one read-only subagent (`Agent` or `invoke_subagent` with `research-google` or `self`, setting `enable_subagent_tools: false` and forbidding child subagents).
    - **Tier 3 (Already Inside a Subagent or Swarm Worker)**: Perform the checklist audit directly in-session without spawning further agents.
-4. Audit the plan against the workspace files and [plan_quality_checklist.md](references/plan_quality_checklist.md), checking intent alignment, disk grounding, intra-wave file disjointness, chokepoint isolation, and per-track verification commands.
-5. Resolve any blockers or gaps in the plan artifact and re-run `validate_plan.py` before presenting the plan to the user.
+3. The reviewer audits the plan against the workspace files and [plan_quality_checklist.md](references/plan_quality_checklist.md) and ends its report with a JSON findings array.
+4. With 3 or more findings, save the array to the scratch directory and render `plan_surfaces.py triage <findings.json>` as a `triage_matrix` before applying anything; with fewer, apply clear fixes directly. Apply the accepted findings and re-run `validate_plan.py`. If findings change a recorded decision or add questions, render a second worksheet with only the new or changed `Q<n>` items and no review item.
+5. For multi-wave plans, render `plan_surfaces.py overview <plan.md>` with `template: "plan_overview"` in the pane (skip it when `render_a2ui` is unavailable; the At a glance section already serves as the overview).
+6. **STOP and do not start executing changes.** Wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
 
-### 7. Present Plan & Await Approval
+### 8. After Proceed: Progress & Landing
 
-Once validated and reviewed:
-
-1. Output a concise response in chat with a markdown link to the generated plan artifact.
-2. Highlight critical decisions, breaking changes, or open questions that need the user's attention.
-3. When `packrat_probe.py` returned a non-empty `user_note` for a GitHub repository (`"not_synced"` or `"unavailable"`), append that single-line note to the chat response. Omit the note when `status` is `"ready"` or `"not_github"`.
-4. **STOP and do not start executing changes.** Wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
+1. Drive a `progress_board` pane with one item per wave and track, updated with data-only lines at each wave barrier. Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
+2. After the last wave, render the landing `confirm_gate` (code review, commit, PR) using [post_plan_ui.md](references/post_plan_ui.md), or its fallback question when `render_a2ui` is unavailable.
 
 ______________________________________________________________________
 
 ## Relationship to Other Skills
 
-- Use [just-brainstorm](../just-brainstorm/SKILL.md) for early exploration of candidate architectures and tradeoffs before selecting a direction for `plan`.
+- Use [just-brainstorm](../just-brainstorm/SKILL.md) to explore candidate architectures, weigh tradeoffs interactively, and converge on a single-direction design spec before running `plan`.
 - Use [proposal-writer](../proposal-writer/SKILL.md) for stakeholder-facing RFCs and architecture documents ("why" and "what"), whereas `plan` produces the execution blueprint ("how").
 - Use [grill-me](../grill-me/SKILL.md) and the `genui` skill when requirements are underspecified or wave ordering needs interactive alignment (`wave_sequencer`, `decision_batch`, `assumption_ledger`).
 - Use [duckdb](../duckdb/SKILL.md), [packrat](../packrat/SKILL.md), [context-indexer](../context-indexer/SKILL.md), and [sem-semantic-info](../sem-semantic-info/SKILL.md) in Step 2 to query specs, repo history, diffs, and symbol blast radius with low token cost.

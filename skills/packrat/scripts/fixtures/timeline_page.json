@@ -1,0 +1,17 @@
+{
+  "data": {
+    "rateLimit": {"cost": 1, "remaining": 4899, "resetAt": "2027-01-10T13:00:00Z"},
+    "t0": {
+      "__typename": "PullRequest",
+      "id": "PR_kwDOAwidgets7",
+      "timelineItems": {
+        "pageInfo": {"hasNextPage": false, "endCursor": "Y3Vyc29yOnBhZ2Uy"},
+        "nodes": [
+          {"__typename": "PullRequestReview", "id": "PRR_user2", "createdAt": "2027-01-10T10:10:00Z", "submittedAt": "2027-01-10T10:10:05Z", "state": "APPROVED", "author": {"login": "bob-reviewer", "__typename": "User"}},
+          {"__typename": "PullRequestReview", "id": "PRR_pending", "createdAt": "2027-01-10T10:12:00Z", "submittedAt": null, "state": "PENDING", "author": {"login": "frank-reviewer", "__typename": "User"}},
+          {"__typename": "LabeledEvent", "id": "LE_pr2", "createdAt": "2027-01-10T10:15:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "label": {"name": "ready to merge"}}
+        ]
+      }
+    }
+  }
+}

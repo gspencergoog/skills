@@ -285,6 +285,23 @@ class LiveStoreMixin:
             (slen, state_prefix),
         )
 
+    def _rewrite_timeline_subjects_in_tx(self, old_full_name: str, new_full_name: str) -> None:
+        """Rewrites linked-item timeline subjects from `old_full_name#` to `new_full_name#`.
+
+        Only `Issue` and `PullRequest` subjects hold item keys; labels, refs,
+        and other subject types that happen to contain `#` are left alone.
+        """
+        prefix = f"{old_full_name}#"
+        plen = len(prefix)
+        self.conn.execute(
+            """
+            UPDATE timeline_events SET subject = ? || substr(subject, ?)
+            WHERE subject_type IN ('Issue', 'PullRequest')
+              AND lower(substr(subject, 1, ?)) = lower(?)
+            """,
+            (f"{new_full_name}#", plen + 1, plen, prefix),
+        )
+
     def merge_repo_alias(
         self,
         alias_repo_id: int,
@@ -295,7 +312,8 @@ class LiveStoreMixin:
 
         Creates or finds the canonical repository, records `alias_full_name` in
         `repo_aliases`, rewrites item keys in `watches`, `notifications`,
-        `viewer_sets`, `refresh_requests`, and `changes`, and deletes the alias
+        `viewer_sets`, `refresh_requests`, and `changes` (and linked-item
+        subjects in `timeline_events`), and deletes the alias
         repository row when it is in `items` mode. A `mirror`-mode alias
         repository is kept and logged instead of deleted.
         """
@@ -334,6 +352,7 @@ class LiveStoreMixin:
                 (alias_full_name, canonical.repo_id, now_iso),
             )
             self._rewrite_alias_item_keys_in_tx(alias_full_name, canonical.full_name)
+            self._rewrite_timeline_subjects_in_tx(alias_full_name, canonical.full_name)
             if alias_mode == REPO_MODE_ITEMS and alias_repo_id != canonical.repo_id:
                 self.conn.execute(
                     "DELETE FROM chunks_fts WHERE chunk_id IN "
@@ -1255,6 +1274,7 @@ class LiveStoreMixin:
         keep_notifications_s: int = 30 * DAY_S,
         keep_viewer_s: int = 30 * DAY_S,
         keep_idle_items_repo_s: int = 30 * DAY_S,
+        keep_timeline_dirty_s: int = 7 * DAY_S,
     ) -> dict[str, int]:
         """Deletes old change, api_calls, notification, viewer-set, expired lease, and idle `items` repo rows.
 
@@ -1262,7 +1282,9 @@ class LiveStoreMixin:
         `keep_viewer_s` (for example a set the service stopped tracking). Idle
         `items` repositories older than `keep_idle_items_repo_s` with no active
         watch or recent notification or viewer-set row are removed along with
-        their FTS chunks and cascaded child/alias rows.
+        their FTS chunks and cascaded child/alias rows. `timeline_dirty` rows
+        older than `keep_timeline_dirty_s` (targets that were never stored) are
+        removed too.
 
         Returns:
             Rows deleted per table.
@@ -1273,6 +1295,7 @@ class LiveStoreMixin:
             ("api_calls", "at", keep_api_calls_s),
             ("notifications", "seen_at", keep_notifications_s),
             ("viewer_sets", "last_seen_at", keep_viewer_s),
+            ("timeline_dirty", "queued_at", keep_timeline_dirty_s),
         )
         deleted: dict[str, int] = {}
         with self.conn:

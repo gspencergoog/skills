@@ -111,7 +111,7 @@ class TestMigrations(unittest.TestCase):
     def test_fresh_db_reaches_latest_version_with_views(self) -> None:
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7])
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
             stored = store.conn.execute(
@@ -131,7 +131,7 @@ class TestMigrations(unittest.TestCase):
         _build_pre_migration_db(self.db_path)
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7])
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
             self.assertEqual(repo.mode, "mirror")
@@ -228,7 +228,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -300,7 +300,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5, 6])
+            self.assertEqual(store.applied_migrations, [5, 6, 7])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -323,7 +323,7 @@ class TestMigrations(unittest.TestCase):
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
             for version, migrate in db_migrations.MIGRATIONS[:5]:
                 db_migrations._run_migration(conn, version, migrate)
-            self.assertEqual(apply_migrations(conn), [6])
+            self.assertEqual(apply_migrations(conn), [6, 7])
             conn.execute(
                 "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
                 "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -339,6 +339,80 @@ class TestMigrations(unittest.TestCase):
             conn.execute("DELETE FROM repos WHERE repo_id = 1")
             remaining = conn.execute("SELECT COUNT(*) FROM repo_aliases").fetchone()[0]
             self.assertEqual(remaining, 0)
+        finally:
+            conn.close()
+
+    def test_migration_0007_adds_timeline_tables_columns_and_indexes(self) -> None:
+        self.assertEqual(LATEST_SCHEMA_VERSION, 7)
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:6]:
+                db_migrations._run_migration(conn, version, migrate)
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
+            )
+            conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
+            conn.commit()
+            self.assertEqual(apply_migrations(conn), [7])
+            self.assertEqual(read_schema_version(conn), 7)
+            tables = {
+                str(r[0])
+                for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+            self.assertLessEqual({"timeline_events", "timeline_dirty"}, tables)
+            for table in ("pull_requests", "issues"):
+                self.assertLessEqual(
+                    {"timeline_synced_at", "xref_synced_at"},
+                    db_migrations._table_columns(conn, table),
+                )
+            indexes = {
+                str(r[0])
+                for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+            }
+            self.assertLessEqual(
+                {
+                    "idx_timeline_item",
+                    "idx_timeline_type",
+                    "idx_timeline_subject",
+                    "idx_prs_timeline_pending",
+                    "idx_issues_timeline_pending",
+                },
+                indexes,
+            )
+            pending = conn.execute(
+                "SELECT number, timeline_synced_at FROM pull_requests"
+            ).fetchall()
+            self.assertEqual(pending, [(7, None)])
+            plan = " ".join(
+                str(r[3])
+                for r in conn.execute(
+                    "EXPLAIN QUERY PLAN SELECT number FROM pull_requests "
+                    "WHERE repo_id = 1 AND timeline_synced_at IS NULL"
+                )
+            )
+            self.assertIn("idx_prs_timeline_pending", plan)
+
+            # Re-running is a no-op, and migration 7 itself is idempotent.
+            self.assertEqual(apply_migrations(conn), [])
+            conn.execute("BEGIN IMMEDIATE")
+            db_migrations.migrate_0007_timeline_events(conn)
+            conn.execute("COMMIT")
+            self.assertEqual(read_schema_version(conn), 7)
+
+            conn.execute(
+                "INSERT INTO timeline_events (event_id, repo_id, item_kind, item_number, "
+                "event_type, created_at) VALUES ('E1', 1, 'pr', 7, 'MergedEvent', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO timeline_dirty (repo_id, item_number, reason, queued_at) "
+                "VALUES (1, 7, 'mention', 'now')"
+            )
+            conn.execute("DELETE FROM repos WHERE repo_id = 1")
+            for table in ("timeline_events", "timeline_dirty"):
+                count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                self.assertEqual(count, 0)
         finally:
             conn.close()
 

@@ -168,6 +168,47 @@ class TestGitIndexer(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_commit_message_mentions_queue_timeline_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+            (work_dir / "README.md").write_text("# Widget\n", encoding="utf-8")
+            _git(work_dir, "add", ".")
+            _git(
+                work_dir,
+                "commit",
+                "-m",
+                "fix: handle empty input (#30)",
+                "-m",
+                "Fixes #12\n\nSee also octo-org/gadgets#4 and #30.",
+            )
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                store.register_repo("octo-org", "gadgets")
+                stats = sync_git_codebase(store, repo)
+                self.assertEqual(stats.commits_upserted, 1)
+                rows = store.conn.execute(
+                    """
+                    SELECT r.full_name, d.item_number, d.reason
+                    FROM timeline_dirty d JOIN repos r USING (repo_id)
+                    ORDER BY r.full_name, d.item_number
+                    """
+                ).fetchall()
+                # The squash-merge PR (#30) is the commit's own source, so it is skipped.
+                self.assertEqual(
+                    [tuple(r) for r in rows],
+                    [("octo-org/gadgets", 4, "commit"), ("octo-org/widgets", 12, "commit")],
+                )
+            finally:
+                store.close()
+
     def test_normalize_numstat_rename_paths(self) -> None:
         from git_indexer import _parse_numstat_lines
 

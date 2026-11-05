@@ -18,6 +18,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from plan_model import (
+    FULL_GLANCE_FIELDS,
+    LIGHTWEIGHT_GLANCE_FIELDS,
+    PlanDocument,
+    find_section,
+    parse_plan,
+    section_text,
+    sentence_stats,
+)
+
+BRIEF_MAX_AVG_SENTENCE_WORDS = 20
+GLANCE_MAX_WORDS = 180
+NEXT_STEP_MESSAGE = (
+    "NEXT: present the brief, then run plan_surfaces.py questions <plan> "
+    "and render the post-plan worksheet (review item first)."
+)
+
 
 @dataclass
 class ValidationIssue:
@@ -48,9 +65,20 @@ class ParallelTrackSpan:
     heading_level: int
     file_actions: list[tuple[str, str, str, int]] = field(default_factory=list)
     has_verification: bool = False
+    model_tier: str | None = None
 
 
 class PlanValidator:
+    BRIEF_MAX_AVG_SENTENCE_WORDS = BRIEF_MAX_AVG_SENTENCE_WORDS
+    GLANCE_MAX_WORDS = GLANCE_MAX_WORDS
+
+    BRIEF_SECTION_PATTERNS = (
+        r"^at a glance\b",
+        r"^user review required\b",
+        r"^open questions\b",
+        r"^decisions\b",
+    )
+
     # Required top-level or secondary section patterns (case-insensitive regex)
     REQUIRED_SECTION_PATTERNS = (
         (r"^#\s+.+", "Top-level title (e.g. '# Feature Name')"),
@@ -108,6 +136,12 @@ class PlanValidator:
         re.IGNORECASE,
     )
 
+    # Model tier declaration inside a wave or track
+    MODEL_TIER_RE = re.compile(
+        r"^\s*[-*+]?\s*\*\*Model tier\s*:?\*\*\s*:?\s*(?P<tier>.+?)\s*$",
+        re.IGNORECASE,
+    )
+
     # Placeholders that indicate incomplete plans
     SUSPICIOUS_PLACEHOLDERS = (
         re.compile(r"\bTODO\b", re.IGNORECASE),
@@ -128,15 +162,23 @@ class PlanValidator:
         self.workspace_dir = workspace_dir
         self.strict = strict
         self.issues: list[ValidationIssue] = []
+        self.doc: PlanDocument = parse_plan(content)
 
     def validate(self) -> list[ValidationIssue]:
         self.issues.clear()
+        self.doc = parse_plan(self.content)
         self._check_sections()
+        self._check_at_a_glance()
+        self._check_brief_readability()
+        self._check_questions()
+        self._check_pr_table()
         self._check_code_blocks()
         self._check_task_list_headings()
         self._check_placeholders()
         self._check_file_actions()
-        self._check_parallel_waves()
+        waves = self._parse_parallel_tracks()
+        self._check_parallel_waves(waves)
+        self._check_model_tiers(waves)
         return self.issues
 
     def _iter_non_fenced_lines(self) -> Iterator[tuple[int, str]]:
@@ -173,6 +215,135 @@ class PlanValidator:
                         message=f"Missing required section: {description}",
                     )
                 )
+
+    def _check_at_a_glance(self) -> None:
+        """Verifies that '## At a glance' is the first '##' section, has required fields, and is <= 180 words."""
+        glance_section = find_section(self.doc.sections, r"^at a glance\b", level=2)
+        if self.doc.at_a_glance is None or glance_section is None:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message="Missing required '## At a glance' section.",
+                )
+            )
+            return
+
+        first_h2 = next((s for s in self.doc.sections if s.level == 2), None)
+        if first_h2 is not None and first_h2.start_line != glance_section.start_line:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        f"'## At a glance' must be the first '##' section "
+                        f"(found '## {first_h2.heading}' first)."
+                    ),
+                    line_num=first_h2.start_line,
+                )
+            )
+
+        required_fields = (
+            LIGHTWEIGHT_GLANCE_FIELDS
+            if self.doc.is_lightweight
+            else FULL_GLANCE_FIELDS
+        )
+        missing = [f for f in required_fields if not self.doc.at_a_glance.get(f)]
+        if missing:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        f"'## At a glance' is missing required field(s): "
+                        f"{', '.join(missing)}."
+                    ),
+                    line_num=glance_section.start_line,
+                )
+            )
+
+        word_count = len(self.doc.glance_bullet_text.split())
+        if word_count > self.GLANCE_MAX_WORDS:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        f"'## At a glance' field bullets total {word_count} words "
+                        f"(max {self.GLANCE_MAX_WORDS})."
+                    ),
+                    line_num=glance_section.start_line,
+                )
+            )
+
+    def _check_brief_readability(self) -> None:
+        """Verifies that the brief sections average 20 words per sentence or fewer."""
+        brief_text = "\n\n".join(
+            section_text(self.content, self.doc, pattern)
+            for pattern in self.BRIEF_SECTION_PATTERNS
+        )
+        mean_words, _ = sentence_stats(brief_text)
+        if mean_words > self.BRIEF_MAX_AVG_SENTENCE_WORDS:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        f"Brief sections average {mean_words:.1f} words per sentence "
+                        f"(max {self.BRIEF_MAX_AVG_SENTENCE_WORDS})."
+                    ),
+                )
+            )
+
+    def _check_questions(self) -> None:
+        """Verifies structured '### Q<n>' open questions and rejects free-form bullets."""
+        if self.doc.free_question_bullets and not self.doc.no_questions_marker:
+            section = find_section(self.doc.sections, r"^open questions\b", level=2)
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        "Open Questions contains free-form bullets; use '### Q<n>: <title>' "
+                        "with option bullets or 'None currently blocking.'."
+                    ),
+                    line_num=section.start_line if section else None,
+                )
+            )
+
+        for q in self.doc.questions:
+            if len(q.options) < 2:
+                self.issues.append(
+                    ValidationIssue(
+                        is_error=True,
+                        message=(
+                            f"Open question {q.qid} ('{q.title}') has {len(q.options)} "
+                            "option(s); at least 2 options are required."
+                        ),
+                        line_num=q.line,
+                    )
+                )
+            rec_count = sum(1 for opt in q.options if opt.recommended)
+            if rec_count != 1:
+                self.issues.append(
+                    ValidationIssue(
+                        is_error=True,
+                        message=(
+                            f"Open question {q.qid} ('{q.title}') must have exactly 1 "
+                            f"'(Recommended)' option (found {rec_count})."
+                        ),
+                        line_num=q.line,
+                    )
+                )
+
+    def _check_pr_table(self) -> None:
+        """Requires a PR or Commits table when the plan has 2 or more waves."""
+        if self.doc.is_lightweight:
+            return
+        if len(self.doc.waves) >= 2 and not self.doc.pr_rows:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=True,
+                    message=(
+                        f"Plan has {len(self.doc.waves)} waves but no PR or Commits table "
+                        "(expected a pipe table under a 'PRs', 'Commits', or 'PR plan' heading)."
+                    ),
+                )
+            )
 
     def _check_code_blocks(self) -> None:
         """Verifies that markdown code blocks are properly opened and closed."""
@@ -389,6 +560,24 @@ class PlanValidator:
 
         return current_wave_id, current_wave_level, current_track
 
+    def _update_track_from_line(
+        self, track: ParallelTrackSpan, line_num: int, line: str
+    ) -> None:
+        """Updates a parallel track span with model tier, verification, and file actions."""
+        tier_match = self.MODEL_TIER_RE.match(line)
+        if tier_match:
+            track.model_tier = tier_match.group("tier").strip()
+
+        if self.TRACK_VERIFICATION_RE.search(line):
+            track.has_verification = True
+
+        for m in self.FILE_ACTION_RE.finditer(line):
+            action, path_str = self._extract_target_path(m)
+            if not path_str or path_str.startswith(("http://", "https://")):
+                continue
+            norm_path = self._normalize_action_path(path_str)
+            track.file_actions.append((action, path_str, norm_path, line_num))
+
     def _parse_parallel_tracks(self) -> dict[str, list[ParallelTrackSpan]]:
         """Groups parallel tracks by wave_id across non-fenced Markdown lines."""
         waves: dict[str, list[ParallelTrackSpan]] = {}
@@ -412,20 +601,8 @@ class PlanValidator:
                         waves,
                     )
                 )
-                continue
-
-            if not current_track:
-                continue
-
-            if self.TRACK_VERIFICATION_RE.search(line):
-                current_track.has_verification = True
-
-            for m in self.FILE_ACTION_RE.finditer(line):
-                action, path_str = self._extract_target_path(m)
-                if not path_str or path_str.startswith(("http://", "https://")):
-                    continue
-                norm_path = self._normalize_action_path(path_str)
-                current_track.file_actions.append((action, path_str, norm_path, i))
+            elif current_track is not None:
+                self._update_track_from_line(current_track, i, line)
 
         return waves
 
@@ -475,14 +652,37 @@ class PlanValidator:
                     )
                 )
 
-    def _check_parallel_waves(self) -> None:
+    def _check_parallel_waves(
+        self, waves: dict[str, list[ParallelTrackSpan]] | None = None
+    ) -> None:
         """Validates intra-wave file disjointness and per-track verification."""
-        waves = self._parse_parallel_tracks()
+        if waves is None:
+            waves = self._parse_parallel_tracks()
         for wave_id, tracks in waves.items():
             if len(tracks) < 2:
                 continue
             self._check_wave_collisions(wave_id, tracks)
             self._check_track_verifications(tracks)
+
+    def _check_model_tiers(
+        self, waves: dict[str, list[ParallelTrackSpan]] | None = None
+    ) -> None:
+        """Errors when a parallel track is missing a '**Model tier**' line."""
+        if waves is None:
+            waves = self._parse_parallel_tracks()
+        for tracks in waves.values():
+            for track in tracks:
+                if not track.model_tier:
+                    self.issues.append(
+                        ValidationIssue(
+                            is_error=True,
+                            message=(
+                                f"Parallel track '{track.track_id}' in Wave {track.wave_id} "
+                                "is missing a '**Model tier**:' line."
+                            ),
+                            line_num=track.heading_line,
+                        )
+                    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -549,6 +749,7 @@ def _print_human_results(
     if not errors and not (strict and warnings):
         if not quiet:
             print(f"✓ Plan passed validation ({len(warnings)} warning(s)).")
+            print(NEXT_STEP_MESSAGE)
     else:
         print(
             f"✗ Plan validation failed: {len(errors)} error(s), {len(warnings)} warning(s).",
@@ -575,14 +776,17 @@ def _print_json_results(
     errors: list[ValidationIssue],
     warnings: list[ValidationIssue],
     is_valid: bool,
+    quiet: bool = False,
 ) -> None:
     """Formats and prints JSON validation results."""
-    output_payload = {
+    output_payload: dict[str, Any] = {
         "valid": is_valid,
         "errors": [err.to_dict() for err in errors],
         "warnings": [warn.to_dict() for warn in warnings],
         "total_issues": len(issues),
     }
+    if is_valid and not quiet:
+        output_payload["next_step"] = NEXT_STEP_MESSAGE
     print(json.dumps(output_payload, indent=2))
 
 
@@ -609,7 +813,7 @@ def main(argv: list[str] | None = None) -> int:
     has_fatal_failure = bool(errors) or (args.strict and bool(warnings))
 
     if args.json:
-        _print_json_results(issues, errors, warnings, not has_fatal_failure)
+        _print_json_results(issues, errors, warnings, not has_fatal_failure, args.quiet)
     else:
         _print_human_results(issues, errors, warnings, args.strict, args.quiet)
 

@@ -108,13 +108,13 @@ Escalate to the user **only** when branches have mutually exclusive architectura
 3. Group conflicting files by shared architectural cause (`tier4_clusters`), and render each cluster with `genui` `consequence_cards` when the `a2ui-pane` plugin is installed. Use `mode: "pane"` with `stack: true` for 2 to 4 clusters (including `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` in chat), or `mode: "inline"` for one clash. Fall back to your host's question tool or a numbered chat prompt when `a2ui-pane` is unavailable.
 4. Keep each decision brief to three parts:
    - One sentence on original behavior at the common ancestor with clickable `[file](file:///...)` links in chat.
-   - Side-by-side branch consequences in `$/options` (or a Markdown table) contrasting `<target-branch>` intent against `<incoming-branch>` intent, including `impact` and `tradeoff`.
+   - Branch consequences in `$/options` (or a Markdown table) contrasting `<target-branch>` intent against `<incoming-branch>` intent, including `impact` and `tradeoff`.
    - Your recommended synthesis pre-populated in `$/choice` (for `consequence_cards`) or listed first with `(Recommended)` in the fallback.
 5. Format options with concrete branch names and include deferral:
    - `(Recommended) <Synthesized resolution naming specific branches with brief rationale>`
    - `<Keep <target-branch> (e.g. v1_0) design and adapt <incoming-branch> (e.g. main) callers>`
    - `<Adopt <incoming-branch> (e.g. main) design and migrate <target-branch> (e.g. v1_0) callers>`
-   - Support `"Explain further"` (`$/moreInfo` in `consequence_cards`) and `"Let's come back to this"` (`$/defer` in `consequence_cards` or as a fallback option).
+   - Support deferral via a `{label: "Defer", value: "defer"}` chip in `consequence_cards` (or `"Let's come back to this"` in the fallback) and follow-up questions or hybrid notes via `$/notes`.
 
 For detailed Tier 1–4 resolution recipes and `/grill-me` question templates, see the [guide on conflict-resolution strategies](references/conflict_resolution_strategies.md).
 

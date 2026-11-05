@@ -1,19 +1,18 @@
 ---
 name: proposal-writer
 description: >-
-  Writes technical proposals, RFCs, system designs, and architecture documents
-  for human stakeholders, choosing a lightweight, standard, or detailed template
-  by project size and including non-goals, diagrams, an API review, and a
-  self-critique pass. Use when the user asks for a proposal, RFC, design doc, or
-  architecture document, wants to propose a new architecture or major feature,
-  or wants a design written down before implementation. Don't use for the
-  engineering execution plan with file-level steps (use plan), or for open-ended
-  option exploration before a direction is chosen.
+  Writes formal technical proposals, RFCs, and stakeholder-facing architecture
+  documents, choosing a lightweight, standard, or detailed template by project
+  size and including non-goals, diagrams, an API review, and a self-critique
+  pass. Use when the user asks for an RFC, stakeholder proposal, or formal
+  design document for team or cross-team sign-off. Don't use for interactive
+  option exploration and in-session design convergence (use just-brainstorm) or
+  for the engineering execution plan with file-level steps (use plan).
 ---
 
 # Writing technical proposals
 
-Use this skill to write structured technical proposals for software products.
+Use this skill to write formal, stakeholder-facing technical proposals and RFCs for human review and sign-off. For interactive design exploration, weighing candidate architectures, and converging an in-session design spec before `/plan`, use [just-brainstorm](../just-brainstorm/SKILL.md) instead.
 
 ## Choose the proposal depth
 

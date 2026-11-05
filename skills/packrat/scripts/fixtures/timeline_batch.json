@@ -1,0 +1,73 @@
+{
+  "data": {
+    "rateLimit": {"cost": 3, "remaining": 4900, "resetAt": "2027-01-10T13:00:00Z"},
+    "t0": {
+      "__typename": "PullRequest",
+      "id": "PR_kwDOAwidgets7",
+      "timelineItems": {
+        "pageInfo": {"hasNextPage": true, "endCursor": "Y3Vyc29yOnBhZ2Ux"},
+        "nodes": [
+          {"__typename": "ConvertToDraftEvent", "id": "CTDE_1", "createdAt": "2027-01-10T09:00:00Z", "actor": {"login": "alice-dev", "__typename": "User"}},
+          {"__typename": "PullRequestReview", "id": "PRR_bot1", "createdAt": "2027-01-10T09:01:00Z", "submittedAt": "2027-01-10T09:01:30Z", "state": "COMMENTED", "author": {"login": "review-helper", "__typename": "Bot"}},
+          {"__typename": "ReadyForReviewEvent", "id": "RFRE_1", "createdAt": "2027-01-10T09:05:00Z", "actor": {"login": "alice-dev", "__typename": "User"}},
+          {"__typename": "ReviewRequestedEvent", "id": "RRE_user", "createdAt": "2027-01-10T09:06:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "requestedReviewer": {"__typename": "User", "login": "bob-reviewer"}},
+          {"__typename": "ReviewRequestedEvent", "id": "RRE_team", "createdAt": "2027-01-10T09:06:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "requestedReviewer": {"__typename": "Team", "slug": "core-team", "organization": {"login": "octo-org"}}},
+          {"__typename": "ReviewRequestRemovedEvent", "id": "RRRE_team", "createdAt": "2027-01-10T09:07:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "requestedReviewer": {"__typename": "Team", "slug": "core-team", "organization": {"login": "octo-org"}}},
+          {"__typename": "PullRequestReview", "id": "PRR_user1", "createdAt": "2027-01-10T09:20:00Z", "submittedAt": "2027-01-10T09:21:00Z", "state": "CHANGES_REQUESTED", "author": {"login": "bob-reviewer", "__typename": "User"}},
+          {"__typename": "ReviewDismissedEvent", "id": "RDE_1", "createdAt": "2027-01-10T09:30:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "dismissalMessage": "Addressed in a later push", "review": {"author": {"login": "bob-reviewer", "__typename": "User"}}},
+          {"__typename": "HeadRefForcePushedEvent", "id": "HRFPE_1", "createdAt": "2027-01-10T09:40:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "beforeCommit": {"oid": "1111111111111111111111111111111111111111"}, "afterCommit": {"oid": "2222222222222222222222222222222222222222"}},
+          {"__typename": "BaseRefChangedEvent", "id": "BRCE_1", "createdAt": "2027-01-10T09:41:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "previousRefName": "dev", "currentRefName": "main"},
+          {"__typename": "AutomaticBaseChangeSucceededEvent", "id": "ABCSE_1", "createdAt": "2027-01-10T09:42:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "oldBase": "feature-a", "newBase": "main"},
+          {"__typename": "AutomaticBaseChangeFailedEvent", "id": "ABCFE_1", "createdAt": "2027-01-10T09:43:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "oldBase": "feature-b", "newBase": "main"},
+          {"__typename": "LabeledEvent", "id": "LE_pr1", "createdAt": "2027-01-10T09:44:00Z", "actor": {"login": "triage-bot", "__typename": "Bot"}, "label": {"name": "needs review"}},
+          {"__typename": "UnlabeledEvent", "id": "UNLE_pr1", "createdAt": "2027-01-10T09:45:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "label": {"name": "needs review"}},
+          {"__typename": "AssignedEvent", "id": "AE_pr1", "createdAt": "2027-01-10T09:46:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "assignee": {"__typename": "User", "login": "alice-dev"}},
+          {"__typename": "UnassignedEvent", "id": "UAE_pr1", "createdAt": "2027-01-10T09:47:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "assignee": {"__typename": "Bot", "login": "triage-bot"}},
+          {"__typename": "RenamedTitleEvent", "id": "RTE_pr1", "createdAt": "2027-01-10T09:48:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "previousTitle": "WIP: widgets", "currentTitle": "Add widget sorting"},
+          {"__typename": "MilestonedEvent", "id": "ME_pr1", "createdAt": "2027-01-10T09:49:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "milestoneTitle": "v2.0"},
+          {"__typename": "DemilestonedEvent", "id": "DME_pr1", "createdAt": "2027-01-10T09:50:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "milestoneTitle": "v1.9"},
+          {"__typename": "ConnectedEvent", "id": "CE_pr1", "createdAt": "2027-01-10T09:51:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "subject": {"__typename": "Issue", "number": 3, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "DisconnectedEvent", "id": "DE_pr1", "createdAt": "2027-01-10T09:52:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "subject": {"__typename": "Issue", "number": 4, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "CrossReferencedEvent", "id": "CRE_pr1", "createdAt": "2027-01-10T09:53:00Z", "actor": {"login": "dave-ext", "__typename": "User"}, "willCloseTarget": false, "isCrossRepository": true, "source": {"__typename": "Issue", "number": 11, "repository": {"nameWithOwner": "octo-org/gadgets"}}},
+          {"__typename": "ReferencedEvent", "id": "REFE_pr1", "createdAt": "2027-01-10T09:54:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "isCrossRepository": false, "commit": {"oid": "3333333333333333333333333333333333333333"}},
+          {"__typename": "AutoMergeEnabledEvent", "id": "AMEE_1", "createdAt": "2027-01-10T09:55:00Z", "actor": {"login": "alice-dev", "__typename": "User"}},
+          {"__typename": "AutoMergeDisabledEvent", "id": "AMDE_1", "createdAt": "2027-01-10T09:56:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "reason": "MERGE_CONFLICT"},
+          {"__typename": "AddedToMergeQueueEvent", "id": "ATMQE_1", "createdAt": "2027-01-10T09:57:00Z", "actor": {"login": "alice-dev", "__typename": "User"}},
+          {"__typename": "RemovedFromMergeQueueEvent", "id": "RFMQE_1", "createdAt": "2027-01-10T09:58:00Z", "actor": {"login": "merge-queue", "__typename": "Bot"}, "reason": "CI_FAILED"},
+          {"__typename": "ClosedEvent", "id": "CLE_pr1", "createdAt": "2027-01-10T09:59:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "stateReason": null, "closer": null},
+          {"__typename": "ReopenedEvent", "id": "ROE_pr1", "createdAt": "2027-01-10T10:00:00Z", "actor": {"login": "alice-dev", "__typename": "User"}},
+          {"__typename": "MergedEvent", "id": "MGE_1", "createdAt": "2027-01-10T10:30:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "commit": {"oid": "4444444444444444444444444444444444444444"}, "mergeRefName": "main"},
+          {"__typename": "HeadRefDeletedEvent", "id": "HRDE_1", "createdAt": "2027-01-10T10:31:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "headRefName": "alice/sorting"},
+          {"__typename": "HeadRefRestoredEvent", "id": "HRRE_1", "createdAt": "2027-01-10T10:32:00Z", "actor": {"login": "alice-dev", "__typename": "User"}}
+        ]
+      }
+    },
+    "t1": {
+      "__typename": "Issue",
+      "id": "I_kwDOAwidgets3",
+      "timelineItems": {
+        "pageInfo": {"hasNextPage": false, "endCursor": "Y3Vyc29yOmlzc3VlMQ"},
+        "nodes": [
+          {"__typename": "LabeledEvent", "id": "LE_is1", "createdAt": "2027-01-09T08:00:00Z", "actor": {"login": "triage-bot", "__typename": "Bot"}, "label": {"name": "type: bug"}},
+          {"__typename": "UnlabeledEvent", "id": "UNLE_is1", "createdAt": "2027-01-09T08:01:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "label": {"name": "status: triage"}},
+          {"__typename": "AssignedEvent", "id": "AE_is1", "createdAt": "2027-01-09T08:02:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "assignee": {"__typename": "User", "login": "alice-dev"}},
+          {"__typename": "UnassignedEvent", "id": "UAE_is1", "createdAt": "2027-01-09T08:03:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "assignee": {"__typename": "Mannequin", "login": "old-account"}},
+          {"__typename": "RenamedTitleEvent", "id": "RTE_is1", "createdAt": "2027-01-09T08:04:00Z", "actor": {"login": "erin-user", "__typename": "User"}, "previousTitle": "broken", "currentTitle": "Widget sort is broken"},
+          {"__typename": "MilestonedEvent", "id": "ME_is1", "createdAt": "2027-01-09T08:05:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "milestoneTitle": "v2.0"},
+          {"__typename": "DemilestonedEvent", "id": "DME_is1", "createdAt": "2027-01-09T08:06:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "milestoneTitle": "v2.0"},
+          {"__typename": "TransferredEvent", "id": "TE_is1", "createdAt": "2027-01-09T08:07:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "fromRepository": {"nameWithOwner": "octo-org/gadgets"}},
+          {"__typename": "MarkedAsDuplicateEvent", "id": "MADE_is1", "createdAt": "2027-01-09T08:08:00Z", "actor": {"login": "carol-lead", "__typename": "User"}, "duplicate": {"__typename": "Issue", "number": 3, "repository": {"nameWithOwner": "octo-org/widgets"}}, "canonical": {"__typename": "Issue", "number": 2, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "UnmarkedAsDuplicateEvent", "id": "UMADE_is1", "createdAt": "2027-01-09T08:09:00Z", "actor": {"login": "carol-lead", "__typename": "User"}},
+          {"__typename": "ConnectedEvent", "id": "CE_is1", "createdAt": "2027-01-10T09:51:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "subject": {"__typename": "PullRequest", "number": 7, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "DisconnectedEvent", "id": "DE_is1", "createdAt": "2027-01-10T09:52:30Z", "actor": {"login": "alice-dev", "__typename": "User"}, "subject": {"__typename": "PullRequest", "number": 8, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "CrossReferencedEvent", "id": "CRE_is1", "createdAt": "2027-01-10T09:00:30Z", "actor": {"login": "alice-dev", "__typename": "User"}, "willCloseTarget": true, "isCrossRepository": false, "source": {"__typename": "PullRequest", "number": 9, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "CrossReferencedEvent", "id": "CRE_is2", "createdAt": "2027-01-10T09:00:40Z", "actor": {"login": "dave-ext", "__typename": "User"}, "willCloseTarget": false, "isCrossRepository": true, "source": {"__typename": "PullRequest", "number": 12, "repository": {"nameWithOwner": "octo-org/gadgets"}}},
+          {"__typename": "ReferencedEvent", "id": "REFE_is1", "createdAt": "2027-01-10T09:54:30Z", "actor": {"login": "alice-dev", "__typename": "User"}, "isCrossRepository": false, "commit": {"oid": "3333333333333333333333333333333333333333"}},
+          {"__typename": "ClosedEvent", "id": "CLE_is1", "createdAt": "2027-01-10T10:30:05Z", "actor": {"login": "carol-lead", "__typename": "User"}, "stateReason": "COMPLETED", "closer": {"__typename": "PullRequest", "number": 7, "repository": {"nameWithOwner": "octo-org/widgets"}}},
+          {"__typename": "ReopenedEvent", "id": "ROE_is1", "createdAt": "2027-01-10T11:00:00Z", "actor": {"login": "erin-user", "__typename": "User"}},
+          {"__typename": "ClosedEvent", "id": "CLE_is2", "createdAt": "2027-01-10T12:00:00Z", "actor": {"login": "alice-dev", "__typename": "User"}, "stateReason": "COMPLETED", "closer": {"__typename": "Commit", "oid": "5555555555555555555555555555555555555555"}}
+        ]
+      }
+    }
+  }
+}

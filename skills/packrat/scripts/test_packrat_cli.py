@@ -1267,6 +1267,115 @@ class TestLiveCli(unittest.TestCase):
             self._run("sync", "--download-model", "--no-download-model")
         self.assertEqual(ctx_dl.exception.code, 2)
 
+    def _sync_with_fake_timeline(
+        self, *argv: str, gh_stats: Any = None, timeline: Any = None
+    ) -> tuple[int, str, str, mock.Mock]:
+        """Runs `packrat sync --github-only` with faked GitHub and timeline syncs."""
+        from models import SyncStats, TimelineStats
+
+        stats = gh_stats or SyncStats(repo_full_name="Octo-Org/Widgets")
+        ok_probe = packrat.GhAuthProbe(ok=True)
+        with (
+            mock.patch("packrat.probe_gh_auth", return_value=ok_probe),
+            mock.patch("packrat.sync_backfill_only", return_value=stats),
+            mock.patch("packrat.sync_github_metadata", return_value=stats),
+            mock.patch(
+                "packrat.sync_repo_timelines", return_value=timeline or TimelineStats()
+            ) as tl,
+        ):
+            rc, out, err = self._run("sync", "--progress", "off", *argv)
+        return rc, out, err, tl
+
+    def test_sync_runs_timeline_pass_in_mode_matching_the_sync(self) -> None:
+        from models import TimelineMode
+
+        rc, _, err, tl = self._sync_with_fake_timeline("--github-only")
+        self.assertEqual(rc, 0, err)
+        tl.assert_called_once()
+        self.assertEqual(tl.call_args.args[1].full_name, "Octo-Org/Widgets")
+        self.assertEqual(tl.call_args.kwargs["mode"], TimelineMode.ALL)
+        self.assertTrue(tl.call_args.kwargs["drain_xrefs"])
+
+        rc, _, err, tl = self._sync_with_fake_timeline("--backfill-only")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(tl.call_args.kwargs["mode"], TimelineMode.BACKFILL)
+        self.assertFalse(tl.call_args.kwargs["drain_xrefs"])
+
+    def test_sync_no_timeline_and_stopped_github_sync_skip_timeline(self) -> None:
+        from models import SyncStats
+
+        rc, _, err, tl = self._sync_with_fake_timeline("--github-only", "--no-timeline")
+        self.assertEqual(rc, 0, err)
+        tl.assert_not_called()
+
+        locked = SyncStats(
+            repo_full_name="Octo-Org/Widgets",
+            errors=["github issues sync failed after 0 page(s) (keyring_locked: locked)"],
+        )
+        _, _, _, tl = self._sync_with_fake_timeline("--github-only", gh_stats=locked)
+        tl.assert_not_called()
+
+    def test_sync_json_reports_timeline_block_and_deferral(self) -> None:
+        from models import TimelineStats
+
+        timeline = TimelineStats(
+            items_synced=4,
+            events_written=17,
+            graphql_cost=3,
+            capped_items=["Octo-Org/Widgets#9"],
+        )
+        rc, out, err, _ = self._sync_with_fake_timeline(
+            "--github-only", "--json", timeline=timeline
+        )
+        self.assertEqual(rc, 0, err)
+        result = json.loads(out)["results"][0]
+        self.assertEqual(result["timeline"]["items_synced"], 4)
+        self.assertEqual(result["timeline"]["graphql_cost"], 3)
+        self.assertEqual(result["timeline"]["capped_items"], ["Octo-Org/Widgets#9"])
+
+        rc, out, err, _ = self._sync_with_fake_timeline("--github-only", timeline=timeline)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("timeline=+4 xrefs=+0 events=+17 graphql_cost=3", out)
+        self.assertIn("Octo-Org/Widgets#9", out)
+
+        deferred = TimelineStats(deferred=True, errors=["timeline: rate_limited: slow"])
+        rc, out, err, _ = self._sync_with_fake_timeline(
+            "--github-only", "--json", timeline=deferred
+        )
+        result = json.loads(out)["results"][0]
+        self.assertEqual(result["deferred_streams"], ["timeline"])
+        self.assertEqual(result["errors"], [])
+
+    def test_status_warns_about_pending_timelines_for_mirror_repos_only(self) -> None:
+        from models import PrRecord
+
+        items = self.store.ensure_items_repo("octo-org", "gadgets")
+        self.store.upsert_pull_requests(
+            [
+                PrRecord(
+                    repo_id=repo_id,
+                    number=5,
+                    title="t",
+                    state="OPEN",
+                    updated_at="2027-01-05T00:00:00Z",
+                    node_id=f"PR_{repo_id}",
+                )
+                for repo_id in (self.repo.repo_id, items.repo_id)
+            ]
+        )
+        payload = self._run_json("status", "--json")
+        repos = payload["repos"]
+        assert isinstance(repos, list)
+        warnings = {r["full_name"]: r["warnings"] for r in repos}
+        warning = "timeline backfill incomplete (1 items pending)"
+        self.assertIn(warning, warnings["Octo-Org/Widgets"])
+        self.assertNotIn(warning, warnings["octo-org/gadgets"])
+        _, out, _ = self._run("status")
+        self.assertIn(f"Warning: {warning}", out)
+
+        _, _, err = self._run("search", "focus ring")
+        self.assertNotIn("timeline", err)
+
     def test_status_reports_service_and_leases(self) -> None:
         rc, out, _ = self._run("status")
         self.assertEqual(rc, 0)

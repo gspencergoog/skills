@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -34,6 +34,7 @@ from models import (
     compute_content_sha256,
     utc_now_iso,
 )
+from mentions import RepoResolver, caching_resolver, extract_item_mentions
 from progress import NULL_REPORTER, ProgressReporter
 from rate_budget import Priority, RateBudget
 
@@ -119,7 +120,7 @@ _PR_NODE_FIELDS = """\
             state
             body
             submittedAt
-            author { login }
+            author { login __typename }
             authorAssociation
           }
         }
@@ -672,6 +673,15 @@ def _parse_pr_files(
     )
 
 
+def _author_type(node: dict[str, Any]) -> str | None:
+    """Returns the GraphQL `author.__typename` (such as "User" or "Bot"), if selected."""
+    author = node.get("author")
+    if not isinstance(author, dict):
+        return None
+    typename = author.get("__typename")
+    return str(typename) if typename else None
+
+
 def _parse_pr_reviews(
     repo_id: int, pr_number: int, node: dict[str, Any]
 ) -> tuple[ReviewRecord, ...]:
@@ -686,6 +696,7 @@ def _parse_pr_reviews(
             author_association=rv.get("authorAssociation"),
             body=str(rv.get("body") or ""),
             submitted_at=rv.get("submittedAt"),
+            author_type=_author_type(rv),
         )
         for rv in _connection_nodes(node, "reviews")
         if rv.get("id")
@@ -1242,6 +1253,54 @@ def _walk_pages(
     return walk
 
 
+MentionSource = tuple[int, Iterable[str]]
+"""An item number in the synced repository and the texts it contains."""
+
+
+def _thread_reply_bodies(comments_json: str) -> list[str]:
+    """Returns every comment body stored in a review thread's `comments_json`."""
+    try:
+        nodes = json.loads(comments_json or "[]")
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(nodes, list):
+        return []
+    return [
+        str(n.get("body") or "") for n in nodes if isinstance(n, dict)
+    ]
+
+
+def _pr_mention_texts(pr: PrRecord) -> Iterator[str]:
+    """Yields the PR body, comments, reviews, threads, and thread replies."""
+    yield pr.body
+    for comment in pr.comments:
+        yield comment.body
+    for review in pr.reviews:
+        yield review.body
+    for thread in pr.review_threads:
+        yield thread.body
+        yield from _thread_reply_bodies(thread.comments_json)
+
+
+def _enqueue_mentions(
+    store: PackratStore, repo: RepoConfig, sources: Iterable[MentionSource]
+) -> None:
+    """Queues every mirrored item mentioned by `sources` for a timeline refresh.
+
+    Each source item's mention of itself is dropped. Mentions beyond the
+    GraphQL query caps (comments, reviews, and review threads) are not seen.
+    """
+    resolve: RepoResolver = caching_resolver(store.get_repo)
+    for number, texts in sources:
+        targets: set[tuple[int, int]] = set()
+        for text in texts:
+            targets |= extract_item_mentions(text, repo, resolve)
+        if targets:
+            store.enqueue_timeline_dirty(
+                targets, reason="mention", source=(repo.repo_id, number)
+            )
+
+
 def _persist_issues(
     store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats
 ) -> None:
@@ -1251,13 +1310,16 @@ def _persist_issues(
     issues: list[IssueRecord] = []
     comments: list[CommentRecord] = []
     chunks: list[TextChunk] = []
+    mention_sources: list[MentionSource] = []
     for node in nodes:
         iss, cms, chs = _parse_issue_node(repo, node)
         issues.append(iss)
         comments.extend(cms)
         chunks.extend(chs)
+        mention_sources.append((iss.number, [iss.body, *(c.body for c in cms)]))
     store.upsert_issues(issues, comments)
     store.upsert_chunks(chunks)
+    _enqueue_mentions(store, repo, mention_sources)
     stats.issues_upserted += len(issues)
     stats.chunks_upserted += len(chunks)
 
@@ -1276,6 +1338,7 @@ def _persist_prs(
         chunks.extend(chs)
     store.upsert_pull_requests(prs)
     store.upsert_chunks(chunks)
+    _enqueue_mentions(store, repo, ((pr.number, _pr_mention_texts(pr)) for pr in prs))
     stats.prs_upserted += len(prs)
     stats.chunks_upserted += len(chunks)
 
@@ -1294,6 +1357,11 @@ def _persist_discussions(
         chunks.append(ch)
     store.upsert_discussions(discussions)
     store.upsert_chunks(chunks)
+    _enqueue_mentions(
+        store,
+        repo,
+        ((d.number, (d.body, d.answer_body or "")) for d in discussions),
+    )
     stats.discussions_upserted += len(discussions)
     stats.chunks_upserted += len(chunks)
 
