@@ -6,7 +6,7 @@ Provides three subcommands consumed after `validate_plan.py` passes:
 - `questions <plan.md> [--surface-id ID] [--format a2ui|ask-question|markdown] [--layout cards|list]`
   Emits a Composable Express Question Blocks worksheet (or Tier 2/3 fallbacks)
   with one block per `Q<n>` and an independent review checkbox in the footer.
-- `overview <plan.md>`
+- `overview <plan.md> [--diagram auto|compact|plan]`
   Emits `$/...` data lines for the `plan_overview` A2UI template.
 - `triage <findings.json> [--format a2ui|ask-question|markdown]`
   Emits `triage_matrix` data lines and a custom `bucket_picker` with
@@ -21,9 +21,18 @@ import re
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from plan_model import OpenQuestion, PlanDocument, QuestionOption, parse_plan
+from plan_model import (
+    OpenQuestion,
+    PlanDocument,
+    QuestionOption,
+    TrackInfo,
+    WaveInfo,
+    parse_plan,
+)
+
+DiagramMode = Literal["auto", "compact", "plan"]
 
 CHIP_LABEL_MAX_CHARS = 60
 REVIEW_PROMPT = "Run an independent review of this plan?"
@@ -444,11 +453,30 @@ _MERMAID_BLOCK_RE = re.compile(
     r"^```mermaid[ \t]*\n(?P<body>.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL
 )
 _FLOWCHART_RE = re.compile(r"^\s*(flowchart|graph)\b", re.IGNORECASE)
+_MODE_TAG_SUFFIX_RE = re.compile(
+    r"\s*\[(?:Parallel|Sequential)[^\]]*\]\s*$", re.IGNORECASE
+)
+_TRACK_PREFIX_RE = re.compile(r"^Track\s+", re.IGNORECASE)
+_WAVE_PREFIX_RE = re.compile(r"^Wave\s+[\w.-]+\b\s*(?::|·)?\s*", re.IGNORECASE)
+_COLON_SEP_RE = re.compile(r"\s*:\s+")
+_PAREN_GROUP_RE = re.compile(r"\([^)]*\)")
+_WAVE_TOKEN_RE = re.compile(r"\b(\d[\w.-]*)\b")
 
 
 def _node_label(text: str) -> str:
     """Makes `text` safe inside a quoted Mermaid node label."""
     return text.replace('"', "'").replace("`", "").strip()
+
+
+def _normalize_diagram_title(text: str, *, strip_wave_prefix: bool = False) -> str:
+    """Normalizes a wave or track heading into a safe, compact Mermaid label."""
+    cleaned = _MODE_TAG_SUFFIX_RE.sub("", text.strip())
+    if strip_wave_prefix:
+        cleaned = _WAVE_PREFIX_RE.sub("", cleaned)
+    cleaned = _TRACK_PREFIX_RE.sub("", cleaned)
+    cleaned = _COLON_SEP_RE.sub(" · ", cleaned)
+    cleaned = _node_label(cleaned)
+    return " ".join(cleaned.split())
 
 
 def _plan_flowchart(text: str) -> str | None:
@@ -460,55 +488,124 @@ def _plan_flowchart(text: str) -> str | None:
     return None
 
 
-def _wave_nodes(doc: PlanDocument, wave: Any) -> tuple[list[str], list[str]]:
-    """Builds `(mermaid_lines, node_ids)` for a single `wave`."""
-    tracks = [t for t in doc.tracks if t.wave_id == wave.wave_id]
-    safe_wave = wave.wave_id.replace(".", "_").replace("-", "_")
-    if wave.mode == "Parallel" and tracks:
-        node_lines: list[str] = []
-        nodes: list[str] = []
-        for idx, track in enumerate(tracks):
-            node = f"W{safe_wave}T{idx}"
-            label = (
-                f"{track.track_id}: {track.title}" if track.title else track.track_id
-            )
-            node_lines.append(f'    {node}["{_node_label(label)}"]')
-            nodes.append(node)
-        return node_lines, nodes
-    title = (
-        f"Wave {wave.wave_id}: {wave.title}" if wave.title else f"Wave {wave.wave_id}"
-    )
-    node = f"W{safe_wave}"
-    return [f'    {node}["{_node_label(title)}"]'], [node]
+def _completing_prs_by_wave(doc: PlanDocument) -> dict[str, list[str]]:
+    """Maps each wave ID to the `PR <id>` labels completing in that wave."""
+    by_wave: dict[str, list[str]] = {}
+    for idx, row in enumerate(doc.pr_rows, start=1):
+        raw_id = _strip_wrapping_backticks(
+            _lookup_cell(row, ("#", "pr", "id", "commit #"), str(idx))
+        )
+        pr_label = (
+            f"PR {raw_id[3:].strip()}"
+            if raw_id.lower().startswith("pr ")
+            else f"PR {raw_id}"
+        )
+        wave_cell = _strip_wrapping_backticks(_lookup_cell(row, ("wave", "phase"), ""))
+        stripped = _PAREN_GROUP_RE.sub("", wave_cell)
+        wave_ids = _WAVE_TOKEN_RE.findall(stripped)
+        if wave_ids:
+            by_wave.setdefault(wave_ids[-1], []).append(pr_label)
+    return by_wave
 
 
-def _generated_flowchart(doc: PlanDocument) -> str | None:
-    """Builds a left-to-right wave flowchart from the parsed waves and tracks."""
+def _wave_header_title(wave: WaveInfo) -> str:
+    """Formats `Wave <id> · <title>` (or `Wave <id>` when untitled)."""
+    clean_title = _normalize_diagram_title(wave.title, strip_wave_prefix=True)
+    if clean_title:
+        return f"Wave {wave.wave_id} · {clean_title}"
+    return f"Wave {wave.wave_id}"
+
+
+def _track_node_label(track: TrackInfo) -> str:
+    """Formats a compact track node label such as `2A · Reader`."""
+    raw = f"{track.track_id}: {track.title}" if track.title else track.track_id
+    return _normalize_diagram_title(raw)
+
+
+def _parallel_wave_caption(
+    wave: WaveInfo, wave_tracks: list[TrackInfo], pr_list: list[str]
+) -> str:
+    """Formats the parenthesized header caption for a parallel wave."""
+    meta_parts: list[str] = []
+    if wave.has_verifier or len(wave_tracks) >= 2:
+        meta_parts.append("Verifier")
+    meta_parts.extend(pr_list)
+    return f" ({' · '.join(meta_parts)})" if meta_parts else ""
+
+
+def _wave_nodes(
+    doc: PlanDocument, wave: WaveInfo, prs: list[str] | None = None
+) -> tuple[list[str], str]:
+    """Builds `(mermaid_lines, wave_node_id)` for a single `wave`."""
+    pr_list = prs or []
+    wave_tracks = [t for t in doc.tracks if t.wave_id == wave.wave_id]
+    safe_wave = f"W{wave.wave_id.replace('.', '_').replace('-', '_')}"
+    base_title = _wave_header_title(wave)
+
+    if wave.mode == "Parallel" and wave_tracks:
+        caption = _parallel_wave_caption(wave, wave_tracks, pr_list)
+        lines = [f'    subgraph {safe_wave}["{base_title}{caption}"]']
+        for idx, track in enumerate(wave_tracks):
+            lines.append(f'        {safe_wave}T{idx}["{_track_node_label(track)}"]')
+        lines.append("    end")
+        return lines, safe_wave
+
+    suffix = f" ({', '.join(pr_list)})" if pr_list else ""
+    return [f'    {safe_wave}["{base_title}{suffix}"]'], safe_wave
+
+
+def _generated_flowchart(doc: PlanDocument) -> str:
+    """Builds a compact wave flowchart from the parsed waves, tracks, and PR rows."""
     if not doc.waves:
-        return None
-    lines = ["flowchart LR"]
-    previous: list[str] = []
+        return ""
+    direction = "LR" if len(doc.waves) <= 2 and not doc.parallel_waves else "TD"
+    lines = [f"flowchart {direction}"]
+    prs_by_wave = _completing_prs_by_wave(doc)
+    wave_ids: list[str] = []
     for wave in doc.waves:
-        node_lines, current = _wave_nodes(doc, wave)
+        node_lines, wave_node_id = _wave_nodes(
+            doc, wave, prs_by_wave.get(wave.wave_id, [])
+        )
         lines.extend(node_lines)
-        lines.extend(f"    {src} --> {dst}" for src in previous for dst in current)
-        previous = current
+        wave_ids.append(wave_node_id)
+    for idx in range(len(wave_ids) - 1):
+        lines.append(f"    {wave_ids[idx]} --> {wave_ids[idx + 1]}")
     return "\n".join(lines)
 
 
-def _wave_diagram_markdown(doc: PlanDocument, text: str) -> str:
-    """Returns the Markdown wave diagram: the plan's own flowchart, else a generated one."""
-    body = _plan_flowchart(text) or _generated_flowchart(doc)
-    if body is None:
-        return "_No waves: single-step plan._"
-    return f"```mermaid\n{body}\n```"
+def _select_flowchart_body(
+    doc: PlanDocument, text: str, diagram_mode: DiagramMode
+) -> str:
+    """Selects the inner Mermaid flowchart body for `diagram_mode`."""
+    if diagram_mode == "compact":
+        return _generated_flowchart(doc) if doc.waves else ""
+    if diagram_mode == "plan":
+        return _plan_flowchart(text) or (_generated_flowchart(doc) if doc.waves else "")
+    if doc.waves:
+        return _generated_flowchart(doc)
+    return _plan_flowchart(text) or ""
 
 
-def render_overview(doc: PlanDocument, text: str = "") -> str:
+def _wave_diagram_markdown(
+    doc: PlanDocument, text: str = "", diagram_mode: DiagramMode = "auto"
+) -> str:
+    """Returns the Markdown wave diagram for `doc` under `diagram_mode`."""
+    body = _select_flowchart_body(doc, text, diagram_mode)
+    return f"```mermaid\n{body}\n```" if body else ""
+
+
+def render_overview(
+    doc: PlanDocument,
+    text: str = "",
+    *,
+    diagram_mode: DiagramMode = "auto",
+) -> str:
     """Renders `plan_overview` template data lines for `doc`.
 
-    `text` is the raw plan Markdown; when it contains a Mermaid flowchart that
-    mentions waves, that diagram is reused so the pane matches the artifact.
+    `diagram_mode` controls `$/waveDiagram`: `"auto"` synthesizes a compact wave
+    diagram when `doc.waves` is non-empty and falls back to the plan's raw
+    Mermaid block otherwise; `"compact"` always synthesizes; `"plan"` prefers
+    the plan's raw Mermaid block.
     """
     open_count = len(doc.questions)
     status = "Ready" if open_count == 0 else f"{open_count} open"
@@ -524,7 +621,7 @@ def render_overview(doc: PlanDocument, text: str = "") -> str:
         f"$/status = {dsl_str(status)}",
         f"$/statusTone = {dsl_str(status_tone)}",
         f"$/glance = {format_dsl_value(_build_glance_items(doc))}",
-        f"$/waveDiagram = {dsl_str(_wave_diagram_markdown(doc, text))}",
+        f"$/waveDiagram = {dsl_str(_wave_diagram_markdown(doc, text, diagram_mode))}",
         f"$/prsHeading = {dsl_str(prs_heading)}",
         f"$/prs = {format_dsl_value(pr_items)}",
         f"$/openQuestions = {open_count}",
@@ -665,7 +762,7 @@ def _load_findings(path: Path) -> list[dict[str, Any]]:
     raise ValueError(f"Expected a JSON array of findings in {path}")
 
 
-def _build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Emit post-plan A2UI surfaces and fallback prompts."
     )
@@ -697,6 +794,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "overview", help="Emit data lines for the plan_overview template."
     )
     o_parser.add_argument("plan", type=Path, help="Path to the plan Markdown file.")
+    o_parser.add_argument(
+        "--diagram",
+        choices=("auto", "compact", "plan"),
+        default="auto",
+        help=(
+            "Wave diagram mode: auto synthesizes compact wave diagrams when "
+            "Wave sections exist and falls back to raw Mermaid otherwise, "
+            "compact always synthesizes, and plan prefers the plan's raw "
+            "Mermaid block (default: auto)."
+        ),
+    )
 
     t_parser = subparsers.add_parser(
         "triage", help="Emit triage_matrix data lines from reviewer findings JSON."
@@ -711,9 +819,12 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_build_parser = build_parser
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint for `plan_surfaces.py`."""
-    parser = _build_parser()
+    parser = build_parser()
     args = parser.parse_args(argv)
 
     if args.subcommand == "questions":
@@ -730,7 +841,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.subcommand == "overview":
         plan_text = args.plan.read_text(encoding="utf-8")
-        sys.stdout.write(render_overview(parse_plan(plan_text), plan_text))
+        sys.stdout.write(
+            render_overview(
+                parse_plan(plan_text),
+                plan_text,
+                diagram_mode=args.diagram,
+            )
+        )
         return 0
 
     if args.subcommand == "triage":

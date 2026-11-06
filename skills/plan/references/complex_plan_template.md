@@ -11,7 +11,7 @@ Every plan has two prose layers checked by `validate_plan.py`:
 
 See [post_plan_ui.md](post_plan_ui.md) for rendering the post-plan worksheet, overview pane, progress board, and landing gate.
 
-______________________________________________________________________
+---
 
 ````markdown
 # [Migration / Architecture Redesign Title]
@@ -26,30 +26,25 @@ ______________________________________________________________________
 
 ```mermaid
 flowchart TD
-    subgraph W1["Wave 1: Foundation & Shims [Sequential]"]
-        S1["Shared contracts & compatibility adapters"]
+    W1["Wave 1 · Foundation & Shims (PR 1)"]
+    subgraph W2["Wave 2 · Subsystem Migration (Verifier · PR 2, PR 3)"]
+        W2T0["2A · Package A"]
+        W2T1["2B · Package B"]
+        W2T2["2C · Client API"]
     end
-    subgraph W2["Wave 2: Subsystem Migration [Parallel]"]
-        T2A["Track 2A: Package A Migration"]
-        T2B["Track 2B: Package B Migration"]
-        V2["Verifier Worker (1 per 2-4 Authors)"]
-        T2A -.-> V2
-        T2B -.-> V2
-    end
-    subgraph W3["Wave 3: Cutover & Cleanup [Sequential]"]
-        S3["Barrel exports, legacy removal, & CHANGELOG"]
-    end
-    W1 --> W2 --> W3
+    W3["Wave 3 · Cutover & Cleanup (PR 4)"]
+    W1 --> W2
+    W2 --> W3
 ```
 
 ### PRs
 
-| # | Repo | PR / Commit | Companion PR | Wave |
-| ---: | :--- | :--- | :--- | :--- |
-| 1 | [repo-a] | `feat(contracts): add v2 adapter and shared types` | None | 1 |
-| 2 | [repo-a] | `feat(pkg-a): migrate package A to v2 contract` | `[repo-b]#142` | 2 (2A) |
-| 3 | [repo-a] | `feat(pkg-b): migrate package B to v2 contract` | None | 2 (2B) |
-| 4 | [repo-a] | `refactor(exports): cut over public API and remove v1 shim` | `[repo-b]#143` | 3 |
+|   # | Repo     | PR / Commit                                                 | Companion PR   | Wave   |
+| --: | :------- | :---------------------------------------------------------- | :------------- | :----- |
+|   1 | [repo-a] | `feat(contracts): add v2 adapter and shared types`          | None           | 1      |
+|   2 | [repo-a] | `feat(pkg-a): migrate package A to v2 contract`             | `[repo-b]#142` | 2 (2A) |
+|   3 | [repo-a] | `feat(pkg-b): migrate package B to v2 contract`             | None           | 2 (2B) |
+|   4 | [repo-a] | `refactor(exports): cut over public API and remove v1 shim` | `[repo-b]#143` | 3      |
 
 ## User Review Required
 
@@ -59,6 +54,7 @@ flowchart TD
 ## Open Questions
 
 ### Q1: [Short architecture or migration question?]
+
 - (Recommended) A: [Recommended migration path.] Consequence: [Concrete effect of choosing A.]
 - B: [Alternative migration path.] Consequence: [Concrete effect of choosing B.]
 
@@ -84,15 +80,15 @@ None currently blocking.
 
 [Describe the target architecture, modular boundaries, and wave-by-wave migration progression.]
 
-### Orchestration & Parallel Verification Matrix
+### Execution Strategy & Parallel Verification Matrix
 
-| Wave / Track | Execution Mode | Orchestrator / Role | Model Tier | Workspace Isolation | Owned Files / Scope | Verification Gate |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Wave 1** | Sequential | Coordinator / Single Agent | Claude Fable 5.1 High | Primary workspace or base worktree | Shared interfaces & shims | `[Wave 1 typecheck + compatibility suite]` |
-| **Track 2A** | Parallel (Wave 2) | `/swarm` author (`pkg-a`) | Gemini Pro Next (`auto`) | `workspace: "share"` | `packages/pkg_a/**` | `[Track 2A unit tests + linter]` |
-| **Track 2B** | Parallel (Wave 2) | `/swarm` author (`pkg-b`) | Gemini Pro Next (`auto`) | `workspace: "share"` | `packages/pkg_b/**` | `[Track 2B unit tests + linter]` |
-| **Wave 2 Verifier** | Parallel Critic | `/swarm` `verifier` (`1` per `2-4` authors) | Claude Fable 5.1 High | `workspace: "inherit"` (read-only) | Audits Track 2A & 2B diffs and file bounds | `[Wave 2 cross-package integration gate]` |
-| **Wave 3** | Sequential | Coordinator / Single Agent | Claude Fable 5.1 High | Primary workspace or merged branch | Barrel exports, `CHANGELOG.md`, legacy removal | `[Full repo regression + code-review]` |
+| Wave / Track        | Execution Mode    | Orchestrator / Role                         | Model Tier               | Workspace Isolation                | Owned Files / Scope                            | Verification Gate                          |
+| :------------------ | :---------------- | :------------------------------------------ | :----------------------- | :--------------------------------- | :--------------------------------------------- | :----------------------------------------- |
+| **Wave 1**          | Sequential        | Coordinator / Single Agent                  | Claude Fable 5.1 High    | Primary workspace or base worktree | Shared interfaces & shims                      | `[Wave 1 typecheck + compatibility suite]` |
+| **Track 2A**        | Parallel (Wave 2) | `/swarm` author (`pkg-a`)                   | Gemini Pro Next (`auto`) | `workspace: "share"`               | `packages/pkg_a/**`                            | `[Track 2A unit tests + linter]`           |
+| **Track 2B**        | Parallel (Wave 2) | `/swarm` author (`pkg-b`)                   | Gemini Pro Next (`auto`) | `workspace: "share"`               | `packages/pkg_b/**`                            | `[Track 2B unit tests + linter]`           |
+| **Wave 2 Verifier** | Parallel Critic   | `/swarm` `verifier` (`1` per `2-4` authors) | Claude Fable 5.1 High    | `workspace: "inherit"` (read-only) | Audits Track 2A & 2B diffs and file bounds     | `[Wave 2 cross-package integration gate]`  |
+| **Wave 3**          | Sequential        | Coordinator / Single Agent                  | Claude Fable 5.1 High    | Primary workspace or merged branch | Barrel exports, `CHANGELOG.md`, legacy removal | `[Full repo regression + code-review]`     |
 
 ### Interface & Schema Specifications
 
@@ -115,7 +111,7 @@ Introduce non-breaking abstractions, backward-compatibility shims, and shared in
 
 **Wave 1 Verification**: `[Commands to run compatibility and regression suites]`
 
-______________________________________________________________________
+---
 
 ### Wave 2: Core Subsystem Migration [Parallel]
 
@@ -150,10 +146,11 @@ Implement the new subsystems and migrate independent packages or modules concurr
 **Track 2B Verification**: `[Scoped test & static analysis command for Track 2B]`
 
 **Wave 2 Verifier & Barrier Gate**:
+
 - Peer `verifier` confirms zero out-of-scope file edits, runs Track 2A and Track 2B test suites, and checks cognitive complexity ($\le 15$).
 - Wave barrier command: `[Cross-package integration test command before Wave 3 begins]`
 
-______________________________________________________________________
+---
 
 ### Wave 3: Cutover, Chokepoint Wiring & Cleanup [Sequential]
 
@@ -168,7 +165,7 @@ Wire public barrel exports, remove legacy shims, and update documentation and ch
 
 **Wave 3 Verification**: `[Commands to verify zero dangling references and full suite pass]`
 
-______________________________________________________________________
+---
 
 ## Verification Plan
 

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -871,10 +872,59 @@ def get_pr_diff(
     return ""
 
 
+def _fetch_prev_round_paths(
+    workspace_dir: str, base_ref: str, prev_head_sha: str
+) -> list[str]:
+    """Returns paths touched between origin/<base_ref> and prev_head_sha, fetching if needed."""
+    if not base_ref or not prev_head_sha:
+        return []
+    name_cmd = [
+        "git",
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-only",
+        f"origin/{base_ref}...{prev_head_sha}",
+    ]
+    ret, out, _ = run_command(name_cmd, cwd=workspace_dir)
+    if ret != 0:
+        fetch_ret, _, _ = run_command(
+            ["git", "fetch", "--no-tags", "origin", prev_head_sha],
+            cwd=workspace_dir,
+        )
+        if fetch_ret != 0:
+            return []
+        ret, out, _ = run_command(name_cmd, cwd=workspace_dir)
+    if ret != 0:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def _collect_pr_increment_paths(
+    workspace_dir: str,
+    base_ref: str,
+    prev_head_sha: str,
+    diff_text: str,
+) -> list[str]:
+    """Returns sorted unique file paths modified by the PR in Round 1 or Round 2."""
+    paths: set[str] = set()
+    for line in diff_text.splitlines():
+        header_path = _extract_header_path(line)
+        if header_path:
+            paths.add(header_path)
+    paths.update(_fetch_prev_round_paths(workspace_dir, base_ref, prev_head_sha))
+    return sorted(paths)
+
+
 def get_incremental_diff(
-    workspace_dir: str, prev_head_sha: str, head_sha: str
+    workspace_dir: str,
+    prev_head_sha: str,
+    head_sha: str,
+    pr_paths: Sequence[str] | None = None,
 ) -> str | None:
-    """Extracts the unified diff between prev_head_sha and head_sha when available."""
+    """Extracts the unified diff between prev_head_sha and head_sha, restricted to pr_paths when given."""
     if not prev_head_sha or not head_sha or prev_head_sha == head_sha:
         return None
     diff_cmd = [
@@ -886,6 +936,8 @@ def get_incremental_diff(
         "--no-textconv",
         f"{prev_head_sha}..{head_sha}",
     ]
+    if pr_paths:
+        diff_cmd.extend(["--", *pr_paths])
     ret, diff_out, _ = run_command(diff_cmd, cwd=workspace_dir)
     if ret == 0:
         return diff_out
@@ -1239,12 +1291,22 @@ def _write_incremental_diff_if_needed(
     coords: dict[str, Any],
     prev_head_sha: str,
     output_diff: str | None,
+    diff_text: str = "",
 ) -> None:
     """Writes pr_incremental.diff alongside output_diff when prev_head_sha moved."""
     if not prev_head_sha or not output_diff:
         return
+    pr_paths = _collect_pr_increment_paths(
+        workspace_dir,
+        str(coords.get("base_ref") or "main"),
+        prev_head_sha,
+        diff_text,
+    )
     inc_diff = get_incremental_diff(
-        workspace_dir, prev_head_sha, str(coords.get("head_sha") or "")
+        workspace_dir,
+        prev_head_sha,
+        str(coords.get("head_sha") or ""),
+        pr_paths=pr_paths,
     )
     if inc_diff is None:
         return
@@ -1300,7 +1362,7 @@ def _run_prepare_workspace(args: argparse.Namespace) -> int:
     if prev_head_sha:
         coords["prev_head_sha"] = prev_head_sha
         _write_incremental_diff_if_needed(
-            workspace_dir, coords, prev_head_sha, args.output_diff
+            workspace_dir, coords, prev_head_sha, args.output_diff, diff_text
         )
 
     if args.output_coords:
@@ -1417,6 +1479,24 @@ def _resolve_target_from_args(args: argparse.Namespace) -> tuple[str, str, int, 
     )
 
 
+def _write_code_review_prep_if_requested(
+    args: argparse.Namespace,
+    metadata: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    """Populates code_review_prep in context and writes code_review_prep.json when requested."""
+    if not getattr(args, "prepare_code_review", False):
+        return
+    prep = _prepare_code_review_from_args(args, metadata)
+    context["code_review_prep"] = prep
+    prep_out = getattr(args, "output_prep", None)
+    if not prep_out and args.output_context:
+        prep_out = str(Path(args.output_context).parent / "code_review_prep.json")
+    if prep_out:
+        _write_json_file(prep_out, prep)
+        print(f"Wrote code review prep to {prep_out}")
+
+
 def _run_fetch_context(args: argparse.Namespace) -> int:
     """Executes Stage 2: fetches PR title, description, reviews, and comments."""
     if not _validate_blind_description(
@@ -1464,8 +1544,7 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
     if args.output_meta:
         _write_json_file(args.output_meta, metadata)
         print(f"Wrote PR metadata to {args.output_meta}")
-    if getattr(args, "prepare_code_review", False):
-        context["code_review_prep"] = _prepare_code_review_from_args(args, metadata)
+    _write_code_review_prep_if_requested(args, metadata, context)
     if args.output_context:
         _write_json_file(args.output_context, context)
         print(f"Wrote PR context to {args.output_context}")
@@ -2037,9 +2116,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "With --fetch-context: also run classify_artifacts --combined, stage_diffs.py, "
-            "optional duckdb churn/drift, and packrat_context.py, storing the result under "
-            "pr_context.json['code_review_prep']. Reads --diff (default <coords dir>/pr.diff) "
-            "and --repo-dir (default <coords dir>/workspace_dir.txt)."
+            "optional duckdb churn/drift, and packrat_context.py, writing code_review_prep.json "
+            "and storing the result under pr_context.json['code_review_prep']. Reads --diff "
+            "(default <coords dir>/pr.diff) and --repo-dir (default <coords dir>/workspace_dir.txt)."
+        ),
+    )
+    parser.add_argument(
+        "--output-prep",
+        help=(
+            "Optional output path for standalone code_review_prep.json when --prepare-code-review "
+            "is set (default: <output-context dir>/code_review_prep.json)."
         ),
     )
     parser.add_argument(

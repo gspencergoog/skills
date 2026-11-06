@@ -14,7 +14,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from models import Event, PrSnapshot, ReviewSortTier, ReviewStep, classify_review_turn
+from models import (
+    Event,
+    PrSnapshot,
+    ReviewSortTier,
+    ReviewStep,
+    classify_review_turn,
+    effective_viewer_review,
+)
 
 BASIC_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
 STATUS_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/status/catalog.json"
@@ -761,11 +768,7 @@ def _is_review_ready(snap: PrSnapshot, step: ReviewStep) -> bool:
         snap.required_summary() == "NONE" and snap.rollup_state == "SUCCESS"
     )
     approved = (
-        (
-            step == ReviewStep.APPROVED
-            or snap.review_decision == "APPROVED"
-            or bool(snap.approvals)
-        )
+        (step == ReviewStep.APPROVED or snap.review_decision == "APPROVED" or bool(snap.approvals))
         and snap.review_decision != "CHANGES_REQUESTED"
         and not snap.changes_requested
     )
@@ -805,7 +808,7 @@ def _reviewer_badge(
     if tier == ReviewSortTier.TERMINAL:
         if _is_viewer_approved_snap(snap, viewer_norm):
             return "Approved by you", "success"
-        if snap.viewer_last_review is None:
+        if effective_viewer_review(snap, viewer_norm) is None:
             return "Unreviewed", "neutral"
         return "Waiting on author", "info"
     if step == ReviewStep.APPROVED:

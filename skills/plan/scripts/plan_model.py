@@ -17,8 +17,8 @@ It understands these plan conventions:
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
-from typing import Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
 
 HEADING_RE = re.compile(r"^\s*(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
 WAVE_HEADING_RE = re.compile(
@@ -32,7 +32,9 @@ INLINE_PARALLEL_WAVE_RE = re.compile(
 FIELD_BULLET_RE = re.compile(
     r"^\s*[-*+]\s+\*\*(?P<name>[^*]+?)\s*:?\s*\*\*\s*:?\s*(?P<value>.*)$"
 )
-QUESTION_HEADING_RE = re.compile(r"^(?P<qid>Q\d+)\s*[:.)-]\s*(?P<title>.+)$", re.IGNORECASE)
+QUESTION_HEADING_RE = re.compile(
+    r"^(?P<qid>Q\d+)\s*[:.)-]\s*(?P<title>.+)$", re.IGNORECASE
+)
 OPTION_RE = re.compile(
     r"^\s*[-*+]\s+(?P<rec>\(Recommended\)\s+)?(?P<letter>[A-Z])\s*:\s*(?P<body>.+?)\s*$"
 )
@@ -52,6 +54,10 @@ FILE_ACTION_RE = re.compile(
 TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 PR_HEADING_RE = re.compile(r"\b(PRs?|Commits|PR plan)\b", re.IGNORECASE)
 NO_QUESTIONS_RE = re.compile(r"none currently blocking", re.IGNORECASE)
+VERIFIER_RE = re.compile(
+    r"(?:\bwave\s+[\w.-]+\s+verifier\b|\*\*[^*\n]*\bverifier\b[^*\n]*\*\*|\bpeer\s+`?verifier`?\b)",
+    re.IGNORECASE,
+)
 
 FULL_GLANCE_FIELDS = (
     "goal",
@@ -96,6 +102,7 @@ class WaveInfo:
     mode: str  # "Sequential", "Parallel", or "" when unstated
     model_tier: str | None
     line: int
+    has_verifier: bool = False
 
 
 @dataclass
@@ -107,6 +114,7 @@ class TrackInfo:
     verification: str | None = None
     line: int = 0
     title: str = ""
+
 
 @dataclass(frozen=True)
 class PlanDocument:
@@ -237,7 +245,9 @@ def _parse_pr_rows(
     for section in sections:
         if section.level < 2 or not PR_HEADING_RE.search(section.heading):
             continue
-        body = [line for _, line in _section_lines(lines, section, stop_at_subheading=True)]
+        body = [
+            line for _, line in _section_lines(lines, section, stop_at_subheading=True)
+        ]
         rows = _first_table(body)
         if rows:
             return rows
@@ -273,6 +283,23 @@ def _parse_option(line: str) -> QuestionOption | None:
     )
 
 
+def _parse_question_heading(text: str, line_num: int) -> tuple[str, str, int] | None:
+    qm = QUESTION_HEADING_RE.match(text)
+    if not qm:
+        return None
+    return (qm.group("qid").upper(), qm.group("title").strip(), line_num)
+
+
+def _flush_question(
+    current: tuple[str, str, int] | None,
+    options: list[QuestionOption],
+    questions: list[OpenQuestion],
+) -> None:
+    if current is not None:
+        qid, title, line_num = current
+        questions.append(OpenQuestion(qid, title, tuple(options), line_num))
+
+
 def _parse_questions(
     lines: list[str], sections: tuple[Section, ...]
 ) -> tuple[tuple[OpenQuestion, ...], tuple[str, ...], bool]:
@@ -286,30 +313,22 @@ def _parse_questions(
     current: tuple[str, str, int] | None = None
     options: list[QuestionOption] = []
 
-    def flush() -> None:
-        if current is not None:
-            qid, title, line_num = current
-            questions.append(OpenQuestion(qid, title, tuple(options), line_num))
-
     for i, line in _section_lines(lines, section):
-        if NO_QUESTIONS_RE.search(line):
-            marker = True
+        marker = marker or bool(NO_QUESTIONS_RE.search(line))
         heading = HEADING_RE.match(line)
         if heading:
-            flush()
+            _flush_question(current, options, questions)
             options = []
-            qm = QUESTION_HEADING_RE.match(heading.group("text"))
-            current = (qm.group("qid").upper(), qm.group("title").strip(), i) if qm else None
-            continue
-        if current is not None:
+            current = _parse_question_heading(heading.group("text"), i)
+        elif current is not None:
             option = _parse_option(line)
             if option:
                 options.append(option)
-            continue
-        bullet = BULLET_RE.match(line)
-        if bullet:
-            free_bullets.append(bullet.group("text"))
-    flush()
+        else:
+            bullet = BULLET_RE.match(line)
+            if bullet:
+                free_bullets.append(bullet.group("text"))
+    _flush_question(current, options, questions)
     return tuple(questions), tuple(free_bullets), marker
 
 
@@ -346,7 +365,9 @@ def _wave_mode(rest: str) -> str:
 
 
 def _strip_mode_tag(rest: str) -> str:
-    return re.sub(r"\s*\[(?:Parallel|Sequential)[^\]]*\]\s*$", "", rest, flags=re.IGNORECASE).strip()
+    return re.sub(
+        r"\s*\[(?:Parallel|Sequential)[^\]]*\]\s*$", "", rest, flags=re.IGNORECASE
+    ).strip()
 
 
 def _heading_title(text: str) -> str:
@@ -362,7 +383,10 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
     inline = INLINE_PARALLEL_WAVE_RE.match(text)
     if inline:
         state.track = TrackInfo(
-            inline.group("wave_id"), inline.group("label"), line=line_num, title=_heading_title(text)
+            inline.group("wave_id"),
+            inline.group("label"),
+            line=line_num,
+            title=_heading_title(text),
         )
         state.tracks.append(state.track)
         return
@@ -370,7 +394,13 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
     wave = WAVE_HEADING_RE.match(text)
     if wave:
         rest = wave.group("rest") or ""
-        info = WaveInfo(wave.group("wave_id"), _strip_mode_tag(rest), _wave_mode(rest), None, line_num)
+        info = WaveInfo(
+            wave.group("wave_id"),
+            _strip_mode_tag(rest),
+            _wave_mode(rest),
+            None,
+            line_num,
+        )
         state.waves.append(info)
         state.wave_index = len(state.waves) - 1
         state.wave_id, state.wave_level, state.track = info.wave_id, level, None
@@ -379,7 +409,10 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
     track = TRACK_HEADING_RE.match(text)
     if track and state.wave_id is not None:
         state.track = TrackInfo(
-            state.wave_id, track.group("label"), line=line_num, title=_heading_title(text)
+            state.wave_id,
+            track.group("label"),
+            line=line_num,
+            title=_heading_title(text),
         )
         state.tracks.append(state.track)
         return
@@ -392,15 +425,24 @@ def _set_model_tier(state: _WaveState, tier: str) -> None:
     if state.track is not None:
         state.track.model_tier = tier
     elif state.wave_id is not None and state.wave_index >= 0:
-        wave = state.waves[state.wave_index]
-        state.waves[state.wave_index] = WaveInfo(
-            wave.wave_id, wave.title, wave.mode, tier, wave.line
+        state.waves[state.wave_index] = replace(
+            state.waves[state.wave_index], model_tier=tier
         )
+
+
+def _set_wave_verifier(state: _WaveState) -> None:
+    if state.wave_id is not None and state.wave_index >= 0:
+        wave = state.waves[state.wave_index]
+        if not wave.has_verifier:
+            state.waves[state.wave_index] = replace(wave, has_verifier=True)
 
 
 def _handle_body_line(state: _WaveState, line: str) -> None:
     actions = list(FILE_ACTION_RE.finditer(line))
     state.file_actions += len(actions)
+
+    if VERIFIER_RE.search(line):
+        _set_wave_verifier(state)
 
     tier = MODEL_TIER_RE.match(line)
     if tier:
@@ -424,7 +466,9 @@ def _parse_waves(lines: list[str]) -> _WaveState:
     for i, line in iter_non_fenced_lines(lines):
         heading = HEADING_RE.match(line)
         if heading:
-            _handle_heading(state, i, len(heading.group("hashes")), heading.group("text"))
+            _handle_heading(
+                state, i, len(heading.group("hashes")), heading.group("text")
+            )
         else:
             _handle_body_line(state, line)
     return state

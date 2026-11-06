@@ -443,17 +443,22 @@ class PackratSource:
     def discover_review_keys(self, repo: str | None = None) -> list[str]:
         """Returns open PR keys in the viewer's `review_requested` and `reviewed` sets."""
         sql = (
-            "SELECT DISTINCT vi.item_key, pl.updated_at "
+            "SELECT vi.item_key "
             "FROM v_viewer_items vi "
-            "JOIN v_pr_live pl ON pl.item_key = vi.item_key "
-            "WHERE vi.set_name IN ('review_requested', 'reviewed') AND pl.state = 'OPEN'"
+            "LEFT JOIN v_pr_live pl ON pl.item_key = vi.item_key "
+            "WHERE vi.set_name IN ('review_requested', 'reviewed') "
+            "AND (pl.state IS NULL OR pl.state = 'OPEN')"
         )
         params: list[Any] = []
         cleaned_repo = (repo or "").strip()
         if cleaned_repo:
-            sql += " AND pl.repo_full_name = ?"
+            sql += " AND LOWER(vi.item_key) LIKE LOWER(?) || '#%'"
             params.append(cleaned_repo)
-        sql += " ORDER BY pl.updated_at DESC, vi.item_key ASC"
+        sql += (
+            " GROUP BY vi.item_key "
+            "ORDER BY MIN(CASE WHEN vi.set_name = 'review_requested' THEN 0 ELSE 1 END) ASC, "
+            "COALESCE(MAX(pl.updated_at), '') DESC, vi.item_key ASC"
+        )
         try:
             with closing(connect_readonly(self.db_path)) as conn:
                 rows = conn.execute(sql, params).fetchall()

@@ -11,7 +11,7 @@ Every plan has two prose layers checked by `validate_plan.py`:
 
 See [post_plan_ui.md](post_plan_ui.md) for rendering the post-plan worksheet, overview pane, progress board, and landing gate.
 
-______________________________________________________________________
+---
 
 ````markdown
 # [Feature / Task Title]
@@ -24,21 +24,27 @@ ______________________________________________________________________
 - **Biggest risk:** [One short sentence naming the main risk and its mitigation.]
 - **Not doing:** [Explicit non-goals in one short line.]
 
+<!-- Short 2-wave sequential plans may use flowchart LR. For 3 or more waves or parallel waves, use flowchart TD with subgraph containers and one edge per line. Do not use <br/> tags inside labels. -->
+
 ```mermaid
-flowchart LR
-    W1["Wave 1: Foundation [Sequential]"] --> TA["2A: Service A"]
-    W1 --> TB["2B: Handler B"]
-    TA --> W3["Wave 3: Integration [Sequential]"]
-    TB --> W3
+flowchart TD
+    W1["Wave 1 · Shared Types"]
+    subgraph W2["Wave 2 · Parallel Tracks (Verifier)"]
+        W2T0["2A · Parser"]
+        W2T1["2B · CLI"]
+    end
+    W3["Wave 3 · Integration (PR 1)"]
+    W1 --> W2
+    W2 --> W3
 ```
 
 ### PRs
 
-| # | Repo | PR / Commit | Wave |
-| ---: | :--- | :--- | :--- |
-| 1 | [repo] | `feat(scope): add shared types and contracts` | 1 |
-| 2 | [repo] | `feat(scope): implement service A and handler B` | 2 (2A, 2B) |
-| 3 | [repo] | `feat(scope): wire exports and CLI entry point` | 3 |
+|   # | Repo   | PR / Commit                                      | Wave       |
+| --: | :----- | :----------------------------------------------- | :--------- |
+|   1 | [repo] | `feat(scope): add shared types and contracts`    | 1          |
+|   2 | [repo] | `feat(scope): implement service A and handler B` | 2 (2A, 2B) |
+|   3 | [repo] | `feat(scope): wire exports and CLI entry point`  | 3          |
 
 ## User Review Required
 
@@ -48,6 +54,7 @@ flowchart LR
 ## Open Questions
 
 ### Q1: [Short question title?]
+
 - (Recommended) A: [Recommended choice.] Consequence: [Concrete effect of choosing A.]
 - B: [Alternative choice.] Consequence: [Concrete effect of choosing B.]
 
@@ -81,13 +88,13 @@ None currently blocking.
 
 ### Execution & Verification Strategy
 
-| Setting | Value |
-| :--- | :--- |
-| Orchestration | [`/swarm` (named author + verifier workers) \| `/run-workflow` (`parallel()` script)] |
-| Workspaces | [`share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree` \| `inherit` (read-only verifier)] |
-| Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks] |
-| Chokepoints | [Barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`) or registries isolated in Wave 1 or Wave 3] |
-| Model tiers | [Capable model (`pro` / `self`) for architecture and coordination; independent quota pool (`auto`) for parallel author tracks] |
+| Setting        | Value                                                                                                                          |
+| :------------- | :----------------------------------------------------------------------------------------------------------------------------- |
+| Orchestration  | [`/swarm` (named author + verifier workers) \| `/run-workflow` (`parallel()` script)]                                          |
+| Workspaces     | [`share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree` \| `inherit` (read-only verifier)] |
+| Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks]                                                                         |
+| Chokepoints    | [Barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`) or registries isolated in Wave 1 or Wave 3]                          |
+| Model tiers    | [Capable model (`pro` / `self`) for architecture and coordination; independent quota pool (`auto`) for parallel author tracks] |
 
 ## Phased Implementation Plan
 
@@ -103,7 +110,7 @@ Define shared data structures and interfaces that parallel tracks build against.
 
 **Wave 1 Verification**: `[Command to verify Wave 1, e.g. npm run typecheck or pytest tests/unit/test_types.py]`
 
-______________________________________________________________________
+---
 
 ### Wave 2: Core Implementation [Parallel]
 
@@ -139,10 +146,11 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 **Track 2B Verification**: `[Scoped test & lint command for Track 2B, e.g. pytest tests/test_handler_b.ext]`
 
 **Wave 2 Verifier & Barrier Gate**:
+
 - Peer `verifier` checks that Track 2A and Track 2B stayed within their owned file boundaries and passed track-local tests.
 - Wave barrier command: `[Combined test & static analysis command before Wave 3 starts]`
 
-______________________________________________________________________
+---
 
 ### Wave 3: Integration, Exports & CLI Surface [Sequential]
 
@@ -156,7 +164,7 @@ Wire parallel tracks into shared chokepoint files, entry points, and documentati
 
 **Wave 3 Verification**: `[Command to run integration test suite, e.g. pytest tests/integration/]`
 
-______________________________________________________________________
+---
 
 ## Verification Plan
 

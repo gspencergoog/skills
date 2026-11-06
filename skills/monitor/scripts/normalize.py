@@ -189,11 +189,7 @@ def _parse_viewer_review_node(node: Any, viewer_norm: str) -> ViewerReview | Non
     )
 
 
-def _extract_viewer_last_review(raw: dict[str, Any], viewer: str) -> ViewerReview | None:
-    viewer_norm = viewer.strip().lower()
-    if not viewer_norm:
-        return None
-    conn = raw.get("reviews")
+def _latest_viewer_review_in_conn(conn: Any, viewer_norm: str) -> ViewerReview | None:
     nodes = (conn.get("nodes") or []) if isinstance(conn, dict) else []
     best: ViewerReview | None = None
     for node in nodes:
@@ -203,6 +199,15 @@ def _extract_viewer_last_review(raw: dict[str, Any], viewer: str) -> ViewerRevie
         if best is None or candidate.submitted_at >= best.submitted_at:
             best = candidate
     return best
+
+
+def _extract_viewer_last_review(raw: dict[str, Any], viewer: str) -> ViewerReview | None:
+    viewer_norm = viewer.strip().lower()
+    if not viewer_norm:
+        return None
+    return _latest_viewer_review_in_conn(
+        raw.get("reviews"), viewer_norm
+    ) or _latest_viewer_review_in_conn(raw.get("latestOpinionatedReviews"), viewer_norm)
 
 
 def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:

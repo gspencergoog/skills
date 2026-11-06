@@ -182,9 +182,7 @@ def _iter_statements(sql: str) -> Iterator[str]:
                 yield candidate
             buf = []
     tail = "".join(buf).strip()
-    if tail and not all(
-        ln.strip().startswith("--") for ln in tail.splitlines() if ln.strip()
-    ):
+    if tail and not all(ln.strip().startswith("--") for ln in tail.splitlines() if ln.strip()):
         yield tail
 
 
@@ -328,9 +326,7 @@ def _copy_legacy_f32_batches(conn: sqlite3.Connection) -> None:
         batch = cursor.fetchmany(2000)
         if not batch:
             break
-        converted = [
-            item for row in batch if (item := _quantize_legacy_f32_row(row)) is not None
-        ]
+        converted = [item for row in batch if (item := _quantize_legacy_f32_row(row)) is not None]
         if converted:
             conn.executemany(
                 """
@@ -453,6 +449,15 @@ CREATE TABLE IF NOT EXISTS latest_reviews (
 def migrate_0008_latest_reviews(conn: sqlite3.Connection) -> None:
     """Adds `latest_reviews` storing the latest non-pending review per author and commit OID."""
     _execute_script(conn, LATEST_REVIEWS_SQL)
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO latest_reviews (
+          repo_id, pr_number, author, author_type, state, submitted_at, commit_oid
+        )
+        SELECT repo_id, pr_number, author, author_type, state, submitted_at, NULL
+        FROM latest_opinionated_reviews
+        """
+    )
 
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -542,9 +547,7 @@ def refresh_views(conn: sqlite3.Connection, path: Path = VIEWS_SQL_PATH) -> None
         raise
 
 
-def apply_migrations(
-    conn: sqlite3.Connection, views_path: Path = VIEWS_SQL_PATH
-) -> list[int]:
+def apply_migrations(conn: sqlite3.Connection, views_path: Path = VIEWS_SQL_PATH) -> list[int]:
     """Brings `conn`'s database to `LATEST_SCHEMA_VERSION` and refreshes stale views.
 
     Args:

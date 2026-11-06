@@ -17,6 +17,7 @@ from typing import Any
 import packrat_source
 from a2ui_board import review_board_data_model
 from daemon_support import ControlReader
+from gh_client import GhError
 from models import Event, ReviewRole
 from monitor_prs import Monitor, _LoopConfig, _Timers, parse_args
 from state import MonitorState, load_state, save_state
@@ -1423,14 +1424,13 @@ class TestReviewsMode(unittest.TestCase):
             snapshots={
                 "acme/widget#5": make_snapshot(number=5, state="CLOSED", author="bob", mine=False),
                 "acme/widget#6": make_snapshot(number=6, state="OPEN", author="bob", mine=False),
+                "acme/widget#7": make_snapshot(number=7, state="OPEN", author="alice", mine=True),
             }
         )
         save_state(Path(self.state_path), prior_state)
 
         pr_open = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
-        pr_closed = _review_pr_node(
-            6, repo="acme/widget", requested_viewer=None, state="CLOSED"
-        )
+        pr_closed = _review_pr_node(6, repo="acme/widget", requested_viewer=None, state="CLOSED")
         store_graphql_pr(self.db, pr_open)
         store_graphql_pr(self.db, pr_closed)
         self._add_viewer_item("review_requested", "acme/widget#3339")
@@ -1456,6 +1456,7 @@ class TestReviewsMode(unittest.TestCase):
         self.assertEqual(len(fake_gh.calls), 0)
         payload = json.loads(out.getvalue())
         self.assertNotIn("acme/widget#5", payload["prs"])
+        self.assertNotIn("acme/widget#7", payload["prs"])
         self.assertIn("acme/widget#3339", payload["prs"])
         self.assertIn("acme/widget#6", payload["prs"])
         kinds = {(e["pr"], e["kind"]) for e in payload["events"]}
@@ -1694,9 +1695,7 @@ class TestReviewsMode(unittest.TestCase):
         self.assertIn("acme/widget#3339", mon_close.state.snapshots)
         self.assertEqual(mon_close.state.snapshots["acme/widget#3339"].state, "CLOSED")
         self.assertNotIn("acme/widget#3339", mon_close.watched_keys)
-        remove_calls = [
-            c for c in self.cli.by_command("remove") if "acme/widget#3339" in c
-        ]
+        remove_calls = [c for c in self.cli.by_command("remove") if "acme/widget#3339" in c]
         self.assertEqual(len(remove_calls), 1)
         dm_closed = review_board_data_model(mon_close.state.snapshots, viewer="alice")
         self.assertEqual(dm_closed["items"][0]["step"], 0)
@@ -1849,6 +1848,59 @@ class TestReviewsMode(unittest.TestCase):
         self.assertEqual(code_wake, 0)
         self.assertEqual(len(notifier_wake.calls), 1)
         self.assertEqual(notifier_wake.calls[0]["conversation_id"], "conv-rev-wake")
+
+    def test_reviews_evicts_unassigned_open_pr_and_preserves_notify_flag_on_gh_error(self) -> None:
+        # 1. H2: Unassigned open unreviewed PR is evicted from snapshots, watched_keys, and leases
+        pr_req = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
+        store_graphql_pr(self.db, pr_req)
+        self._add_viewer_item("review_requested", "acme/widget#3339")
+
+        seed_args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self._monitor(FakeGh([])).run(seed_args)
+
+        # Unassign alice while bob remains requested on the still-OPEN PR
+        pr_unassigned = _review_pr_node(3339, repo="acme/widget", requested_viewer="bob")
+        store_graphql_pr(self.db, pr_unassigned)
+        with _db(self.db) as conn:
+            conn.execute("DELETE FROM v_viewer_items WHERE item_key = 'acme/widget#3339'")
+
+        mon_evict = self._monitor(FakeGh([]))
+        mon_evict.role = ReviewRole.REVIEWER
+        mon_evict.state = MonitorState.from_dict(
+            json.loads(Path(self.state_path).read_text(encoding="utf-8"))
+        )
+        mon_evict.watched_keys = ["acme/widget#3339"]
+        mon_evict.packrat = mon_evict._select_source(seed_args)
+        assert mon_evict.packrat is not None
+        mon_evict.packrat.lease(["acme/widget#3339"])
+        added, missing = mon_evict._discover_packrat_review_delta()
+        self.assertEqual((added, missing), ([], ["acme/widget#3339"]))
+        mon_evict.refresh(missing)
+        self.assertNotIn("acme/widget#3339", mon_evict.watched_keys)
+        self.assertNotIn("acme/widget#3339", mon_evict.state.snapshots)
+        remove_calls = [c for c in self.cli.by_command("remove") if "acme/widget#3339" in c]
+        self.assertEqual(len(remove_calls), 1)
+
+        # 2. M4: Transient GhError in _consume_unwatched_review_request retains notification flag
+        gh_fail = FakeGh([("graphql", 1, "", "HTTP 502 Bad Gateway")])
+        mon_gh = self._monitor(gh_fail, state_path=str(self.dir / "m4_state.json"))
+        mon_gh.role = ReviewRole.REVIEWER
+        mon_gh.poller.review_requested_unwatched = True
+        with self.assertRaises(GhError):
+            mon_gh._consume_unwatched_review_request()
+        self.assertTrue(mon_gh.poller.review_requested_unwatched)
 
 
 if __name__ == "__main__":

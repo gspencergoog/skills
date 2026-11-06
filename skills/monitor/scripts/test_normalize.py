@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 
@@ -216,6 +217,29 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(snap_ties.viewer_opinionated_state, "CHANGES_REQUESTED")
         self.assertEqual(
             snap_ties.viewer_last_review,
+            ViewerReview(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-10-27T20:50:00Z",
+                commit_oid=None,
+            ),
+        )
+
+        # Fallback to latestOpinionatedReviews when 20 thread-reply reviews overflow reviews(last: 20)
+        raw_overflow = copy.deepcopy(raw_ties)
+        raw_overflow["reviews"] = {
+            "nodes": [
+                {
+                    "author": {"login": "alice"},
+                    "state": "COMMENTED",
+                    "submittedAt": f"2026-10-27T21:{i:02d}:00Z",
+                    "commit": {"oid": "2222222"},
+                }
+                for i in range(20)
+            ]
+        }
+        snap_overflow = normalize_pr(raw_overflow, viewer="bob")
+        self.assertEqual(
+            snap_overflow.viewer_last_review,
             ViewerReview(
                 state="CHANGES_REQUESTED",
                 submitted_at="2026-10-27T20:50:00Z",

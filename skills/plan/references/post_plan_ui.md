@@ -2,7 +2,7 @@
 
 This guide covers the pre-plan question rule, the `render_a2ui` calls for each post-plan surface, how to record decisions by hand, and the three-tier fallback contract.
 
-______________________________________________________________________
+---
 
 ## 1. Pre-Plan Question Rule: Write First, Ask Second
 
@@ -19,9 +19,9 @@ Before drafting a plan, the agent rendered **"Express number literals: four deci
 ### Good Example
 
 - When scope is clear, ask nothing before drafting. Write the plan artifact with `### Q1` to `### Q4` under `## Open Questions`, present the brief, and render the post-plan worksheet.
-- When scope is blocked, ask one plain question before drafting: *"Should this change target only the CLI package, or also update the web client?"*
+- When scope is blocked, ask one plain question before drafting: _"Should this change target only the CLI package, or also update the web client?"_
 
-______________________________________________________________________
+---
 
 ## 2. Post-Plan Surfaces (`render_a2ui`)
 
@@ -65,11 +65,11 @@ python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md> --layou
 
 The `list` layout replaces `ChoiceCards` with one letter-badge row and consequence caption per option plus short `A`, `B`, ..., `Defer` chips, while keeping the same intro caption, footer review `CheckBox`, and `review: true|false` payload.
 
-| Tier / Format | How the review choice is presented | How to read the review answer |
-| :--- | :--- | :--- |
-| Tier 1 (`plan_surfaces.py questions`, `cards` or `list`) | Footer `CheckBox` bound to `$/review` (`true` by default) | `review: true` or `review: false` in the `submit_plan_decisions` event payload |
-| Tier 2 (`--format ask-question`) | First question (`"Run an independent review of this plan?"`) | `"(Recommended) Yes"` or `"No"` |
-| Tier 3 (`--format markdown`) | Item 1 in the numbered Markdown list | User reply of `Yes` (or option 1) vs `No` |
+| Tier / Format                                            | How the review choice is presented                           | How to read the review answer                                                  |
+| :------------------------------------------------------- | :----------------------------------------------------------- | :----------------------------------------------------------------------------- |
+| Tier 1 (`plan_surfaces.py questions`, `cards` or `list`) | Footer `CheckBox` bound to `$/review` (`true` by default)    | `review: true` or `review: false` in the `submit_plan_decisions` event payload |
+| Tier 2 (`--format ask-question`)                         | First question (`"Run an independent review of this plan?"`) | `"(Recommended) Yes"` or `"No"`                                                |
+| Tier 3 (`--format markdown`)                             | Item 1 in the numbered Markdown list                         | User reply of `Yes` (or option 1) vs `No`                                      |
 
 If review findings later invalidate a recorded decision or add new `### Q<n>` questions, render a second worksheet with only the new or changed `Q<n>` blocks. Omit the review checkbox on that second worksheet.
 
@@ -100,10 +100,14 @@ When the reviewer reports 1 or 2 findings, apply straightforward fixes directly 
 For multi-wave plans (2 or more waves), generate the overview data lines:
 
 ```bash
-python3 <skill-dir>/scripts/plan_surfaces.py overview <path/to/plan.md>
+python3 <path/to/plan>/scripts/plan_surfaces.py overview <path/to/plan.md> [--diagram {auto,compact,plan}] > <scratch>/overview.a2ui
 ```
 
-The script emits data assignments matching the `plan_overview` contract (`/title`, `/subtitle`, `/status`, `/statusTone`, `/glance[] {label,value}`, `/waveDiagram` (Markdown, normally the plan's own Mermaid wave flowchart, else one generated from the waves and tracks), `/prsHeading`, `/prs[] {id,title,repo,wave}`, `/openQuestions`, `/ackLabel`). Render with:
+The `--diagram auto` flag is the default. It synthesizes a compact `flowchart TD` `subgraph` diagram from parsed waves. It falls back to the plan's raw Mermaid block only when `### Wave N` headings are absent.
+
+Use `--diagram plan` to preserve a custom architecture diagram in Mermaid verbatim. Use `--diagram compact` to force synthesis from parsed waves.
+
+The script emits data assignments matching the `plan_overview` contract (`/title`, `/subtitle`, `/status`, `/statusTone`, `/glance[]`, `/waveDiagram`, `/prsHeading`, `/prs[]`, `/openQuestions`, `/ackLabel`). Render with:
 
 ```json
 {
@@ -154,7 +158,7 @@ After the final wave verification passes, render an inline `confirm_gate` titled
 }
 ```
 
-______________________________________________________________________
+---
 
 ## 3. Recording Decisions by Hand
 
@@ -180,10 +184,12 @@ There is no script that patches answers into the plan. Record user answers by ed
 ## Open Questions
 
 ### Q1: Should the new validator checks be errors or warnings?
+
 - A: Warnings at first, errors with `--strict`. Consequence: older plans still pass without edits.
 - (Recommended) B: Errors right away. Consequence: older plans fail if revalidated until updated.
 
 ### Q2: How should user answers be written back into the plan?
+
 - A: Add an `apply-decisions` script. Consequence: fast and deterministic, but wording is mechanical.
 - (Recommended) B: Record answers by hand. Consequence: the agent can reword answers and fold in notes.
 
@@ -213,7 +219,7 @@ None currently blocking.
 - **Q2 (2026-11-04):** B. The agent records answers in the plan by hand so it can reword them and fold in notes.
 ```
 
-______________________________________________________________________
+---
 
 ## 4. Three-Tier Fallbacks
 
@@ -225,10 +231,10 @@ When `render_a2ui` is unavailable, fall back in the three-tier order:
 
 Fallbacks happen at the same point in the workflow as the surface they replace. The plan artifact stays the source of truth in every tier.
 
-| Surface | Tier 2: host question tool | Tier 3: chat |
-| :--- | :--- | :--- |
+| Surface             | Tier 2: host question tool                                                                                                                                                                                   | Tier 3: chat                                                                                                                      |
+| :------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
 | Post-plan worksheet | One `ask_question` call: the review item first, then one question per `Q<n>`, with the recommended option first and labeled `(Recommended)`. Split into several calls if the tool limits the question count. | A numbered list (review item first, then each `Q<n>` with lettered options and the recommendation marked). End the turn and wait. |
-| Review triage | One multi-select question per severity group ("Apply these findings?"), with the blocker and major findings preselected. | A short table of findings with a proposed disposition for each. Ask for overrides and end the turn. |
-| Plan overview | Not needed. The At a glance section and wave diagram in the artifact already serve as the overview. | Same: no extra chat output. |
-| Wave progress | Not applicable. | One short status line in chat at each wave barrier, plus ticked checkboxes in the plan artifact. |
-| Landing gate | One single-choice question: `(Recommended) Review, commit, and open PRs`, `Commit only`, `Stop here`. | The same three options as a numbered prompt. End the turn and wait. |
+| Review triage       | One multi-select question per severity group ("Apply these findings?"), with the blocker and major findings preselected.                                                                                     | A short table of findings with a proposed disposition for each. Ask for overrides and end the turn.                               |
+| Plan overview       | Not needed. The At a glance section and wave diagram in the artifact already serve as the overview.                                                                                                          | Same: no extra chat output.                                                                                                       |
+| Wave progress       | Not applicable.                                                                                                                                                                                              | One short status line in chat at each wave barrier, plus ticked checkboxes in the plan artifact.                                  |
+| Landing gate        | One single-choice question: `(Recommended) Review, commit, and open PRs`, `Commit only`, `Stop here`.                                                                                                        | The same three options as a numbered prompt. End the turn and wait.                                                               |

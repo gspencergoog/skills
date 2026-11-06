@@ -1329,6 +1329,62 @@ class TestStackDetection(unittest.TestCase):
             self.assertEqual(coords["prev_head_sha"], "sha_old")
             self.assertNotIn("incremental_diff_file", coords)
 
+    @patch("review_engine.run_command")
+    def test_get_incremental_diff_filters_to_pr_paths_on_rebase(self, mock_run):
+        import review_engine
+
+        recorded_cmds: list[list[str]] = []
+        fetched = {"done": False}
+
+        def side_effect(cmd, cwd=None):
+            recorded_cmds.append(list(cmd))
+            if "--name-only" in cmd and "origin/main...sha_round_1" in cmd:
+                if not fetched["done"]:
+                    return 128, "", "fatal: bad object sha_round_1"
+                return 0, "src/reverted_in_r2.py\nsrc/kept.py\n", ""
+            if cmd[:4] == ["git", "fetch", "--no-tags", "origin"]:
+                fetched["done"] = True
+                return 0, "", ""
+            if "sha_round_1..sha_round_2" in cmd:
+                return 0, "diff --git a/src/kept.py b/src/kept.py\n+x = 2\n", ""
+            return 0, "", ""
+
+        mock_run.side_effect = side_effect
+        r2_diff = (
+            "diff --git a/src/kept.py b/src/kept.py\n"
+            "--- a/src/kept.py\n"
+            "+++ b/src/kept.py\n"
+            "@@ -1 +1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+            "diff --git a/src/added_in_r2.py b/src/added_in_r2.py\n"
+            "--- /dev/null\n"
+            "+++ b/src/added_in_r2.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+y = 1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            diff_file = tmp_path / "pr.diff"
+            coords = {"base_ref": "main", "head_sha": "sha_round_2"}
+            review_engine._write_incremental_diff_if_needed(
+                "/tmp/pr-review-rebase",
+                coords,
+                "sha_round_1",
+                str(diff_file),
+                r2_diff,
+            )
+            inc_path = tmp_path / "pr_incremental.diff"
+            self.assertTrue(inc_path.is_file())
+            self.assertEqual(coords["incremental_diff_file"], str(inc_path))
+
+        diff_calls = [c for c in recorded_cmds if "sha_round_1..sha_round_2" in c]
+        self.assertEqual(len(diff_calls), 1)
+        self.assertEqual(
+            diff_calls[0][-4:],
+            ["--", "src/added_in_r2.py", "src/kept.py", "src/reverted_in_r2.py"],
+        )
+
 
 _SAMPLE_BLIND_MD = (
     "## Summary\n"
@@ -1930,6 +1986,9 @@ class TestPrepareCodeReview(unittest.TestCase):
         context = json.loads(out_context.read_text(encoding="utf-8"))
         self.assertEqual(context["code_review_prep"], sentinel)
         self.assertIn("blind_sha256", context)
+        prep_file = self.tmp / "code_review_prep.json"
+        self.assertTrue(prep_file.is_file())
+        self.assertEqual(json.loads(prep_file.read_text(encoding="utf-8")), sentinel)
 
     def test_cli_skips_with_warning_when_checkout_missing(self):
         coords_file = self.tmp / "pr_coords.json"

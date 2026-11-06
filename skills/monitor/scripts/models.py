@@ -297,11 +297,7 @@ def parse_event_list(
     items = {part.strip() for part in raw.split(",") if part.strip()}
     if not items:
         return None
-    valid = (
-        REVIEWER_EVENT_KINDS
-        if ReviewRole(role) == ReviewRole.REVIEWER
-        else EVENT_KINDS
-    )
+    valid = REVIEWER_EVENT_KINDS if ReviewRole(role) == ReviewRole.REVIEWER else EVENT_KINDS
     unknown = sorted(items - set(valid))
     if unknown:
         raise ValueError(
@@ -314,6 +310,20 @@ def _is_viewer_approved(snap: PrSnapshot, viewer_norm: str) -> bool:
     if snap.viewer_opinionated_state == "APPROVED":
         return True
     return bool(viewer_norm) and any(a.lower() == viewer_norm for a in snap.approvals)
+
+
+def effective_viewer_review(snap: PrSnapshot, viewer: str) -> ViewerReview | None:
+    """Returns ``snap.viewer_last_review``, or a fallback review from opinionated state."""
+    if snap.viewer_last_review is not None:
+        return snap.viewer_last_review
+    viewer_norm = viewer.strip().lower()
+    if snap.viewer_opinionated_state in ("APPROVED", "CHANGES_REQUESTED"):
+        return ViewerReview(state=snap.viewer_opinionated_state, submitted_at="", commit_oid=None)
+    if viewer_norm and any(a.lower() == viewer_norm for a in snap.changes_requested):
+        return ViewerReview(state="CHANGES_REQUESTED", submitted_at="", commit_oid=None)
+    if viewer_norm and any(a.lower() == viewer_norm for a in snap.approvals):
+        return ViewerReview(state="APPROVED", submitted_at="", commit_oid=None)
+    return None
 
 
 def _needs_re_review(
@@ -339,22 +349,18 @@ def classify_review_turn(snap: PrSnapshot, viewer: str) -> tuple[ReviewStep, Rev
         return (ReviewStep.MERGED, ReviewSortTier.TERMINAL)
     if snap.state == "CLOSED":
         return (ReviewStep.REQUESTED, ReviewSortTier.TERMINAL)
+    viewer_norm = viewer.strip().lower()
+    last = effective_viewer_review(snap, viewer_norm)
     if snap.draft:
-        step = (
-            ReviewStep.WAITING_ON_AUTHOR
-            if snap.viewer_last_review is not None
-            else ReviewStep.REQUESTED
-        )
+        step = ReviewStep.WAITING_ON_AUTHOR if last is not None else ReviewStep.REQUESTED
         return (step, ReviewSortTier.DRAFT_REQUESTED)
 
-    viewer_norm = viewer.strip().lower()
     direct_requested = bool(viewer_norm) and any(
         r.lower() == viewer_norm for r in snap.requested_reviewers
     )
     if _is_viewer_approved(snap, viewer_norm) and not direct_requested:
         return (ReviewStep.APPROVED, ReviewSortTier.APPROVED_OPEN)
 
-    last = snap.viewer_last_review
     if last is None:
         return (ReviewStep.REQUESTED, ReviewSortTier.REVIEW_REQUESTED)
     if _needs_re_review(snap, last, viewer_norm, direct_requested):

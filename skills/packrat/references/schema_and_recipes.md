@@ -355,7 +355,7 @@ SELECT
   p.live_fetched_at
 FROM v_viewer_items v
 JOIN v_pr_live p ON p.item_key = v.item_key
-WHERE v.set_name IN ('authored', 'review_requested')
+WHERE v.set_name IN ('authored', 'review_requested', 'reviewed')
 ORDER BY v.set_name, p.updated_at DESC;
 ```
 

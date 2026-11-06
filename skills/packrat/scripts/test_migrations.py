@@ -115,15 +115,11 @@ class TestMigrations(unittest.TestCase):
             self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8])
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
-            stored = store.conn.execute(
-                "SELECT views_sha256 FROM views_meta"
-            ).fetchone()[0]
+            stored = store.conn.execute("SELECT views_sha256 FROM views_meta").fetchone()[0]
             self.assertEqual(stored, views_sha256())
             for view in READER_VIEWS:
                 store.conn.execute(f"SELECT * FROM {view}").fetchall()
-            health = store.conn.execute(
-                "SELECT beat_age_s, pid FROM v_service_health"
-            ).fetchall()
+            health = store.conn.execute("SELECT beat_age_s, pid FROM v_service_health").fetchall()
             self.assertEqual([tuple(r) for r in health], [(None, None)])
         finally:
             store.close()
@@ -137,18 +133,12 @@ class TestMigrations(unittest.TestCase):
             assert repo is not None
             self.assertEqual(repo.mode, "mirror")
             self.assertEqual(store.table_counts()["pull_requests"], 1)
-            self.assertEqual(
-                store.get_state(f"{REFETCH_OPEN_PRS_KEY_PREFIX}{repo.repo_id}"), "1"
-            )
+            self.assertEqual(store.get_state(f"{REFETCH_OPEN_PRS_KEY_PREFIX}{repo.repo_id}"), "1")
             row = store.conn.execute(
                 "SELECT item_key, title, is_cross_repository, repo_mode FROM v_pr_basic"
             ).fetchone()
-            self.assertEqual(
-                tuple(row), ("octo-org/widgets#7", "Add focus ring", None, "mirror")
-            )
-            self.assertEqual(
-                store.conn.execute("SELECT COUNT(*) FROM v_pr_live").fetchone()[0], 0
-            )
+            self.assertEqual(tuple(row), ("octo-org/widgets#7", "Add focus ring", None, "mirror"))
+            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM v_pr_live").fetchone()[0], 0)
             issue = store.conn.execute(
                 "SELECT item_key, title, state, assignees_json FROM v_issue_basic"
             ).fetchone()
@@ -189,9 +179,7 @@ class TestMigrations(unittest.TestCase):
         conn = sqlite3.connect(str(self.db_path))
         try:
             calls: list[int] = []
-            self.assertFalse(
-                db_migrations._run_migration(conn, 2, lambda _c: calls.append(2))
-            )
+            self.assertFalse(db_migrations._run_migration(conn, 2, lambda _c: calls.append(2)))
             self.assertEqual(calls, [])
             self.assertFalse(conn.in_transaction)
         finally:
@@ -277,10 +265,7 @@ class TestMigrations(unittest.TestCase):
                 "'PR #2', 'sha2', 'text', 'now')"
             )
             orig_vec = l2_normalize(
-                [
-                    0.8 if i == 0 else -0.4 if i == 1 else 0.1
-                    for i in range(EMBEDDING_DIM)
-                ]
+                [0.8 if i == 0 else -0.4 if i == 1 else 0.1 for i in range(EMBEDDING_DIM)]
             )
             conn.execute(
                 """
@@ -417,15 +402,55 @@ class TestMigrations(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_migration_0008_backfills_latest_reviews_from_opinionated_reviews(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:7]:
+                db_migrations._run_migration(conn, version, migrate)
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
+            )
+            conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
+            conn.execute(
+                "INSERT INTO latest_opinionated_reviews "
+                "(repo_id, pr_number, author, author_type, state, submitted_at) "
+                "VALUES (1, 7, 'bob', 'User', 'CHANGES_REQUESTED', '2026-10-27T20:00:00Z')"
+            )
+            conn.commit()
+            self.assertEqual(apply_migrations(conn), [8])
+            rows = conn.execute(
+                "SELECT item_key, author, author_type, state, submitted_at, commit_oid "
+                "FROM v_pr_latest_author_reviews"
+            ).fetchall()
+            self.assertEqual(
+                rows,
+                [
+                    (
+                        "octo-org/widgets#7",
+                        "bob",
+                        "User",
+                        "CHANGES_REQUESTED",
+                        "2026-10-27T20:00:00Z",
+                        None,
+                    )
+                ],
+            )
+            conn.execute("BEGIN IMMEDIATE")
+            db_migrations.migrate_0008_latest_reviews(conn)
+            conn.execute("COMMIT")
+            self.assertEqual(conn.execute("SELECT COUNT(*) FROM latest_reviews").fetchone()[0], 1)
+        finally:
+            conn.close()
+
     def test_reader_indexes_exist_and_comment_lookups_use_them(self) -> None:
         # L8
         store = PackratStore(self.db_path)
         try:
             names = {
                 r[0]
-                for r in store.conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='index'"
-                )
+                for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
             }
             self.assertTrue({"idx_prs_live", "idx_changes_at"} <= names)
             plan = " ".join(
@@ -441,9 +466,7 @@ class TestMigrations(unittest.TestCase):
     def test_newer_schema_version_is_refused(self) -> None:
         PackratStore(self.db_path).close()
         conn = sqlite3.connect(str(self.db_path))
-        conn.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (99, 'later')"
-        )
+        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'later')")
         conn.commit()
         conn.close()
         with self.assertRaises(SchemaTooNewError):

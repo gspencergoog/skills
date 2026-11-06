@@ -332,6 +332,40 @@ class TestModels(unittest.TestCase):
             (ReviewStep.REQUESTED, ReviewSortTier.TERMINAL),
         )
 
+        # 7. Pre-v8 / legacy state fallback when viewer_last_review is None
+        legacy_changes_req = make_snapshot(
+            mine=False,
+            requested_reviewers=[],
+            viewer_last_review=None,
+            viewer_opinionated_state="CHANGES_REQUESTED",
+            changes_requested=["bob"],
+        )
+        self.assertEqual(
+            classify_review_turn(legacy_changes_req, "bob"),
+            (ReviewStep.WAITING_ON_AUTHOR, ReviewSortTier.WAITING_ON_AUTHOR),
+        )
+        legacy_rerequested_approval = make_snapshot(
+            mine=False,
+            requested_reviewers=["bob"],
+            viewer_last_review=None,
+            viewer_opinionated_state="APPROVED",
+            approvals=["bob"],
+        )
+        self.assertEqual(
+            classify_review_turn(legacy_rerequested_approval, "bob"),
+            (ReviewStep.RE_REVIEW_NEEDED, ReviewSortTier.RE_REVIEW_NEEDED),
+        )
+        legacy_draft_approved = make_snapshot(
+            mine=False,
+            draft=True,
+            viewer_last_review=None,
+            viewer_opinionated_state="APPROVED",
+        )
+        self.assertEqual(
+            classify_review_turn(legacy_draft_approved, "bob"),
+            (ReviewStep.WAITING_ON_AUTHOR, ReviewSortTier.DRAFT_REQUESTED),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

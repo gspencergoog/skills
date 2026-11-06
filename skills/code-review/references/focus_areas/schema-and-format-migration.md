@@ -20,6 +20,10 @@ Theme id: `schema-and-format-migration`. Lane for merges: B.
    Look at: `CREATE`, `ALTER`, `INSERT`, or backfill statements and their conflict or existence guards. Settles it: trace running the migration twice against a partially migrated state; `Deduction`.
 5. A destructive schema change (`DROP COLUMN`, type narrowing, `NOT NULL`) lands together with the code change before readers stop querying the old shape.
    Look at: migration ordering relative to application queries that still reference the column or constraint. Settles it: `rg` the codebase for all references to the altered column or field; `Read`.
+6. A reader adds a backward-compatibility fallback from an older column or view when a new table or field is absent or `NULL`, but handles only the happy-path enum state (such as `APPROVED`) and drops sibling states (such as `CHANGES_REQUESTED`).
+   Look at: fallback helpers, legacy-record branches, and status classifiers reading dual denormalized fields. Settles it: trace each non-null enum value of the legacy field when the new field is `None`; `Deduction`.
+7. A single persisted state file (such as `state.json`) backs multiple CLI modes or roles in the same directory or conversation, and startup pruning retains open records created by another mode.
+   Look at: startup state loaders, pruning filters, and watch-list merge logic when switching flags on an existing state file. Settles it: trace loading a state file written by mode A under mode B; `Deduction`.
 
 ## Hypothesis templates
 
@@ -27,3 +31,5 @@ Theme id: `schema-and-format-migration`. Lane for merges: B.
 - "Renaming serialized field `<old_name>` to `<new_name>` without an alias drops existing values stored in `<storage>`."
 - "Running migration `<migration_id>` a second time after a failure at `<step>` raises an error or duplicates rows."
 - "Old readers still deployed during rollout reject `<new_enum_or_field>` produced by `<writer>`."
+- "When `<new_table_or_field>` is absent or `None`, `<reader>` falls back to `<legacy_field>` for `<state_a>` but misclassifies `<state_b>` as `<default_state>`."
+- "Starting `<mode_b>` against a persisted `<state_file>` written by `<mode_a>` retains `<mode_a>` records in `<active_collection>` because `<prune_fn>` only filters terminal states."

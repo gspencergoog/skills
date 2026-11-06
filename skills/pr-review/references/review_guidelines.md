@@ -103,7 +103,7 @@ Derive `blind_description.md` **solely** from `pr.diff` and `pr_coords.json` (in
 
 ### Stage 2: Narrative Context Reconciliation (`pr_description.md`)
 
-After running `review_engine.py --fetch-context`, compare `blind_description.md` against `pr_context.json` (the author's PR title, body, general comments, reviews, and `threads`) and write `intent_reconciliation.json`. `review_engine.py --reconcile-description` splices it into `pr_description.md` and keeps every Stage 1 section verbatim, so the diff-derived text is never rewritten or softened to match the author's framing. Never edit `blind_description.md` after `--fetch-context`: the splice compares it against the recorded `blind_sha256` and exits 1 on a mismatch.
+Stage 2 runs the unanchored `code-review` pass (Step 3.2, reading `code_review_prep.json`, `pr_coords.json`, and `blind_description.md`) **before** reading `pr_context.json`, `prev_review_results.json`, `prev_review_decisions.json`, or `pr_incremental.diff` in Step 3.3. Once Step 3.2 has produced its initial unanchored findings, compare `blind_description.md` against `pr_context.json` (the author's PR title, body, general comments, reviews, and `threads`) and write `intent_reconciliation.json`. `review_engine.py --reconcile-description` splices it into `pr_description.md` and keeps every Stage 1 section verbatim, so the diff-derived text is never rewritten or softened to match the author's framing. Never edit `blind_description.md` after `--fetch-context`: the splice compares it against the recorded `blind_sha256` and exits 1 on a mismatch.
 
 ```json
 {
@@ -149,7 +149,7 @@ After running `review_engine.py --fetch-context`, compare `blind_description.md`
    - When the PR body says a later PR in the stack handles something, confirm it with `gh pr diff <n>` before accepting the claim; if it is not there, use a `> [!IMPORTANT]` callout.
    - A predecessor that is a draft, closed, or `needs_rebase` is a `> [!NOTE]`. A predecessor whose state is `CLOSED` (not merged) means this PR's base will not land; say so in `## Stack Context`.
    - Do not repeat findings that were already raised and resolved on a predecessor PR.
-5. **Put a `## Prior Review Resolution` table in `prior_resolution_markdown` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**. Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
+5. **Put a `## Prior Review Resolution` table in `prior_resolution_markdown` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**. Perform this prior-thread audit and three-way merge in Step 3.3 *after* the Step 3.2 full-diff review (`rev-a-2` or in-session Steps 1 through 4) has already generated its unanchored findings. Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
 
    ```markdown
    ## Prior Review Resolution
@@ -163,7 +163,7 @@ After running `review_engine.py --fetch-context`, compare `blind_description.md`
    | M2. Unused export ` LegacyConfig` | `src/index.ts:14` | Unaddressed | Still exported at `HEAD` (open thread) |
    ```
 
-   When synthesizing `review_results.md` in Step 3.3, reconcile this table with the fresh full-diff review (`rev-a-2`) using the three-way merge rules:
+   When synthesizing `review_results.md` in Step 3.3 (`code-review` Step 5), reconcile this table with the unanchored Step 3.2 full-diff review (`rev-a-2` or in-session Steps 1 through 4) using the three-way merge rules:
    - **Both Fresh Review and Prior Audit flag the same defect**: Merge into a single finding in `review_results.md` at the higher severity, keeping the fresh review's `HEAD` line anchor and `Evidence` tier. Prefix its heading with `[Unaddressed]`, `[Partially Addressed]`, or `[Unaddressed (open thread)]` and adapt `Body` and `Suggestion` to state what remains broken at `HEAD`.
    - **Only Prior Audit flags an unaddressed or partially addressed item**: Verify it at `HEAD` with `Read` evidence and carry it forward into `review_results.md` as a single finding so reviewer variance never drops an unfixed defect.
    - **Addressed items**: Record in `## Prior Review Resolution` (in `pr_description.md`) and `## Checked and Found Clean` (in `review_results.md`), never as findings.

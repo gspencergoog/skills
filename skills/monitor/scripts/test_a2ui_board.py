@@ -922,7 +922,9 @@ class TestReviewBoard(unittest.TestCase):
 
         self.assertEqual(items[1]["id"], "beta#411")
         self.assertEqual((items[1]["state"], items[1]["tone"]), ("Ready", "success"))
-        self.assertEqual((items[1]["review"], items[1]["reviewTone"]), ("Approved by you", "success"))
+        self.assertEqual(
+            (items[1]["review"], items[1]["reviewTone"]), ("Approved by you", "success")
+        )
         self.assertEqual(items[1]["step"], int(ReviewStep.APPROVED))
 
         dsl = review_board_dsl(dm)

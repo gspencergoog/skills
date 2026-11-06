@@ -122,10 +122,14 @@ class ParsePlanTest(unittest.TestCase):
 
     def test_waves_and_tracks(self):
         self.assertEqual([w.wave_id for w in self.doc.waves], ["1", "2", "3"])
-        self.assertEqual([w.mode for w in self.doc.waves], ["Sequential", "Parallel", "Sequential"])
+        self.assertEqual(
+            [w.mode for w in self.doc.waves], ["Sequential", "Parallel", "Sequential"]
+        )
         self.assertEqual(self.doc.waves[0].title, "Foundation")
         self.assertEqual(self.doc.waves[0].model_tier, "Claude Fable 5.1 High")
-        self.assertEqual([t.track_id for t in self.doc.tracks], ["Track 2A", "Track 2B"])
+        self.assertEqual(
+            [t.track_id for t in self.doc.tracks], ["Track 2A", "Track 2B"]
+        )
         track_a, track_b = self.doc.tracks
         self.assertEqual(track_a.model_tier, "Gemini Pro Next")
         self.assertEqual(track_a.files, ["/repo/reader.py"])
@@ -164,7 +168,9 @@ class EdgeCaseTest(unittest.TestCase):
         self.assertEqual(doc.questions, ())
 
     def test_question_without_recommendation(self):
-        doc = parse_plan("# T\n\n## Open Questions\n\n### Q3: Pick one\n- A: This.\n- B: That.\n")
+        doc = parse_plan(
+            "# T\n\n## Open Questions\n\n### Q3: Pick one\n- A: This.\n- B: That.\n"
+        )
         self.assertEqual(len(doc.questions), 1)
         self.assertFalse(any(o.recommended for o in doc.questions[0].options))
 
@@ -183,6 +189,32 @@ class EdgeCaseTest(unittest.TestCase):
         doc = parse_plan("# T\n\n### PRs\n\n| PR | Title |\n| --- | --- |\n| 1 | a |\n")
         self.assertEqual(doc.pr_rows, ({"PR": "1", "Title": "a"},))
 
+    def test_wave_has_verifier_preserves_mode_and_model_tier(self):
+        doc = parse_plan(
+            "# T\n\n## Phases\n\n"
+            "### Wave 1: Foundation [Sequential]\n\n"
+            "- **Model tier**: Gemini Pro Next\n"
+            "- [ ] [NEW] [a.py](file:///a.py)\n\n"
+            "### Wave 2: Core [Parallel]\n\n"
+            "#### Track 2A: Reader\n\n"
+            "- **Model tier**: Gemini Pro Next\n"
+            "- [ ] [MODIFY] [b.py](file:///b.py)\n\n"
+            "**Wave 2 Verifier & Barrier Gate**:\n"
+            "- Peer `verifier` runs Track 2A tests.\n\n"
+            "### Wave 3: Lite [Parallel]\n\n"
+            "#### Track 3A: Docs\n\n"
+            "- **Model tier**: Gemini 3.8 Flash High\n"
+            "- [ ] [MODIFY] [c.md](file:///c.md)\n"
+        )
+        self.assertEqual(
+            [(w.wave_id, w.mode, w.model_tier, w.has_verifier) for w in doc.waves],
+            [
+                ("1", "Sequential", "Gemini Pro Next", False),
+                ("2", "Parallel", None, True),
+                ("3", "Parallel", None, False),
+            ],
+        )
+
 
 class SentenceStatsTest(unittest.TestCase):
     def test_counts_prose_and_ignores_code(self):
@@ -198,7 +230,9 @@ class SentenceStatsTest(unittest.TestCase):
         self.assertEqual((mean, longest), (0.0, 0))
 
     def test_bullets_split(self):
-        mean, longest = sentence_stats("- one two three four\n- five six seven eight nine")
+        _mean, longest = sentence_stats(
+            "- one two three four\n- five six seven eight nine"
+        )
         self.assertEqual(longest, 5)
 
 

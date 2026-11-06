@@ -15,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from models import parse_pr_ref
+from models import ViewerReview, parse_pr_ref
 from normalize import normalize_pr
 from packrat_source import (
     PackratError,
@@ -403,7 +403,14 @@ class TestSnapshots(PackratDbCase):
         raw_fallback = self.source.snapshots([key])[key]
         self.assertEqual(raw_fallback["reviews"], {"nodes": []})
         snap_carol = normalize_pr(raw_fallback, viewer="carol")
-        self.assertIsNone(snap_carol.viewer_last_review)
+        self.assertEqual(
+            snap_carol.viewer_last_review,
+            ViewerReview(
+                state="APPROVED",
+                submitted_at="2026-10-27T20:50:00Z",
+                commit_oid=None,
+            ),
+        )
         self.assertEqual(snap_carol.viewer_opinionated_state, "APPROVED")
 
     def test_discover_review_keys_orders_by_updated_at_and_filters_repo(self) -> None:
@@ -436,6 +443,7 @@ class TestSnapshots(PackratDbCase):
                 [
                     ("review_requested", "acme/widget#10", "x", "x"),
                     ("reviewed", "acme/widget#10", "x", "x"),
+                    ("review_requested", "acme/widget#40", "x", "x"),
                     ("reviewed", "other/repo#20", "x", "x"),
                     ("review_requested", "acme/widget#30", "x", "x"),
                     ("authored", "acme/widget#99", "x", "x"),
@@ -443,11 +451,11 @@ class TestSnapshots(PackratDbCase):
             )
         self.assertEqual(
             self.source.discover_review_keys(),
-            ["other/repo#20", "acme/widget#10"],
+            ["acme/widget#10", "acme/widget#40", "other/repo#20"],
         )
         self.assertEqual(
-            self.source.discover_review_keys(repo="acme/widget"),
-            ["acme/widget#10"],
+            self.source.discover_review_keys(repo="ACME/Widget"),
+            ["acme/widget#10", "acme/widget#40"],
         )
 
 

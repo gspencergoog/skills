@@ -148,7 +148,7 @@ python3 <skill-dir>/scripts/packrat.py install-cli
    - Polls notifications every 60 seconds (or GitHub's `X-Poll-Interval`) and repository `/events` for `mirror` repositories.
    - Polls check-run and status ETags for each lease whose `freshness` has elapsed.
    - Refreshes leased PRs when a signal arrives, and at least every `max(freshness, 600)` seconds without one.
-   - Refreshes the viewer's authored PRs, review requests, and issues every 15 minutes, or sooner after a notification.
+   - Refreshes the viewer's authored PRs, review requests, reviewed PRs, and issues every 15 minutes, or sooner after a notification.
    - Fetches timeline events for stored items in `items` repositories every 15 minutes, right after the viewer refresh (the `timeline` worker, at `VIEWER` priority).
    - Syncs a `mirror` repository at most every 2 minutes after its `/events` feed changes, including new timeline events for updated items and items queued by mentions.
    - Writes the heartbeat, drops expired leases, and prunes old change-feed, API-call, and notification rows once an hour.

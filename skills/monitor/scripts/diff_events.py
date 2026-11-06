@@ -12,6 +12,7 @@ from models import (
     ReviewerEventKind,
     ReviewStep,
     classify_review_turn,
+    effective_viewer_review,
 )
 
 
@@ -579,7 +580,7 @@ def _diff_reviewer_initial(
         return []
     if _is_directly_requested(cur, viewer_norm):
         return [_make_re_requested_event(cur)]
-    last = cur.viewer_last_review
+    last = effective_viewer_review(cur, viewer_norm)
     if last is not None and bool(last.commit_oid) and last.commit_oid != cur.head_sha:
         return [_make_author_head_push_event(cur, last.commit_oid)]
     unread = _unread_reviewer_threads(cur, ctx, viewer_norm)
@@ -610,18 +611,21 @@ def _diff_reviewer_draft_and_requests(
                 detail={},
             )
         )
-    newly_requested = _is_directly_requested(cur, viewer_norm) and not _is_directly_requested(
-        prev, viewer_norm
+    reopened = prev.state != "OPEN" and cur.state == "OPEN"
+    newly_requested = _is_directly_requested(cur, viewer_norm) and (
+        reopened or not _is_directly_requested(prev, viewer_norm)
     )
+    prev_review = effective_viewer_review(prev, viewer_norm)
+    cur_review = effective_viewer_review(cur, viewer_norm)
     if (
         not cur.draft
         and not prev.draft
-        and prev.viewer_last_review is None
+        and prev_review is None
         and cur_step == ReviewStep.REQUESTED
-        and (prev_step != ReviewStep.REQUESTED or prev.state != "OPEN" or newly_requested)
+        and (prev_step != ReviewStep.REQUESTED or reopened or newly_requested)
     ):
         events.append(_make_new_review_request_event(cur))
-    if cur.viewer_last_review is not None and not cur.draft and newly_requested:
+    if cur_review is not None and not cur.draft and newly_requested:
         events.append(_make_re_requested_event(cur, prev))
     return events
 
@@ -648,7 +652,7 @@ def _diff_reviewer_rework(
                 detail={"head_sha": cur.head_sha},
             )
         )
-    last = cur.viewer_last_review
+    last = effective_viewer_review(cur, viewer_norm)
     if cur.draft or last is None or cur_step != ReviewStep.RE_REVIEW_NEEDED:
         return events
     if prev.head_sha != cur.head_sha and bool(last.commit_oid) and cur.head_sha != last.commit_oid:

@@ -62,6 +62,7 @@ from models import (
     MonitorState,
     PrSnapshot,
     ReviewRole,
+    effective_viewer_review,
     parse_event_list,
     parse_pr_ref,
     pr_key,
@@ -585,6 +586,7 @@ class Monitor:
         self._packrat_seq = 0
         self._next_renew = 0.0
         self._force_gh: set[str] = set()
+        self._missing_review_keys: set[str] = set()
         self._prefetched_raw: dict[str, dict[str, Any]] = {}
         self._arm_meta: dict[str, Any] = {}
         self.state_path = Path(state_path)
@@ -708,6 +710,16 @@ class Monitor:
             record_completed_durations(self.state, prev, cur)
         return events
 
+    def _is_unassigned_open_review(self, key: str, snap: PrSnapshot) -> bool:
+        if snap.state != "OPEN" or effective_viewer_review(snap, self.viewer) is not None:
+            return False
+        if key in self._missing_review_keys or not snap.requested_reviewers:
+            return True
+        viewer_norm = self.viewer.strip().lower()
+        if not viewer_norm or any(r.startswith("team:") for r in snap.requested_reviewers):
+            return False
+        return all(r.lower() != viewer_norm for r in snap.requested_reviewers)
+
     def _retire_terminal_reviews(self, terminal_keys: set[str]) -> None:
         retired = [k for k in self.watched_keys if k in terminal_keys]
         self.watched_keys = [k for k in self.watched_keys if k not in terminal_keys]
@@ -715,6 +727,17 @@ class Monitor:
             leased_terminal = sorted(set(retired) | (self.packrat.watched & terminal_keys))
             if leased_terminal:
                 self.packrat.unlease(leased_terminal)
+
+    def _retire_finished_reviews(self, terminal_keys: set[str]) -> None:
+        unassigned_keys = {
+            k for k, s in self.state.snapshots.items() if self._is_unassigned_open_review(k, s)
+        }
+        for key in unassigned_keys:
+            self.state.snapshots.pop(key, None)
+        retired_keys = terminal_keys | unassigned_keys
+        self.state.prune(retired_keys)
+        if retired_keys:
+            self._retire_terminal_reviews(retired_keys)
 
     def refresh(self, keys: list[str] | None = None) -> list[Event]:
         """Fetches ``keys`` (or all watched PRs), updates ``self.state``, and returns new events.
@@ -745,9 +768,11 @@ class Monitor:
         terminal_keys = {
             k for k, s in self.state.snapshots.items() if s.state in ("MERGED", "CLOSED")
         }
-        self.state.prune(terminal_keys)
-        if self.role == ReviewRole.REVIEWER and terminal_keys:
-            self._retire_terminal_reviews(terminal_keys)
+        if self.role == ReviewRole.REVIEWER:
+            self._retire_finished_reviews(terminal_keys)
+        else:
+            self.state.prune(terminal_keys)
+        self._missing_review_keys.difference_update(target_keys)
         self._pushed_keys.difference_update(target_keys)
         self.backoff.reset()
         return events
@@ -1040,9 +1065,7 @@ class Monitor:
         except PackratError as exc:
             sys.stderr.write(f"warning: packrat refresh failed: {exc}\n")
 
-    def _emit_silent_daemon_batch(
-        self, accumulated: list[Event], args: argparse.Namespace
-    ) -> bool:
+    def _emit_silent_daemon_batch(self, accumulated: list[Event], args: argparse.Namespace) -> bool:
         payload = self._build_payload("change", 0, accumulated, args, notify_mode="none")
         self.emit(payload, args)
         if not getattr(args, "output", None):
@@ -1158,9 +1181,7 @@ class Monitor:
         return None
 
     def _discover_github_review_delta(self) -> list[str]:
-        viewer, discovered = search_review_keys(
-            self.runner, repo=self.repo, backoff=self.backoff
-        )
+        viewer, discovered = search_review_keys(self.runner, repo=self.repo, backoff=self.backoff)
         if viewer:
             self.viewer = viewer
         existing = set(self.watched_keys)
@@ -1176,23 +1197,21 @@ class Monitor:
         if self.role != ReviewRole.REVIEWER:
             return set()
         if not (
-            self.poller.review_requested_unwatched
-            or NotificationPoller.review_requested_unwatched
+            self.poller.review_requested_unwatched or NotificationPoller.review_requested_unwatched
         ):
             return set()
+        added = set(self._discover_github_review_delta())
         self.poller.review_requested_unwatched = False
         NotificationPoller.review_requested_unwatched = False
-        return set(self._discover_github_review_delta())
+        return added
 
     def _sweep_github_review_keys(self) -> None:
-        viewer, discovered = search_review_keys(
-            self.runner, repo=self.repo, backoff=self.backoff
-        )
+        viewer, discovered = search_review_keys(self.runner, repo=self.repo, backoff=self.backoff)
         if viewer:
             self.viewer = viewer
-        self.watched_keys = _merge_key_lists(
-            discovered[:MAX_WATCHED_PRS], self.watched_keys
-        )
+        open_set = set(discovered)
+        self._missing_review_keys.update(k for k in self.watched_keys if k not in open_set)
+        self.watched_keys = _merge_key_lists(discovered[:MAX_WATCHED_PRS], self.watched_keys)
 
     def _select_refresh_targets(
         self,
@@ -1447,12 +1466,14 @@ class Monitor:
     def _discover_packrat_review_delta(self) -> tuple[list[str], list[str]]:
         source = self.packrat
         assert source is not None
-        open_keys = source.discover_review_keys(repo=self.repo)[:MAX_WATCHED_PRS]
+        all_open_keys = source.discover_review_keys(repo=self.repo)
+        open_keys = all_open_keys[:MAX_WATCHED_PRS]
         self.viewer = self.viewer or _packrat_viewer(source)
         old_set = set(self.watched_keys)
-        open_set = set(open_keys)
+        all_open_set = set(all_open_keys)
         newly_added = [k for k in open_keys if k not in old_set]
-        newly_missing = [k for k in self.watched_keys if k not in open_set]
+        newly_missing = [k for k in self.watched_keys if k not in all_open_set]
+        self._missing_review_keys.update(newly_missing)
         if newly_added:
             source.lease(newly_added)
         self.watched_keys = _merge_key_lists(open_keys, self.watched_keys)
@@ -1610,6 +1631,7 @@ class Monitor:
             key
             for key, snap in self.state.snapshots.items()
             if snap.state in ("MERGED", "CLOSED")
+            or snap.mine
             or (self.repo is not None and snap.repo != self.repo)
         }
         for key in drop:
@@ -1621,20 +1643,23 @@ class Monitor:
     def _start_reviewer_packrat(self, prior_open: list[str]) -> list[Event]:
         source = self.packrat
         assert source is not None
-        open_keys = source.discover_review_keys(repo=self.repo)[:MAX_WATCHED_PRS]
+        all_open_keys = source.discover_review_keys(repo=self.repo)
+        open_keys = all_open_keys[:MAX_WATCHED_PRS]
+        all_open_set = set(all_open_keys)
+        self._missing_review_keys.update(k for k in prior_open if k not in all_open_set)
         self.viewer = _packrat_viewer(source)
         if open_keys:
             source.lease(open_keys)
         self._next_renew = self.clock() + PACKRAT_RENEW_S
-        self._packrat_seq = source.wait_changes(
-            _FEED_HEAD, 0, watch_viewer_sets=True
-        ).seq
+        self._packrat_seq = source.wait_changes(_FEED_HEAD, 0, watch_viewer_sets=True).seq
         self.watched_keys = _merge_key_lists(open_keys, prior_open)
         return self.refresh(self.watched_keys) if self.watched_keys else []
 
     def _start_reviewer_github(self, prior_open: list[str]) -> list[Event]:
         viewer, keys = search_review_keys(self.runner, repo=self.repo, backoff=self.backoff)
         self.viewer = viewer
+        all_open_set = set(keys)
+        self._missing_review_keys.update(k for k in prior_open if k not in all_open_set)
         open_keys = keys[:MAX_WATCHED_PRS]
         self.watched_keys = _merge_key_lists(open_keys, prior_open)
         return self.refresh(self.watched_keys) if self.watched_keys else []

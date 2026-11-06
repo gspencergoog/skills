@@ -586,6 +586,35 @@ class TestDiffEvents(unittest.TestCase):
             [e.kind for e in evs_reopened], [ReviewerEventKind.NEW_REVIEW_REQUEST.value]
         )
 
+        # Reopened previously reviewed PR with direct request fires re_requested_review
+        review = make_viewer_review(state="CHANGES_REQUESTED", commit_oid="aaa1111")
+        s_closed_reviewed = make_snapshot(
+            mine=False,
+            state="CLOSED",
+            requested_reviewers=["bob"],
+            viewer_last_review=review,
+        )
+        s_open_reviewed = make_snapshot(
+            mine=False,
+            state="OPEN",
+            requested_reviewers=["bob"],
+            viewer_last_review=review,
+        )
+        evs_reopened_reviewed = diff_reviewer_snapshots(s_closed_reviewed, s_open_reviewed, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_reopened_reviewed], [ReviewerEventKind.RE_REQUESTED_REVIEW.value]
+        )
+
+        # Pre-v8 CHANGES_REQUESTED snapshot with viewer_last_review=None does not emit new_review_request
+        s_legacy_cr = make_snapshot(
+            mine=False,
+            requested_reviewers=[],
+            viewer_last_review=None,
+            viewer_opinionated_state="CHANGES_REQUESTED",
+            changes_requested=["bob"],
+        )
+        self.assertEqual(diff_reviewer_snapshots(None, s_legacy_cr, ctx), [])
+
 
 if __name__ == "__main__":
     unittest.main()
