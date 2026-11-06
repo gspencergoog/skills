@@ -968,5 +968,281 @@ submitReview().then(() => {
         self.assertNotIn("_initial_comment", saved["findings"][0])
 
 
+def _md(*lines: str) -> str:
+    """Joins Markdown source lines with newlines."""
+    return "\n".join(lines)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is required for JS details tests")
+class TestDashboardDetailsRendering(unittest.TestCase):
+    """Exercises the <details> fold grammar and collapsed description sections."""
+
+    js_code: ClassVar[str] = ""
+
+    @classmethod
+    def setUpClass(cls):
+        html_path = (
+            Path(__file__).resolve().parent.parent / "assets" / "review_dashboard.html"
+        )
+        html = html_path.read_text(encoding="utf-8")
+        scripts = re.findall(r"<script>([\s\S]*?)</script>", html)
+        if len(scripts) != 1:
+            raise AssertionError(f"expected one inline <script>, found {len(scripts)}")
+        cls.js_code = scripts[0]
+
+    def _run_js(self, body: str, inputs) -> object:
+        """Runs `body` after the dashboard script with `inputs` bound as INPUTS.
+
+        `body` must print one JSON value to stdout, which is returned decoded.
+        """
+        harness = (
+            "const elements = {};\n"
+            "const window = { addEventListener: () => {} };\n"
+            "const document = { getElementById: (id) => elements[id] || null };\n"
+            + self.js_code
+            + "\nconst INPUTS = "
+            + json.dumps(inputs)
+            + ";\n"
+            + body
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness], capture_output=True, text=True, check=True
+        )
+        return json.loads(proc.stdout)
+
+    def _render_all(self, payloads: list[str]) -> list[str]:
+        return self._run_js(
+            "console.log(JSON.stringify(INPUTS.map(p => renderMarkdownSafe(p))));",
+            payloads,
+        )
+
+    def test_fold_renders_summary_and_fenced_code_inside(self):
+        md = _md(
+            "The bound is off by one.",
+            "",
+            "<details>",
+            "<summary>Repro for **items**</summary>",
+            "",
+            "```python",
+            "assert f([1]) == '<b>'",
+            "```",
+            "",
+            "</details>",
+        )
+        (rendered,) = self._render_all([md])
+        self.assertIn("<p>The bound is off by one.</p>", rendered)
+        self.assertIn(
+            '<details class="md-details"><summary>Repro for <strong>items</strong></summary>',
+            rendered,
+        )
+        self.assertIn(
+            '<pre class="code-box" data-lang="python"><code>assert f([1]) == '
+            "&#039;&lt;b&gt;&#039;</code></pre></details>",
+            rendered,
+        )
+        self.assertNotIn("&lt;details&gt;", rendered)
+        self.assertNotIn("\u0000", rendered)
+
+    def test_fold_without_summary_uses_default_label(self):
+        (rendered,) = self._render_all(["<details>\n\nBody text\n\n</details>"])
+        self.assertEqual(
+            rendered,
+            '<details class="md-details"><summary>Details</summary><p>Body text</p></details>',
+        )
+
+    def test_hostile_details_forms_stay_escaped_or_inert(self):
+        payloads = [
+            "<details open>\nopened\n</details>",
+            "<DETAILS>\nupper\n</DETAILS>",
+            "<details>\n<summary onclick=alert(1)>hi</summary>\nbody\n</details>",
+            (
+                "<details>\n<summary>a</summary><img src=x onerror=alert(1)></summary>\n"
+                "<script>alert(1)</script>\n</details>"
+            ),
+            "Intro\n<details>\nnever closed",
+            "<details>\n```\n</details>\n<script>alert(1)</script>\n```\n",
+        ]
+        rendered = self._render_all(payloads)
+        joined = "\n".join(rendered)
+        self.assertNotIn("<script", joined)
+        self.assertNotIn("<img", joined)
+        self.assertNotIn("<summary onclick", joined)
+        self.assertNotIn("<details open", joined)
+
+        # Attributes or uppercase tags never open a fold.
+        self.assertEqual(
+            rendered[0], "<p>&lt;details open&gt;<br>opened<br>&lt;/details&gt;</p>"
+        )
+        self.assertNotIn("<details", rendered[1])
+        self.assertIn("&lt;DETAILS&gt;", rendered[1])
+        # A summary line with attributes stays body text under the default label.
+        self.assertIn("<summary>Details</summary>", rendered[2])
+        self.assertIn("&lt;summary onclick=alert(1)&gt;hi&lt;/summary&gt;", rendered[2])
+        # Summary text is escaped, never copied into a tag.
+        self.assertIn(
+            "<summary>a&lt;/summary&gt;&lt;img src=x onerror=alert(1)&gt;</summary>",
+            rendered[3],
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered[3])
+        # An unclosed fold renders as escaped text.
+        self.assertEqual(
+            rendered[4], "<p>Intro</p>\n<p>&lt;details&gt;<br>never closed</p>"
+        )
+        # A close tag inside a fence cannot close the fold, so it stays unclosed.
+        self.assertNotIn("<details", rendered[5])
+        self.assertIn("&lt;details&gt;", rendered[5])
+        self.assertIn(
+            "<code>&lt;/details&gt;\n&lt;script&gt;alert(1)&lt;/script&gt;</code>",
+            rendered[5],
+        )
+
+    def test_nested_folds_pair_by_depth_and_depth_four_is_escaped(self):
+        two_levels = _md(
+            "<details>",
+            "<summary>Outer</summary>",
+            "<details>",
+            "<summary>Inner</summary>",
+            "inner body",
+            "</details>",
+            "outer tail",
+            "</details>",
+            "after",
+        )
+        four_levels = "\n".join(["<details>"] * 4 + ["deep"] + ["</details>"] * 4)
+        rendered = self._render_all([two_levels, four_levels])
+        self.assertEqual(
+            rendered[0],
+            '<details class="md-details"><summary>Outer</summary>'
+            '<details class="md-details"><summary>Inner</summary><p>inner body</p></details>\n'
+            "<p>outer tail</p></details>\n<p>after</p>",
+        )
+        self.assertEqual(rendered[1].count('<details class="md-details">'), 3)
+        self.assertEqual(rendered[1].count("</details>"), 3)
+        self.assertIn("<p>&lt;details&gt;<br>deep<br>&lt;/details&gt;</p>", rendered[1])
+
+    def test_blockquote_nesting_counts_toward_depth_cap(self):
+        md = _md(
+            "<details>",
+            "<details>",
+            "<details>",
+            "> <details>",
+            "> quoted",
+            "> </details>",
+            "</details>",
+            "</details>",
+            "</details>",
+        )
+        (rendered,) = self._render_all([md])
+        self.assertEqual(rendered.count('<details class="md-details">'), 3)
+        self.assertIn("&lt;details&gt;", rendered)
+
+    def test_description_sections_collapse_and_warning_renders_open(self):
+        md = _md(
+            "Preamble line.",
+            "## Summary",
+            "Adds a cache.",
+            "## Intent Alignment: Matches Stated Purpose",
+            "Aligned.",
+            "## Changes",
+            "- Adds `cache.py`",
+            "```markdown",
+            "## Not A Section",
+            "```",
+            "## Security & Execution Gate",
+            "> [!WARNING]",
+            "> Runs a postinstall script.",
+            "## Stack Context <img src=x onerror=alert(1)>",
+            "Base PR #1.",
+            "## Prior Review Resolution",
+            "All resolved.",
+        )
+        rendered = self._run_js(
+            "console.log(JSON.stringify(renderDescriptionHtml(INPUTS)));", md
+        )
+        self.assertIn("<p>Preamble line.</p>", rendered)
+        self.assertIn("<h2>Summary</h2>", rendered)
+        self.assertIn("<h2>Intent Alignment: Matches Stated Purpose</h2>", rendered)
+        self.assertIn(
+            '<details class="md-details desc-section"><summary>Changes</summary>'
+            "<ul><li>Adds <code>cache.py</code></li></ul>",
+            rendered,
+        )
+        # A heading inside a fence stays in the code block and does not split.
+        self.assertIn(
+            '<pre class="code-box" data-lang="markdown"><code>## Not A Section</code></pre></details>',
+            rendered,
+        )
+        self.assertNotIn("<summary>Not A Section", rendered)
+        self.assertIn(
+            '<details class="md-details desc-section" open>'
+            "<summary>Security &amp; Execution Gate</summary>"
+            '<div class="md-callout callout-warning">',
+            rendered,
+        )
+        self.assertIn(
+            '<details class="md-details desc-section">'
+            "<summary>Stack Context &lt;img src=x onerror=alert(1)&gt;</summary>",
+            rendered,
+        )
+        self.assertIn(
+            '<details class="md-details desc-section">'
+            "<summary>Prior Review Resolution</summary><p>All resolved.</p></details>",
+            rendered,
+        )
+        self.assertNotIn("<img", rendered)
+        self.assertEqual(rendered.count(" open>"), 1)
+
+    def test_render_pr_description_uses_collapsed_sections(self):
+        body = """
+function el() {
+  return { style: {}, innerHTML: '', textContent: '', className: '' };
+}
+['pr-description-card', 'pr-description-rendered', 'pr-description-raw',
+ 'pr-alignment-badge'].forEach(id => { elements[id] = el(); });
+reviewData = { pr_description: { markdown: INPUTS, alignment: 'MATCHES' } };
+renderPRDescription();
+console.log(JSON.stringify({
+  rendered: elements['pr-description-rendered'].innerHTML,
+  raw: elements['pr-description-raw'].textContent
+}));
+"""
+        md = "## Summary\nShort.\n\n## Changes\n- One"
+        out = self._run_js(body, md)
+        self.assertEqual(out["raw"], md)
+        self.assertIn("<h2>Summary</h2>", out["rendered"])
+        self.assertIn(
+            '<details class="md-details desc-section"><summary>Changes</summary>',
+            out["rendered"],
+        )
+
+    def test_insert_suggestion_places_fence_before_trailing_fold(self):
+        body = """
+function editor(value) {
+  return { value, style: {}, classList: { toggle() {}, add() {}, remove() {} } };
+}
+INPUTS.forEach((comment, idx) => {
+  elements[`comment-editor-${idx}`] = editor(comment);
+});
+reviewData = {
+  findings: INPUTS.map(comment => ({ draft_comment: comment, original_code: 'x = 1' }))
+};
+INPUTS.forEach((_, idx) => insertSuggestion(idx));
+console.log(JSON.stringify(reviewData.findings.map(f => f.draft_comment)));
+"""
+        fold = "<details>\n<summary>Details</summary>\n\n```\n</details>\n```\n\n</details>"
+        comments = [
+            f"The bound is off by one.\n\n{fold}\n",
+            fold,
+            "Plain comment.",
+            "Ends with a fence.\n```\n</details>\n```",
+        ]
+        out = self._run_js(body, comments)
+        fence = "```suggestion\nx = 1\n```"
+        self.assertEqual(out[0], f"The bound is off by one.\n\n{fence}\n\n{fold}")
+        self.assertEqual(out[1], f"{fence}\n\n{fold}")
+        self.assertEqual(out[2], f"Plain comment.\n\n{fence}")
+        self.assertEqual(out[3], f"{comments[3]}\n\n{fence}")
+
+
 if __name__ == "__main__":
     unittest.main()

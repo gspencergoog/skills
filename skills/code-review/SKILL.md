@@ -226,7 +226,8 @@ Audit and combine the refined comments into the final output:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md --export-json <export-path>
   ```
-  If `lint_review.py` exits non-zero, fix the reported formatting, severity-cap, or `comment-*` prose violations (`comment-prose-length`, `comment-sentence-length`, `comment-sentence-complexity`, `comment-ai-ism`) in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. A `playbook-feedback-leaked` violation means a focus reviewer's `## Playbook Feedback` section was copied into the report: remove it. Do not emit the full review directly into the chat response.
+  The lint caps visible comment prose at 80 words and 4 sentences. `pr-review` runs it with `--comment-profile pr` (120 words, 6 sentences) because it folds supporting detail into a collapsed `<details>` block. Every `draft_comment` ends with that block when the finding has an Evidence detail, `Details`, a repro test, or (for questions) `To settle`.
+  If `lint_review.py` exits non-zero, fix the reported formatting, severity-cap, or `comment-*` prose violations (`comment-prose-length`, `comment-details-length`, `comment-sentence-length`, `comment-sentence-complexity`, `comment-ai-ism`) in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. A `playbook-feedback-leaked` violation means a focus reviewer's `## Playbook Feedback` section was copied into the report: remove it. Do not emit the full review directly into the chat response.
 
 ### Step 5b: Playbook Learning
 
@@ -285,4 +286,4 @@ The review file sections appear in this order:
 6. `## Checked and Found Clean`: up to 10 disproved hypotheses, each with its evidence tier and disproof.
 7. `## Recommendations`: key actionable feedback.
 
-Field-by-field formats for findings (`File`, `Line`, `Severity`, `Category`, `Focus`, `Evidence`, `Body`, `Why`, `Suggestion`, `Repro test`) and Questions (`File`, `Line`, `Evidence`, `Why`, `To settle`) are defined in [evidence.md](references/evidence.md#formats) and the Output Contract in [reviewer_mandate.md](references/reviewer_mandate.md#output-contract). A focus reviewer's `## Playbook Feedback` never appears in the final file.
+Field-by-field formats for findings (`File`, `Line`, `Severity`, `Category`, `Focus`, `Evidence`, `Body`, `Why`, `Suggestion`, `Details`, `Repro test`) and Questions (`File`, `Line`, `Evidence`, `Why`, `To settle`) are defined in [evidence.md](references/evidence.md#formats) and the Output Contract in [reviewer_mandate.md](references/reviewer_mandate.md#output-contract). A focus reviewer's `## Playbook Feedback` never appears in the final file.

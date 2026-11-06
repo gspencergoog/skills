@@ -112,7 +112,7 @@ When the user asks to review, audit, or critique an existing document, PR descri
    - Review word count, sentence count, median sentence length, paragraph stats, `median_sentence_complexity`, and `max_sentence_complexity`.
    - Inspect all violation arrays under `violations`: `banned_ai_words_found`, `banned_ai_phrases_found`, `obscure_words_found`, `rare_domain_nouns_advisory`, `nominalizations_found`, `noun_clusters_found`, `phrasal_verbs_found`, `synonym_rotations_found`, `complex_sentences_found`, `em_dashes_found`, `smart_quotes_found`, `inline_header_list_overuse`, `sentences_exceeding_25_words`, and `paragraphs_exceeding_4_sentences`.
 
-3. Output a clear feedback report table detailing findings and concrete fixes:
+3. Present a clear feedback report table detailing findings and concrete fixes (writing the full report to an artifact in `<conversation-artifact-dir>/` with a short summary in chat whenever the user asks for an audit or report, or when the output exceeds roughly a page):
 
    | Line / Location | Issue / Violation                                     | Standard Violated         | Suggested Plain Language Fix                                   |
    | :-------------- | :---------------------------------------------------- | :------------------------ | :------------------------------------------------------------- |

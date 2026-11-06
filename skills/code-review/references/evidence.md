@@ -111,8 +111,9 @@ Every finding in `## Review Comments` uses a `### <ID>. <short claim>` heading (
 - **Focus**: `<theme-id>` (focus reviewers only; see [lanes.md](lanes.md#focus-mandate-block))
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or a line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>
-- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>
+- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences standalone, or <= 120 words and <= 6 sentences under `pr-review`)>
 - **Suggestion**: <smallest compilable fix, replacement text, or specific question>
+- **Details**: <optional, up to 150 words, may continue on indented lines: root-cause trace, affected callers, or alternatives you rejected. Exported inside a collapsed `<details>` block with the Evidence detail and repro test, and never counted toward the visible comment caps>
 ```
 
 Every entry in `## Questions` (at most 3 per review) uses `### Q1. <claim phrased as a question>`:

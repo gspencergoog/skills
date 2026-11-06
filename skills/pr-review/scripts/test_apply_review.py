@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 test_apply_review.py - Unit tests for apply_review.py.
 """
@@ -16,7 +15,6 @@ from apply_review import (
 
 
 class TestApplyReview(unittest.TestCase):
-
     def test_append_agent_attribution_idempotent(self):
         self.assertEqual(append_agent_attribution(""), "")
         self.assertEqual(append_agent_attribution("   "), "")
@@ -183,7 +181,9 @@ class TestApplyReview(unittest.TestCase):
 
     def test_submit_review_dry_run(self):
         payload = {"body": "Test", "event": "COMMENT", "comments": []}
-        code, resp, err = submit_review("octocat", "hello-world", 100, payload, dry_run=True)
+        code, resp, err = submit_review(
+            "octocat", "hello-world", 100, payload, dry_run=True
+        )
         self.assertEqual(code, 0)
         self.assertTrue(resp.get("dry_run"))
         self.assertEqual(err, "")
@@ -192,7 +192,9 @@ class TestApplyReview(unittest.TestCase):
     def test_submit_review_success(self, mock_run):
         mock_proc = MagicMock()
         mock_proc.returncode = 0
-        mock_proc.stdout = json.dumps({"id": 12345, "html_url": "https://github.com/o/r/pull/1#review-12345"})
+        mock_proc.stdout = json.dumps(
+            {"id": 12345, "html_url": "https://github.com/o/r/pull/1#review-12345"}
+        )
         mock_proc.stderr = ""
         mock_run.return_value = mock_proc
 
@@ -200,6 +202,7 @@ class TestApplyReview(unittest.TestCase):
         code, resp, err = submit_review("o", "r", 1, payload, dry_run=False)
 
         self.assertEqual(code, 0)
+        self.assertEqual(err, "")
         self.assertEqual(resp["id"], 12345)
         self.assertIn("review-12345", resp["html_url"])
         mock_run.assert_called_once()
@@ -286,8 +289,70 @@ class TestApplyReview(unittest.TestCase):
         self.assertEqual(payload["comments"][0]["line"], 40)
         self.assertIn("defaultTimeout", payload["comments"][0]["body"])
 
+    def test_inline_and_out_of_diff_findings_with_details_fold(self):
+        folded_comment = (
+            "Negative `max_retries` skips the initial attempt.\n\n"
+            "```suggestion\n"
+            "for attempt in range(max(1, max_retries)):\n"
+            "```\n\n"
+            "<details>\n"
+            "<summary>Details</summary>\n\n"
+            "**Evidence** (`Executed`): `pytest -k retry` failed with `None`\n\n"
+            "Trace through `send_request` shows no fallback path.\n\n"
+            "**Repro test**\n\n"
+            "```python\n"
+            "def test_negative_retries():\n"
+            "    assert client.send(max_retries=-1) is not None\n"
+            "```\n\n"
+            "</details>"
+        )
+        decisions = {
+            "head_sha": "abc123456789",
+            "verdict": "REQUEST_CHANGES",
+            "summary_comment": "Review summary.",
+            "findings": [
+                {
+                    "id": "M1",
+                    "file_path": "src/client.py",
+                    "line_start": 11,
+                    "line_end": 12,
+                    "side": "RIGHT",
+                    "is_diff_hunk": True,
+                    "approved": True,
+                    "draft_comment": folded_comment,
+                },
+                {
+                    "id": "M2",
+                    "file_path": "src/legacy.py",
+                    "line_start": 40,
+                    "line_end": 40,
+                    "side": "RIGHT",
+                    "is_diff_hunk": False,
+                    "approved": True,
+                    "description": "Same issue in legacy caller",
+                    "draft_comment": folded_comment,
+                },
+            ],
+        }
+        payload = build_review_payload(decisions)
+        self.assertEqual(len(payload["comments"]), 1)
+        inline_body = payload["comments"][0]["body"]
+        self.assertTrue(
+            inline_body.endswith(f"</details>\n\n{AGENT_ATTRIBUTION_BADGE}")
+        )
+
+        top_body = payload["body"]
+        self.assertIn(
+            "\n  > <details>\n  > <summary>Details</summary>\n  > \n", top_body
+        )
+        self.assertIn(
+            "\n  > **Repro test**\n  > \n  > ```python\n"
+            "  > def test_negative_retries():\n"
+            "  >     assert client.send(max_retries=-1) is not None\n"
+            "  > ```\n  > \n  > </details>\n",
+            top_body,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

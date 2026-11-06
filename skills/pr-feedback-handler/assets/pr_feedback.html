@@ -553,6 +553,28 @@
       white-space: pre-wrap;
       color: #e6edf3;
     }
+    /* Inline notices and two-step confirmation. MCP App iframes are sandboxed
+       without allow-modals, so modal dialogs are silent no-ops there. */
+    .dashboard-notice {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      transform: translateX(-50%);
+      z-index: 10000;
+      max-width: min(640px, calc(100vw - 32px));
+      padding: 10px 16px;
+      border-radius: 4px;
+      border: 1px solid var(--danger-color);
+      background-color: var(--panel-bg);
+      color: #ff8888;
+      font-size: 0.9rem;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+
+    #abort-btn.armed {
+      outline: 2px solid #ffffff;
+      outline-offset: 1px;
+    }
   </style>
 </head>
 <body>
@@ -1344,21 +1366,68 @@
         
         renderSummaryPage(list);
       } catch (err) {
-        alert('Error saving plan: ' + err.message);
+        showNotice('Error saving plan: ' + err.message);
       }
     });
 
-    document.getElementById('abort-btn').addEventListener('click', async () => {
-      if (confirm('Are you sure you want to abort the review? No changes will be applied.')) {
-        try {
-          await dashboardHost.abort();
-          const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
-          showDoneOverlay(abortedOverlayHtml(
-            `You can close this ${closeTarget} now. The agent has been notified.`
-          ));
-        } catch (err) {
-          alert('Error aborting: ' + err.message);
-        }
+    /**
+     * Shows a transient message at the bottom of the page.
+     *
+     * Used instead of `alert()`, which the sandboxed MCP App iframe ignores.
+     */
+    let noticeTimer = null;
+    function showNotice(message) {
+      let notice = document.getElementById('dashboard-notice');
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'dashboard-notice';
+        notice.className = 'dashboard-notice';
+        notice.setAttribute('role', 'alert');
+        document.body.appendChild(notice);
+      }
+      notice.textContent = message;
+      notice.hidden = false;
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
+    }
+
+    /**
+     * Returns true on the second click of `btn` within `windowMs`.
+     *
+     * The first click relabels the button with `armedLabel` and returns false.
+     * Used instead of `confirm()`, which returns false without showing a
+     * dialog in the sandboxed MCP App iframe.
+     */
+    function confirmByDoubleClick(btn, armedLabel, windowMs = 4000) {
+      if (btn.dataset.armed === 'true') {
+        clearTimeout(Number(btn.dataset.armTimer));
+        delete btn.dataset.armed;
+        btn.classList.remove('armed');
+        btn.textContent = btn.dataset.idleLabel;
+        return true;
+      }
+      btn.dataset.idleLabel = btn.textContent.trim();
+      btn.dataset.armed = 'true';
+      btn.classList.add('armed');
+      btn.textContent = armedLabel;
+      btn.dataset.armTimer = String(setTimeout(() => {
+        delete btn.dataset.armed;
+        btn.classList.remove('armed');
+        btn.textContent = btn.dataset.idleLabel;
+      }, windowMs));
+      return false;
+    }
+
+    document.getElementById('abort-btn').addEventListener('click', async (event) => {
+      if (!confirmByDoubleClick(event.currentTarget, 'Click again to abort')) return;
+      try {
+        await dashboardHost.abort();
+        const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
+        showDoneOverlay(abortedOverlayHtml(
+          `You can close this ${closeTarget} now. The agent has been notified.`
+        ));
+      } catch (err) {
+        showNotice('Error aborting: ' + err.message);
       }
     });
 

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,25 @@ ALIGNMENT_HEADINGS: dict[str, str] = {
 _VALID_CALLOUT_KINDS = frozenset({"NOTE", "IMPORTANT", "WARNING"})
 _SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
+_TOP_LEVEL_BULLET_RE = re.compile(r"^-\s+")
+
+
+@dataclass(frozen=True)
+class SectionBudget:
+    """Per-section length budget for Stage 1 blind_description.md."""
+
+    sentences: int | None = None
+    bullets: int | None = None
+    lines_when_clean: int | None = None
+
+
+DESCRIPTION_BUDGETS: dict[str, SectionBudget] = {
+    "Summary": SectionBudget(sentences=3),
+    "Quality Assessment": SectionBudget(sentences=1),
+    "Changes": SectionBudget(bullets=6),
+    "Reviewer Focus & Risks": SectionBudget(bullets=3),
+    "Security & Execution Gate": SectionBudget(lines_when_clean=1),
+}
 
 _FALLBACK_FIX_HINTS: dict[str, str] = dict(getattr(lint_review, "_FIX_HINTS", {}))
 
@@ -1519,7 +1539,12 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
         print(f"Error fetching PR context: {e}", file=sys.stderr)
         return 1
 
-    context["blind_sha256"] = _compute_file_sha256(Path(args.require_blind_description))
+    blind_path = Path(args.require_blind_description)
+    blind_text = blind_path.read_text(encoding="utf-8")
+    prescan_clean = _is_prescan_clean(args.input_coords, blind_text)
+    for line in check_description_budgets(blind_text, prescan_clean):
+        print(line, file=sys.stderr)
+    context["blind_sha256"] = _compute_file_sha256(blind_path)
     context["stack"] = stack
     if stack:
         metadata["stack"] = {
@@ -1767,6 +1792,118 @@ def _split_blind_sections(markdown_text: str) -> tuple[str, list[tuple[str, str]
     return "\n".join(preamble_lines).strip(), rendered
 
 
+def _count_section_sentences(text: str) -> int:
+    """Counts sentences in a markdown section body using analyze_prose's stdlib engine."""
+    if not text.strip():
+        return 0
+    metrics = lint_review.analyze_prose("-", engine="stdlib", text=text)
+    if not isinstance(metrics, dict) or "error" in metrics:
+        return 0
+    return int((metrics.get("summary") or {}).get("total_sentences", 0))
+
+
+def _count_top_level_bullets(lines: list[str]) -> int:
+    """Counts top-level '-' bullet lines outside fenced code blocks."""
+    count = 0
+    fence_marker = ""
+    for line in lines:
+        was_fenced = bool(fence_marker)
+        fence_marker = _update_fence_marker(fence_marker, line)
+        if not was_fenced and not fence_marker and _TOP_LEVEL_BULLET_RE.match(line):
+            count += 1
+    return count
+
+
+def _has_safe_gate_verdict(markdown: str) -> bool:
+    """Returns True when Security & Execution Gate records SAFE_FOR_LOCAL_EXECUTION."""
+    _, sections = _split_blind_sections(markdown)
+    for sec_name, block in sections:
+        if sec_name == "Security & Execution Gate":
+            body = "\n".join(block.splitlines()[1:])
+            if "REQUIRES_USER_CONFIRMATION" in body or "BLOCKED_UNSAFE" in body:
+                return False
+            return "SAFE_FOR_LOCAL_EXECUTION" in body
+    return False
+
+
+def _is_prescan_clean(input_coords_path: str | None, markdown: str) -> bool:
+    """Returns True when pr_coords.json has an empty security_prescan.signals list
+    and the blind description's gate verdict is SAFE_FOR_LOCAL_EXECUTION.
+    """
+    if not input_coords_path:
+        return False
+    coords_path = Path(input_coords_path)
+    if not coords_path.is_file():
+        return False
+    try:
+        coords = json.loads(coords_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(coords, dict):
+        return False
+    prescan = coords.get("security_prescan")
+    if not isinstance(prescan, dict):
+        return False
+    signals = prescan.get("signals")
+    if not isinstance(signals, list) or len(signals) > 0:
+        return False
+    return _has_safe_gate_verdict(markdown)
+
+
+def check_description_budgets(markdown: str, prescan_clean: bool) -> list[str]:
+    """Checks each Stage 1 section against DESCRIPTION_BUDGETS.
+
+    Returns 'Budget: <section>: <n> <unit> (max <m>)' strings for any overruns.
+    """
+    _, sections = _split_blind_sections(markdown)
+    warnings: list[str] = []
+    for sec_name, verbatim_block in sections:
+        budget = DESCRIPTION_BUDGETS.get(sec_name)
+        if budget is None:
+            continue
+        body_lines = verbatim_block.splitlines()[1:]
+        body_text = "\n".join(body_lines).strip()
+        if budget.sentences is not None:
+            sent_count = _count_section_sentences(body_text)
+            if sent_count > budget.sentences:
+                warnings.append(
+                    f"Budget: {sec_name}: {sent_count} sentences (max {budget.sentences})"
+                )
+        if budget.bullets is not None:
+            bullet_count = _count_top_level_bullets(body_lines)
+            if bullet_count > budget.bullets:
+                warnings.append(
+                    f"Budget: {sec_name}: {bullet_count} bullets (max {budget.bullets})"
+                )
+        if (
+            budget.lines_when_clean is not None
+            and prescan_clean
+            and "REQUIRES_USER_CONFIRMATION" not in body_text
+            and "BLOCKED_UNSAFE" not in body_text
+        ):
+            line_count = sum(1 for line in body_lines if line.strip())
+            if line_count > budget.lines_when_clean:
+                warnings.append(
+                    f"Budget: {sec_name}: {line_count} lines (max {budget.lines_when_clean})"
+                )
+    return warnings
+
+
+def _run_check_description_budgets(args: argparse.Namespace) -> int:
+    """Executes CLI section-budget check on blind_description.md and always exits 0."""
+    blind_path = Path(args.check_description_budgets)
+    if not blind_path.is_file():
+        return 0
+    try:
+        blind_text = blind_path.read_text(encoding="utf-8")
+    except OSError:
+        return 0
+    prescan_clean = _is_prescan_clean(args.input_coords, blind_text)
+    for line in check_description_budgets(blind_text, prescan_clean):
+        print(line)
+    return 0
+
+
 def _format_callout_block(kind: str, text: str) -> str:
     """Formats a GFM callout (> [!KIND]) from kind and body text."""
     stripped = text.strip()
@@ -1993,7 +2130,7 @@ def finalize_review(
 
     raw_report = report_file.read_text(encoding="utf-8")
     report = lint_review.parse_report(raw_report)
-    violations = lint_review.check_report(report)
+    violations = lint_review.check_report(report, profile="pr")
     if violations:
         _print_lint_violations(violations)
         return 1
@@ -2194,6 +2331,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output-security-scan",
         help="Optional output file path for the static execution-risk scan JSON.",
     )
+    parser.add_argument(
+        "--check-description-budgets",
+        help="Stage 1: check section budgets on blind_description.md (with optional --input-coords) and exit 0.",
+    )
     parser.add_argument("--cleanup", help="Directory path to safely clean up and exit.")
     return parser
 
@@ -2214,6 +2355,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cleanup:
         return _run_cleanup(args.cleanup)
+    if args.check_description_budgets:
+        return _run_check_description_budgets(args)
     if args.security_scan:
         return _run_security_scan(args)
     if args.prepare_workspace:

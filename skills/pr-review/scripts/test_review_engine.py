@@ -7,18 +7,21 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from diff_parser import normalize_findings_payload
 from review_engine import (
     ALIGNMENT_HEADINGS,
+    DESCRIPTION_BUDGETS,
+    SectionBudget,
     _apply_hardened_git_env,
     annotate_stack_status,
     blind_stack_summary,
     build_arg_parser,
     capture_stack_view,
+    check_description_budgets,
     cleanup_workspace,
     fetch_pr_context,
     fetch_pr_stack,
@@ -1821,6 +1824,75 @@ class TestReconcileAndFinalize(unittest.TestCase):
             self.assertFalse(out_results.exists())
             self.assertFalse(out_findings.exists())
 
+    def test_finalize_review_uses_pr_comment_profile_caps(self):
+        # 20 words per sentence * 5 sentences = 100 words in Body, plus 10 words in Why = 110 words (6 sentences).
+        twenty_word_sentence = (
+            "The cache returns stale rows after the second retry because the "
+            "eviction timer never resets on writes from the worker."
+        )
+        body_110 = " ".join([twenty_word_sentence] * 5)
+        report_110 = _CLEAN_REPORT_MD.replace(
+            "Negative `max_retries` skips the initial attempt and returns `None` without sending the request.",
+            body_110,
+        )
+        # 24 words per sentence * 5 sentences = 120 words in Body, plus 10 words in Why = 130 words (6 sentences).
+        twenty_four_word_sentence = (
+            "The local cache returns stale rows after the second retry attempt "
+            "because the background eviction timer never resets on fresh writes "
+            "from the worker."
+        )
+        body_130 = " ".join(
+            [
+                twenty_four_word_word
+                for twenty_four_word_word in [twenty_four_word_sentence] * 5
+            ]
+        )
+        report_130 = _CLEAN_REPORT_MD.replace(
+            "Negative `max_retries` skips the initial attempt and returns `None` without sending the request.",
+            body_130,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            report_file = tmp_path / "review_results.md"
+            diff_file = tmp_path / "pr.diff"
+            meta_file = tmp_path / "pr_meta.json"
+            out_results = tmp_path / "review_results.json"
+            out_findings = tmp_path / "review_findings.json"
+
+            diff_file.write_text(
+                "diff --git a/src/client.py b/src/client.py\n", encoding="utf-8"
+            )
+            meta_file.write_text(
+                json.dumps(
+                    {"owner": "o", "repo": "r", "pull_number": 1, "head_sha": "abc"}
+                ),
+                encoding="utf-8",
+            )
+
+            report_file.write_text(report_110, encoding="utf-8")
+            rc_ok = finalize_review(
+                report_file, diff_file, meta_file, None, out_results, out_findings
+            )
+            self.assertEqual(rc_ok, 0)
+            self.assertTrue(out_results.is_file())
+            self.assertTrue(out_findings.is_file())
+            out_results.unlink()
+            out_findings.unlink()
+
+            report_file.write_text(report_130, encoding="utf-8")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc_bad = finalize_review(
+                    report_file, diff_file, meta_file, None, out_results, out_findings
+                )
+            output = buf.getvalue()
+            self.assertEqual(rc_bad, 1)
+            self.assertIn("comment-prose-length", output)
+            self.assertIn("120 words and 6 sentences", output)
+            self.assertFalse(out_results.exists())
+            self.assertFalse(out_findings.exists())
+
 
 _PREP_DIFF = (
     "diff --git a/src/app.py b/src/app.py\n"
@@ -2024,6 +2096,213 @@ class TestPrepareCodeReview(unittest.TestCase):
         self.assertEqual(rc, 0)
         prep = json.loads(out_context.read_text(encoding="utf-8"))["code_review_prep"]
         self.assertTrue(prep["warnings"][0].startswith("--prepare-code-review skipped"))
+
+
+_COMPLIANT_BLIND_MD = (
+    "## Summary\n"
+    "Adds exponential retry backoff to the HTTP client so transient 503 responses do not fail requests immediately.\n\n"
+    "## Quality Assessment\n"
+    "Focused change with full unit test coverage.\n\n"
+    "## Security & Execution Gate\n"
+    "- **Gate Verdict**: `SAFE_FOR_LOCAL_EXECUTION` (static pre-scan clean)\n\n"
+    "## Changes\n"
+    "- **`src/client.py`**: Adds exponential backoff loop.\n"
+    "- **`tests/test_client.py`**: Covers retry cap and timeout.\n\n"
+    "## Reviewer Focus & Risks\n"
+    "- Verify max retry cap under timeout.\n"
+)
+
+_OVER_BUDGET_BLIND_MD = (
+    "## Summary\n"
+    "First sentence here. Second sentence here. Third sentence here. Fourth sentence here.\n\n"
+    "## Quality Assessment\n"
+    "First sentence here. Second sentence here.\n\n"
+    "## Security & Execution Gate\n"
+    "- **Gate Verdict**: `SAFE_FOR_LOCAL_EXECUTION`\n"
+    "- **Static Pre-Scan**: `clean`\n"
+    "- **Execution Risk Notes**: None.\n\n"
+    "## Changes\n"
+    + "".join(f"- **`src/file_{i}.py`**: Change {i}.\n" for i in range(1, 9))
+    + "```markdown\n- Not a top-level bullet inside a fence\n```\n\n"
+    "## Reviewer Focus & Risks\n"
+    "- Risk one.\n"
+    "- Risk two.\n"
+    "- Risk three.\n"
+    "- Risk four.\n"
+)
+
+
+class TestDescriptionBudgets(unittest.TestCase):
+    def test_compliant_blind_description_has_no_warnings(self):
+        self.assertIsInstance(DESCRIPTION_BUDGETS["Summary"], SectionBudget)
+        self.assertEqual(
+            check_description_budgets(_COMPLIANT_BLIND_MD, prescan_clean=True), []
+        )
+
+    def test_over_budget_sections_and_prescan_clean_gate(self):
+        warnings_clean = check_description_budgets(
+            _OVER_BUDGET_BLIND_MD, prescan_clean=True
+        )
+        self.assertEqual(
+            warnings_clean,
+            [
+                "Budget: Summary: 4 sentences (max 3)",
+                "Budget: Quality Assessment: 2 sentences (max 1)",
+                "Budget: Security & Execution Gate: 3 lines (max 1)",
+                "Budget: Changes: 8 bullets (max 6)",
+                "Budget: Reviewer Focus & Risks: 4 bullets (max 3)",
+            ],
+        )
+
+        warnings_not_clean = check_description_budgets(
+            _OVER_BUDGET_BLIND_MD, prescan_clean=False
+        )
+        self.assertNotIn(
+            "Budget: Security & Execution Gate: 3 lines (max 1)", warnings_not_clean
+        )
+        self.assertIn("Budget: Changes: 8 bullets (max 6)", warnings_not_clean)
+
+    def test_cli_check_description_budgets_exits_zero_and_respects_coords(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            blind = tmp_path / "blind_description.md"
+            coords = tmp_path / "pr_coords.json"
+            blind.write_text(_OVER_BUDGET_BLIND_MD, encoding="utf-8")
+
+            # Missing --input-coords: Security multi-line is allowed, Changes still flagged
+            buf_no_coords = io.StringIO()
+            with redirect_stdout(buf_no_coords):
+                rc = main(["--check-description-budgets", str(blind)])
+            self.assertEqual(rc, 0)
+            self.assertIn(
+                "Budget: Changes: 8 bullets (max 6)", buf_no_coords.getvalue()
+            )
+            self.assertNotIn(
+                "Budget: Security & Execution Gate:", buf_no_coords.getvalue()
+            )
+
+            # Clean coords + SAFE_FOR_LOCAL_EXECUTION: Security multi-line is flagged
+            coords.write_text(
+                json.dumps({"security_prescan": {"signals": []}}), encoding="utf-8"
+            )
+            buf_clean = io.StringIO()
+            with redirect_stdout(buf_clean):
+                rc_clean = main(
+                    [
+                        "--check-description-budgets",
+                        str(blind),
+                        "--input-coords",
+                        str(coords),
+                    ]
+                )
+            self.assertEqual(rc_clean, 0)
+            self.assertIn(
+                "Budget: Security & Execution Gate: 3 lines (max 1)",
+                buf_clean.getvalue(),
+            )
+
+            # Non-empty signals in coords: Security multi-line is allowed
+            coords.write_text(
+                json.dumps(
+                    {
+                        "security_prescan": {
+                            "signals": [{"category": "x", "file_path": "a.py"}]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            buf_flagged = io.StringIO()
+            with redirect_stdout(buf_flagged):
+                rc_flagged = main(
+                    [
+                        "--check-description-budgets",
+                        str(blind),
+                        "--input-coords",
+                        str(coords),
+                    ]
+                )
+            self.assertEqual(rc_flagged, 0)
+            self.assertNotIn(
+                "Budget: Security & Execution Gate:", buf_flagged.getvalue()
+            )
+
+            # Non-SAFE gate verdict with clean signals: Security multi-line is allowed
+            coords.write_text(
+                json.dumps({"security_prescan": {"signals": []}}), encoding="utf-8"
+            )
+            blind.write_text(
+                _OVER_BUDGET_BLIND_MD.replace(
+                    "SAFE_FOR_LOCAL_EXECUTION", "REQUIRES_USER_CONFIRMATION"
+                ),
+                encoding="utf-8",
+            )
+            buf_confirm = io.StringIO()
+            with redirect_stdout(buf_confirm):
+                rc_confirm = main(
+                    [
+                        "--check-description-budgets",
+                        str(blind),
+                        "--input-coords",
+                        str(coords),
+                    ]
+                )
+            self.assertEqual(rc_confirm, 0)
+            self.assertNotIn(
+                "Budget: Security & Execution Gate:", buf_confirm.getvalue()
+            )
+
+    def test_fetch_context_prints_budget_lines_and_records_matching_sha256(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            blind = tmp_path / "blind_description.md"
+            coords = tmp_path / "pr_coords.json"
+            out_ctx = tmp_path / "pr_context.json"
+            blind.write_text(_OVER_BUDGET_BLIND_MD, encoding="utf-8")
+            coords.write_text(
+                json.dumps(
+                    {
+                        "owner": "octocat",
+                        "repo": "hello-world",
+                        "pull_number": 42,
+                        "head_sha": "abc123",
+                        "security_prescan": {"signals": []},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            err_buf = io.StringIO()
+            with (
+                patch(
+                    "review_engine.fetch_pr_context",
+                    return_value=({"head_sha": "abc123", "base_ref": "main"}, {}),
+                ),
+                patch("review_engine.fetch_pr_stack", return_value=None),
+                redirect_stdout(io.StringIO()),
+                redirect_stderr(err_buf),
+            ):
+                rc = main(
+                    [
+                        "--fetch-context",
+                        "--input-coords",
+                        str(coords),
+                        "--require-blind-description",
+                        str(blind),
+                        "--output-context",
+                        str(out_ctx),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            stderr_out = err_buf.getvalue()
+            self.assertIn("Budget: Changes: 8 bullets (max 6)", stderr_out)
+            self.assertIn(
+                "Budget: Security & Execution Gate: 3 lines (max 1)", stderr_out
+            )
+            ctx = json.loads(out_ctx.read_text(encoding="utf-8"))
+            self.assertEqual(
+                ctx["blind_sha256"],
+                hashlib.sha256(_OVER_BUDGET_BLIND_MD.encode("utf-8")).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

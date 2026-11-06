@@ -327,6 +327,78 @@
       color: #ff7b72;
     }
 
+    details.md-details {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(110, 118, 129, 0.06);
+      margin: 10px 0;
+      padding: 0 12px;
+    }
+
+    details.md-details > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 8px 0;
+      color: var(--text-bright);
+      font-weight: 600;
+      user-select: none;
+    }
+
+    details.md-details > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.md-details > summary::before {
+      content: '\25B8';
+      display: inline-block;
+      width: 1em;
+      margin-right: 4px;
+      color: var(--text-muted);
+    }
+
+    details.md-details[open] > summary::before {
+      content: '\25BE';
+    }
+
+    details.md-details > summary:hover {
+      color: var(--accent-hover);
+    }
+
+    details.md-details > summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    details.md-details[open] > summary {
+      border-bottom: 1px solid var(--border-muted);
+      margin-bottom: 8px;
+    }
+
+    details.md-details.desc-section > summary {
+      font-size: 15px;
+    }
+
+    details.clean-details {
+      margin: 0;
+    }
+
+    details.clean-details > summary {
+      font-size: 16px;
+    }
+
+    .clean-details-count,
+    .clean-details-note {
+      font-size: 11px;
+      font-weight: normal;
+      color: var(--text-muted);
+      margin-left: 6px;
+    }
+
+    details.clean-details > ul {
+      padding-bottom: 8px;
+    }
+
     .markdown-rendered .md-table-wrap {
       margin: 10px 0;
       overflow-x: auto;
@@ -906,6 +978,33 @@
       padding: 40px;
       color: var(--text-muted);
     }
+    /* Inline notices and two-step confirmation. MCP App iframes are sandboxed
+       without allow-modals, so modal dialogs are silent no-ops there. */
+    .dashboard-notice {
+      position: fixed;
+      left: 50%;
+      bottom: 72px;
+      transform: translateX(-50%);
+      z-index: 10000;
+      max-width: min(640px, calc(100vw - 32px));
+      padding: 10px 16px;
+      border-radius: 6px;
+      border: 1px solid var(--danger-border);
+      background-color: var(--bg-panel);
+      color: var(--danger-text);
+      font-size: 13px;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    }
+
+    .dashboard-notice.info {
+      border-color: var(--warning-border);
+      color: var(--warning-text);
+    }
+
+    .btn-danger.armed {
+      background-color: var(--danger-bg);
+      border-color: var(--danger-border);
+    }
   </style>
 </head>
 <body>
@@ -954,11 +1053,10 @@
   <!-- Checked and Found Clean & Structural Assessment Panel -->
   <div class="section-card" id="clean-and-structural-card" style="display: none;">
     <div id="checked-clean-section" style="display: none; margin-bottom: 12px;">
-      <div class="section-title" style="margin-bottom: 8px;">
-        <span>Checked and Found Clean</span>
-        <span style="font-size: 11px; font-weight: normal; color: var(--text-muted);">Verified edge cases and disproved hypotheses</span>
-      </div>
-      <ul id="checked-clean-list" style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-muted); line-height: 1.6;"></ul>
+      <details class="md-details clean-details" id="checked-clean-details">
+        <summary><span>Checked and Found Clean</span><span class="clean-details-count" id="checked-clean-count"></span><span class="clean-details-note">Verified edge cases and disproved hypotheses</span></summary>
+        <ul id="checked-clean-list" style="margin: 0; padding-left: 20px; font-size: 13px; color: var(--text-muted); line-height: 1.6;"></ul>
+      </details>
     </div>
 
     <div id="structural-assessment-section" style="display: none;">
@@ -1052,7 +1150,7 @@
     Loading review stats...
   </div>
   <div class="footer-actions">
-    <button class="btn-danger" onclick="abortReview()">Abort Review</button>
+    <button class="btn-danger" id="abort-btn" onclick="abortReview()">Abort Review</button>
     <button class="btn-primary" id="submit-btn" onclick="submitReview()">Submit Review to GitHub</button>
   </div>
 </div>
@@ -2371,7 +2469,9 @@
     return withMath.replace(/\u0000INLINE_TICK_(\d+)\u0000/g, (_, idx) => tickMasks[Number(idx)] || '');
   }
 
-  function consumeBlockquoteOrCallout(lines, startIndex) {
+  // Blockquote bodies re-enter renderMarkdownSafe with the current fold depth so a
+  // <details> nested inside a quote still counts toward MAX_DETAILS_DEPTH.
+  function consumeBlockquoteOrCallout(lines, startIndex, depth) {
     const quoteLines = [];
     let i = startIndex;
     while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
@@ -2385,13 +2485,13 @@
       const titleText = alertMatch[1].toUpperCase();
       const inlineFirst = alertMatch[2].trim();
       const innerLines = (inlineFirst ? [inlineFirst, ''] : []).concat(quoteLines.slice(1));
-      const bodyHtml = renderMarkdownSafe(innerLines.join('\n'));
+      const bodyHtml = renderMarkdownSafe(innerLines.join('\n'), depth);
       return {
         html: `<div class="md-callout callout-${kind}"><div class="md-callout-title">${titleText}</div>${bodyHtml}</div>`,
         nextIndex: i
       };
     }
-    const quoteHtml = renderMarkdownSafe(quoteLines.join('\n'));
+    const quoteHtml = renderMarkdownSafe(quoteLines.join('\n'), depth);
     return { html: `<blockquote>${quoteHtml}</blockquote>`, nextIndex: i };
   }
 
@@ -2407,29 +2507,75 @@
     return { html: `<${tag}>${items.join('')}</${tag}>`, nextIndex: i };
   }
 
+  // <details> grammar: the open and close tags sit alone on their lines, lowercase,
+  // with no attributes. Every other form falls through to escaped paragraph text.
+  const DETAILS_OPEN_RE = /^\s*<details>\s*$/;
+  const DETAILS_CLOSE_RE = /^\s*<\/details>\s*$/;
+  const DETAILS_SUMMARY_RE = /^\s*<summary>(.*)<\/summary>\s*$/;
+  const MAX_DETAILS_DEPTH = 3;
+
   function isParagraphBreakLine(lines, index) {
     const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) return true;
     if (/^\u0000(?:FENCE|MATH_BLOCK)_\d+\u0000$/.test(trimmed)) return true;
     if (/^(?:#{1,6}\s+|\s*>\s?|\s*[-*]\s+|\s*\d+\.\s+)/.test(line)) return true;
+    if (DETAILS_OPEN_RE.test(line)) return true;
     return isTableHeaderAt(lines, index);
   }
 
+  // Always consumes the start line, so a line that breaks paragraphs but did not
+  // render as its own block (an unclosed or too-deep <details>) still shows as text.
   function consumeParagraphBlock(lines, startIndex) {
     const paraLines = [];
     let i = startIndex;
-    while (i < lines.length && !isParagraphBreakLine(lines, i)) {
+    do {
       paraLines.push(renderInlineMarkdown(lines[i].trim()));
       i++;
-    }
+    } while (i < lines.length && !isParagraphBreakLine(lines, i));
     return {
       html: paraLines.length > 0 ? `<p>${paraLines.join('<br>')}</p>` : '',
       nextIndex: i
     };
   }
 
-  function consumeNextMarkdownBlock(lines, index, codeBlocks, mathBlocks) {
+  // Returns the index of the </details> line that pairs with the open line at
+  // startIndex, counting nested opens, or -1 when the block is never closed.
+  function findDetailsClose(lines, startIndex) {
+    let level = 0;
+    for (let i = startIndex; i < lines.length; i++) {
+      if (DETAILS_OPEN_RE.test(lines[i])) {
+        level++;
+      } else if (DETAILS_CLOSE_RE.test(lines[i])) {
+        level--;
+        if (level === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  // Renders a <details> fold, or returns null when it is unclosed or nested deeper
+  // than MAX_DETAILS_DEPTH. The emitted tags are fixed literals; only the summary
+  // text (through renderInlineMarkdown) and the rendered body come from the input.
+  function consumeDetailsBlock(lines, startIndex, codeBlocks, mathBlocks, depth) {
+    if (depth >= MAX_DETAILS_DEPTH) return null;
+    const closeIndex = findDetailsClose(lines, startIndex);
+    if (closeIndex < 0) return null;
+    let bodyStart = startIndex + 1;
+    let label = 'Details';
+    const summaryMatch = bodyStart < closeIndex ? lines[bodyStart].match(DETAILS_SUMMARY_RE) : null;
+    if (summaryMatch) {
+      label = summaryMatch[1].trim() || 'Details';
+      bodyStart++;
+    }
+    const bodyHtml = renderMarkdownLines(lines.slice(bodyStart, closeIndex), codeBlocks, mathBlocks, depth + 1);
+    return {
+      html: `<details class="md-details"><summary>${renderInlineMarkdown(label)}</summary>${bodyHtml}</details>`,
+      nextIndex: closeIndex + 1
+    };
+  }
+
+  function consumeNextMarkdownBlock(lines, index, codeBlocks, mathBlocks, depth) {
     const line = lines[index];
     const trimmed = line.trim();
     if (!trimmed) return { html: '', nextIndex: index + 1 };
@@ -2437,36 +2583,106 @@
     if (fenceMatch) return { html: codeBlocks[Number(fenceMatch[1])] || '', nextIndex: index + 1 };
     const mathMatch = trimmed.match(/^\u0000MATH_BLOCK_(\d+)\u0000$/);
     if (mathMatch) return { html: mathBlocks[Number(mathMatch[1])] || '', nextIndex: index + 1 };
+    if (DETAILS_OPEN_RE.test(line)) {
+      const details = consumeDetailsBlock(lines, index, codeBlocks, mathBlocks, depth);
+      if (details) return details;
+      return consumeParagraphBlock(lines, index);
+    }
     const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       return { html: `<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`, nextIndex: index + 1 };
     }
-    if (/^\s*>\s?/.test(line)) return consumeBlockquoteOrCallout(lines, index);
+    if (/^\s*>\s?/.test(line)) return consumeBlockquoteOrCallout(lines, index, depth);
     if (isTableHeaderAt(lines, index)) return renderTableBlock(lines, index);
     if (/^\s*[-*]\s+/.test(line)) return consumeListBlock(lines, index, false);
     if (/^\s*\d+\.\s+/.test(line)) return consumeListBlock(lines, index, true);
     return consumeParagraphBlock(lines, index);
   }
 
+  // Renders already-extracted lines. Fold bodies recurse here with the parent's
+  // codeBlocks and mathBlocks so fence and math placeholders inside a fold resolve.
+  function renderMarkdownLines(lines, codeBlocks, mathBlocks, depth) {
+    const htmlParts = [];
+    let i = 0;
+    while (i < lines.length) {
+      const step = consumeNextMarkdownBlock(lines, i, codeBlocks, mathBlocks, depth);
+      if (step.html) htmlParts.push(step.html);
+      i = step.nextIndex > i ? step.nextIndex : i + 1;
+    }
+    return htmlParts.join('\n');
+  }
+
   // Converts Markdown into safe HTML (supports fenced code blocks, Mermaid SVG,
-  // LaTeX MathML, GFM pipe tables, GitHub alert callouts, headings, lists, and paragraphs).
-  function renderMarkdownSafe(md) {
+  // LaTeX MathML, GFM pipe tables, GitHub alert callouts, <details> folds, headings,
+  // lists, and paragraphs). Fences are extracted first, so a <details> line inside
+  // a code block never opens a fold. depth is the number of enclosing folds.
+  function renderMarkdownSafe(md, depth = 0) {
     if (!md) return '';
     const codeBlocks = [];
     const mathBlocks = [];
     const normalized = String(md).replace(/\r\n/g, '\n');
     const withoutFences = extractTopLevelFences(normalized, codeBlocks);
     const withoutDisplayMath = extractTopLevelDisplayMath(withoutFences, mathBlocks);
-    const lines = withoutDisplayMath.split('\n');
-    const htmlParts = [];
-    let i = 0;
-    while (i < lines.length) {
-      const step = consumeNextMarkdownBlock(lines, i, codeBlocks, mathBlocks);
-      if (step.html) htmlParts.push(step.html);
-      i = step.nextIndex > i ? step.nextIndex : i + 1;
-    }
-    return htmlParts.join('\n');
+    return renderMarkdownLines(withoutDisplayMath.split('\n'), codeBlocks, mathBlocks, depth);
+  }
+
+  // Flags lines that sit inside a ``` fence (the fence lines included).
+  function markFencedLines(lines) {
+    let inFence = false;
+    return lines.map(line => {
+      const isFenceLine = /^\s*```/.test(line);
+      const fenced = inFence || isFenceLine;
+      if (isFenceLine) inFence = !inFence;
+      return fenced;
+    });
+  }
+
+  const COLLAPSED_DESCRIPTION_SECTIONS = [
+    'Changes',
+    'Security & Execution Gate',
+    'Stack Context',
+    'Prior Review Resolution'
+  ];
+
+  // Matches by prefix so headings such as "Intent Alignment: Matches" still match,
+  // but requires a non-word boundary so "Changes" does not match "Changesets".
+  function isCollapsedDescriptionSection(title) {
+    return COLLAPSED_DESCRIPTION_SECTIONS.some(name =>
+      title === name || (title.startsWith(name) && /^[^A-Za-z0-9]/.test(title.slice(name.length))));
+  }
+
+  // Splits description Markdown into a preamble and one entry per "## " heading.
+  // Heading lines inside fences do not split.
+  function splitDescriptionSections(markdown) {
+    const lines = String(markdown).replace(/\r\n/g, '\n').split('\n');
+    const fenced = markFencedLines(lines);
+    const sections = [{ title: null, lines: [], hasAlert: false }];
+    lines.forEach((line, idx) => {
+      const headingMatch = fenced[idx] ? null : line.match(/^##\s+(.*?)\s*$/);
+      if (headingMatch) {
+        sections.push({ title: headingMatch[1], lines: [], hasAlert: false });
+        return;
+      }
+      const current = sections[sections.length - 1];
+      current.lines.push(line);
+      if (!fenced[idx] && /^\s*>\s*\[!(WARNING|IMPORTANT)\]/i.test(line)) current.hasAlert = true;
+    });
+    return sections;
+  }
+
+  // Renders the description with routine sections folded. A section carrying a
+  // WARNING or IMPORTANT callout renders as an open fold so it stays visible.
+  function renderDescriptionHtml(markdown) {
+    return splitDescriptionSections(markdown).map(section => {
+      const body = section.lines.join('\n');
+      if (section.title === null) return renderMarkdownSafe(body);
+      if (!isCollapsedDescriptionSection(section.title)) {
+        return renderMarkdownSafe(`## ${section.title}\n${body}`);
+      }
+      const openAttr = section.hasAlert ? ' open' : '';
+      return `<details class="md-details desc-section"${openAttr}><summary>${renderInlineMarkdown(section.title)}</summary>${renderMarkdownSafe(body, 1)}</details>`;
+    }).filter(Boolean).join('\n');
   }
 
   function renderPRDescription() {
@@ -2482,7 +2698,7 @@
     card.style.display = 'block';
     const renderedEl = document.getElementById('pr-description-rendered');
     const rawEl = document.getElementById('pr-description-raw');
-    renderedEl.innerHTML = renderMarkdownSafe(markdown);
+    renderedEl.innerHTML = renderDescriptionHtml(markdown);
     rawEl.textContent = markdown;
 
     const badge = document.getElementById('pr-alignment-badge');
@@ -2514,7 +2730,7 @@
       btn.textContent = 'Copied!';
       setTimeout(() => { btn.textContent = prev; }, 1500);
     } catch (e) {
-      alert('Failed to copy description to clipboard: ' + e);
+      showNotice('Failed to copy description to clipboard: ' + e);
     }
   }
 
@@ -2615,6 +2831,8 @@
     const cleanUl = document.getElementById('checked-clean-list');
     if (Array.isArray(cleanList) && cleanList.length > 0) {
       cleanUl.innerHTML = cleanList.map(item => `<li>${renderInlineMarkdown(item)}</li>`).join('');
+      const cleanCount = document.getElementById('checked-clean-count');
+      if (cleanCount) cleanCount.textContent = `(${cleanList.length})`;
       cleanSection.style.display = 'block';
     } else {
       cleanSection.style.display = 'none';
@@ -2879,6 +3097,32 @@
     }
   }
 
+  // Splits off a <details> block that ends the comment, pairing tags by depth and
+  // ignoring tag lines inside fences. Returns null when the comment has no such fold.
+  function splitTrailingDetailsBlock(text) {
+    const lines = String(text).replace(/\r\n/g, '\n').replace(/\s+$/, '').split('\n');
+    const fenced = markFencedLines(lines);
+    let level = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (fenced[i]) {
+        if (level === 0) return null;
+        continue;
+      }
+      if (DETAILS_CLOSE_RE.test(lines[i])) {
+        level++;
+      } else if (DETAILS_OPEN_RE.test(lines[i])) {
+        if (level === 0) return null;
+        level--;
+        if (level === 0) {
+          return { head: lines.slice(0, i).join('\n').trim(), fold: lines.slice(i).join('\n') };
+        }
+      } else if (level === 0) {
+        return null;
+      }
+    }
+    return null;
+  }
+
   function insertSuggestion(index) {
     const finding = reviewData.findings[index];
     const editor = document.getElementById(`comment-editor-${index}`);
@@ -2887,13 +3131,22 @@
 
     const currentVal = editor ? editor.value : (finding.draft_comment || '');
     if (currentVal.includes('```suggestion')) {
-      alert('A suggestion fence is already present in this comment.');
+      showNotice('A suggestion fence is already present in this comment.', 'info');
       return;
     }
 
-    const updated = currentVal.trim().length > 0
-      ? currentVal.trim() + '\n\n' + fence
-      : fence;
+    // Keep the suggestion above a trailing Details fold so it stays visible.
+    const trailing = splitTrailingDetailsBlock(currentVal);
+    let updated;
+    if (trailing) {
+      updated = trailing.head
+        ? `${trailing.head}\n\n${fence}\n\n${trailing.fold}`
+        : `${fence}\n\n${trailing.fold}`;
+    } else {
+      updated = currentVal.trim().length > 0
+        ? currentVal.trim() + '\n\n' + fence
+        : fence;
+    }
     if (editor) editor.value = updated;
     finding.draft_comment = updated;
     if (finding._tab === 'preview') {
@@ -2951,15 +3204,68 @@
         'Your review decisions have been saved. The background process is submitting the batch review to GitHub.'
       ));
     } catch (e) {
-      alert('Failed to save review decisions: ' + (e && e.message ? e.message : e));
+      showNotice('Failed to save review decisions: ' + (e && e.message ? e.message : e));
     }
   }
 
+  /**
+   * Shows a transient message at the bottom of the page.
+   *
+   * Used instead of `alert()`, which the sandboxed MCP App iframe ignores.
+   */
+  let noticeTimer = null;
+  function showNotice(message, kind) {
+    let notice = document.getElementById('dashboard-notice');
+    if (!notice) {
+      notice = document.createElement('div');
+      notice.id = 'dashboard-notice';
+      notice.setAttribute('role', 'alert');
+      document.body.appendChild(notice);
+    }
+    notice.className = kind === 'info' ? 'dashboard-notice info' : 'dashboard-notice';
+    notice.textContent = message;
+    notice.hidden = false;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { notice.hidden = true; }, 6000);
+  }
+
+  /**
+   * Returns true on the second click of `btn` within `windowMs`.
+   *
+   * The first click relabels the button with `armedLabel` and returns false.
+   * Used instead of `confirm()`, which returns false without showing a dialog
+   * in the sandboxed MCP App iframe.
+   */
+  function confirmByDoubleClick(btn, armedLabel, windowMs = 4000) {
+    if (!btn) return true;
+    if (btn.dataset.armed === 'true') {
+      clearTimeout(Number(btn.dataset.armTimer));
+      delete btn.dataset.armed;
+      btn.classList.remove('armed');
+      btn.textContent = btn.dataset.idleLabel;
+      return true;
+    }
+    btn.dataset.idleLabel = btn.textContent;
+    btn.dataset.armed = 'true';
+    btn.classList.add('armed');
+    btn.textContent = armedLabel;
+    btn.dataset.armTimer = String(setTimeout(() => {
+      delete btn.dataset.armed;
+      btn.classList.remove('armed');
+      btn.textContent = btn.dataset.idleLabel;
+    }, windowMs));
+    return false;
+  }
+
   async function abortReview() {
-    if (!confirm('Are you sure you want to abort? No review will be posted to GitHub.')) return;
+    const btn = document.getElementById('abort-btn');
+    if (!confirmByDoubleClick(btn, 'Click again to abort')) return;
     try {
       await dashboardHost.abort();
-    } catch (e) {}
+    } catch (e) {
+      showNotice('Failed to abort review: ' + (e && e.message ? e.message : e));
+      return;
+    }
     const closeCopy = dashboardHost.kind === 'mcp-app'
       ? 'You can close this pane now.'
       : 'You can safely close this window.';

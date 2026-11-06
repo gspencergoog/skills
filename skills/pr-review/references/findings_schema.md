@@ -49,7 +49,8 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
       "evidence_detail": "src/parser.ts:121 - return Promise without await",
       "description": "The promise from resolveDynamicValue() is never awaited.",
       "why": "Async functions report success before completion, dropping errors silently.",
-      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before completion and drop errors silently.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```",
+      "details": "Callers in `src/index.ts` catch rejections only on the outer promise.",
+      "draft_comment": "`resolveDynamicValue(fc)` returns a promise that is never awaited, so async functions report success before completion and drop errors silently.\n\n```suggestion\n    await resolveDynamicValue(fc);\n```\n\n<details>\n<summary>Details</summary>\n\n**Evidence** (`Read`): src/parser.ts:121 - return Promise without await\n\nCallers in `src/index.ts` catch rejections only on the outer promise.\n\n</details>",
       "is_diff_hunk": true,
       "original_code": "    resolveDynamicValue(fc);"
     },
@@ -65,7 +66,7 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
       "description": "Does defaultTimeout apply to long-lived streaming calls?",
       "why": "If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.",
       "to_settle": "Check grpc client timeout options in net/client.ts",
-      "draft_comment": "Does defaultTimeout apply to long-lived streaming calls? If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.",
+      "draft_comment": "Does defaultTimeout apply to long-lived streaming calls? If streaming RPCs use the 30s timeout, long transfers will terminate prematurely.\n\n<details>\n<summary>Details</summary>\n\n**Evidence** (`Speculation`): Unclear if default timeout applies to streaming RPCs\n\n**To settle**: Check grpc client timeout options in net/client.ts\n\n</details>",
       "is_diff_hunk": true
     }
   ]
@@ -85,11 +86,12 @@ Write `raw_findings.json` in this shape. `diff_parser.py --findings` keeps the s
 | `findings[].evidence_tier` | agent / `code-review` | `Executed`, `Read`, `Fetched`, `Deduction`, or `Speculation`. |
 | `findings[].evidence_detail` | agent / `code-review` | Command output, citation location, or deductive trace. |
 | `findings[].why` | agent / `code-review` | Concrete consequence if shipped as-is. |
-| `findings[].suggestion` | `code-review` | Raw text of the finding's `Suggestion` block. Already folded into `draft_comment` (as a committable ```` ```suggestion ```` block unless it was a ```` ```diff ````/```` ```patch ```` fence); nothing downstream reads it on its own. |
-| `findings[].repro_test` | `code-review` | (`--verify` only) Raw text of the finding's `Repro test` block. Folded into `draft_comment` under a `**Repro test**` label as a plain code block, never as a committable suggestion. |
-| `findings[].to_settle` | agent / `code-review` | (Question findings only) Exact command, file, or symbol that settles the question. |
+| `findings[].details` | agent / `code-review` | Optional supporting reasoning ($\le 150$ words, may span multiple lines): root-cause trace, affected callers, or rejected alternatives. Folded into the trailing `<details>` block of `draft_comment`. |
+| `findings[].suggestion` | `code-review` | Raw text of the finding's `Suggestion` block. Already folded into the visible part of `draft_comment` (as a committable ```` ```suggestion ```` block unless it was a ```` ```diff ````/```` ```patch ```` fence); nothing downstream reads it on its own. |
+| `findings[].repro_test` | `code-review` | (`--verify` only) Raw text of the finding's `Repro test` block. Folded into the trailing `<details>` block of `draft_comment` under a `**Repro test**` label as a plain code block, never as a committable suggestion. |
+| `findings[].to_settle` | agent / `code-review` | (Question findings only) Exact command, file, or symbol that settles the question. Folded into the trailing `<details>` block of `draft_comment`. |
 | `findings[].description` | agent | One short sentence naming the problem for the dashboard card header. |
-| `findings[].draft_comment` | agent / `code-review` | The concise peer-facing comment body ($\le 80$ prose words, $\le 4$ sentences): the defect and its consequence first, followed by a suggestion block (or a natural 1–2 sentence question for `Q1…`). If `draft_comment` is empty, the launcher falls back to `description`. |
+| `findings[].draft_comment` | agent / `code-review` | The peer-facing comment body ($\le 120$ visible prose words and $\le 6$ sentences under `pr-review`'s `pr` profile): the defect and its consequence first, followed by a visible suggestion block (or a natural 1 to 2 sentence question for `Q1...`), and a trailing `<details>` block holding the `Evidence` detail, optional `Details`, `Repro test`, or `To settle` when any of those are present. If `draft_comment` is empty, the launcher falls back to `description`. |
 | `findings[].is_diff_hunk` | `diff_parser.py` | `true` for an inline comment. `false` means the comment goes under "Broader Context" in the summary. |
 | `findings[].original_code` | `diff_parser.py` | The source lines the finding covers, shown in the dashboard. |
 | `findings[].approved` | dashboard only | Don't write it. The launcher sets every finding to `true`, and the user unchecks any to omit. |

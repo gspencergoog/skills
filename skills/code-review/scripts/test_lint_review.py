@@ -259,14 +259,17 @@ None.
             self.assertEqual(q1["line_end"], 41)
             self.assertEqual(q1["evidence_tier"], "Speculation")
             self.assertIn("Check how `git diff`", q1["to_settle"])
+            visible, _, fold = q1["draft_comment"].partition("\n\n<details>")
             self.assertEqual(
-                q1["draft_comment"],
+                visible,
                 "Can `split_diff_grouped` receive surrogate-escaped text on stdin? "
                 'If binary diffs contain non-UTF-8 bytes, `encode("utf-8")` raises `UnicodeEncodeError`.',
             )
             self.assertNotIn("**Question**", q1["draft_comment"])
-            self.assertNotIn("**Evidence**", q1["draft_comment"])
-            self.assertNotIn("**To Settle**", q1["draft_comment"])
+            self.assertNotIn("**Evidence**", visible)
+            self.assertIn("**Evidence** (`Speculation`)", fold)
+            self.assertIn("**To settle**: Check how `git diff`", fold)
+            self.assertTrue(q1["draft_comment"].endswith("</details>"))
 
             self.assertEqual(len(data["review_summary"]["checked_clean"]), 2)
 
@@ -559,6 +562,8 @@ Verdict: Minor revisions needed.
             comment,
         )
         self.assertEqual(comment.count("```suggestion"), 1)
+        self.assertLess(comment.index("```suggestion"), comment.index("<details>"))
+        self.assertLess(comment.index("<details>"), comment.index("**Repro test**"))
         self.assertEqual(
             finding["repro_test"],
             "def test_retry_increments_once():\n    assert retry(fail_once) == 1",
@@ -574,6 +579,102 @@ Verdict: Minor revisions needed.
             "**Repro test**\n\n```python\nassert retry(fail_once) == 1\n```",
             data["findings"][0]["draft_comment"],
         )
+
+    @staticmethod
+    def _profile_report(body: str, extra: str = "") -> str:
+        return f"""\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Example finding
+- **File**: `example.py`
+- **Line**: `10`
+- **Severity**: `medium`
+- **Evidence**: `Read` - example.py:10 returns early
+- **Body**: {body}
+- **Why**: It breaks.
+{extra}"""
+
+    @staticmethod
+    def _sentences(count: int) -> str:
+        # The prose analyzer counts this sentence as 21 words.
+        sentence = (
+            "The cache returns stale rows after the second retry, and the eviction "
+            "timer never resets on new writes from the worker."
+        )
+        return " ".join([sentence] * count)
+
+    def test_pr_profile_allows_longer_comment(self):
+        from lint_review import COMMENT_PROFILES
+
+        text = self._profile_report(self._sentences(4))
+        rules_default = {v.rule for v in check_report(parse_report(text))}
+        self.assertIn("comment-prose-length", rules_default)
+        pr_violations = check_report(parse_report(text), profile="pr")
+        self.assertNotIn("comment-prose-length", {v.rule for v in pr_violations})
+        self.assertEqual(COMMENT_PROFILES["pr"].words, 120)
+
+    def test_pr_profile_fix_hint_names_active_caps(self):
+        text = self._profile_report(self._sentences(6))
+        hits = [
+            v
+            for v in check_report(parse_report(text), profile="pr")
+            if v.rule == "comment-prose-length"
+        ]
+        self.assertEqual(len(hits), 1)
+        self.assertIn("120 words and 6 sentences", hits[0].fix)
+
+    def test_unknown_profile_raises(self):
+        with self.assertRaises(ValueError):
+            check_report(parse_report(self._profile_report("Short.")), profile="x")
+
+    def test_cli_comment_profile_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "r.md"
+            path.write_text(self._profile_report(self._sentences(4)), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main([str(path)]), 1)
+                self.assertEqual(main([str(path), "--comment-profile", "pr"]), 0)
+
+    def test_details_too_long_fails(self):
+        details = self._sentences(8)
+        text = self._profile_report("Short body.", f"- **Details**: {details}\n")
+        rules = {v.rule for v in check_report(parse_report(text), profile="pr")}
+        self.assertIn("comment-details-length", rules)
+        self.assertNotIn("comment-prose-length", rules)
+
+    def test_multiline_details_round_trips_into_fold(self):
+        text = self._profile_report(
+            "Short body.",
+            "- **Details**: First line of the trace.\n"
+            "  Second line names `caller()`.\n"
+            "- **Suggestion**:\n```python\nfix()\n```\n",
+        )
+        report = parse_report(text)
+        self.assertEqual(check_report(report, profile="pr"), [])
+        data = self._export(text)
+        finding = data["findings"][0]
+        self.assertEqual(
+            finding["details"],
+            "First line of the trace.\nSecond line names `caller()`.",
+        )
+        comment = finding["draft_comment"]
+        self.assertEqual(comment.count("<details>"), 1)
+        self.assertLess(comment.index("```suggestion"), comment.index("<details>"))
+        fold = comment[comment.index("<details>") :]
+        self.assertIn("**Evidence** (`Read`): example.py:10 returns early", fold)
+        self.assertIn("Second line names `caller()`.", fold)
+        self.assertTrue(comment.endswith("</details>"))
+
+    def test_no_fold_without_detail(self):
+        text = self._profile_report("Short body.").replace(
+            "- **Evidence**: `Read` - example.py:10 returns early",
+            "- **Evidence**: `Read`",
+        )
+        comment = self._export(text)["findings"][0]["draft_comment"]
+        self.assertNotIn("<details>", comment)
 
     def test_summary_keeps_paragraph_breaks(self):
         report_text = """\
@@ -693,6 +794,13 @@ with:
 ```python
 new()
 ```
+
+### L1. Details too long
+- **Severity**: `low`
+- **Evidence**: `Read` - parser.py:10
+- **Body**: The buffer is stale.
+- **Why**: Output repeats.
+- **Details**: The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here. The parser keeps a stale buffer here.
 
 ### C1. Speculative critical without tier
 - **Severity**: `critical`

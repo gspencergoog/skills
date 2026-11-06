@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Linter for synthesized code-review artifacts (review_results.md)."""
 
+import argparse
 import json
 import pathlib
 import re
@@ -22,10 +23,49 @@ CLEAN_TIERS = ("Executed", "Read", "Fetched", "Deduction")
 ID_TO_SEVERITY = {"C": "critical", "H": "high", "M": "medium", "L": "low"}
 CLASS_ORDER = {"C": 0, "H": 1, "M": 2, "L": 3}
 
-MAX_COMMENT_WORDS = 80
-MAX_COMMENT_SENTENCES = 4
 MAX_SENTENCE_WORDS = 30
 MAX_SENTENCE_PCC = 5
+
+
+@dataclass(frozen=True)
+class CommentCaps:
+    """Prose caps for one comment profile.
+
+    `words` and `sentences` bound the visible comment prose (Body, Why, and a
+    prose Suggestion). `details_words` bounds the optional `Details` field,
+    which is exported inside a collapsed `<details>` block.
+    """
+
+    words: int
+    sentences: int
+    details_words: int
+
+
+# `default` applies to standalone code-review reports. `pr` applies when
+# pr-review posts the comments to GitHub, where the extra detail is folded.
+COMMENT_PROFILES: dict[str, CommentCaps] = {
+    "default": CommentCaps(words=80, sentences=4, details_words=150),
+    "pr": CommentCaps(words=120, sentences=6, details_words=150),
+}
+
+
+def _prose_length_hint(caps: CommentCaps) -> str:
+    return (
+        "Shorten the combined Body, Why, and prose Suggestion to at most "
+        f"{caps.words} words and {caps.sentences} sentences. Move supporting detail "
+        "into '- **Details**:'."
+    )
+
+
+def _details_length_hint(caps: CommentCaps) -> str:
+    return (
+        f"Shorten the Details field to at most {caps.details_words} words; keep only "
+        "the root-cause trace, affected callers, or rejected alternatives."
+    )
+
+
+MAX_COMMENT_WORDS = COMMENT_PROFILES["default"].words
+MAX_COMMENT_SENTENCES = COMMENT_PROFILES["default"].sentences
 
 _STOPWORDS = frozenset(
     {
@@ -96,6 +136,9 @@ class FenceMeta:
 
 # Finding fields whose value may be a fenced code block.
 FENCED_FIELDS = ("Suggestion", "Repro test")
+
+# Finding fields whose prose may continue on the lines after the field bullet.
+CONTINUED_FIELDS = ("Details",)
 
 
 @dataclass
@@ -190,10 +233,8 @@ _FIX_HINTS: dict[str, str] = {
         "Keep only one fenced replacement block under '- **Suggestion**:' and move any test "
         "block to '- **Repro test**:'."
     ),
-    "comment-prose-length": (
-        "Shorten the combined Body, Why, and prose Suggestion to at most 80 words and "
-        "4 sentences."
-    ),
+    "comment-prose-length": _prose_length_hint(COMMENT_PROFILES["default"]),
+    "comment-details-length": _details_length_hint(COMMENT_PROFILES["default"]),
     "comment-sentence-length": (
         "Split or trim sentences in Body, Why, or Suggestion so every sentence has at most "
         "30 words."
@@ -393,6 +434,11 @@ def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> No
         state.current_field = key
         if key.lower() == "severity":
             state.current.severity = _strip_ticks(val).lower()
+        return
+
+    if state.current is not None and state.current_field in CONTINUED_FIELDS:
+        prev = state.current.fields.get(state.current_field, "")
+        state.current.fields[state.current_field] = f"{prev}\n{stripped}"
         return
 
     state.current = _record_section_line(
@@ -734,10 +780,10 @@ def _collect_ai_ism_labels(violations_dict: dict[str, Any]) -> list[str]:
     return labels
 
 
-def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Violation]:
-    """Runs write-prose checks on a single finding or question's assembled prose."""
+def _analyze_comment_prose(prose: str) -> dict[str, Any] | None:
+    """Returns analyze_prose metrics for `prose`, or None when there is nothing to lint."""
     if not prose.strip():
-        return []
+        return None
     metrics = analyze_prose(
         "-",
         complexity_threshold=MAX_SENTENCE_PCC,
@@ -745,23 +791,15 @@ def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Viol
         text=prose,
     )
     if "error" in metrics:
-        return []
-    summary = metrics["summary"]
-    v_dict = metrics["violations"]
+        return None
+    return metrics
+
+
+def _prose_quality_violations(
+    item_id: str, line: int, v_dict: dict[str, Any], where: str
+) -> list[Violation]:
+    """Sentence length, sentence complexity, and AI-ism checks shared by all comment prose."""
     out: list[Violation] = []
-
-    words = summary["total_words"]
-    sentences = summary["total_sentences"]
-    if words > MAX_COMMENT_WORDS or sentences > MAX_COMMENT_SENTENCES:
-        out.append(
-            Violation(
-                line,
-                "comment-prose-length",
-                f"'{item_id}' comment prose is {words} words / {sentences} sentences "
-                f"(max {MAX_COMMENT_WORDS} words, {MAX_COMMENT_SENTENCES} sentences).",
-            )
-        )
-
     long_sents = [
         s
         for s in v_dict.get("sentences_exceeding_25_words", [])
@@ -773,7 +811,7 @@ def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Viol
             Violation(
                 line,
                 "comment-sentence-length",
-                f"'{item_id}' has {len(long_sents)} sentence(s) exceeding "
+                f"'{item_id}' {where} has {len(long_sents)} sentence(s) exceeding "
                 f"{MAX_SENTENCE_WORDS} words (longest: {longest} words).",
             )
         )
@@ -785,8 +823,8 @@ def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Viol
             Violation(
                 line,
                 "comment-sentence-complexity",
-                f"'{item_id}' has {len(complex_sents)} sentence(s) with cognitive complexity "
-                f"PCC > {MAX_SENTENCE_PCC} (max PCC: {worst}).",
+                f"'{item_id}' {where} has {len(complex_sents)} sentence(s) with cognitive "
+                f"complexity PCC > {MAX_SENTENCE_PCC} (max PCC: {worst}).",
             )
         )
 
@@ -796,21 +834,78 @@ def _lint_single_comment_prose(item_id: str, line: int, prose: str) -> list[Viol
             Violation(
                 line,
                 "comment-ai-ism",
-                f"'{item_id}' contains prose violation(s): {', '.join(ai_labels)}.",
+                f"'{item_id}' {where} contains prose violation(s): {', '.join(ai_labels)}.",
             )
         )
     return out
 
 
-def _check_comment_prose(report: Report) -> list[Violation]:
-    """Runs write-prose checks on each finding and question comment prose."""
+def _lint_single_comment_prose(
+    item_id: str,
+    line: int,
+    prose: str,
+    caps: CommentCaps = COMMENT_PROFILES["default"],
+) -> list[Violation]:
+    """Runs write-prose checks on a single finding or question's visible prose."""
+    metrics = _analyze_comment_prose(prose)
+    if metrics is None:
+        return []
+    summary = metrics["summary"]
+    out: list[Violation] = []
+
+    words = summary["total_words"]
+    sentences = summary["total_sentences"]
+    if words > caps.words or sentences > caps.sentences:
+        out.append(
+            Violation(
+                line,
+                "comment-prose-length",
+                f"'{item_id}' comment prose is {words} words / {sentences} sentences "
+                f"(max {caps.words} words, {caps.sentences} sentences).",
+                fix=_prose_length_hint(caps),
+            )
+        )
+    out.extend(
+        _prose_quality_violations(item_id, line, metrics["violations"], "comment")
+    )
+    return out
+
+
+def _lint_details_prose(
+    item_id: str, line: int, details: str, caps: CommentCaps
+) -> list[Violation]:
+    """Runs write-prose checks on a finding's optional Details field."""
+    metrics = _analyze_comment_prose(details)
+    if metrics is None:
+        return []
+    out: list[Violation] = []
+    words = metrics["summary"]["total_words"]
+    if words > caps.details_words:
+        out.append(
+            Violation(
+                line,
+                "comment-details-length",
+                f"'{item_id}' Details is {words} words (max {caps.details_words} words).",
+                fix=_details_length_hint(caps),
+            )
+        )
+    out.extend(
+        _prose_quality_violations(item_id, line, metrics["violations"], "Details")
+    )
+    return out
+
+
+def _check_comment_prose(report: Report, caps: CommentCaps) -> list[Violation]:
+    """Runs write-prose checks on each finding and question comment, plus Details."""
     violations: list[Violation] = []
     for f in report.findings:
         prose = _extract_finding_comment_prose(f)
-        violations.extend(_lint_single_comment_prose(f.id, f.line, prose))
+        violations.extend(_lint_single_comment_prose(f.id, f.line, prose, caps))
+        details = f.fields.get("Details", "").strip()
+        violations.extend(_lint_details_prose(f.id, f.line, details, caps))
     for q in report.questions:
         prose = _build_question_prose(q)
-        violations.extend(_lint_single_comment_prose(q.id, q.line, prose))
+        violations.extend(_lint_single_comment_prose(q.id, q.line, prose, caps))
     return violations
 
 
@@ -826,15 +921,24 @@ RULES: list[Callable[[Report], list[Violation]]] = [
     _check_focus_field,
     _check_no_playbook_feedback_section,
     _check_single_fence_per_field,
-    _check_comment_prose,
 ]
 
 
-def check_report(report: Report) -> list[Violation]:
-    """Run all lint rules against a parsed Report."""
+def check_report(report: Report, profile: str = "default") -> list[Violation]:
+    """Run all lint rules against a parsed Report.
+
+    `profile` names an entry in COMMENT_PROFILES and sets the comment prose caps.
+    Raises ValueError for an unknown profile.
+    """
+    if profile not in COMMENT_PROFILES:
+        raise ValueError(
+            f"Unknown comment profile '{profile}' "
+            f"(expected one of: {', '.join(COMMENT_PROFILES)})."
+        )
     violations: list[Violation] = []
     for rule_fn in RULES:
         violations.extend(rule_fn(report))
+    violations.extend(_check_comment_prose(report, COMMENT_PROFILES[profile]))
     return sorted(violations, key=lambda v: (v.line, v.rule))
 
 
@@ -1029,10 +1133,44 @@ def _format_repro_test(meta: FenceMeta, test: str) -> str:
     return test
 
 
+def _build_details_block(
+    evidence_tier: str,
+    evidence_detail: str,
+    details: str,
+    repro_md: str,
+    to_settle: str = "",
+) -> str:
+    """Returns a collapsed `<details>` block holding a comment's supporting detail.
+
+    The block is omitted (returns "") when `evidence_detail`, `details`,
+    `repro_md`, and `to_settle` are all empty. `evidence_tier` alone never
+    produces a block, because every finding carries a tier. Parts are separated
+    by blank lines so GitHub renders Markdown and code fences inside the block.
+    """
+    parts: list[str] = []
+    if evidence_detail.strip():
+        label = f"**Evidence** (`{evidence_tier}`)" if evidence_tier else "**Evidence**"
+        parts.append(f"{label}: {evidence_detail.strip()}")
+    if details.strip():
+        parts.append(details.strip())
+    if to_settle.strip():
+        parts.append(f"**To settle**: {to_settle.strip()}")
+    if repro_md.strip():
+        parts.append(repro_md.strip())
+    if not parts:
+        return ""
+    body = "\n\n".join(parts)
+    return f"<details>\n<summary>Details</summary>\n\n{body}\n\n</details>"
+
+
 def _build_finding_draft_comment(
     f: Finding, body: str, why: str, sugg: str, repro: str
 ) -> str:
-    """Assembles the peer-facing draft_comment for a finding."""
+    """Assembles the peer-facing draft_comment for a finding.
+
+    Visible parts come first (prose, suggestion lead-in, suggestion block). The
+    evidence detail, Details field, and repro test go in a trailing fold.
+    """
     sugg_meta = f.fence("Suggestion")
     lead_in = _strip_file_links(sugg_meta.lead_in.strip())
     repro_meta = f.fence("Repro test")
@@ -1046,12 +1184,22 @@ def _build_finding_draft_comment(
         draft_parts.append(lead_in)
     if sugg:
         draft_parts.append(_format_suggestion(sugg_meta, sugg))
+
+    repro_md = ""
     if repro:
         heading = (
             f"**Repro test**: {repro_lead_in}" if repro_lead_in else "**Repro test**"
         )
-        draft_parts.append(heading)
-        draft_parts.append(_format_repro_test(repro_meta, repro))
+        repro_md = f"{heading}\n\n{_format_repro_test(repro_meta, repro)}"
+    ev = f.fields.get("Evidence", "")
+    fold = _build_details_block(
+        _extract_tier(ev),
+        _strip_file_links(_extract_evidence_detail(ev)),
+        _strip_file_links(f.fields.get("Details", "").strip()),
+        repro_md,
+    )
+    if fold:
+        draft_parts.append(fold)
     return "\n\n".join(draft_parts)
 
 
@@ -1061,6 +1209,7 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
     ev = f.fields.get("Evidence", "")
     body = _strip_file_links(f.fields.get("Body", "").strip())
     why = _strip_file_links(f.fields.get("Why", "").strip())
+    details = _strip_file_links(f.fields.get("Details", "").strip())
     sugg = f.fields.get("Suggestion", "").rstrip().lstrip("\n")
     repro = f.fields.get("Repro test", "").rstrip().lstrip("\n")
     desc = _strip_file_links(
@@ -1081,6 +1230,8 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
         "why": why,
         "draft_comment": _build_finding_draft_comment(f, body, why, sugg, repro),
     }
+    if details:
+        finding_dict["details"] = details
     if "Category" in f.fields:
         finding_dict["category"] = f.fields["Category"].strip().lower()
     if "Focus" in f.fields:
@@ -1099,6 +1250,11 @@ def _build_question_dict(q: Finding) -> dict[str, Any]:
     why = _strip_file_links(q.fields.get("Why", "").strip())
     to_settle = _strip_file_links(q.fields.get("To settle", "").strip())
     desc = _strip_file_links(q.title or q.fields.get("Body", "").strip())
+    evidence_tier = _extract_tier(ev)
+    evidence_detail = _strip_file_links(_extract_evidence_detail(ev))
+    prose = _strip_file_links(_build_question_prose(q))
+    fold = _build_details_block(evidence_tier, evidence_detail, "", "", to_settle)
+    draft = f"{prose}\n\n{fold}" if fold and prose else (prose or fold)
     return {
         "id": q.id,
         "severity": "question",
@@ -1111,7 +1267,7 @@ def _build_question_dict(q: Finding) -> dict[str, Any]:
         "description": desc,
         "why": why,
         "to_settle": to_settle,
-        "draft_comment": _strip_file_links(_build_question_prose(q)),
+        "draft_comment": draft,
     }
 
 
@@ -1150,34 +1306,37 @@ def export_report_to_json(report: Report, output_path: pathlib.Path) -> dict[str
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: lint_review.py <review_results.md> [--export-json <output.json>]."""
-    args = sys.argv[1:] if argv is None else argv
-    if not args:
-        print(
-            "Usage: lint_review.py <review_results.md> [--export-json <path>]",
-            file=sys.stderr,
-        )
-        return 2
+    """CLI entrypoint.
 
-    report_path = pathlib.Path(args[0])
-    export_json_path: pathlib.Path | None = None
+    lint_review.py <review_results.md> [--comment-profile {default,pr}]
+    [--export-json <output.json>]
+    """
+    parser = argparse.ArgumentParser(
+        prog="lint_review.py", description="Lint a code-review review_results.md."
+    )
+    parser.add_argument("report", help="Path to review_results.md")
+    parser.add_argument(
+        "--comment-profile",
+        choices=sorted(COMMENT_PROFILES),
+        default="default",
+        help="Comment prose caps: default (80 words / 4 sentences) or pr (120 / 6).",
+    )
+    parser.add_argument(
+        "--export-json", help="Write review_results.json here on success"
+    )
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return 2 if exc.code else 0
 
-    if len(args) == 3 and args[1] == "--export-json":
-        export_json_path = pathlib.Path(args[2])
-    elif len(args) != 1:
-        print(
-            "Usage: lint_review.py <review_results.md> [--export-json <path>]",
-            file=sys.stderr,
-        )
-        return 2
-
+    report_path = pathlib.Path(args.report)
     if not report_path.is_file():
         print(f"Error: file not found: {report_path}", file=sys.stderr)
         return 2
 
     raw_text = report_path.read_text(encoding="utf-8")
     report = parse_report(raw_text)
-    violations = check_report(report)
+    violations = check_report(report, profile=args.comment_profile)
     for v in violations:
         print(f"{v.line}: {v.rule}: {v.message}")
         if v.fix:
@@ -1186,8 +1345,8 @@ def main(argv: list[str] | None = None) -> int:
     if violations:
         return 1
 
-    if export_json_path is not None:
-        export_report_to_json(report, export_json_path)
+    if args.export_json:
+        export_report_to_json(report, pathlib.Path(args.export_json))
 
     return 0
 

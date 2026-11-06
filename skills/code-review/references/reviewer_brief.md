@@ -113,8 +113,9 @@ Put every finding under a `### <ID>. <short claim>` heading (`C1…`, `H1…`, `
 - **Focus**: `<theme-id>` (focus reviewers only)
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or line-cited trace>
 - **Body**: `<1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>`
-- **Why**: `<1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>`
+- **Why**: `<1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences standalone, or <= 120 words and <= 6 sentences under `pr-review`)>`
 - **Suggestion**: (Optional drop-in code snippet, replacement text, or specific question. One fenced block at most; the exporter posts it as a committable GitHub suggestion unless the fence is ```` ```diff ```` or ```` ```patch ````. Never put a test or example here.)
+- **Details**: (Optional, up to 150 words, may continue on indented lines. Root-cause trace, affected callers, or rejected alternatives. Exported inside a collapsed `<details>` block, so keep Body and Why self-contained.)
 - **Repro test**: (Optional, `--verify` only. The scratch test that reproduces the defect, in one fenced block. It is posted as a plain code block, never as a committable suggestion.)
 
 ## Questions

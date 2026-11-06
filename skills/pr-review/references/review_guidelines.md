@@ -31,9 +31,11 @@ These review guidelines ensure feedback is actionable, objective, and respectful
    - If an issue exists on lines outside the diff hunk, note it in the top-level review summary rather than attempting an invalid inline comment.
 
 5. **State the Problem Before the Fix**:
-   - Each comment is read on its own, next to the code. Open with what is wrong and what it causes in 1–3 short sentences, then give the fix or suggestion block.
+   - Each comment is read on its own, next to the code. Open with what is wrong and what it causes in 1 to 3 short sentences, then give the fix or suggestion block.
    - Never restate what the diff lines already show; the author can see the diff right above the comment.
-   - Keep each comment's prose within 80 words and 4 sentences ($\le 30$ words per sentence, $\text{PCC} \le 5$), with no em-dashes or AI filler words (see [`write-prose`](../../write-prose/references/audiences.md)).
+   - Keep each comment's visible prose (`Body`, `Why`, and any prose `Suggestion` or lead-in) within 120 words and 6 sentences ($\le 30$ words per sentence, $\text{PCC} \le 5$), with no em-dashes or AI filler words (see [`write-prose`](../../write-prose/references/audiences.md)). Code blocks do not count toward the word cap, and suggestion blocks stay visible outside the fold.
+   - Put optional supporting reasoning in `- **Details**:` (up to 150 words, may continue on indented lines, same sentence and prose rules) for root-cause traces, affected callers, or rejected alternatives. Keep `Body` and `Why` self-contained so the comment still reads clearly without opening the fold.
+   - The exporter appends a collapsed `<details>` fold at the end of `draft_comment` containing the `Evidence` detail, optional `Details` prose, the `Repro test` code block, and (for questions) `To settle`. The fold is omitted when all of those are empty.
    - Keep `description` to one short sentence naming the problem for the dashboard card header; `launch_dashboard.py` does not prepend `**{description}**` onto non-empty `draft_comment` text.
 
 6. **Keep the Review Summary Short**:
@@ -81,25 +83,35 @@ Derive `blind_description.md` **solely** from `pr.diff` and `pr_coords.json` (in
 
 ```markdown
 ## Summary
-<1-2 sentences describing what the code changes actually do.>
-
-## Inferred Purpose
-<Why this change appears to exist based strictly on the code and test modifications.>
+<Up to 3 sentences covering what the code changes do and why they appear to exist, based strictly on the diff.>
 
 ## Quality Assessment
-<High-level assessment of code structure, test coverage, complexity, and adherence to codebase patterns.>
+<1 sentence on code structure, test coverage, complexity, and adherence to codebase patterns.>
 
 ## Security & Execution Gate
+- **Gate Verdict**: `SAFE_FOR_LOCAL_EXECUTION` (static pre-scan clean)
+<!-- When the verdict is not SAFE_FOR_LOCAL_EXECUTION or security_prescan.signals is non-empty, use full bullets instead:
 - **Gate Verdict**: `<SAFE_FOR_LOCAL_EXECUTION | REQUIRES_USER_CONFIRMATION | BLOCKED_UNSAFE>`
 - **Static Pre-Scan**: `<clean | N signal(s) across M file(s) audited>`
 - **Execution Risk Notes**: <Audit of any flagged build/hook/linter configs, subprocess calls, network access, or test execution risks.>
+-->
 
 ## Changes
-- **`path/to/file.ext`**: <Concrete description of the behavioral or structural change.>
+- **`path/to/component`**: <Up to 6 bullets total, grouped by component; tests and changelog share one bullet.>
 
 ## Reviewer Focus & Risks
-- <Specific areas, edge cases, or side effects that warrant close human inspection.>
+- <Up to 3 bullets, 1 sentence each, naming specific areas, edge cases, or side effects for close inspection.>
 ```
+
+Keep each Stage 1 section within its budget (checked by `review_engine.py --check-description-budgets`):
+
+| Section | Budget |
+| :--- | :--- |
+| `## Summary` | Up to 3 sentences covering what changed and why (replaces separate `Summary` and `Inferred Purpose` sections). |
+| `## Quality Assessment` | 1 sentence. |
+| `## Security & Execution Gate` | 1 line when the verdict is `SAFE_FOR_LOCAL_EXECUTION` and `security_prescan.signals` is empty; full bullets otherwise. |
+| `## Changes` | Up to 6 top-level bullets grouped by component. Tests and changelog share one bullet. |
+| `## Reviewer Focus & Risks` | Up to 3 top-level bullets, one sentence each. |
 
 ### Stage 2: Narrative Context Reconciliation (`pr_description.md`)
 
@@ -122,7 +134,7 @@ Stage 2 runs the unanchored `code-review` pass (Step 3.2, reading `code_review_p
    - `PARTIAL` gives `Partial Divergence`: the code mostly implements the stated purpose but includes unmentioned behavior changes, leaves out a claimed change, or differs in scope.
    - `DIVERGES` gives `Diverges from Stated Purpose`: the code changes contradict the stated purpose or do something substantially different from what the PR description claims.
    - `UNSTATED` gives `Unstated Scope`: the PR description is empty or minimal, or the diff includes significant additional changes not described by the author.
-2. **`callouts[]`** places each callout as `> [!<kind>]` directly under the named `section`, which must be an existing `##` heading in `blind_description.md` (for example `Summary`, `Inferred Purpose`, `Quality Assessment`, `Security & Execution Gate`, or `Changes`):
+2. **`callouts[]`** places each callout as `> [!<kind>]` directly under the named `section`, which must be an existing `##` heading in `blind_description.md` (for example `Summary`, `Quality Assessment`, `Security & Execution Gate`, `Changes`, or `Reviewer Focus & Risks`):
    - `WARNING`: **Conflict / Unstated Behavior**. The PR description or comments claim X, but the diff does Y; or a file change introduces a behavioral side effect not mentioned in the PR description.
    - `IMPORTANT`: **Unaddressed Review Feedback or Missing Claim**. The PR description claims a fix or test that is absent from the diff, or an open review thread raises a concern that remains unresolved at `HEAD`.
    - `NOTE`: **Helpful Context from PR Body or Discussion**. Background rationale, linked issue context, or design constraints that explain *why* a non-obvious approach was chosen (or note if `threads_complete` is `false` or `latest_head_sha` moved after Stage 1).
@@ -149,18 +161,24 @@ Stage 2 runs the unanchored `code-review` pass (Step 3.2, reading `code_review_p
    - When the PR body says a later PR in the stack handles something, confirm it with `gh pr diff <n>` before accepting the claim; if it is not there, use a `> [!IMPORTANT]` callout.
    - A predecessor that is a draft, closed, or `needs_rebase` is a `> [!NOTE]`. A predecessor whose state is `CLOSED` (not merged) means this PR's base will not land; say so in `## Stack Context`.
    - Do not repeat findings that were already raised and resolved on a predecessor PR.
-5. **Put a `## Prior Review Resolution` table in `prior_resolution_markdown` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**. Perform this prior-thread audit and three-way merge in Step 3.3 *after* the Step 3.2 full-diff review (`rev-a-2` or in-session Steps 1 through 4) has already generated its unanchored findings. Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`):
+5. **Put a `## Prior Review Resolution` section in `prior_resolution_markdown` when re-reviewing (`review_round > 1`) or when `pr_context.json.threads` is non-empty**. Perform this prior-thread audit and three-way merge in Step 3.3 *after* the Step 3.2 full-diff review (`rev-a-2` or in-session Steps 1 through 4) has already generated its unanchored findings. Audit every prior review thread in `pr_context.json.threads` and any archived finding in `prev_review_results.json` against `pr_incremental.diff` and the current checkout (`HEAD`). Start with a count line, include table rows only for items that are not `Addressed` (`Partially Addressed` or `Unaddressed`), and place `Addressed` items inside a nested `<details>` list:
 
    ```markdown
    ## Prior Review Resolution
 
-   Compared Round 1 (`4bd4b791`) against Round 2 (`312a49ba`).
+   Compared Round 1 (`4bd4b791`) against Round 2 (`312a49ba`): 1 addressed, 1 partially addressed, 1 unaddressed.
 
    | Prior Item | Location | Status | Notes |
    | :--- | :--- | :--- | :--- |
-   | H1. Missing null guard on `catalogId` | `src/parser.ts:120` | Addressed | Fixed in `c7b42a27` with unit test |
    | M1. Race in `dispose()` | `src/client.ts:88` | Partially Addressed | Lock added, but error path skips release |
-   | M2. Unused export ` LegacyConfig` | `src/index.ts:14` | Unaddressed | Still exported at `HEAD` (open thread) |
+   | M2. Unused export `LegacyConfig` | `src/index.ts:14` | Unaddressed | Still exported at `HEAD` (open thread) |
+
+   <details>
+   <summary>Addressed items (1)</summary>
+
+   - **H1. Missing null guard on `catalogId`** (`src/parser.ts:120`): Fixed in `c7b42a27` with unit test.
+
+   </details>
    ```
 
    When synthesizing `review_results.md` in Step 3.3 (`code-review` Step 5), reconcile this table with the unanchored Step 3.2 full-diff review (`rev-a-2` or in-session Steps 1 through 4) using the three-way merge rules:
