@@ -15,12 +15,14 @@ from pathlib import Path
 from typing import Any
 
 import packrat_source
+from a2ui_board import review_board_data_model
 from daemon_support import ControlReader
-from models import Event
+from models import Event, ReviewRole
 from monitor_prs import Monitor, _LoopConfig, _Timers, parse_args
-from state import load_state
+from state import MonitorState, load_state, save_state
 from test_packrat_source import (
     FakePackratCli,
+    _db,
     change,
     make_packrat_db,
     set_heartbeat,
@@ -1054,10 +1056,16 @@ class TestPackratMode(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _monitor(self, fake_gh: FakeGh, notifier: Any = None, sleep: Any = None) -> Monitor:
+    def _monitor(
+        self,
+        fake_gh: FakeGh,
+        notifier: Any = None,
+        sleep: Any = None,
+        state_path: str | None = None,
+    ) -> Monitor:
         return Monitor(
             runner=fake_gh,
-            state_path=self.state_path,
+            state_path=state_path or self.state_path,
             clock=self.clk,
             sleep=sleep or self.clk.sleep,
             now=lambda: "2026-10-27T21:15:00Z",
@@ -1264,6 +1272,583 @@ class TestPackratMode(unittest.TestCase):
         self.assertEqual(self.cli.by_command("refresh"), [])
         saved = load_state(self.state_path)
         self.assertEqual(list(saved.snapshots), ["acme/widget#3339"])
+
+
+def _review_pr_node(
+    number: int = 3339,
+    *,
+    repo: str = "acme/widget",
+    author: str = "bob",
+    requested_viewer: str | None = "alice",
+    state: str = "OPEN",
+    head_sha: str = "1111111",
+    updated_at: str = "2026-10-27T21:00:00Z",
+    reviews: list[dict[str, Any]] | None = None,
+    opinionated: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    base = copy.deepcopy(
+        json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+    )
+    base["number"] = number
+    base["url"] = f"https://github.com/{repo}/pull/{number}"
+    base["repository"] = {"nameWithOwner": repo}
+    base["state"] = state
+    base["merged"] = state == "MERGED"
+    base["author"] = {"login": author, "__typename": "User"}
+    base["headRefOid"] = head_sha
+    base["updatedAt"] = updated_at
+    base["reviewRequests"] = {
+        "nodes": (
+            [{"requestedReviewer": {"__typename": "User", "login": requested_viewer}}]
+            if requested_viewer
+            else []
+        )
+    }
+    base["reviews"] = {"nodes": reviews or []}
+    base["latestOpinionatedReviews"] = {"nodes": opinionated or []}
+    base["reviewThreads"] = {"nodes": []}
+    return base
+
+
+def _search_response(
+    viewer: str = "alice",
+    requested: list[tuple[str, int]] | None = None,
+    reviewed: list[tuple[str, int]] | None = None,
+) -> str:
+    return json.dumps(
+        {
+            "data": {
+                "viewer": {"login": viewer},
+                "reviewRequested": {
+                    "nodes": [
+                        {"number": num, "repository": {"nameWithOwner": repo}}
+                        for repo, num in (requested or [])
+                    ]
+                },
+                "reviewed": {
+                    "nodes": [
+                        {"number": num, "repository": {"nameWithOwner": repo}}
+                        for repo, num in (reviewed or [])
+                    ]
+                },
+            }
+        }
+    )
+
+
+def _fetch_response(viewer: str, *prs: dict[str, Any]) -> str:
+    data: dict[str, Any] = {"viewer": {"login": viewer}}
+    for idx, pr in enumerate(prs):
+        data[f"pr{idx}"] = {"pullRequest": pr}
+    return json.dumps({"data": data})
+
+
+class TestReviewsMode(unittest.TestCase):
+    """Tests for ``--reviews`` and ``--wake-on-review`` across packrat and GitHub modes."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.db = make_packrat_db(self.dir / "repos.sqlite", viewer="alice")
+        self.state_path = str(self.dir / "state.json")
+        self.clk = FakeClock()
+        self.cli = FakePackratCli(on_wait=self.clk.sleep)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _add_viewer_item(self, role: str, key: str) -> None:
+        with _db(self.db) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO v_viewer_items VALUES (?,?,?,?)",
+                (role, key, "2026-10-27T21:00:00Z", "2026-10-27T21:00:00Z"),
+            )
+
+    def _remove_viewer_item(self, key: str) -> None:
+        with _db(self.db) as conn:
+            conn.execute("DELETE FROM v_viewer_items WHERE item_key = ?", (key,))
+
+    def _monitor(
+        self,
+        fake_gh: FakeGh,
+        notifier: Any = None,
+        sleep: Any = None,
+        state_path: str | None = None,
+    ) -> Monitor:
+        return Monitor(
+            runner=fake_gh,
+            state_path=state_path or self.state_path,
+            clock=self.clk,
+            sleep=sleep or self.clk.sleep,
+            now=lambda: "2026-10-27T21:15:00Z",
+            epoch_now=lambda: 1793135700.0,
+            notifier=notifier,
+            packrat_runner=self.cli,
+        )
+
+    def test_reviews_cli_flag_validation_and_defaults(self) -> None:
+        for invalid in (
+            ["--reviews", "--stack", "--state", self.state_path],
+            ["--reviews", "--until", "all-green", "--state", self.state_path],
+            ["--reviews", "acme/widget#1", "--state", self.state_path],
+            ["--wake-on-review", "acme/widget#1", "--state", self.state_path],
+            ["--reviews", "--events", "ci_check", "--state", self.state_path],
+            ["acme/widget#1", "--events", "new_review_request", "--state", self.state_path],
+        ):
+            with (
+                self.subTest(argv=invalid),
+                redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                parse_args(invalid)
+
+        rev_args = parse_args(["--reviews", "--state", self.state_path])
+        self.assertEqual(rev_args.role, ReviewRole.REVIEWER)
+        self.assertEqual(rev_args.until, "none")
+        self.assertIsNone(rev_args.repo)
+        self.assertFalse(rev_args.wake_on_review)
+
+        rev_repo = parse_args(
+            ["--reviews", "--wake-on-review", "--repo", "acme/widget", "--state", self.state_path]
+        )
+        self.assertEqual(rev_repo.repo, "acme/widget")
+        self.assertTrue(rev_repo.wake_on_review)
+
+        author_args = parse_args(["acme/widget#1", "--state", self.state_path])
+        self.assertEqual(author_args.role, ReviewRole.AUTHOR)
+        self.assertEqual(author_args.until, "closed")
+
+    def test_reviews_packrat_once_and_startup_pruning_with_zero_gh_calls(self) -> None:
+        prior_state = MonitorState(
+            snapshots={
+                "acme/widget#5": make_snapshot(number=5, state="CLOSED", author="bob", mine=False),
+                "acme/widget#6": make_snapshot(number=6, state="OPEN", author="bob", mine=False),
+            }
+        )
+        save_state(Path(self.state_path), prior_state)
+
+        pr_open = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
+        pr_closed = _review_pr_node(
+            6, repo="acme/widget", requested_viewer=None, state="CLOSED"
+        )
+        store_graphql_pr(self.db, pr_open)
+        store_graphql_pr(self.db, pr_closed)
+        self._add_viewer_item("review_requested", "acme/widget#3339")
+
+        args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--state",
+                self.state_path,
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+            ]
+        )
+        fake_gh = FakeGh([])
+        mon = self._monitor(fake_gh)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(len(fake_gh.calls), 0)
+        payload = json.loads(out.getvalue())
+        self.assertNotIn("acme/widget#5", payload["prs"])
+        self.assertIn("acme/widget#3339", payload["prs"])
+        self.assertIn("acme/widget#6", payload["prs"])
+        kinds = {(e["pr"], e["kind"]) for e in payload["events"]}
+        self.assertIn(("acme/widget#3339", "new_review_request"), kinds)
+        self.assertIn(("acme/widget#6", "terminal"), kinds)
+        board_dsl = (self.dir / "board.a2ui").read_text(encoding="utf-8")
+        self.assertIn("Review Queue", board_dsl)
+        self.assertIn('"canReview": true', board_dsl)
+
+    def test_reviews_empty_queue_github_sets_viewer_without_fetch_prs(self) -> None:
+        store_dir = self.dir / "a2ui_store"
+        fake_gh = FakeGh([("graphql", 0, _search_response("alice", [], []), "")])
+        args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--source",
+                "github",
+                "--state",
+                self.state_path,
+                "--conversation-id",
+                "conv-empty",
+                "--a2ui-store-dir",
+                str(store_dir),
+            ]
+        )
+        mon = self._monitor(fake_gh)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+        self.assertEqual(code, 0)
+        self.assertEqual(mon.viewer, "alice")
+        self.assertEqual(len(fake_gh.calls), 1)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["prs"], {})
+        board_dsl = (self.dir / "board.a2ui").read_text(encoding="utf-8")
+        self.assertIn("Queue empty", board_dsl)
+        pane_file = store_dir / "conversations" / "conv-empty" / "monitor.jsonl"
+        self.assertTrue(pane_file.exists())
+        self.assertIn("trigger_pr_review", pane_file.read_text(encoding="utf-8"))
+
+    def test_reviews_packrat_to_github_fallback_when_heartbeat_stale(self) -> None:
+        pr_node = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
+        store_graphql_pr(self.db, pr_node)
+        self._add_viewer_item("review_requested", "acme/widget#3339")
+        set_heartbeat(self.db, 200)
+
+        fake_gh = FakeGh(
+            [
+                ("graphql", 0, _search_response("alice", [("acme/widget", 3339)]), ""),
+                ("graphql", 0, _fetch_response("alice", pr_node), ""),
+            ]
+        )
+        args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--source",
+                "auto",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        mon = self._monitor(fake_gh)
+        out = io.StringIO()
+        with redirect_stdout(out), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+        self.assertEqual(code, 0)
+        payload = json.loads(out.getvalue())
+        self.assertEqual(payload["source"], "github")
+        self.assertEqual(len(fake_gh.calls), 2)
+
+    def test_reviews_mid_session_discovery_packrat_and_github(self) -> None:
+        # 1. Packrat mid-session discovery via batch.viewer_changed
+        pr10 = _review_pr_node(10, repo="acme/widget", requested_viewer="alice")
+        pr20 = _review_pr_node(20, repo="other/repo", requested_viewer="alice")
+        store_graphql_pr(self.db, pr10)
+        self._add_viewer_item("review_requested", "acme/widget#10")
+
+        seed_args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self._monitor(FakeGh([])).run(seed_args)
+
+        def arrive_pr20() -> dict[str, Any]:
+            store_graphql_pr(self.db, pr20)
+            self._add_viewer_item("review_requested", "other/repo#20")
+            return {
+                "seq": 15,
+                "changes": [
+                    {
+                        "seq": 15,
+                        "item_key": "other/repo#20",
+                        "kind": "viewer",
+                        "fields": ["review_requested"],
+                        "at": "2026-10-27T21:05:00Z",
+                    }
+                ],
+            }
+
+        self.cli.changes.append(arrive_pr20)
+        loop_args = parse_args(
+            [
+                "--reviews",
+                "--debounce",
+                "0",
+                "--timeout",
+                "120",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        fake_zero = FakeGh([])
+        out_pr = io.StringIO()
+        with redirect_stdout(out_pr), redirect_stderr(io.StringIO()):
+            code_pr = self._monitor(fake_zero).run(loop_args)
+        self.assertEqual(code_pr, 0)
+        self.assertEqual(len(fake_zero.calls), 0)
+        payload_pr = json.loads(out_pr.getvalue())
+        self.assertIn("other/repo#20", payload_pr["prs"])
+        self.assertEqual(payload_pr["events"][0]["pr"], "other/repo#20")
+        self.assertEqual(payload_pr["events"][0]["kind"], "new_review_request")
+
+        # 2. GitHub mid-session discovery via NotificationPoller.review_requested_unwatched
+        gh_state = str(self.dir / "gh_state.json")
+        notif_unwatched = (
+            "HTTP/2.0 200 OK\r\nLast-Modified: Tue, 27 Oct 2026 21:16:00 GMT\r\n"
+            "X-Poll-Interval: 60\r\n\r\n"
+            + json.dumps(
+                [
+                    {
+                        "reason": "review_requested",
+                        "repository": {"full_name": "other/repo"},
+                        "subject": {
+                            "type": "PullRequest",
+                            "url": "https://api.github.com/repos/other/repo/pulls/20",
+                        },
+                    }
+                ]
+            )
+        )
+        fake_gh = FakeGh(
+            [
+                ("graphql", 0, _search_response("alice", [], []), ""),
+                ("notifications", 0, notif_unwatched, ""),
+                ("graphql", 0, _search_response("alice", [("other/repo", 20)], []), ""),
+                ("graphql", 0, _fetch_response("alice", pr20), ""),
+            ]
+        )
+        gh_args = parse_args(
+            [
+                "--reviews",
+                "--source",
+                "github",
+                "--debounce",
+                "0",
+                "--timeout",
+                "120",
+                "--state",
+                gh_state,
+            ]
+        )
+        out_gh = io.StringIO()
+        with redirect_stdout(out_gh), redirect_stderr(io.StringIO()):
+            code_gh = self._monitor(fake_gh, state_path=gh_state).run(gh_args)
+        self.assertEqual(code_gh, 0)
+        payload_gh = json.loads(out_gh.getvalue())
+        self.assertIn("other/repo#20", payload_gh["prs"])
+        self.assertEqual(payload_gh["events"][0]["kind"], "new_review_request")
+
+    def test_reviews_mid_session_close_retains_snapshot_unleases_and_reopens(self) -> None:
+        pr_open = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
+        store_graphql_pr(self.db, pr_open)
+        self._add_viewer_item("review_requested", "acme/widget#3339")
+
+        seed_args = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self._monitor(FakeGh([])).run(seed_args)
+
+        pr_closed = _review_pr_node(
+            3339, repo="acme/widget", requested_viewer="alice", state="CLOSED"
+        )
+
+        def close_pr() -> dict[str, Any]:
+            store_graphql_pr(self.db, pr_closed)
+            return change(12, "acme/widget#3339")
+
+        self.cli.changes.append(close_pr)
+        close_args = parse_args(
+            [
+                "--reviews",
+                "--debounce",
+                "0",
+                "--timeout",
+                "120",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        mon_close = self._monitor(FakeGh([]))
+        out_close = io.StringIO()
+        with redirect_stdout(out_close), redirect_stderr(io.StringIO()):
+            code_close = mon_close.run(close_args)
+        self.assertEqual(code_close, 0)
+        self.assertIn("acme/widget#3339", mon_close.state.snapshots)
+        self.assertEqual(mon_close.state.snapshots["acme/widget#3339"].state, "CLOSED")
+        self.assertNotIn("acme/widget#3339", mon_close.watched_keys)
+        remove_calls = [
+            c for c in self.cli.by_command("remove") if "acme/widget#3339" in c
+        ]
+        self.assertEqual(len(remove_calls), 1)
+        dm_closed = review_board_data_model(mon_close.state.snapshots, viewer="alice")
+        self.assertEqual(dm_closed["items"][0]["step"], 0)
+        self.assertEqual(dm_closed["items"][0]["state"], "Closed")
+        self.assertFalse(dm_closed["items"][0]["canReview"])
+
+        # Reopen recovery on a subsequent discovery sweep / viewer_changed
+        pr_reopened = _review_pr_node(
+            3339,
+            repo="acme/widget",
+            requested_viewer="alice",
+            state="OPEN",
+            head_sha="2222222",
+        )
+        store_graphql_pr(self.db, pr_reopened)
+        mon_close.packrat = mon_close._select_source(close_args)
+        assert mon_close.packrat is not None
+        added, _ = mon_close._discover_packrat_review_delta()
+        self.assertEqual(added, ["acme/widget#3339"])
+        self.assertIn("acme/widget#3339", mon_close.watched_keys)
+        mon_close.refresh(added)
+        self.assertEqual(mon_close.state.snapshots["acme/widget#3339"].state, "OPEN")
+        dm_reopened = review_board_data_model(mon_close.state.snapshots, viewer="alice")
+        self.assertTrue(dm_reopened["items"][0]["canReview"])
+
+    def test_reviews_daemon_suppresses_wakeups_unless_wake_on_review(self) -> None:
+        pr_rev1 = _review_pr_node(
+            3339,
+            repo="acme/widget",
+            requested_viewer=None,
+            head_sha="1111111",
+            reviews=[
+                {
+                    "author": {"login": "alice", "__typename": "User"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-10-27T20:00:00Z",
+                    "commit": {"oid": "1111111"},
+                }
+            ],
+            opinionated=[
+                {
+                    "author": {"login": "alice", "__typename": "User"},
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-10-27T20:00:00Z",
+                }
+            ],
+        )
+        pr_rev2 = _review_pr_node(
+            3339,
+            repo="acme/widget",
+            requested_viewer=None,
+            head_sha="2222222",
+            reviews=pr_rev1["reviews"]["nodes"],
+            opinionated=pr_rev1["latestOpinionatedReviews"]["nodes"],
+        )
+        store_graphql_pr(self.db, pr_rev1)
+        self._add_viewer_item("reviewed", "acme/widget#3339")
+
+        control = self.dir / "control.jsonl"
+        log_path = self.dir / "events.jsonl"
+        step = 0
+
+        def push_and_stop() -> dict[str, Any]:
+            nonlocal step
+            step += 1
+            if step == 1:
+                store_graphql_pr(self.db, pr_rev2)
+                return change(11, "acme/widget#3339")
+            control.write_text('{"stop": true}\n', encoding="utf-8")
+            return {"seq": 12, "changes": []}
+
+        # 1. Default --reviews --daemon: silent background update (0 notifier calls)
+        self.cli.changes.extend([push_and_stop, push_and_stop])
+        notifier_silent = FakeNotifier()
+        args_silent = parse_args(
+            [
+                "--reviews",
+                "--daemon",
+                "--debounce",
+                "0",
+                "--conversation-id",
+                "conv-rev",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+                "--log",
+                str(log_path),
+            ]
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code_silent = self._monitor(FakeGh([]), notifier=notifier_silent).run(args_silent)
+        self.assertEqual(code_silent, 0)
+        self.assertEqual(len(notifier_silent.calls), 0)
+        last_silent = json.loads((self.dir / "last.json").read_text(encoding="utf-8"))
+        self.assertEqual(last_silent["notify_mode"], "none")
+        self.assertEqual(last_silent["events"][0]["kind"], "author_head_push")
+        self.assertTrue(log_path.exists())
+
+        # 2. With --wake-on-review: sends agentapi wake notification
+        control.unlink(missing_ok=True)
+        store_graphql_pr(self.db, pr_rev1)
+        state_wake = str(self.dir / "wake" / "state.json")
+        control_wake = self.dir / "wake" / "control.jsonl"
+        step_wake = 0
+
+        def push_and_stop_wake() -> dict[str, Any]:
+            nonlocal step_wake
+            step_wake += 1
+            if step_wake == 1:
+                store_graphql_pr(self.db, pr_rev2)
+                return change(21, "acme/widget#3339")
+            control_wake.parent.mkdir(parents=True, exist_ok=True)
+            control_wake.write_text('{"stop": true}\n', encoding="utf-8")
+            return {"seq": 22, "changes": []}
+
+        self.cli.changes.extend([push_and_stop_wake, push_and_stop_wake])
+        notifier_wake = FakeNotifier()
+        args_wake = parse_args(
+            [
+                "--reviews",
+                "--wake-on-review",
+                "--daemon",
+                "--debounce",
+                "0",
+                "--conversation-id",
+                "conv-rev-wake",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                state_wake,
+            ]
+        )
+        mon_wake = Monitor(
+            runner=FakeGh([]),
+            state_path=state_wake,
+            clock=self.clk,
+            sleep=self.clk.sleep,
+            now=lambda: "2026-10-27T21:15:00Z",
+            epoch_now=lambda: 1793135700.0,
+            notifier=notifier_wake,
+            packrat_runner=self.cli,
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code_wake = mon_wake.run(args_wake)
+        self.assertEqual(code_wake, 0)
+        self.assertEqual(len(notifier_wake.calls), 1)
+        self.assertEqual(notifier_wake.calls[0]["conversation_id"], "conv-rev-wake")
 
 
 if __name__ == "__main__":

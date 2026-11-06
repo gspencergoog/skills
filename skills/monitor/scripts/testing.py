@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from models import CheckRun, PrSnapshot, Thread
+from models import CheckRun, PrSnapshot, Thread, ViewerReview
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
@@ -90,6 +90,19 @@ def make_thread(
     )
 
 
+def make_viewer_review(
+    state: str = "COMMENTED",
+    submitted_at: str = "2026-10-27T21:00:00Z",
+    commit_oid: str | None = "aaa1111",
+) -> ViewerReview:
+    """Constructs a ``ViewerReview`` with defaults for unit tests."""
+    return ViewerReview(
+        state=state,
+        submitted_at=submitted_at,
+        commit_oid=commit_oid,
+    )
+
+
 def make_snapshot(**overrides: Any) -> PrSnapshot:
     """Constructs an open ``PrSnapshot`` with sensible defaults, applying ``overrides``."""
     number = int(overrides.get("number", 3339))
@@ -123,6 +136,8 @@ def make_snapshot(**overrides: Any) -> PrSnapshot:
         "stack_parent_state": None,
         "truncated": [],
         "updated_at": "2026-10-27T21:05:00Z",
+        "viewer_last_review": None,
+        "viewer_opinionated_state": None,
     }
     defaults.update(overrides)
     return PrSnapshot(**defaults)

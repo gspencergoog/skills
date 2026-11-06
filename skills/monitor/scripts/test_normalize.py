@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from models import ViewerReview
 from normalize import normalize_checks, normalize_pr, resolve_stack_parents
 from testing import load_fixture
 
@@ -93,6 +94,134 @@ class TestNormalize(unittest.TestCase):
         snap_from_repo = normalize_pr(raw_with_repo, viewer="alice", repo="legacy/Widget")
         self.assertEqual(snap_from_repo.repo, "canonical/widget")
         self.assertEqual(snap_from_repo.key, "canonical/widget#3339")
+
+    def test_normalize_pr_extracts_viewer_last_review_and_opinionated_state(self) -> None:
+        payload = json.loads(load_fixture("pr_open_ci_running.json"))
+        base_raw = payload["data"]["pr0"]["pullRequest"]
+
+        # 1. COMMENTED-only review with commit oid and PENDING ignored
+        raw_commented = {
+            **base_raw,
+            "latestOpinionatedReviews": {"nodes": []},
+            "reviews": {
+                "nodes": [
+                    {
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-10-27T20:00:00Z",
+                        "commit": {"oid": "1111aaaa"},
+                        "author": {"login": "other", "__typename": "User"},
+                    },
+                    {
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-10-27T20:30:00Z",
+                        "commit": {"oid": "2222bbbb"},
+                        "author": {"login": "Bob", "__typename": "User"},
+                    },
+                    {
+                        "state": "PENDING",
+                        "submittedAt": "2026-10-27T21:00:00Z",
+                        "commit": {"oid": "3333cccc"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                ]
+            },
+        }
+        snap = normalize_pr(raw_commented, viewer="  bob ")
+        self.assertEqual(
+            snap.viewer_last_review,
+            ViewerReview(
+                state="COMMENTED",
+                submitted_at="2026-10-27T20:30:00Z",
+                commit_oid="2222bbbb",
+            ),
+        )
+        self.assertIsNone(snap.viewer_opinionated_state)
+
+        # 2. Post-approval COMMENTED keeps viewer_opinionated_state == "APPROVED"
+        raw_post_approval = {
+            **base_raw,
+            "latestOpinionatedReviews": {
+                "nodes": [
+                    {
+                        "state": "APPROVED",
+                        "author": {"login": "BOB"},
+                        "submittedAt": "2026-10-27T20:10:00Z",
+                    }
+                ]
+            },
+            "reviews": {
+                "nodes": [
+                    {
+                        "state": "APPROVED",
+                        "submittedAt": "2026-10-27T20:10:00Z",
+                        "commit": {"oid": "aaaa1111"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                    {
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-10-27T20:45:00Z",
+                        "commit": {"oid": "bbbb2222"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                ]
+            },
+        }
+        snap_approved = normalize_pr(raw_post_approval, viewer="bob")
+        self.assertEqual(snap_approved.viewer_opinionated_state, "APPROVED")
+        self.assertEqual(
+            snap_approved.viewer_last_review,
+            ViewerReview(
+                state="COMMENTED",
+                submitted_at="2026-10-27T20:45:00Z",
+                commit_oid="bbbb2222",
+            ),
+        )
+
+        # 3. Greatest submittedAt wins, ties broken by later node, and missing commit_oid -> None
+        raw_ties = {
+            **base_raw,
+            "latestOpinionatedReviews": {
+                "nodes": [
+                    {
+                        "state": "CHANGES_REQUESTED",
+                        "author": {"login": "bob"},
+                        "submittedAt": "2026-10-27T20:50:00Z",
+                    }
+                ]
+            },
+            "reviews": {
+                "nodes": [
+                    {
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-10-27T20:50:00Z",
+                        "commit": {"oid": "first"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                    {
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": "2026-10-27T20:50:00Z",
+                        "commit": None,
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                    {
+                        "state": "APPROVED",
+                        "submittedAt": "2026-10-27T19:00:00Z",
+                        "commit": {"oid": "older"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                ]
+            },
+        }
+        snap_ties = normalize_pr(raw_ties, viewer="bob")
+        self.assertEqual(snap_ties.viewer_opinionated_state, "CHANGES_REQUESTED")
+        self.assertEqual(
+            snap_ties.viewer_last_review,
+            ViewerReview(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-10-27T20:50:00Z",
+                commit_oid=None,
+            ),
+        )
 
 
 if __name__ == "__main__":

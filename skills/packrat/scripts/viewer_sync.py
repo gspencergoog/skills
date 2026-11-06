@@ -1,12 +1,14 @@
 """The packrat service's `viewer` worker: the viewer's own PRs, review requests, and issues.
 
-`ViewerSync` runs three GitHub searches (ported from `inflight`'s
+`ViewerSync` runs four GitHub searches (ported from `inflight`'s
 `SEARCH_QUERY`) and records their members in the `viewer_sets` table:
 
 - `authored`: PRs the viewer wrote (open, merged, or closed), updated within
   the lookback window, so recently merged PRs stay on the board.
 - `review_requested`: open PRs that request the viewer's review. No lookback
   applies, because a pending request stays actionable however old the PR is.
+- `reviewed`: open PRs that the viewer has reviewed (excluding the viewer's own
+  PRs), so active review turns stay tracked while the PR remains open.
 - `issues`: issues (open or closed) that involve the viewer, updated within
   the lookback window.
 
@@ -65,11 +67,13 @@ VIEWER_LEASE_TTL_S = 1800
 
 SET_AUTHORED = "authored"
 SET_REVIEW_REQUESTED = "review_requested"
+SET_REVIEWED = "reviewed"
 SET_ISSUES = "issues"
 
 _ALIAS_TO_SET: dict[str, str] = {
     "authored": SET_AUTHORED,
     "reviewRequested": SET_REVIEW_REQUESTED,
+    "reviewed": SET_REVIEWED,
     "issues": SET_ISSUES,
 }
 """Maps each search alias in `SEARCH_QUERY` to its `viewer_sets.set_name`."""
@@ -77,15 +81,16 @@ _ALIAS_TO_SET: dict[str, str] = {
 _ALIAS_VARIABLES: dict[str, tuple[str, str, str]] = {
     "authored": ("authored", "afterAuthored", "withAuthored"),
     "reviewRequested": ("reviewReq", "afterReview", "withReview"),
+    "reviewed": ("reviewed", "afterReviewed", "withReviewed"),
     "issues": ("issues", "afterIssues", "withIssues"),
 }
 """Per alias: the query-string, cursor, and include-flag variable names."""
 
 SEARCH_QUERY = """
 query PackratViewerSearch(
-  $authored: String!, $reviewReq: String!, $issues: String!, $first: Int!,
-  $afterAuthored: String, $afterReview: String, $afterIssues: String,
-  $withAuthored: Boolean!, $withReview: Boolean!, $withIssues: Boolean!
+  $authored: String!, $reviewReq: String!, $reviewed: String!, $issues: String!, $first: Int!,
+  $afterAuthored: String, $afterReview: String, $afterReviewed: String, $afterIssues: String,
+  $withAuthored: Boolean!, $withReview: Boolean!, $withReviewed: Boolean!, $withIssues: Boolean!
 ) {
   rateLimit { cost remaining limit resetAt }
   viewer { login }
@@ -96,6 +101,11 @@ query PackratViewerSearch(
   }
   reviewRequested: search(type: ISSUE, query: $reviewReq, first: $first, after: $afterReview)
     @include(if: $withReview) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ...PrKey }
+  }
+  reviewed: search(type: ISSUE, query: $reviewed, first: $first, after: $afterReviewed)
+    @include(if: $withReviewed) {
     pageInfo { hasNextPage endCursor }
     nodes { ...PrKey }
   }
@@ -193,12 +203,14 @@ def lookback_date(lookback_days: int, now: float) -> str:
     return datetime.fromtimestamp(now - lookback_days * 86400, UTC).strftime("%Y-%m-%d")
 
 
-def search_strings(lookback_days: int, now: float) -> dict[str, str]:
-    """Builds the three search strings, keyed by search alias."""
-    since = f"updated:>={lookback_date(lookback_days, now)}"
+def search_strings(lookback_days: int, now: float | None = None) -> dict[str, str]:
+    """Builds the four search strings, keyed by search alias."""
+    moment = time.time() if now is None else now
+    since = f"updated:>={lookback_date(lookback_days, moment)}"
     return {
         "authored": f"is:pr author:@me archived:false {since}",
         "reviewRequested": "is:pr is:open review-requested:@me archived:false",
+        "reviewed": "is:pr is:open reviewed-by:@me -author:@me archived:false",
         "issues": f"is:issue involves:@me archived:false {since}",
     }
 
@@ -271,12 +283,15 @@ class ViewerSync:
             )
         authored_keys, authored_open = self._pr_keys(result.nodes["authored"])
         review_keys, review_open = self._pr_keys(result.nodes["reviewRequested"])
+        reviewed_keys, reviewed_open = self._pr_keys(result.nodes["reviewed"])
         open_prs: set[str] = set()
         open_prs.update(authored_open)
         open_prs.update(review_open)
+        open_prs.update(reviewed_open)
         sets = {
             SET_AUTHORED: authored_keys,
             SET_REVIEW_REQUESTED: review_keys,
+            SET_REVIEWED: reviewed_keys,
             SET_ISSUES: self._store_issues(result.nodes["issues"]),
         }
         changed: set[str] = set()
@@ -286,11 +301,10 @@ class ViewerSync:
             changed.update(added, removed)
             if set_name != SET_ISSUES:
                 new_prs.update(added)
-        pr_keys = sets[SET_AUTHORED] | sets[SET_REVIEW_REQUESTED]
         unleased = self._update_leases(open_prs, moment)
         # PRs that just closed or merged lose their lease here, so refresh them
         # once now; otherwise their live row could stay OPEN indefinitely (H2).
-        self._refresh_new_prs(sorted((new_prs | unleased) & pr_keys))
+        self._refresh_new_prs(sorted(new_prs | unleased))
         return sorted(changed)
 
     # ----- search -----------------------------------------------------------------

@@ -88,7 +88,7 @@ Before returning your findings, apply the self-critique and falsification pass f
 - Keep at most 3 Questions (`Q1...`), each naming a specific claim and the exact check (`To settle`) that settles it. Drop generic "make sure that..." reminders.
 - Quote the exact text for every document finding at `Read` (or `Fetched`) with its location (both sides for an inconsistency). Search the document and its linked files before claiming a term or section is missing.
 - Drop API findings that demand refactoring untouched legacy code outside the diff or adding speculative design patterns (builders, factories) without concrete cognitive complexity.
-- Keep each finding's combined comment prose (`Body` + `Why` + unfenced `Suggestion`) to at most 80 words and 4 sentences. Keep every sentence to at most 25 words and cognitive complexity $\text{PCC} \le 5$, with zero banned AI words, em-dashes, or 4-noun clusters.
+- Keep each finding's combined comment prose (`Body` + `Why` + unfenced `Suggestion`) to at most 80 words and 4 sentences. Keep every sentence to at most 30 words and cognitive complexity $\text{PCC} \le 5$, with zero banned AI words, em-dashes, or 4-noun clusters.
 
 ## Read-Only and Worker Isolation Mandate
 
@@ -113,7 +113,7 @@ When the prompt includes a **Verification Mandate**, you may run Tier 2 commands
 
 Deliver your completed report once at the end of your pass using the channel for your execution tier:
 
-- **Tier 1 (Jetski `swarm` worker)**: Post the complete markdown report on the board with `post_message` addressed to `@coordinator`, and call `swarm_wait` in the same turn.
+- **Tier 1 (Jetski `swarm` worker)**: Write the complete markdown report to `rev_<your-name>.md` in your own artifact directory (never in the coordinator's directory, which you cannot write), post a 3-line summary (verdict, finding counts by severity, and the report's absolute path) via `post_message` addressed strictly to `@coordinator`, and call `swarm_wait` in the same turn. If the file write fails, post the complete report instead.
 - **Tier 2 (Subagent via `invoke_subagent` or Claude Code `Agent` / `Task`)**: Return the complete markdown report via `send_message` (or your final subagent return message).
 - **Tier 3 (In-session review)**: Proceed directly to Step 5 synthesis using the drafted sections.
 
@@ -144,8 +144,8 @@ Format your report using these exact sections and field labels:
 - **Category**: `<ambiguity | inconsistency | incompleteness | unverifiable | infeasible | rationale-gap | compatibility | traceability | drift | structure | wording>` (document files only)
 - **Focus**: `<theme-id>` (focus reviewers only, on findings that belong to the assigned theme)
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` -- <command and trimmed output (<=15 lines), quoted text with `path:line`, or line-cited trace>
-- **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 25 words/sentence, PCC <= 5).>
-- **Why**: <1 short sentence (<= 25 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences).>
+- **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5).>
+- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences).>
 - **Suggestion**: (Optional) <Compilable drop-in code replacement, replacement text, or specific question. At most one fenced block.>
 - **Repro test**: (Optional, `--verify` only) <The `review_scratch_*` test that reproduces the defect, in one fenced block.>
 

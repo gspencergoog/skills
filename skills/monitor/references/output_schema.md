@@ -8,13 +8,15 @@ monitor_prs.py [PR ...] --state FILE [options]
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `PR` | required (except `--once` with existing state) | Pull request targets: `owner/repo#N`, `https://github.com/owner/repo/pull/N`, or `N` with `--repo` |
-| `--repo OWNER/REPO` | none | Default repository for bare pull request numbers |
-| `--stack` | `false` | Expand each target pull request to include its parent chain and direct child pull requests (up to 20 total) |
+| `PR` | required in author mode (forbidden with `--reviews`) | Pull request targets: `owner/repo#N`, `https://github.com/owner/repo/pull/N`, or `N` with `--repo` |
+| `--repo OWNER/REPO` | none | Default repository for bare pull request numbers in author mode, or optional repository filter under `--reviews` |
+| `--reviews` | `false` | Watch the authenticated user's open review queue across all repositories (or within `--repo`). Incompatible with positional `PR` arguments, `--stack`, and `--until all-green` |
+| `--wake-on-review` | `false` | Send `agentapi send-message` wake notifications on actionable reviewer events under `--reviews --daemon` (requires `--reviews`) |
+| `--stack` | `false` | Expand each target pull request to include its parent chain and direct child pull requests (up to 60 total) |
 | `--state FILE` | required | Path to the JSON state snapshot file (created automatically on first run) |
-| `--events LIST` | all kinds | Comma-separated subset of `EVENT_KINDS` that should wake the caller |
+| `--events LIST` | all kinds | Comma-separated subset of `EVENT_KINDS` (or `REVIEWER_EVENT_KINDS` under `--reviews`) that should wake the caller |
 | `--actionable-only` | `false` | Update `state.json`, `board.a2ui`, and the A2UI Pane board file in place on passive events (a dismissed board is not recreated); exit `0` only on actionable events |
-| `--until MODE` | `closed` | Terminal condition for exit code `3`: `merged`, `closed`, or `all-green` |
+| `--until MODE` | `closed` (`none` with `--reviews`) | Terminal condition for exit code `3`: `merged`, `closed`, `all-green`, or `none` |
 | `--timeout SECONDS` | none | Exit with code `2` when no matching event occurs within this duration |
 | `--debounce SECONDS` | `20` | Fixed window after the first matching wake event to collect follow-on transitions (`0` disables) |
 | `--poll SECONDS` | `120` | Targeted GraphQL refresh interval in seconds. Refetches only flagged pull requests (notifications, `PENDING` CI, `UNKNOWN` mergeability, pending debounce, `control.jsonl` `pushed_sha`) and makes no call when none are flagged. With `--no-notifications`, every step is a full refresh |
@@ -117,6 +119,8 @@ Example:
       "stack_parent_state": null,
       "truncated": [],
       "updated_at": "2026-10-27T21:08:00Z",
+      "viewer_last_review": null,
+      "viewer_opinionated_state": null,
       "eta_s": null
     }
   },
@@ -154,7 +158,18 @@ Example:
 
 `source` is `packrat` while the data comes from `packrat serve`, and `github` in direct mode or after a fallback (see `--source`).
 
-## 4. Event Kinds (`EVENT_KINDS`)
+### Reviewer Snapshot and Board Fields (`--reviews`)
+
+Each `PrSnapshot` in `prs` includes two viewer-specific review fields used by `classify_review_turn(snap, viewer)`:
+
+- `viewer_last_review`: object `{"state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED", "submitted_at": "<ISO-8601>", "commit_oid": "<sha>"}` for the viewer's latest non-pending review, or `null`.
+- `viewer_opinionated_state`: `"APPROVED"`, `"CHANGES_REQUESTED"`, or `null` from `latestOpinionatedReviews` for the viewer.
+
+Under `--reviews`, `monitor_prs.py` renders `REVIEW_BOARD_COMPONENTS` into the `a2ui-pane` store (`surfaceId: "monitor"`) and writes `review_board_dsl` to `board.a2ui`. The data model provides `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/segments`, `$/progressSummary`, `$/ackLabel`, and `$/items`. Each `$/items` entry includes `id`, `key`, `number`, `repo`, `url`, `title`, `author`, `meta`, `headSha`, `wave`, `base`, `state`, `tone`, `ci`, `ciTone`, `review`, `reviewTone`, `step`, `detail`, `actionLabel`, and `canReview`. `actionLabel` is `"Review"`, `"Re-review"`, `"Merged"`, or `"Closed"`, and `canReview` is `true` whenever `state == "OPEN"` (including open draft pull requests for early review passes), enabling the `trigger_pr_review` button.
+
+## 4. Event Kinds (`EVENT_KINDS` and `REVIEWER_EVENT_KINDS`)
+
+### Event Kinds in Author Mode (`EVENT_KINDS`)
 
 | Kind | Trigger condition | `actionable` | `suggested_action` |
 | :--- | :--- | :--- | :--- |
@@ -171,6 +186,18 @@ Example:
 | `stack_parent` | Watched parent PR's `state` becomes `MERGED` or `CLOSED` | `true` on `MERGED` | `rebase_onto_base` (`MERGED`), else `null` |
 | `approval_dismissed` | Previous approver disappears from `approvals` without entering `changes_requested` when `head_sha` changes | `false` | `null` |
 | `auto_merge` | `auto_merge` boolean toggles | `false` | `null` |
+
+### Event Kinds in Reviewer Mode (`REVIEWER_EVENT_KINDS`, `--reviews`)
+
+| Kind | Trigger condition | `actionable` | `suggested_action` |
+| :--- | :--- | :--- | :--- |
+| `new_review_request` | Open non-draft pull request enters `REQUESTED` without a prior viewer review | `true` | `review_pr` |
+| `draft_ready` | Open pull request transitions from `draft: true` to `draft: false` | `true` when in `REQUESTED` or `RE_REVIEW_NEEDED`, else `false` | `review_pr` when actionable, else `null` |
+| `author_head_push` | `head_sha` advances past `viewer_last_review.commit_oid` on an open non-draft pull request in `RE_REVIEW_NEEDED` | `true` | `review_pr` |
+| `author_thread_reply` | Unresolved review thread receives a newer non-viewer comment after `viewer_last_review.submitted_at` (and watermark) | `true` | `review_pr` |
+| `re_requested_review` | Viewer is directly re-requested (`User`, ignoring `"team:..."`) on an open non-draft pull request after a prior review | `true` | `review_pr` |
+| `approval_dismissed` | Viewer's prior approval disappears while `state == "OPEN"` | `true` when non-draft, else `false` | `review_pr` when actionable, else `null` |
+| `terminal` | Watched review pull request transitions from `OPEN` to `MERGED` or `CLOSED` | `false` | `null` |
 
 ### Monitored Checks and Conclusions
 

@@ -330,6 +330,19 @@ SELECT r.full_name || '#' || o.pr_number AS item_key, o.author, o.author_type, o
 FROM kb.latest_opinionated_reviews o
 JOIN kb.repos r ON r.repo_id = o.repo_id;
 
+CREATE OR REPLACE VIEW v_pr_latest_author_reviews AS
+SELECT
+  r.full_name || '#' || lr.pr_number AS item_key,
+  r.full_name AS repo_full_name,
+  lr.pr_number,
+  lr.author,
+  lr.author_type,
+  lr.state,
+  lr.submitted_at,
+  lr.commit_oid
+FROM kb.latest_reviews lr
+JOIN kb.repos r ON r.repo_id = lr.repo_id;
+
 CREATE OR REPLACE VIEW v_pr_threads AS
 SELECT r.full_name || '#' || t.pr_number AS item_key, t.thread_id, t.is_resolved,
   t.is_outdated, t.last_author, t.last_author_type, t.last_at

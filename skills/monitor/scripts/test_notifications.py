@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from gh_client import GhError
 from notifications import (
+    NotificationPoller,
     NotificationsUnavailable,
     parse_http_response,
     poll,
@@ -65,6 +67,76 @@ class TestNotifications(unittest.TestCase):
             poll(fake, since=None, watched={"acme/widget#3339"})
         with self.assertRaises(GhError):
             poll(fake, since=None, watched={"acme/widget#3339"})
+
+    def test_review_requested_unwatched_tracks_and_resets_per_poll(self) -> None:
+        body_unwatched_req = json.dumps(
+            [
+                {
+                    "id": "2001",
+                    "reason": "review_requested",
+                    "subject": {
+                        "url": "https://api.github.com/repos/acme/widget/pulls/4000",
+                        "type": "PullRequest",
+                    },
+                }
+            ]
+        )
+        body_watched_and_other = json.dumps(
+            [
+                {
+                    "id": "2002",
+                    "reason": "review_requested",
+                    "subject": {
+                        "url": "https://api.github.com/repos/acme/widget/pulls/3339",
+                        "type": "PullRequest",
+                    },
+                },
+                {
+                    "id": "2003",
+                    "reason": "ci_activity",
+                    "subject": {
+                        "url": "https://api.github.com/repos/acme/widget/pulls/5000",
+                        "type": "PullRequest",
+                    },
+                },
+                {
+                    "id": "2004",
+                    "reason": "review_requested",
+                    "subject": {
+                        "url": "https://api.github.com/repos/acme/widget/commits/deadbeef",
+                        "type": "Commit",
+                    },
+                },
+            ]
+        )
+        fake = FakeGh(
+            [
+                ("notifications", 0, f"HTTP/2.0 200 OK\n\n{body_unwatched_req}", ""),
+                ("notifications", 0, f"HTTP/2.0 200 OK\n\n{body_watched_and_other}", ""),
+                ("notifications", 1, load_fixture("notifications_304.txt"), "gh: HTTP 304"),
+            ]
+        )
+        poller = NotificationPoller(fake)
+        watched = {"acme/widget#3339"}
+
+        res1 = poller.poll(since=None, watched=watched)
+        self.assertEqual(res1.changed_keys, set())
+        self.assertTrue(res1.review_requested_unwatched)
+        self.assertTrue(poller.review_requested_unwatched)
+        self.assertTrue(NotificationPoller.review_requested_unwatched)
+
+        res2 = poller.poll(since=None, watched=watched)
+        self.assertEqual(res2.changed_keys, {"acme/widget#3339"})
+        self.assertFalse(res2.review_requested_unwatched)
+        self.assertFalse(poller.review_requested_unwatched)
+        self.assertFalse(NotificationPoller.review_requested_unwatched)
+
+        poller.review_requested_unwatched = True
+        res3 = poller.poll(since="Tue, 27 Oct 2026 21:07:55 GMT", watched=watched)
+        self.assertTrue(res3.not_modified)
+        self.assertFalse(res3.review_requested_unwatched)
+        self.assertFalse(poller.review_requested_unwatched)
+        self.assertFalse(NotificationPoller.review_requested_unwatched)
 
 
 if __name__ == "__main__":

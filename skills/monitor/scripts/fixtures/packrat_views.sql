@@ -30,6 +30,49 @@ CREATE TABLE v_pr_latest_reviews (
   item_key TEXT, author TEXT, author_type TEXT, state TEXT, submitted_at TEXT
 );
 
+CREATE TABLE latest_reviews (
+  item_key TEXT, repo_full_name TEXT, repo_id INTEGER, pr_number INTEGER, author TEXT,
+  author_type TEXT, state TEXT, submitted_at TEXT, commit_oid TEXT
+);
+
+CREATE VIEW v_pr_latest_author_reviews AS
+SELECT
+  COALESCE(item_key, repo_full_name || '#' || pr_number) AS item_key,
+  COALESCE(
+    repo_full_name,
+    CASE WHEN item_key LIKE '%#%' THEN substr(item_key, 1, instr(item_key, '#') - 1) END
+  ) AS repo_full_name,
+  COALESCE(
+    pr_number,
+    CASE WHEN item_key LIKE '%#%' THEN CAST(substr(item_key, instr(item_key, '#') + 1) AS INTEGER) END
+  ) AS pr_number,
+  author,
+  author_type,
+  state,
+  submitted_at,
+  commit_oid
+FROM latest_reviews;
+
+CREATE TRIGGER tr_v_pr_latest_author_reviews_ins
+INSTEAD OF INSERT ON v_pr_latest_author_reviews
+BEGIN
+  INSERT INTO latest_reviews (
+    item_key, repo_full_name, pr_number, author,
+    author_type, state, submitted_at, commit_oid
+  ) VALUES (
+    NEW.item_key, NEW.repo_full_name, NEW.pr_number, NEW.author,
+    NEW.author_type, NEW.state, NEW.submitted_at, NEW.commit_oid
+  );
+END;
+
+CREATE TRIGGER tr_v_pr_latest_author_reviews_del
+INSTEAD OF DELETE ON v_pr_latest_author_reviews
+BEGIN
+  DELETE FROM latest_reviews
+  WHERE COALESCE(item_key, repo_full_name || '#' || pr_number) = OLD.item_key
+    AND COALESCE(author, '') = COALESCE(OLD.author, '');
+END;
+
 CREATE TABLE v_pr_threads (
   item_key TEXT, thread_id TEXT, is_resolved INTEGER, is_outdated INTEGER, last_author TEXT,
   last_author_type TEXT, last_at TEXT

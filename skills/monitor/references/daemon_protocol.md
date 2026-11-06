@@ -6,11 +6,10 @@ This document defines the persistent daemon protocol used by `/monitor`.
 
 In daemon mode (`--daemon`), the monitor process does not terminate when actionable events occur. Instead, it:
 1. Emits the event payload to `<state-dir>/last.json` and updates the A2UI board pane.
-2. Posts an actionable batch message into the conversation via `agentapi send-message`.
-3. Sets an internal acknowledgment gate (`AckGate`) and continues polling in the background.
-4. Reads incremental instructions from `<state-dir>/control.jsonl` on each polling tick.
-5. Emits a reminder if the batch remains unacknowledged beyond `--reminder` seconds.
-6. Once acknowledged, unblocks the gate and sends the next pending batch.
+2. In author mode (or with `--wake-on-review`), posts a batch message via `agentapi send-message` and sets `AckGate`. Under `--reviews --daemon` by default, it records `notify_mode: "none"` in `last.json` and `events.jsonl` without waking the conversation.
+3. Reads incremental instructions from `<state-dir>/control.jsonl` on each polling tick.
+4. Emits a reminder if an active batch remains unacknowledged beyond `--reminder` seconds.
+5. Once acknowledged, unblocks the gate and sends the next pending batch.
 
 ## State Directory Files
 
@@ -64,7 +63,8 @@ When `/monitor` reads from `packrat serve` (`--source auto` with a fresh heartbe
 1. **Start:** `packrat watch add --consumer monitor --id <id> --freshness 120 --ttl 900 <PR>...`, where `<id>` is a hash of `--conversation-id` (or of the state directory). Pull requests that `packrat` hasn't refreshed in the last 15 minutes get a `packrat refresh` and up to 30 seconds to arrive; any still missing are fetched once with `gh`.
 2. **Running:** `packrat watch renew` every 5 minutes. The daemon waits on `packrat changes --since <seq> --wait <debounce>` and re-reads only the changed pull requests from the views. A `{"reset": true}` answer re-reads every watched pull request.
 3. **Exit:** after the daemon loop ends (`stop`, `--timeout`, terminal state, or a signal), `packrat watch remove` drops the leases. A crashed daemon's leases expire after the 900-second TTL. `--once` keeps its lease so the daemon that usually follows starts warm.
-4. **Fallback:** if the heartbeat goes stale or a `packrat` command fails, the daemon switches to direct GitHub polling for the rest of the run, logs it once, and rewrites `armed.json` with `"source": "github"`.
+4. **Review queue discovery and retirement (`--reviews`):** on startup, the daemon discovers up to 60 open review keys from `v_viewer_items` (`discover_review_keys`) and leases them. It re-runs discovery on `packrat changes` viewer-set events (`viewer_changed`), on `--sweep` intervals, or on `/notifications` `review_requested` in GitHub mode. When a watched review pull request closes or merges mid-session, the daemon keeps its terminal row on the board and drops its lease with `packrat watch remove` (`unlease`); reopened pull requests are re-leased on the next sweep.
+5. **Fallback:** if the heartbeat goes stale or a `packrat` command fails, the daemon switches to direct GitHub polling for the rest of the run, logs it once, and rewrites `armed.json` with `"source": "github"`.
 
 ## Exit Codes & Exit Reasons
 

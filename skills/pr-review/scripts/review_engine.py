@@ -36,25 +36,7 @@ _VALID_CALLOUT_KINDS = frozenset({"NOTE", "IMPORTANT", "WARNING"})
 _SECTION_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_LINE_RE = re.compile(r"^\s*(`{3,}|~{3,})")
 
-_FALLBACK_FIX_HINTS: dict[str, str] = {
-    "unparsed-comments": "Format each finding under '## Review Comments' with '### <ID>. <Title>' and bold bullet fields.",
-    "id-sequence": "Number findings sequentially by severity class (C1.., H1.., M1.., L1.., Q1..).",
-    "severity-mismatch": "Match each finding ID prefix (C, H, M, L) to its section or Severity field.",
-    "missing-evidence": "Add '- **Evidence**: `<Executed|Read|Fetched|Deduction|Speculation> - <details>`' to each item.",
-    "evidence-cap": "Lower the finding severity or upgrade the evidence tier to Read or Executed.",
-    "missing-why": "Add '- **Why**: <concrete consequence if shipped as-is>' to each finding and question.",
-    "question-format": "Include File, Line, Evidence, Why, and To settle fields on every question.",
-    "clean-missing-evidence": "Append ': <Executed|Read|Fetched|Deduction> - <what was checked>' to each clean item.",
-    "verified-not-removed": "Remove disproved or verified-clean items from Review Comments and list them under Checked and Found Clean.",
-    "invalid-focus": "Format '- **Focus**: `<theme-id>`' using a lowercase slug.",
-    "playbook-feedback-section": "Remove the '## Playbook Feedback' section from the review report.",
-    "multiple-fences": "Keep at most one fenced code block inside each Suggestion or Repro test field.",
-    "comment-word-limit": "Trim the finding Body and Why prose to 80 words or fewer.",
-    "comment-sentence-limit": "Combine or trim sentences so the finding prose has at most 4 sentences.",
-    "comment-sentence-length": "Split or shorten sentences in Body and Why so each sentence is within the word limit.",
-    "comment-sentence-complexity": "Simplify nested clauses and conjunctions so each sentence has PCC <= 5.",
-    "comment-ai-ism": "Remove AI filler words, hyphens used as dashes, and noun clusters from the comment prose.",
-}
+_FALLBACK_FIX_HINTS: dict[str, str] = dict(getattr(lint_review, "_FIX_HINTS", {}))
 
 _HARDENED_GIT_CONFIG: tuple[tuple[str, str], ...] = (
     ("core.hooksPath", "/dev/null"),
@@ -1587,12 +1569,14 @@ def prepare_code_review(
     paths = classify_artifacts._extract_paths_from_diff(diff_text)
     classification = classify_artifacts.classify_combined(paths, repo_dir, diff_text)
 
-    diff_dir = tempfile.mkdtemp(prefix="pr-review-diffs-")
+    diff_dir: str | None = tempfile.mkdtemp(prefix="pr-review-diffs-")
     stage_error = _stage_diff_for_review(
         diff_path, repo_dir, str(coords.get("base_ref") or ""), diff_dir
     )
     churn = drift = None
     if stage_error:
+        shutil.rmtree(diff_dir, ignore_errors=True)
+        diff_dir = None
         warnings.append(f"stage_diffs.py failed: {stage_error}")
     elif not shutil.which("duckdb"):
         warnings.append("duckdb not installed; churn and drift skipped")
@@ -1813,7 +1797,7 @@ def reconcile_pr_description(
     )
 
     blocks: list[str] = [f"## Intent Alignment: {alignment_heading}"]
-    for optional_block in (stack_block, prior_block, preamble):
+    for optional_block in (preamble, stack_block, prior_block):
         if optional_block:
             blocks.append(optional_block)
     for sec_name, sec_text in sections:

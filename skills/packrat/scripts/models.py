@@ -726,6 +726,17 @@ class OpinionatedReviewRecord:
 
 
 @dataclass(frozen=True)
+class LatestReviewRecord:
+    """Latest non-pending review per author on a PR, including COMMENTED and commit OID."""
+
+    author: str
+    state: str
+    author_type: str | None = None
+    submitted_at: str | None = None
+    commit_oid: str | None = None
+
+
+@dataclass(frozen=True)
 class ThreadActivityRecord:
     """A review thread's resolution state and its last comment."""
 

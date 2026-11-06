@@ -153,6 +153,20 @@ SELECT
 FROM latest_opinionated_reviews o
 JOIN repos r ON r.repo_id = o.repo_id;
 
+DROP VIEW IF EXISTS v_pr_latest_author_reviews;
+CREATE VIEW v_pr_latest_author_reviews AS
+SELECT
+  r.full_name || '#' || lr.pr_number AS item_key,
+  r.full_name AS repo_full_name,
+  lr.pr_number,
+  lr.author,
+  lr.author_type,
+  lr.state,
+  lr.submitted_at,
+  lr.commit_oid
+FROM latest_reviews lr
+JOIN repos r ON r.repo_id = lr.repo_id;
+
 DROP VIEW IF EXISTS v_pr_threads;
 CREATE VIEW v_pr_threads AS
 SELECT

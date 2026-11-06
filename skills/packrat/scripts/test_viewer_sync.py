@@ -72,6 +72,7 @@ def _page(
     review: Sequence[Any] = (),
     issues: Sequence[Any] = (),
     cursors: Mapping[str, str] | None = None,
+    reviewed: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Builds one search payload; `cursors` maps an alias to its next-page cursor."""
     cursors = cursors or {}
@@ -80,6 +81,7 @@ def _page(
             "rateLimit": {"cost": 1},
             "authored": _conn(authored, cursors.get("authored")),
             "reviewRequested": _conn(review, cursors.get("reviewRequested")),
+            "reviewed": _conn(reviewed, cursors.get("reviewed")),
             "issues": _conn(issues, cursors.get("issues")),
         }
     }
@@ -328,7 +330,7 @@ class TestViewerSync(unittest.TestCase):
         sync.refresh_viewer(now=T0)
         changed = sync.refresh_viewer(now=T0 + 60)
         self.assertEqual(changed, ["acme/lib#30", "me/app#1", "me/app#3"])
-        self.assertEqual(self.hot.calls[-1], ["me/app#3"])
+        self.assertEqual(self.hot.calls[-1], ["me/app#1", "me/app#3"])
         self.assertEqual(self._leases(T0 + 60), ["acme/lib#9", "me/app#2", "me/app#3"])
         self.assertEqual(
             self._viewer_items(),
@@ -363,9 +365,14 @@ class TestViewerSync(unittest.TestCase):
         self.assertEqual(
             week["reviewReq"], "is:pr is:open review-requested:@me archived:false"
         )
+        self.assertEqual(
+            week["reviewed"],
+            "is:pr is:open reviewed-by:@me -author:@me archived:false",
+        )
         self.assertIn("updated:>=2026-12-16", month["authored"])
         self.assertIn("updated:>=2026-12-16", month["issues"])
         self.assertEqual(search_strings(30, T0)["reviewRequested"], month["reviewReq"])
+        self.assertEqual(search_strings(30, T0)["reviewed"], month["reviewed"])
 
     def test_keys_use_registered_repo_casing(self) -> None:
         self.store.register_repo("Octo-Org", "Widgets")
@@ -386,22 +393,68 @@ class TestViewerSync(unittest.TestCase):
             _page(
                 authored=[_pr("me/app", 1), None, {}],
                 review=[_pr("me/app", 7)],
-                cursors={"authored": "c1"},
+                cursors={"authored": "c1", "reviewed": "r1"},
+                reviewed=[_pr("acme/lib", 11)],
             ),
-            _page(authored=[_pr("me/app", 2)]),
+            _page(authored=[_pr("me/app", 2)], reviewed=[_pr("acme/lib", 12)]),
         )
         changed = sync.refresh_viewer()
-        self.assertEqual(changed, ["me/app#1", "me/app#2", "me/app#7"])
+        self.assertEqual(
+            changed,
+            ["acme/lib#11", "acme/lib#12", "me/app#1", "me/app#2", "me/app#7"],
+        )
         first, second = (c["variables"] for c in transport.calls)
         self.assertEqual(
-            (first["afterAuthored"], first["withReview"], first["withIssues"]),
-            (None, True, True),
+            (
+                first["afterAuthored"],
+                first["afterReviewed"],
+                first["withReview"],
+                first["withReviewed"],
+                first["withIssues"],
+            ),
+            (None, None, True, True, True),
         )
         self.assertEqual(second["afterAuthored"], "c1")
+        self.assertEqual(second["afterReviewed"], "r1")
         self.assertEqual(
-            (second["withAuthored"], second["withReview"], second["withIssues"]),
-            (True, False, False),
+            (
+                second["withAuthored"],
+                second["withReview"],
+                second["withReviewed"],
+                second["withIssues"],
+            ),
+            (True, False, True, False),
         )
+        self.assertEqual(
+            self._viewer_items(),
+            {
+                "authored": ["me/app#1", "me/app#2"],
+                "review_requested": ["me/app#7"],
+                "reviewed": ["acme/lib#11", "acme/lib#12"],
+            },
+        )
+        self.assertEqual(
+            self._leases(),
+            ["acme/lib#11", "acme/lib#12", "me/app#1", "me/app#2", "me/app#7"],
+        )
+
+    def test_reviewed_pr_closing_or_merging_gets_final_h2_refresh(self) -> None:
+        # When an open `reviewed` PR merges or closes, it leaves the `is:open`
+        # search results completely (`unleased` is no longer in `pr_keys`),
+        # and still receives one final H2 hot refresh so `v_pr_live` updates.
+        sync, _ = self._sync(
+            _page(reviewed=[_pr("acme/lib", 42)]),
+            _page(reviewed=[]),
+        )
+        self.assertEqual(sync.refresh_viewer(now=T0), ["acme/lib#42"])
+        self.assertEqual(self._viewer_items(), {"reviewed": ["acme/lib#42"]})
+        self.assertEqual(self._leases(T0), ["acme/lib#42"])
+        self.hot.calls.clear()
+
+        self.assertEqual(sync.refresh_viewer(now=T0 + 900), ["acme/lib#42"])
+        self.assertEqual(self._viewer_items(), {})
+        self.assertEqual(self._leases(T0 + 900), [])
+        self.assertEqual(self.hot.calls, [["acme/lib#42"]])
 
     def test_missing_alias_ends_its_paging(self) -> None:
         sync, transport = self._sync({"data": {"authored": _conn([_pr("me/app", 1)])}})
@@ -461,7 +514,13 @@ class TestViewerSync(unittest.TestCase):
         self.assertEqual(changed, ["acme/lib#30", "acme/lib#9", "me/app#1", "me/app#2"])
         self.assertEqual(self._viewer_items(), {})
         self.assertEqual(self._leases(T0 + 60), [])
-        self.assertEqual(len(self.hot.calls), 1)
+        self.assertEqual(
+            self.hot.calls,
+            [
+                ["acme/lib#9", "me/app#1", "me/app#2"],
+                ["acme/lib#9", "me/app#1", "me/app#2"],
+            ],
+        )
 
     def test_renamed_repo_in_viewer_search_merges_alias(self) -> None:
         pr_old = {

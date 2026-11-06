@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
-from models import Event, PrSnapshot
+from models import (
+    Event,
+    PrSnapshot,
+    ReviewerEventKind,
+    ReviewStep,
+    classify_review_turn,
+)
 
 
 @dataclass
@@ -471,6 +479,215 @@ def diff_snapshots(prev: PrSnapshot | None, cur: PrSnapshot, ctx: DiffContext) -
     return events
 
 
+def _is_directly_requested(snap: PrSnapshot, viewer_norm: str) -> bool:
+    return bool(viewer_norm) and any(r.lower() == viewer_norm for r in snap.requested_reviewers)
+
+
+def _is_reviewer_approved(snap: PrSnapshot, viewer_norm: str) -> bool:
+    if snap.viewer_opinionated_state == "APPROVED":
+        return True
+    return bool(viewer_norm) and any(a.lower() == viewer_norm for a in snap.approvals)
+
+
+def _is_unread_reviewer_thread(thread: Any, viewer_norm: str, cutoff: str) -> bool:
+    if thread.resolved or not thread.last_comment_at:
+        return False
+    if viewer_norm and thread.last_author.lower() == viewer_norm:
+        return False
+    return bool(cutoff) and thread.last_comment_at > cutoff
+
+
+def _unread_reviewer_threads(snap: PrSnapshot, ctx: DiffContext, viewer_norm: str) -> list[str]:
+    last = snap.viewer_last_review
+    if last is None or not last.submitted_at:
+        return []
+    reported_map = ctx.reported_threads.get(snap.key) or {}
+    unread: list[str] = []
+    for thread in snap.threads:
+        cutoff = max(reported_map.get(thread.id, ""), last.submitted_at)
+        if _is_unread_reviewer_thread(thread, viewer_norm, cutoff):
+            unread.append(thread.id)
+    return unread
+
+
+def _make_new_review_request_event(cur: PrSnapshot) -> Event:
+    return Event(
+        pr=cur.key,
+        kind=ReviewerEventKind.NEW_REVIEW_REQUEST.value,
+        from_value=None,
+        to_value="REQUESTED",
+        actionable=True,
+        suggested_action="review_pr",
+        summary="review requested",
+        detail={"author": cur.author, "head_sha": cur.head_sha},
+    )
+
+
+def _make_re_requested_event(cur: PrSnapshot, prev: PrSnapshot | None = None) -> Event:
+    return Event(
+        pr=cur.key,
+        kind=ReviewerEventKind.RE_REQUESTED_REVIEW.value,
+        from_value=list(prev.requested_reviewers) if prev is not None else None,
+        to_value=list(cur.requested_reviewers),
+        actionable=True,
+        suggested_action="review_pr",
+        summary="re-review requested",
+        detail={"author": cur.author, "head_sha": cur.head_sha},
+    )
+
+
+def _make_author_head_push_event(cur: PrSnapshot, from_sha: str | None) -> Event:
+    reviewed_sha = cur.viewer_last_review.commit_oid if cur.viewer_last_review else None
+    return Event(
+        pr=cur.key,
+        kind=ReviewerEventKind.AUTHOR_HEAD_PUSH.value,
+        from_value=from_sha,
+        to_value=cur.head_sha,
+        actionable=True,
+        suggested_action="review_pr",
+        summary=f"author pushed {cur.head_sha[:7]}",
+        detail={"reviewed_sha": reviewed_sha},
+    )
+
+
+def _make_author_thread_reply_event(
+    cur: PrSnapshot, thread_ids: list[str], prev: PrSnapshot | None = None
+) -> Event:
+    return Event(
+        pr=cur.key,
+        kind=ReviewerEventKind.AUTHOR_THREAD_REPLY.value,
+        from_value=len(prev.threads) if prev is not None else 0,
+        to_value=len(thread_ids),
+        actionable=True,
+        suggested_action="review_pr",
+        summary=f"{len(thread_ids)} new author thread reply(s)",
+        detail={"thread_ids": thread_ids},
+    )
+
+
+def _diff_reviewer_initial(
+    cur: PrSnapshot,
+    ctx: DiffContext,
+    cur_step: ReviewStep,
+    viewer_norm: str,
+) -> list[Event]:
+    if cur.state != "OPEN" or cur.draft:
+        return []
+    if cur_step == ReviewStep.REQUESTED:
+        return [_make_new_review_request_event(cur)]
+    if cur_step != ReviewStep.RE_REVIEW_NEEDED:
+        return []
+    if _is_directly_requested(cur, viewer_norm):
+        return [_make_re_requested_event(cur)]
+    last = cur.viewer_last_review
+    if last is not None and bool(last.commit_oid) and last.commit_oid != cur.head_sha:
+        return [_make_author_head_push_event(cur, last.commit_oid)]
+    unread = _unread_reviewer_threads(cur, ctx, viewer_norm)
+    if unread:
+        return [_make_author_thread_reply_event(cur, unread)]
+    return []
+
+
+def _diff_reviewer_draft_and_requests(
+    prev: PrSnapshot,
+    cur: PrSnapshot,
+    prev_step: ReviewStep,
+    cur_step: ReviewStep,
+    viewer_norm: str,
+) -> list[Event]:
+    events: list[Event] = []
+    if prev.draft and not cur.draft:
+        actionable = cur_step in {ReviewStep.REQUESTED, ReviewStep.RE_REVIEW_NEEDED}
+        events.append(
+            Event(
+                pr=cur.key,
+                kind=ReviewerEventKind.DRAFT_READY.value,
+                from_value=True,
+                to_value=False,
+                actionable=actionable,
+                suggested_action="review_pr" if actionable else None,
+                summary="ready for review",
+                detail={},
+            )
+        )
+    newly_requested = _is_directly_requested(cur, viewer_norm) and not _is_directly_requested(
+        prev, viewer_norm
+    )
+    if (
+        not cur.draft
+        and not prev.draft
+        and prev.viewer_last_review is None
+        and cur_step == ReviewStep.REQUESTED
+        and (prev_step != ReviewStep.REQUESTED or prev.state != "OPEN" or newly_requested)
+    ):
+        events.append(_make_new_review_request_event(cur))
+    if cur.viewer_last_review is not None and not cur.draft and newly_requested:
+        events.append(_make_re_requested_event(cur, prev))
+    return events
+
+
+def _diff_reviewer_rework(
+    prev: PrSnapshot,
+    cur: PrSnapshot,
+    ctx: DiffContext,
+    cur_step: ReviewStep,
+    viewer_norm: str,
+) -> list[Event]:
+    events: list[Event] = []
+    if _is_reviewer_approved(prev, viewer_norm) and not _is_reviewer_approved(cur, viewer_norm):
+        actionable = not cur.draft
+        events.append(
+            Event(
+                pr=cur.key,
+                kind=ReviewerEventKind.APPROVAL_DISMISSED.value,
+                from_value="APPROVED",
+                to_value=cur.viewer_opinionated_state,
+                actionable=actionable,
+                suggested_action="review_pr" if actionable else None,
+                summary="approval dismissed",
+                detail={"head_sha": cur.head_sha},
+            )
+        )
+    last = cur.viewer_last_review
+    if cur.draft or last is None or cur_step != ReviewStep.RE_REVIEW_NEEDED:
+        return events
+    if prev.head_sha != cur.head_sha and bool(last.commit_oid) and cur.head_sha != last.commit_oid:
+        events.append(_make_author_head_push_event(cur, prev.head_sha))
+    unread = _unread_reviewer_threads(cur, ctx, viewer_norm)
+    if unread:
+        events.append(_make_author_thread_reply_event(cur, unread, prev))
+    return events
+
+
+def diff_reviewer_snapshots(
+    prev: PrSnapshot | None, cur: PrSnapshot, ctx: DiffContext
+) -> list[Event]:
+    """Computes reviewer-mode ``Event`` transitions between ``prev`` and ``cur``."""
+    cur_step, _cur_tier = classify_review_turn(cur, ctx.viewer)
+    viewer_norm = ctx.viewer.strip().lower()
+    if prev is None:
+        return _diff_reviewer_initial(cur, ctx, cur_step, viewer_norm)
+    if prev.state == "OPEN" and cur.state in {"MERGED", "CLOSED"}:
+        return [
+            Event(
+                pr=cur.key,
+                kind=ReviewerEventKind.TERMINAL.value,
+                from_value=prev.state,
+                to_value=cur.state,
+                actionable=False,
+                suggested_action=None,
+                summary=f"PR {cur.state.lower()}",
+                detail={},
+            )
+        ]
+    if cur.state != "OPEN":
+        return []
+    prev_step, _prev_tier = classify_review_turn(prev, ctx.viewer)
+    events = _diff_reviewer_draft_and_requests(prev, cur, prev_step, cur_step, viewer_norm)
+    events.extend(_diff_reviewer_rework(prev, cur, ctx, cur_step, viewer_norm))
+    return events
+
+
 def filter_events(events: list[Event], kinds: set[str] | None) -> list[Event]:
     """Filters ``events`` to ``kinds`` when provided."""
     if not kinds:
@@ -494,11 +711,13 @@ def is_green(snap: PrSnapshot) -> bool:
     return req_sum == "SUCCESS" or snap.rollup_state in ("SUCCESS", None)
 
 
-def is_terminal(snapshots: dict[str, PrSnapshot], until: str | None = None) -> bool:
+def is_terminal(snapshots: Mapping[str, PrSnapshot], until: str | None = None) -> bool:
     """Checks whether all watched PRs satisfy the terminal condition."""
+    if until is not None and until.strip().lower() == "none":
+        return False
     if not snapshots:
         return False
-    mode = (until or "closed").lower()
+    mode = (until or "closed").strip().lower()
     if mode == "merged":
         return all(s.state == "MERGED" for s in snapshots.values())
     if mode == "all-green":
@@ -520,11 +739,12 @@ def summarize(events: list[Event]) -> str:
 
 def snapshot_thread_watermarks(snap: PrSnapshot, viewer: str = "") -> dict[str, str]:
     """Returns ``{thread_id: last_comment_at}`` for unresolved non-viewer threads on ``snap``."""
+    viewer_norm = viewer.strip().lower()
     out: dict[str, str] = {}
     for thread in snap.threads:
         if thread.resolved:
             continue
-        if viewer and thread.last_author == viewer:
+        if viewer_norm and thread.last_author.lower() == viewer_norm:
             continue
         out[thread.id] = thread.last_comment_at
     return out

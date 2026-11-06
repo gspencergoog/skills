@@ -1,21 +1,24 @@
 ---
 name: monitor
 description: >-
-  Watches one or more GitHub pull requests from the current conversation for
-  review status, CI check completions, merge conflicts, review assignment, and
-  stack state changes, updating a live stack_board A2UI pane from a background
-  daemon and waking the main agent via agentapi to fix CI failures and merge
-  conflicts on the user's own pull requests. Use when the user runs /monitor,
-  asks to watch or babysit a pull request or stack, wants automatic CI or
-  conflict fixes as checks finish, or asks to be notified when a pull request is
-  green and ready to merge. Flags: --stack, --actionable-only, --until, --events,
-  --timeout, --once, --no-a2ui, --daemon, --source. Don't use for reviewing a pull request
-  (use pr-review) or addressing comments once (use pr-feedback-handler).
+  Watches GitHub pull requests or the user's review queue from the current
+  conversation for review status, CI check completions, merge conflicts, review
+  assignment, and stack state changes, updating a live stack_board A2UI pane
+  from a background daemon and waking the main agent via agentapi to fix CI
+  failures and merge conflicts on the user's pull requests. Use when the user
+  runs /monitor, asks to watch or babysit a pull request, stack, or review
+  queue, wants automatic CI or conflict fixes, or asks to be notified when a
+  pull request is ready to merge. Flags: --reviews, --wake-on-review, --stack,
+  --actionable-only, --until, --events, --timeout, --once, --no-a2ui, --daemon,
+  --source. Don't use for reviewing a pull request (use pr-review) or addressing
+  comments once (use pr-feedback-handler).
 ---
 
 # PR Monitor (`/monitor`)
 
-`monitor` watches one or more GitHub pull requests across a session. Its helper script, [scripts/monitor_prs.py](scripts/monitor_prs.py), polls GitHub notifications (`If-Modified-Since`, free `304` responses every 60 seconds) and diffs each pull request against a per-conversation state file. GraphQL refetches are targeted: every `--poll` interval (default 120 seconds) it refetches only flagged pull requests (named in a notification, CI still `PENDING`, mergeability `UNKNOWN`, events in the pending debounce batch, or a `pushed_sha` in `control.jsonl`), and makes no GraphQL call when none are flagged. A full refresh of every watched pull request runs every `--sweep` interval (default 600 seconds). With `--no-notifications`, every `--poll` step is a full refresh. Each GraphQL call logs its point cost to `stderr` (`monitor: graphql cost=N remaining=R ...`).
+`monitor` watches one or more GitHub pull requests across a session. Its helper script, [scripts/monitor_prs.py](scripts/monitor_prs.py), polls GitHub notifications (`If-Modified-Since`, free `304` responses every 60 seconds) and diffs each pull request against a per-conversation state file. GraphQL refetches are targeted: every `--poll` interval (default 120 seconds) it refetches only flagged pull requests (named in a notification, CI still `PENDING`, mergeability `UNKNOWN`, events in the pending debounce batch, or a `pushed_sha` in `control.jsonl`), and makes no GraphQL call when none are flagged.
+
+A full refresh of every watched pull request runs every `--sweep` interval (default 600 seconds). With `--no-notifications`, every `--poll` step is a full refresh. Each GraphQL call logs its point cost to `stderr` (`monitor: graphql cost=N remaining=R ...`).
 
 ### Data source: `packrat` or direct GitHub
 
@@ -33,13 +36,18 @@ On every refresh, `monitor_prs.py` writes `<conversation-scratch-dir>/monitor/bo
 
 Read [references/action_policy.md](references/action_policy.md) before acting on any event, [references/output_schema.md](references/output_schema.md) for the JSON payload contract, CLI flags, event kinds, and exit codes, and [references/daemon_protocol.md](references/daemon_protocol.md) for the control file protocol.
 
-## 1. Resolve Target Pull Requests
+## 1. Resolve Target Pull Requests or Review Queue
 
-Pass the target pull requests explicitly on the `monitor_prs.py` command line. Never rely on the script to guess targets from the current git branch:
+Choose between author mode (explicit pull request targets) and reviewer mode (`--reviews`):
 
-1. Include every pull request the user names in their prompt (`owner/repo#123`, a pull request URL, or `#123` with `--repo owner/repo`).
-2. Add every open pull request already discussed or created in the current conversation.
-3. Pass `--stack` when the user asks to watch a stack or when any target pull request is part of a branch stack.
+- **Author / explicit targets mode (default)**: Pass the target pull requests explicitly on the `monitor_prs.py` command line. Never rely on the script to guess targets from the current git branch:
+  1. Include every pull request the user names in their prompt (`owner/repo#123`, a pull request URL, or `#123` with `--repo owner/repo`).
+  2. Add every open pull request already discussed or created in the current conversation.
+  3. Pass `--stack` when the user asks to watch a stack or when any target pull request is part of a branch stack.
+- **Review queue mode (`--reviews`)**: Pass `--reviews` (with no positional pull request arguments) when the user asks to watch their incoming review queue (`/monitor --reviews`).
+  1. Omit `--repo` to watch open review requests and active reviews across all repositories, or pass `--repo owner/repo` to scope the queue to a single repository.
+  2. Under `--reviews`, `--until` defaults to `none` so an empty or all-closed queue keeps watching for new review requests.
+  3. In `--reviews --daemon`, `monitor_prs.py` updates the A2UI review-queue pane, `last.json`, and `events.jsonl` in the background at zero token cost and suppresses `agentapi send-message` wakeups by default. Pass `--wake-on-review` only when the user explicitly asks to be notified in chat on new or updated review requests.
 
 Store all monitor files inside the conversation scratch directory:
 
@@ -52,7 +60,7 @@ Store all monitor files inside the conversation scratch directory:
 
 ## 2. Initial Snapshot and Live Pane Setup
 
-Before launching the background daemon (and after pushing a fix), run a single immediate pass with `--once`:
+Before starting the background daemon (and after pushing a fix), run a single pass with `--once`. Replace `<PR_1> <PR_2>` with `--reviews` for the review queue:
 
 ```bash
 python3 <skill-dir>/scripts/monitor_prs.py \
@@ -108,6 +116,13 @@ When the daemon wakes the conversation, read `<conversation-scratch-dir>/monitor
    echo '{"ack": 1}' >> <conversation-scratch-dir>/monitor/control.jsonl
    ```
 4. The daemon automatically consumes the commands from `control.jsonl`, updates its internal state, and continues monitoring.
+5. When the user clicks **Review** or **Re-review** on a `--reviews` card, the pane sends `<a2ui-action>` with `name: "trigger_pr_review"` and `context: {"pr": "<display_id>", "key": "<repo>#<number>", "repo": "<repo>", "number": <number>, "url": "<url>", "headSha": "<sha>"}`:
+   - When `agentapi` is on `PATH`, start an isolated review conversation so the `/monitor` session stays lightweight:
+     ```bash
+     env -u ANTIGRAVITY_SOURCE_METADATA agentapi new-conversation --title "Review <repo>#<number>" "/pr-review <url>"
+     ```
+     Pass only `"/pr-review <url>"` as the prompt. Omit the pull request title and branch name so [pr-review](../pr-review/SKILL.md) Stage 1 blind diff summary stays unanchored. Reply in chat with `[Review <repo>#<number>](conversation://<id>)`.
+   - When `agentapi` is not on `PATH`, run [pr-review](../pr-review/SKILL.md) inline on `<url>`.
 
 ## 5. Clean Exit
 

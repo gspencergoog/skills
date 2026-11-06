@@ -139,6 +139,7 @@ _DRY_RUN_WRITES: dict[str, Callable[..., Any]] = {
     "replace_check_runs": _returns(False),
     "replace_review_requests": _returns(False),
     "replace_latest_opinionated_reviews": _returns(False),
+    "replace_latest_reviews": _returns(False),
     "replace_viewer_set": _returns(([], [])),
     "add_watch": _echo_watch,
     "renew_watch": _returns(0),

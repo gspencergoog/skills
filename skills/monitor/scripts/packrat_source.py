@@ -57,11 +57,13 @@ class ChangeBatch:
         seq: The feed position to pass as the next `since`.
         keys: Watched item keys with at least one change row.
         reset: True when `since` fell behind the retained feed; take a full snapshot.
+        viewer_changed: True when `watch_viewer_sets` is enabled and a `viewer` row arrived.
     """
 
     seq: int
     keys: set[str] = field(default_factory=set)
     reset: bool = False
+    viewer_changed: bool = False
 
 
 def connect_readonly(db_path: Path) -> sqlite3.Connection:
@@ -182,6 +184,19 @@ def _review_node(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _author_review_node(row: sqlite3.Row) -> dict[str, Any]:
+    commit_oid = row["commit_oid"]
+    return {
+        "state": row["state"],
+        "submittedAt": row["submitted_at"],
+        "commit": {"oid": commit_oid} if commit_oid else None,
+        "author": {
+            "login": row["author"],
+            "__typename": row["author_type"] or "User",
+        },
+    }
+
+
 def _commit_node(live: sqlite3.Row, checks: list[dict[str, Any]]) -> dict[str, Any]:
     rollup = None
     if live["rollup_state"] is not None or checks:
@@ -213,6 +228,7 @@ def build_raw_pr(
     reviewers: list[sqlite3.Row],
     reviews: list[sqlite3.Row],
     threads: list[sqlite3.Row],
+    author_reviews: Sequence[sqlite3.Row] = (),
 ) -> dict[str, Any]:
     """Builds the GraphQL `PullRequest` node shape `normalize_pr()` reads from view rows."""
     auto_merge = live["auto_merge_enabled_at"]
@@ -244,6 +260,7 @@ def build_raw_pr(
         },
         "assignees": {"nodes": []},
         "latestOpinionatedReviews": {"nodes": [_review_node(r) for r in reviews]},
+        "reviews": {"nodes": [_author_review_node(r) for r in author_reviews]},
         "reviewThreads": {
             "totalCount": len(threads),
             "nodes": [_thread_node(t) for t in threads],
@@ -300,6 +317,11 @@ class PackratSource:
             raise PackratError(f"packrat {args[0]} returned invalid JSON: {exc}") from exc
         return payload if isinstance(payload, dict) else {}
 
+    @property
+    def session_id(self) -> str:
+        """Alias for `consumer_id` matching the packrat watch session identifier."""
+        return self.consumer_id
+
     def _watch_args(self, action: str) -> list[str]:
         return ["watch", action, "--consumer", CONSUMER, "--id", self.consumer_id]
 
@@ -311,6 +333,14 @@ class PackratSource:
         args = [*self._watch_args("add"), "--freshness", str(self.freshness_s)]
         self._run_json([*args, "--ttl", str(self.ttl_s)], items)
         self.watched.update(items)
+
+    def unlease(self, keys: Iterable[str]) -> None:
+        """Releases leases on `keys` for this monitor instance (`packrat watch remove`)."""
+        items = valid_item_keys(keys)
+        if not items:
+            return
+        self._run_json(self._watch_args("remove"), items)
+        self.watched.difference_update(items)
 
     def renew(self) -> None:
         """Extends every lease of this instance by the TTL (`packrat watch renew`)."""
@@ -327,22 +357,40 @@ class PackratSource:
         if items:
             self._run_json(["refresh"], items)
 
-    def wait_changes(self, since: int, timeout_s: float) -> ChangeBatch:
+    def wait_changes(
+        self,
+        since: float,
+        timeout_s: float | None = None,
+        *,
+        watch_viewer_sets: bool = False,
+    ) -> ChangeBatch:
         """Waits up to `timeout_s` for change rows after `since`, filtered to watched keys."""
-        wait = max(0.0, float(timeout_s))
+        if timeout_s is None:
+            since_seq = 0
+            wait = max(0.0, float(since))
+        else:
+            since_seq = int(since)
+            wait = max(0.0, float(timeout_s))
         payload = self._run_json(
-            ["changes", "--since", str(since), "--wait", f"{wait:g}"],
+            ["changes", "--since", str(since_seq), "--wait", f"{wait:g}"],
             timeout_s=wait + 30.0,
         )
-        seq = int(payload.get("seq") or since)
+        seq = int(payload.get("seq") or since_seq)
         if payload.get("reset"):
-            return ChangeBatch(seq=seq, keys=set(self.watched), reset=True)
+            return ChangeBatch(
+                seq=seq,
+                keys=set(self.watched),
+                reset=True,
+                viewer_changed=bool(watch_viewer_sets),
+            )
+        raw_changes = [row for row in (payload.get("changes") or []) if isinstance(row, dict)]
+        viewer_changed = bool(
+            watch_viewer_sets and any(row.get("kind") == "viewer" for row in raw_changes)
+        )
         changed = {
-            str(row.get("item_key"))
-            for row in payload.get("changes") or []
-            if isinstance(row, dict) and row.get("item_key") in self.watched
+            str(row.get("item_key")) for row in raw_changes if row.get("item_key") in self.watched
         }
-        return ChangeBatch(seq=seq, keys=changed)
+        return ChangeBatch(seq=seq, keys=changed, viewer_changed=viewer_changed)
 
     # ----- view reads ---------------------------------------------------------------
 
@@ -364,6 +412,14 @@ class PackratSource:
                     )
                     for view in _DETAIL_VIEWS
                 ]
+                try:
+                    author_reviews = _rows_by_key(
+                        conn,
+                        "SELECT * FROM v_pr_latest_author_reviews WHERE item_key IN ({marks})",
+                        keys,
+                    )
+                except sqlite3.OperationalError:
+                    author_reviews = {}
                 conn.execute("COMMIT")
         except sqlite3.Error as exc:
             raise PackratError(f"packrat view read failed: {exc}") from exc
@@ -375,9 +431,35 @@ class PackratSource:
                 reviewers.get(key, []),
                 reviews.get(key, []),
                 threads.get(key, []),
+                author_reviews.get(key, []),
             )
             for key, rows in live.items()
         }
+
+    def fetch_snapshots(self, keys: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """Alias for `snapshots(keys)`."""
+        return self.snapshots(keys)
+
+    def discover_review_keys(self, repo: str | None = None) -> list[str]:
+        """Returns open PR keys in the viewer's `review_requested` and `reviewed` sets."""
+        sql = (
+            "SELECT DISTINCT vi.item_key, pl.updated_at "
+            "FROM v_viewer_items vi "
+            "JOIN v_pr_live pl ON pl.item_key = vi.item_key "
+            "WHERE vi.set_name IN ('review_requested', 'reviewed') AND pl.state = 'OPEN'"
+        )
+        params: list[Any] = []
+        cleaned_repo = (repo or "").strip()
+        if cleaned_repo:
+            sql += " AND pl.repo_full_name = ?"
+            params.append(cleaned_repo)
+        sql += " ORDER BY pl.updated_at DESC, vi.item_key ASC"
+        try:
+            with closing(connect_readonly(self.db_path)) as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            raise PackratError(f"packrat view read failed: {exc}") from exc
+        return [str(row["item_key"]) for row in rows]
 
     def known_keys(self, keys: Sequence[str]) -> dict[str, str]:
         """Maps each key present in `v_pr_live` or `v_pr_basic` to its canonical `owner/repo#N`."""

@@ -56,9 +56,10 @@ The `packrat serve` service writes these tables. Migrations are tracked in `sche
 | `check_runs` | `(repo_id, pr_number, head_oid, run_key)` | `run_key` (`CheckRun:<databaseId>` or `StatusContext:<context>`; schema v3), `name`, `kind` (`CheckRun` or `StatusContext`), `status`, `conclusion`, `details_url`, `started_at`, `completed_at`, `is_required`, `workflow_run_id` |
 | `review_requests` | `(repo_id, pr_number, reviewer)` | `reviewer_kind` (`User`, `Team`, `Bot`, `Mannequin`) |
 | `latest_opinionated_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state`, `submitted_at` |
+| `latest_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state` (includes `COMMENTED`), `submitted_at`, `commit_oid` (schema v8) |
 | `thread_activity` | `thread_id` | `repo_id`, `pr_number`, `is_resolved`, `is_outdated`, `last_author`, `last_author_type`, `last_at` |
 | `notifications` | `thread_id` | `reason`, `subject_type`, `item_key`, `updated_at`, `unread`, `seen_at` |
-| `viewer_sets` | `(set_name, item_key)` | `set_name` (`authored`, `review_requested`, `issues`), `first_seen_at`, `last_seen_at` |
+| `viewer_sets` | `(set_name, item_key)` | `set_name` (`authored`, `review_requested`, `reviewed`, `issues`), `first_seen_at`, `last_seen_at` |
 | `watches` | `(consumer, consumer_id, item_key)` | `freshness_s`, `lease_expires_at` |
 | `refresh_requests` | `item_key` | `requested_at` |
 | `changes` | `seq` (autoincrement) | `item_key`, `kind`, `fields` (JSON array), `at` |
@@ -70,7 +71,7 @@ Item keys are `owner/name#number` with the repository's registered casing. Times
 
 ### SQLite Reader Views
 
-Tools that read live data (`/monitor`, `inflight`, the watchdog) open `repos.sqlite` read-only and query only these views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. [reader_contract.md](reader_contract.md) documents every column, along with the lease and change-feed rules.
+Tools that read live data (`/monitor`, `inflight`, the watchdog) open `repos.sqlite` read-only and query only these views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. [reader_contract.md](reader_contract.md) documents every column, along with the lease and change-feed rules.
 
 `v_pr_checks` has one row per check run or status context on the current head, keyed by `run_key`. Several rows can share a `name` (re-runs, or one job name in two workflows), so judge every row rather than one per name. `v_item_comments` holds the 10 newest conversation comments per PR and issue, with `author_type` (`User` or `Bot`).
 
@@ -92,7 +93,7 @@ When running `packrat sql "<query>"` (or `duckdb -batch -dark-mode -init ~/.loca
 - `v_pr_lifecycle`: one row per PR with `opened_at`, `first_ready_at`, `first_review_requested_at`, `first_review_at`, `first_approval_at`, `merged_at`, `merged_by`, `draft_cycles`, `force_pushes_after_first_review`, `reviewed_before_request`, and the minute latencies `ready_to_first_review_min`, `request_to_first_review_min`, and `ready_to_merge_min`. Review columns count human reviews only. `first_ready_at` is the first ready-for-review event for a PR opened as a draft, `NULL` while such a PR is still a draft, and `opened_at` otherwise. `reviewed_before_request` is true when a human review exists and no review request came before it. `request_to_first_review_min` is negative when the review came first.
 - `v_review_request_latency`: one row per review request with `reviewer`, `reviewer_type`, `requested_at`, `requested_by`, `removed_at` (the first removal before the same reviewer is requested again), `first_review_at` (that reviewer's first submitted review after the request), and `latency_min`. Team requests have no `first_review_at`.
 - `v_issue_pr_links`: one row per `(repo, issue_number, pr_number)` with the strongest `link_type` (`closed_by` > `closes` > `xref` > `references`), every type seen in `link_types`, and `issue_key` / `pr_key`. It adds `closed_by` for issues closed by a commit whose `commits.pr_number` is known, and drops pairs whose `issue_number` is a PR.
-- Live GitHub views with the same names and columns as the SQLite reader views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. DuckDB can't evaluate the SQLite views, so `init.sql` defines DuckDB copies of them.
+- Live GitHub views with the same names and columns as the SQLite reader views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. DuckDB can't evaluate the SQLite views, so `init.sql` defines DuckDB copies of them.
 - `v_watches`: every lease, with an `active` column that is true while `lease_expires_at` is in the future.
 - `v_changes`: the change feed (`seq`, `item_key`, `kind`, `fields`, `at`).
 - `v_api_calls`: the GitHub API call log (`at`, `worker`, `resource`, `cost`, `remaining`, `reset_at`, `status`).

@@ -380,6 +380,11 @@ class TestClassifyCombined(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.root)
 
+    def test_focus_dedicated_allowed_when_no_diff_text(self):
+        res = classify_combined(["src/service.py"], self.root, None)
+        self.assertTrue(res["focus_dedicated_allowed"])
+        self.assertEqual(res["ring"]["ring"], 2)
+
     def test_focus_dedicated_allowed_flips_above_400(self):
         diff_400 = _make_diff_block("src/service.py", FOCUS_MIN_LINES)
         res_400 = classify_combined([], self.root, diff_400)
@@ -448,6 +453,30 @@ class TestClassifyCombined(unittest.TestCase):
             [a["path"] for a in data["artifacts"]],
             ["lib/public_api.dart", "README.md"],
         )
+
+    def test_cli_combined_piped_diff_extracts_paths_and_rejects_double_stdin(self):
+        diff_payload = _make_diff_block("lib/public_api.dart", 30)
+        out = io.StringIO()
+        with (
+            patch("sys.stdin", io.StringIO(diff_payload)),
+            patch("sys.stdout", out),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            code = main(["--root", str(self.root), "--combined", "--diff-file", "-"])
+        self.assertEqual(code, 0)
+        data = json.loads(out.getvalue())
+        self.assertEqual(data["ring"]["highest_file"], "lib/public_api.dart")
+        self.assertEqual(data["substantive"]["substantive_lines"], 30)
+
+        with (
+            patch("sys.stdin", io.StringIO(diff_payload)),
+            patch("sys.stdout", io.StringIO()),
+            patch("sys.stderr", io.StringIO()),
+        ):
+            err_code = main(
+                ["--root", str(self.root), "--combined", "--diff-file", "-", "-"]
+            )
+        self.assertEqual(err_code, 2)
 
     def test_cli_ring_with_diff_file_gates_panel(self):
         diff_file = self.root / "pr.diff"

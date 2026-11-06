@@ -15,18 +15,26 @@ from unittest import mock
 
 import a2ui_board
 from a2ui_board import (
+    BASIC_CATALOG,
     CALL_ID_PREFIX,
+    REVIEW_BOARD_COMPONENTS,
+    REVIEW_BOARD_STEPS,
     STACK_BOARD_COMPONENTS,
+    STATUS_CATALOG,
     board_data_model,
     board_dsl,
     default_store_dir,
     item_for,
     lifecycle_step,
+    review_board_data_model,
+    review_board_dsl,
+    review_item_for,
+    sort_review_snapshots,
     sync_pane_store,
     write_board_file,
 )
-from models import Event
-from testing import make_check, make_snapshot, make_thread
+from models import Event, ReviewSortTier, ReviewStep
+from testing import make_check, make_snapshot, make_thread, make_viewer_review
 
 
 class TestA2uiBoard(unittest.TestCase):
@@ -565,6 +573,440 @@ class TestDefaultStoreDir(unittest.TestCase):
     def test_returns_none_when_nothing_exists(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(default_store_dir())
+
+
+class TestReviewBoard(unittest.TestCase):
+    """Covers REVIEW_BOARD_COMPONENTS, 6-tier stack sort, and reviewer data models."""
+
+    def test_review_board_components_schema_and_one_shot_false(self) -> None:
+        self.assertEqual(len(REVIEW_BOARD_STEPS), 5)
+        self.assertEqual(
+            [s["label"] for s in REVIEW_BOARD_STEPS],
+            ["Requested", "Waiting on Author", "Re-Review Needed", "Approved", "Merged"],
+        )
+        by_id = {comp["id"]: comp for comp in REVIEW_BOARD_COMPONENTS}
+        self.assertIn("root", by_id)
+        for comp in REVIEW_BOARD_COMPONENTS:
+            self.assertIn(comp["catalogId"], (BASIC_CATALOG, STATUS_CATALOG))
+            if "child" in comp:
+                self.assertIn(comp["child"], by_id)
+            children = comp.get("children")
+            if isinstance(children, list):
+                for child_id in children:
+                    self.assertIn(child_id, by_id)
+            elif isinstance(children, dict):
+                self.assertIn(children["componentId"], by_id)
+
+        progress = by_id["stack_progress"]
+        self.assertEqual(progress["component"], "ProgressBar")
+        self.assertEqual(progress["segments"], {"@path": "/segments"})
+        self.assertEqual(progress["summary"], {"@path": "/progressSummary"})
+        self.assertNotIn("items", progress)
+
+        row_head = by_id["stack_row_head"]
+        self.assertEqual(
+            row_head["children"],
+            [
+                "stack_row_id",
+                "stack_row_state",
+                "stack_row_ci",
+                "stack_row_review",
+                "review_row_btn",
+            ],
+        )
+
+        btn = by_id["review_row_btn"]
+        self.assertEqual(btn["component"], "Button")
+        self.assertEqual(btn["variant"], "borderless")
+        self.assertEqual(btn["child"], "review_row_btn_label")
+        event = btn["action"]["event"]
+        self.assertEqual(event["name"], "trigger_pr_review")
+        self.assertIs(event["context"]["_oneShot"], False)
+        self.assertEqual(event["context"]["pr"], {"@path": "id"})
+        self.assertEqual(event["context"]["key"], {"@path": "key"})
+        self.assertEqual(event["context"]["repo"], {"@path": "repo"})
+        self.assertEqual(event["context"]["number"], {"@path": "number"})
+        self.assertEqual(event["context"]["url"], {"@path": "url"})
+        self.assertEqual(event["context"]["headSha"], {"@path": "headSha"})
+        self.assertEqual(
+            btn["checks"],
+            [
+                {
+                    "condition": {
+                        "@call": "and",
+                        "catalogId": BASIC_CATALOG,
+                        "args": {"values": [{"@path": "canReview"}, True]},
+                    },
+                    "message": "PR is closed or merged",
+                }
+            ],
+        )
+        self.assertIs(by_id["ack_btn"]["action"]["event"]["context"]["_oneShot"], True)
+
+    def test_sort_review_snapshots_tiers_clusters_and_waves(self) -> None:
+        # Stack A: #101 (root, wave 0, older own_ts) <- #102 (child, wave 1, newer own_ts)
+        # Both in Tier 1 (REVIEW_REQUESTED). Cluster max ts is 2026-11-05T12:00:00Z.
+        stack_a_root = make_snapshot(
+            number=101,
+            key="acme/widget#101",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        stack_a_child = make_snapshot(
+            number=102,
+            key="acme/widget#102",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            stack_parent="acme/widget#101",
+            updated_at="2026-11-05T12:00:00Z",
+        )
+        # Standalone PR #103 in Tier 1 with own_ts 11:00:00Z (< Stack A cluster max 12:00:00Z,
+        # even though #103's own_ts > #101's own_ts 10:00:00Z).
+        standalone = make_snapshot(
+            number=103,
+            key="acme/widget#103",
+            mine=False,
+            author="carol",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T11:00:00Z",
+        )
+        # Re-review needed PR #104 in Tier 0 (RE_REVIEW_NEEDED)
+        re_review = make_snapshot(
+            number=104,
+            key="acme/widget#104",
+            mine=False,
+            author="dave",
+            head_sha="bbb2222",
+            viewer_last_review=make_viewer_review(
+                state="COMMENTED",
+                submitted_at="2026-11-05T08:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            updated_at="2026-11-05T09:00:00Z",
+        )
+        # Draft PR #105 in Tier 2 (DRAFT_REQUESTED)
+        draft_pr = make_snapshot(
+            number=105,
+            key="acme/widget#105",
+            mine=False,
+            author="eve",
+            draft=True,
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T13:00:00Z",
+        )
+        # Waiting on author PR #106 in Tier 3 (WAITING_ON_AUTHOR)
+        waiting_pr = make_snapshot(
+            number=106,
+            key="acme/widget#106",
+            mine=False,
+            author="frank",
+            head_sha="ccc3333",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-11-05T09:30:00Z",
+                commit_oid="ccc3333",
+            ),
+            updated_at="2026-11-05T09:30:00Z",
+        )
+        # Approved PR #107 in Tier 4 (APPROVED_OPEN)
+        approved_pr = make_snapshot(
+            number=107,
+            key="acme/widget#107",
+            mine=False,
+            author="grace",
+            approvals=["alice"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(
+                state="APPROVED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="ddd4444",
+            ),
+            updated_at="2026-11-05T14:00:00Z",
+        )
+        # Terminal Closed PR #108 in Tier 5 (TERMINAL)
+        closed_pr = make_snapshot(
+            number=108,
+            key="acme/widget#108",
+            mine=False,
+            author="heidi",
+            state="CLOSED",
+            updated_at="2026-11-05T15:00:00Z",
+        )
+
+        rows = sort_review_snapshots(
+            [
+                closed_pr,
+                approved_pr,
+                waiting_pr,
+                draft_pr,
+                standalone,
+                stack_a_child,
+                stack_a_root,
+                re_review,
+            ],
+            viewer="alice",
+        )
+        ordered_numbers = [snap.number for snap, _, _, _ in rows]
+        self.assertEqual(ordered_numbers, [104, 101, 102, 103, 105, 106, 107, 108])
+        self.assertEqual(rows[0][2], ReviewSortTier.RE_REVIEW_NEEDED)
+        self.assertEqual(rows[-1][2], ReviewSortTier.TERMINAL)
+        waves_by_num = {snap.number: wave for snap, _, _, wave in rows}
+        self.assertEqual(waves_by_num[101], 0)
+        self.assertEqual(waves_by_num[102], 1)
+        self.assertEqual(waves_by_num[103], 0)
+        direct_item = review_item_for(stack_a_root, viewer="alice", multi_repo=False)
+        self.assertEqual(direct_item["id"], "PR 101")
+
+    def test_sort_review_snapshots_cycle_safe(self) -> None:
+        cyc1 = make_snapshot(
+            number=201,
+            key="acme/widget#201",
+            stack_parent="acme/widget#202",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        cyc2 = make_snapshot(
+            number=202,
+            key="acme/widget#202",
+            stack_parent="acme/widget#201",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        rows = sort_review_snapshots({cyc1.key: cyc1, cyc2.key: cyc2}, viewer="alice")
+        self.assertEqual([s.number for s, _, _, _ in rows], [201, 202])
+
+    def test_closed_row_stays_step_zero_neutral_and_excluded_from_merged_segments(self) -> None:
+        merged = make_snapshot(
+            number=301,
+            key="acme/widget#301",
+            mine=False,
+            author="bob",
+            state="MERGED",
+            approvals=["alice"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(state="APPROVED", commit_oid="1111111"),
+            updated_at="2026-11-05T12:00:00Z",
+        )
+        closed_unmerged = make_snapshot(
+            number=302,
+            key="acme/widget#302",
+            mine=False,
+            author="carol",
+            state="CLOSED",
+            viewer_last_review=None,
+            updated_at="2026-11-05T11:00:00Z",
+        )
+        open_req = make_snapshot(
+            number=303,
+            key="acme/widget#303",
+            mine=False,
+            author="dave",
+            state="OPEN",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+
+        dm = review_board_data_model(
+            [merged, closed_unmerged, open_req],
+            viewer="alice",
+            observed_at="2026-11-05T12:05:00Z",
+        )
+        self.assertEqual(dm["title"], "Review Queue (3)")
+        self.assertEqual(dm["steps"], REVIEW_BOARD_STEPS)
+
+        by_num = {item["number"]: item for item in dm["items"]}
+        closed_item = by_num[302]
+        self.assertEqual(closed_item["state"], "Closed")
+        self.assertEqual(closed_item["tone"], "neutral")
+        self.assertEqual(closed_item["step"], int(ReviewStep.REQUESTED))
+        self.assertEqual(closed_item["step"], 0)
+        self.assertEqual(closed_item["review"], "Unreviewed")
+        self.assertEqual(closed_item["reviewTone"], "neutral")
+        self.assertEqual(closed_item["actionLabel"], "Closed")
+        self.assertFalse(closed_item["canReview"])
+
+        merged_item = by_num[301]
+        self.assertEqual(merged_item["state"], "Merged")
+        self.assertEqual(merged_item["tone"], "success")
+        self.assertEqual(merged_item["step"], int(ReviewStep.MERGED))
+        self.assertEqual(merged_item["review"], "Approved by you")
+        self.assertEqual(merged_item["reviewTone"], "success")
+        self.assertEqual(merged_item["actionLabel"], "Merged")
+        self.assertFalse(merged_item["canReview"])
+
+        open_item = by_num[303]
+        self.assertEqual(open_item["actionLabel"], "Review")
+        self.assertTrue(open_item["canReview"])
+
+        seg_by_label = {seg["label"]: seg for seg in dm["segments"]}
+        self.assertEqual(seg_by_label["Requested"]["count"], 1)
+        self.assertEqual(seg_by_label["Requested"]["tone"], "warning")
+        self.assertEqual(seg_by_label["Merged"]["count"], 1)
+        self.assertEqual(seg_by_label["Merged"]["tone"], "success")
+        self.assertEqual(seg_by_label["Closed"]["count"], 1)
+        self.assertEqual(seg_by_label["Closed"]["tone"], "neutral")
+        self.assertEqual(dm["progressSummary"], "1 requested · 1 merged · 1 closed")
+
+    def test_review_item_for_multi_repo_details_and_dsl(self) -> None:
+        re_review_snap = make_snapshot(
+            number=410,
+            repo="acme/alpha",
+            key="acme/alpha#410",
+            url="https://github.com/acme/alpha/pull/410",
+            mine=False,
+            author="bob",
+            base_ref="main",
+            head_sha="9999999abcdef",
+            viewer_last_review=make_viewer_review(
+                state="COMMENTED",
+                submitted_at="2026-11-05T10:00:00Z",
+                commit_oid="1111111abcdef",
+            ),
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    resolved=False,
+                    last_author="bob",
+                    last_comment_at="2026-11-05T10:05:00Z",
+                )
+            ],
+            checks=[
+                make_check(
+                    name="unit",
+                    status="IN_PROGRESS",
+                    conclusion=None,
+                    started_at="2026-11-05T10:08:00Z",
+                )
+            ],
+            rollup_state="PENDING",
+        )
+        ready_snap = make_snapshot(
+            number=411,
+            repo="acme/beta",
+            key="acme/beta#411",
+            url="https://github.com/acme/beta/pull/411",
+            mine=False,
+            author="carol",
+            base_ref="release",
+            head_sha="7777777abcdef",
+            approvals=["alice"],
+            review_decision="APPROVED",
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(
+                state="APPROVED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="7777777abcdef",
+            ),
+            checks=[make_check(name="unit", status="COMPLETED", conclusion="SUCCESS")],
+        )
+        dm = review_board_data_model(
+            [re_review_snap, ready_snap],
+            viewer="alice",
+            durations={"acme/alpha:unit": [180]},
+            now=1793873340.0,
+            observed_at="2026-11-05T10:09:00Z",
+        )
+        items = dm["items"]
+        self.assertEqual(items[0]["id"], "alpha#410")
+        self.assertEqual(items[0]["meta"], "by @bob · acme/alpha · base main")
+        self.assertEqual(items[0]["actionLabel"], "Re-review")
+        self.assertTrue(items[0]["canReview"])
+        self.assertEqual(items[0]["review"], "Re-review needed")
+        self.assertEqual(items[0]["reviewTone"], "warning")
+        self.assertIn("New commit `9999999` since your review (`1111111`)", items[0]["detail"])
+        self.assertIn("1 unread thread reply", items[0]["detail"])
+        self.assertIn("ETA", items[0]["ci"])
+
+        self.assertEqual(items[1]["id"], "beta#411")
+        self.assertEqual((items[1]["state"], items[1]["tone"]), ("Ready", "success"))
+        self.assertEqual((items[1]["review"], items[1]["reviewTone"]), ("Approved by you", "success"))
+        self.assertEqual(items[1]["step"], int(ReviewStep.APPROVED))
+
+        dsl = review_board_dsl(dm)
+        parsed = {
+            line.split(" = ", 1)[0]: json.loads(line.split(" = ", 1)[1])
+            for line in dsl.splitlines()
+        }
+        self.assertEqual(parsed["$/title"], "Review Queue (2)")
+        self.assertEqual(parsed["$/segments"], dm["segments"])
+        self.assertEqual(parsed["$/progressSummary"], dm["progressSummary"])
+        self.assertEqual(parsed["$/items"], dm["items"])
+
+    def test_author_to_reviewer_surface_upgrade_stays_one_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir = Path(tmp) / "plugin_data"
+            snap = make_snapshot(
+                number=500,
+                key="acme/widget#500",
+                requested_reviewers=["alice"],
+            )
+            author_dm = board_data_model({snap.key: snap}, [])
+            rev_dm = review_board_data_model({snap.key: snap}, viewer="alice")
+
+            # 1. Write author board (defaults to STACK_BOARD_COMPONENTS).
+            self.assertEqual(
+                sync_pane_store("conv-up", author_dm, store_dir=store_dir),
+                "written",
+            )
+            lines = _surface_lines(store_dir, "conv-up", "monitor")
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["seq"], 1)
+            self.assertEqual(
+                lines[0]["message"]["createSurface"]["components"],
+                STACK_BOARD_COMPONENTS,
+            )
+
+            # 2. Switch to reviewer board (REVIEW_BOARD_COMPONENTS) — rewrites single line, bumps seq.
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-up",
+                    rev_dm,
+                    store_dir=store_dir,
+                    components=REVIEW_BOARD_COMPONENTS,
+                ),
+                "written",
+            )
+            lines = _surface_lines(store_dir, "conv-up", "monitor")
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["seq"], 2)
+            self.assertEqual(_read_seq(store_dir, "conv-up"), 2)
+            self.assertEqual(
+                lines[0]["message"]["createSurface"]["components"],
+                REVIEW_BOARD_COMPONENTS,
+            )
+
+            # 3. Calling again with identical reviewer items and components is unchanged.
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-up",
+                    rev_dm,
+                    store_dir=store_dir,
+                    components=REVIEW_BOARD_COMPONENTS,
+                ),
+                "unchanged",
+            )
+            self.assertEqual(_read_seq(store_dir, "conv-up"), 2)
+
+            # 4. Switching back to author board rewrites the single line and bumps seq to 3.
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-up",
+                    author_dm,
+                    store_dir=store_dir,
+                    components=STACK_BOARD_COMPONENTS,
+                ),
+                "written",
+            )
+            lines = _surface_lines(store_dir, "conv-up", "monitor")
+            self.assertEqual(len(lines), 1)
+            self.assertEqual(lines[0]["seq"], 3)
+            self.assertEqual(
+                lines[0]["message"]["createSurface"]["components"],
+                STACK_BOARD_COMPONENTS,
+            )
 
 
 if __name__ == "__main__":

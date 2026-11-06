@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from models import parse_pr_ref
+from models import parse_pr_ref, pr_key
 
 BATCH_SIZE = 10
 MIN_POLL_BACKOFF_S = 30
@@ -70,6 +70,19 @@ fragment PrFields on PullRequest {
         login
       }
       submittedAt
+    }
+  }
+  reviews(last: 20) {
+    nodes {
+      state
+      submittedAt
+      commit {
+        oid
+      }
+      author {
+        login
+        __typename
+      }
     }
   }
   reviewThreads(first: 100) {
@@ -407,6 +420,92 @@ def fetch_prs(runner: GhRunner, keys: list[str]) -> tuple[str, dict[str, dict[st
                 raise GhError(f"Pull request not found: {key}", code=1)
             results[key] = pr_node
     return viewer, results
+
+
+REVIEW_SEARCH_QUERY = """
+query($reqQuery: String!, $revQuery: String!) {
+  viewer {
+    login
+  }
+  rateLimit {
+    cost
+    remaining
+    resetAt
+  }
+  reviewRequested: search(type: ISSUE, query: $reqQuery, first: 60) {
+    nodes {
+      ... on PullRequest {
+        number
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+  reviewed: search(type: ISSUE, query: $revQuery, first: 60) {
+    nodes {
+      ... on PullRequest {
+        number
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+}
+""".strip()
+
+
+def _search_node_key(node: Any) -> str | None:
+    if not isinstance(node, dict):
+        return None
+    number = node.get("number")
+    repo_node = node.get("repository") if isinstance(node.get("repository"), dict) else {}
+    repo_name = str(repo_node.get("nameWithOwner") or "").strip()
+    if isinstance(number, int) and not isinstance(number, bool) and repo_name:
+        return pr_key(repo_name, number)
+    return None
+
+
+def _collect_alias_keys(data: dict[str, Any], alias: str) -> list[str]:
+    conn = data.get(alias)
+    nodes = (conn.get("nodes") or []) if isinstance(conn, dict) else []
+    out: list[str] = []
+    for node in nodes:
+        key = _search_node_key(node)
+        if key:
+            out.append(key)
+    return out
+
+
+def search_review_keys(
+    runner: GhRunner,
+    repo: str | None = None,
+    *,
+    backoff: RateLimitBackoff | None = None,
+) -> tuple[str, list[str]]:
+    """Queries GitHub search for open review-requested and reviewed PR keys."""
+    cleaned_repo = (repo or "").strip()
+    repo_suffix = f" repo:{cleaned_repo}" if cleaned_repo else ""
+    variables = {
+        "reqQuery": f"is:pr is:open review-requested:@me archived:false{repo_suffix}",
+        "revQuery": f"is:pr is:open reviewed-by:@me -author:@me archived:false{repo_suffix}",
+    }
+    data = graphql(runner, REVIEW_SEARCH_QUERY, variables=variables).data
+    if backoff is not None:
+        backoff.reset()
+    viewer_node = data.get("viewer") if isinstance(data.get("viewer"), dict) else {}
+    viewer = str(viewer_node.get("login") or "").strip()
+    seen: set[str] = set()
+    keys: list[str] = []
+    for key in [
+        *_collect_alias_keys(data, "reviewRequested"),
+        *_collect_alias_keys(data, "reviewed"),
+    ]:
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return viewer, keys
 
 
 class RateLimitBackoff:

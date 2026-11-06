@@ -110,8 +110,8 @@ Every finding in `## Review Comments` uses a `### <ID>. <short claim>` heading (
 - **Category**: `<document category>` (document files only)
 - **Focus**: `<theme-id>` (focus reviewers only; see [lanes.md](lanes.md#focus-mandate-block))
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or a line-cited trace>
-- **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 25 words/sentence, PCC <= 5)>
-- **Why**: <1 short sentence (<= 25 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>
+- **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>
+- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words, <= 4 sentences)>
 - **Suggestion**: <smallest compilable fix, replacement text, or specific question>
 ```
 
@@ -122,7 +122,7 @@ Every entry in `## Questions` (at most 3 per review) uses `### Q1. <claim phrase
 - **File**: `path/to/file`
 - **Line**: `<line number in the new file>`
 - **Evidence**: `<Speculation | Deduction>` — <what was checked and where the trace stopped>
-- **Why**: <1 short sentence (<= 25 words): if true, what breaks and what severity (`critical | high | medium`) it would carry>
+- **Why**: <1 short sentence (<= 30 words): if true, what breaks and what severity (`critical | high | medium`) it would carry>
 - **To settle**: <the exact file, symbol, or command that answers the question>
 ```
 

@@ -25,6 +25,7 @@ try:
         ChangeRecord,
         CheckRunRecord,
         ItemCommentRecord,
+        LatestReviewRecord,
         NotificationRecord,
         OpinionatedReviewRecord,
         PrLiveRecord,
@@ -43,6 +44,7 @@ except ImportError:
         ChangeRecord,
         CheckRunRecord,
         ItemCommentRecord,
+        LatestReviewRecord,
         NotificationRecord,
         OpinionatedReviewRecord,
         PrLiveRecord,
@@ -706,6 +708,26 @@ class LiveStoreMixin:
             "latest_opinionated_reviews",
             "reviews",
             ("author", "author_type", "state", "submitted_at"),
+        )
+        return self._replace_pr_rows(repo_id, pr_number, spec, rows, now)
+
+    def replace_latest_reviews(
+        self,
+        repo_id: int,
+        pr_number: int,
+        reviews: Sequence[LatestReviewRecord],
+        now: float | None = None,
+    ) -> bool:
+        """Replaces a PR's latest non-pending review per author; True when changed."""
+        deduped = {r.author: r for r in reviews}
+        rows = [
+            (r.author, r.author_type, r.state, r.submitted_at, r.commit_oid)
+            for r in deduped.values()
+        ]
+        spec = (
+            "latest_reviews",
+            "reviews",
+            ("author", "author_type", "state", "submitted_at", "commit_oid"),
         )
         return self._replace_pr_rows(repo_id, pr_number, spec, rows, now)
 

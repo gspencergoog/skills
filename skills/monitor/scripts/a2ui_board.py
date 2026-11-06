@@ -6,14 +6,15 @@ import json
 import os
 import re
 import secrets
+import statistics
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from models import Event, PrSnapshot
+from models import Event, PrSnapshot, ReviewSortTier, ReviewStep, classify_review_turn
 
 BASIC_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
 STATUS_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/status/catalog.json"
@@ -165,6 +166,232 @@ STACK_BOARD_COMPONENTS: list[dict[str, Any]] = [
             "catalogId": BASIC_CATALOG,
             "args": {"value": "wave ${wave} · base ${base}"},
         },
+        "variant": "caption",
+    },
+    {
+        "id": "stack_row_details",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "detail"},
+        "variant": "caption",
+    },
+    {
+        "id": "stack_row_steps",
+        "component": "Stepper",
+        "catalogId": STATUS_CATALOG,
+        "steps": {"@path": "/steps"},
+        "current": {"@path": "step"},
+        "tone": {"@path": "tone"},
+    },
+    {
+        "id": "stack_footer",
+        "component": "Row",
+        "catalogId": BASIC_CATALOG,
+        "children": ["ack_btn"],
+        "justify": "end",
+        "align": "center",
+    },
+    {
+        "id": "ack_btn",
+        "component": "Button",
+        "catalogId": BASIC_CATALOG,
+        "child": "ack_btn_child",
+        "action": {"event": {"name": "acknowledge_stack_board", "context": {"_oneShot": True}}},
+    },
+    {
+        "id": "ack_btn_child",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "/ackLabel"},
+    },
+]
+
+REVIEW_BOARD_STEPS: list[dict[str, str]] = [
+    {"label": "Requested", "detail": "Awaiting your initial review"},
+    {"label": "Waiting on Author", "detail": "Reviewed; waiting on author response"},
+    {"label": "Re-Review Needed", "detail": "Author pushed changes or replied"},
+    {"label": "Approved", "detail": "Approved by you"},
+    {"label": "Merged", "detail": "Landed on base branch"},
+]
+
+REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
+    {
+        "id": "root",
+        "component": "Card",
+        "catalogId": BASIC_CATALOG,
+        "child": "stack_col",
+    },
+    {
+        "id": "stack_col",
+        "component": "Column",
+        "catalogId": BASIC_CATALOG,
+        "children": [
+            "stack_header",
+            "stack_subtitle",
+            "stack_progress",
+            "stack_divider",
+            "stack_rows",
+            "stack_footer",
+        ],
+    },
+    {
+        "id": "stack_header",
+        "component": "Row",
+        "catalogId": BASIC_CATALOG,
+        "children": ["stack_title", "stack_status"],
+        "justify": "spaceBetween",
+        "align": "center",
+    },
+    {
+        "id": "stack_title",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "/title"},
+        "variant": "body",
+        "weight": 1,
+    },
+    {
+        "id": "stack_status",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "/status"},
+        "tone": {"@path": "/statusTone"},
+        "pulse": {"@path": "/statusPulse"},
+    },
+    {
+        "id": "stack_subtitle",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "/subtitle"},
+        "variant": "caption",
+    },
+    {
+        "id": "stack_progress",
+        "component": "ProgressBar",
+        "catalogId": STATUS_CATALOG,
+        "segments": {"@path": "/segments"},
+        "summary": {"@path": "/progressSummary"},
+    },
+    {"id": "stack_divider", "component": "Divider", "catalogId": BASIC_CATALOG},
+    {
+        "id": "stack_rows",
+        "component": "List",
+        "catalogId": BASIC_CATALOG,
+        "children": {"path": "/items", "componentId": "stack_row"},
+    },
+    {
+        "id": "stack_row",
+        "component": "Column",
+        "catalogId": BASIC_CATALOG,
+        "children": [
+            "stack_row_head",
+            "stack_row_link",
+            "stack_row_meta",
+            "stack_row_details",
+            "stack_row_steps",
+        ],
+    },
+    {
+        "id": "stack_row_head",
+        "component": "Row",
+        "catalogId": BASIC_CATALOG,
+        "children": [
+            "stack_row_id",
+            "stack_row_state",
+            "stack_row_ci",
+            "stack_row_review",
+            "review_row_btn",
+        ],
+        "align": "center",
+    },
+    {
+        "id": "stack_row_id",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {
+            "@call": "formatString",
+            "catalogId": BASIC_CATALOG,
+            "args": {"value": "**${id}**"},
+        },
+    },
+    {
+        "id": "stack_row_state",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "state"},
+        "tone": {"@path": "tone"},
+    },
+    {
+        "id": "stack_row_ci",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "ci"},
+        "tone": {"@path": "ciTone"},
+    },
+    {
+        "id": "stack_row_review",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "review"},
+        "tone": {"@path": "reviewTone"},
+    },
+    {
+        "id": "review_row_btn",
+        "component": "Button",
+        "catalogId": BASIC_CATALOG,
+        "child": "review_row_btn_label",
+        "variant": "borderless",
+        "action": {
+            "event": {
+                "name": "trigger_pr_review",
+                "context": {
+                    "pr": {"@path": "id"},
+                    "key": {"@path": "key"},
+                    "repo": {"@path": "repo"},
+                    "number": {"@path": "number"},
+                    "url": {"@path": "url"},
+                    "headSha": {"@path": "headSha"},
+                    "_oneShot": False,
+                },
+            }
+        },
+        "checks": [
+            {
+                "condition": {
+                    "@call": "and",
+                    "catalogId": BASIC_CATALOG,
+                    "args": {
+                        "values": [
+                            {"@path": "canReview"},
+                            True,
+                        ]
+                    },
+                },
+                "message": "PR is closed or merged",
+            }
+        ],
+    },
+    {
+        "id": "review_row_btn_label",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "actionLabel"},
+    },
+    {
+        "id": "stack_row_link",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {
+            "@call": "formatString",
+            "catalogId": BASIC_CATALOG,
+            "args": {"value": "[${title}](${url})"},
+        },
+    },
+    {
+        "id": "stack_row_meta",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {"@path": "meta"},
         "variant": "caption",
     },
     {
@@ -462,6 +689,445 @@ def board_dsl(
     return "\n".join(lines)
 
 
+def _parse_iso_ts(raw: str | None) -> float:
+    if not raw:
+        return 0.0
+    cleaned = raw.strip()
+    if cleaned.endswith("Z"):
+        cleaned = f"{cleaned[:-1]}+00:00"
+    try:
+        dt = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return 0.0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.timestamp()
+
+
+def _trace_chain(snap: PrSnapshot, by_key: Mapping[str, PrSnapshot]) -> list[str]:
+    chain = [snap.key]
+    seen = {snap.key}
+    cur = snap
+    while cur.stack_parent and cur.stack_parent in by_key and cur.stack_parent not in seen:
+        seen.add(cur.stack_parent)
+        cur = by_key[cur.stack_parent]
+        chain.append(cur.key)
+    return chain
+
+
+def sort_review_snapshots(
+    snapshots: Mapping[str, PrSnapshot] | Sequence[PrSnapshot],
+    viewer: str,
+) -> list[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]]:
+    """Sorts reviewer snapshots by 6-tier priority, stack cluster recency, and wave."""
+    snaps = list(snapshots.values()) if isinstance(snapshots, Mapping) else list(snapshots)
+    by_key = {s.key: s for s in snaps}
+    chains = {s.key: _trace_chain(s, by_key) for s in snaps}
+    own_ts = {s.key: _parse_iso_ts(s.updated_at) for s in snaps}
+    node_max = dict(own_ts)
+    for key, chain in chains.items():
+        for anc in chain:
+            node_max[anc] = max(node_max[anc], own_ts[key])
+
+    entries: list[
+        tuple[
+            tuple[int, float, int, float, str, int],
+            PrSnapshot,
+            ReviewStep,
+            ReviewSortTier,
+            int,
+        ]
+    ] = []
+    for snap in snaps:
+        step, tier = classify_review_turn(snap, viewer)
+        chain = chains[snap.key]
+        wave = len(chain) - 1
+        cluster_max_ts = max(node_max[anc] for anc in chain)
+        sort_key = (
+            int(tier),
+            -cluster_max_ts,
+            wave,
+            -own_ts[snap.key],
+            snap.repo,
+            snap.number,
+        )
+        entries.append((sort_key, snap, step, tier, wave))
+    entries.sort(key=lambda item: item[0])
+    return [(snap, step, tier, wave) for _, snap, step, tier, wave in entries]
+
+
+def _is_review_ready(snap: PrSnapshot, step: ReviewStep) -> bool:
+    ci_green = snap.required_summary() == "SUCCESS" or (
+        snap.required_summary() == "NONE" and snap.rollup_state == "SUCCESS"
+    )
+    approved = (
+        (
+            step == ReviewStep.APPROVED
+            or snap.review_decision == "APPROVED"
+            or bool(snap.approvals)
+        )
+        and snap.review_decision != "CHANGES_REQUESTED"
+        and not snap.changes_requested
+    )
+    return approved and ci_green
+
+
+def _review_state_badge(snap: PrSnapshot, step: ReviewStep) -> tuple[str, str]:
+    if snap.state == "MERGED":
+        return "Merged", "success"
+    if snap.state == "CLOSED":
+        return "Closed", "neutral"
+    if snap.draft:
+        return "Draft", "neutral"
+    if snap.mergeable == "CONFLICTING" or snap.merge_state == "DIRTY":
+        return "Conflicts", "danger"
+    if snap.merge_state == "BEHIND":
+        return "Behind", "warning"
+    if _is_review_ready(snap, step):
+        return "Ready", "success"
+    return "Open", "active"
+
+
+def _is_viewer_approved_snap(snap: PrSnapshot, viewer_norm: str) -> bool:
+    if snap.viewer_opinionated_state == "APPROVED":
+        return True
+    if snap.viewer_last_review is not None and snap.viewer_last_review.state == "APPROVED":
+        return True
+    return bool(viewer_norm) and any(a.lower() == viewer_norm for a in snap.approvals)
+
+
+def _reviewer_badge(
+    snap: PrSnapshot,
+    step: ReviewStep,
+    tier: ReviewSortTier,
+    viewer_norm: str,
+) -> tuple[str, str]:
+    if tier == ReviewSortTier.TERMINAL:
+        if _is_viewer_approved_snap(snap, viewer_norm):
+            return "Approved by you", "success"
+        if snap.viewer_last_review is None:
+            return "Unreviewed", "neutral"
+        return "Waiting on author", "info"
+    if step == ReviewStep.APPROVED:
+        return "Approved by you", "success"
+    if step == ReviewStep.RE_REVIEW_NEEDED:
+        return "Re-review needed", "warning"
+    if step == ReviewStep.WAITING_ON_AUTHOR:
+        return "Waiting on author", "info"
+    return "Review requested", "warning"
+
+
+def _estimate_eta_s(
+    snap: PrSnapshot,
+    durations: Mapping[str, Sequence[int]] | None,
+    now: float | None,
+) -> int | None:
+    if not durations:
+        return None
+    best: int | None = None
+    for check in snap.effective_required_checks():
+        if check.is_completed():
+            continue
+        samples = durations.get(f"{snap.repo}:{check.name}") or durations.get(check.name)
+        if not samples:
+            continue
+        med = round(statistics.median(samples))
+        start = _parse_iso_ts(check.started_at)
+        elapsed = int(now - start) if start > 0 and now is not None and now > start else 0
+        remaining = max(5, med - elapsed)
+        best = remaining if best is None else max(best, remaining)
+    return best
+
+
+def _unread_thread_count(snap: PrSnapshot, viewer_norm: str) -> int:
+    last = snap.viewer_last_review
+    if last is None:
+        return 0
+    return sum(
+        1
+        for t in snap.threads
+        if not t.resolved
+        and t.last_author.lower() != viewer_norm
+        and (
+            not last.submitted_at
+            or (bool(t.last_comment_at) and t.last_comment_at > last.submitted_at)
+        )
+    )
+
+
+def _review_fallback_bullet(snap: PrSnapshot) -> str:
+    if snap.state == "MERGED":
+        return "Merged"
+    if snap.state == "CLOSED":
+        return "Closed without merge"
+    return f"Head `{snap.head_sha[:7]}`" if snap.head_sha else ""
+
+
+def _dedup_bullets(candidates: Sequence[str]) -> str:
+    bullets: list[str] = []
+    seen: set[str] = set()
+    for text in candidates:
+        cleaned = text.strip().removeprefix("- ").strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            bullets.append(f"- {cleaned}")
+    return "\n".join(bullets)
+
+
+def _review_detail_bullets(
+    snap: PrSnapshot,
+    viewer_norm: str,
+    pr_events: Sequence[Event] | None = None,
+) -> str:
+    candidates: list[str] = [ev.summary for ev in (pr_events or ())]
+    last = snap.viewer_last_review
+    if last is not None and last.commit_oid and snap.head_sha and snap.head_sha != last.commit_oid:
+        candidates.append(
+            f"New commit `{snap.head_sha[:7]}` since your review (`{last.commit_oid[:7]}`)"
+        )
+    unread = _unread_thread_count(snap, viewer_norm)
+    if unread > 0:
+        noun = "thread reply" if unread == 1 else "thread replies"
+        candidates.append(f"{unread} unread {noun}")
+    if snap.draft:
+        candidates.append("Draft PR — review requested")
+    for check in snap.effective_required_checks():
+        if check.is_failed():
+            candidates.append(f"CI failed ({check.name})")
+    result = _dedup_bullets(candidates)
+    return result if result else _dedup_bullets([_review_fallback_bullet(snap)])
+
+
+def _review_action_label(snap: PrSnapshot) -> str:
+    if snap.state == "MERGED":
+        return "Merged"
+    if snap.state == "CLOSED":
+        return "Closed"
+    if snap.viewer_last_review is not None:
+        return "Re-review"
+    return "Review"
+
+
+def review_item_for(
+    snap: PrSnapshot,
+    *,
+    viewer: str,
+    multi_repo: bool = False,
+    durations: Mapping[str, Sequence[int]] | None = None,
+    now: float | None = None,
+    wave: int = 0,
+    events: Sequence[Event] | None = None,
+) -> dict[str, Any]:
+    """Builds a single reviewer queue board item dictionary for ``snap``."""
+    viewer_norm = viewer.strip().lower()
+    step, tier = classify_review_turn(snap, viewer)
+    state_text, state_tone = _review_state_badge(snap, step)
+    eta_s = _estimate_eta_s(snap, durations, now)
+    ci_text, ci_tone = _ci_badge(snap, eta_s)
+    rev_text, rev_tone = _reviewer_badge(snap, step, tier, viewer_norm)
+    short_repo = snap.repo.split("/")[-1] if snap.repo else ""
+    item_id = f"{short_repo}#{snap.number}" if multi_repo and short_repo else f"PR {snap.number}"
+    base_label = f"PR {snap.stack_parent.split('#')[-1]}" if snap.stack_parent else snap.base_ref
+    return {
+        "id": item_id,
+        "key": snap.key,
+        "number": snap.number,
+        "repo": snap.repo,
+        "url": snap.url,
+        "title": snap.title,
+        "author": snap.author,
+        "meta": f"by @{snap.author} · {snap.repo} · base {snap.base_ref}",
+        "headSha": snap.head_sha,
+        "wave": str(wave),
+        "base": base_label,
+        "state": state_text,
+        "tone": state_tone,
+        "ci": ci_text,
+        "ciTone": ci_tone,
+        "review": rev_text,
+        "reviewTone": rev_tone,
+        "step": int(step),
+        "detail": _review_detail_bullets(snap, viewer_norm, events),
+        "actionLabel": _review_action_label(snap),
+        "canReview": snap.state == "OPEN",
+    }
+
+
+_TIER_SEGMENT_LABEL: dict[ReviewSortTier, str] = {
+    ReviewSortTier.RE_REVIEW_NEEDED: "Re-review",
+    ReviewSortTier.REVIEW_REQUESTED: "Requested",
+    ReviewSortTier.WAITING_ON_AUTHOR: "Waiting",
+    ReviewSortTier.APPROVED_OPEN: "Approved",
+    ReviewSortTier.DRAFT_REQUESTED: "Draft",
+}
+
+_SEGMENT_ORDER: tuple[tuple[str, str], ...] = (
+    ("Re-review", "warning"),
+    ("Requested", "warning"),
+    ("Waiting", "info"),
+    ("Approved", "success"),
+    ("Merged", "success"),
+    ("Draft", "neutral"),
+    ("Closed", "neutral"),
+)
+
+
+def _segment_bucket_label(snap: PrSnapshot, tier: ReviewSortTier) -> str:
+    if tier in _TIER_SEGMENT_LABEL:
+        return _TIER_SEGMENT_LABEL[tier]
+    return "Merged" if snap.state == "MERGED" else "Closed"
+
+
+def _review_progress_segments(
+    sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+) -> tuple[list[dict[str, Any]], str]:
+    counts: dict[str, int] = {}
+    for snap, _, tier, _ in sorted_rows:
+        label = _segment_bucket_label(snap, tier)
+        counts[label] = counts.get(label, 0) + 1
+    segments = [
+        {"label": label, "count": counts[label], "value": counts[label], "tone": tone}
+        for label, tone in _SEGMENT_ORDER
+        if counts.get(label, 0) > 0
+    ]
+    summary = (
+        " · ".join(f"{seg['count']} {seg['label'].lower()}" for seg in segments)
+        if segments
+        else "0 PRs"
+    )
+    return segments, summary
+
+
+def _review_status_badge(
+    sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    observed_at: str,
+) -> tuple[str, str, bool]:
+    short_ts = _format_utc_short(observed_at)
+    suffix = f" · {short_ts}" if short_ts else ""
+    if not sorted_rows:
+        return f"Queue empty{suffix}", "success", False
+    action_count = sum(
+        1
+        for _, _, tier, _ in sorted_rows
+        if tier in (ReviewSortTier.RE_REVIEW_NEEDED, ReviewSortTier.REVIEW_REQUESTED)
+    )
+    if action_count > 0:
+        return f"{action_count} awaiting review{suffix}", "warning", True
+    if all(tier == ReviewSortTier.TERMINAL for _, _, tier, _ in sorted_rows):
+        return f"Queue complete{suffix}", "success", False
+    return f"Watching{suffix}", "active", True
+
+
+def _review_subtitle(
+    sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    viewer: str,
+    events: Sequence[Event] | None,
+) -> str:
+    if not sorted_rows:
+        return f"Review queue for @{viewer}" if viewer else ""
+    snaps = [s for s, _, _, _ in sorted_rows]
+    repos = sorted({s.repo for s in snaps if s.repo})
+    noun = "PR" if len(snaps) == 1 else "PRs"
+    if len(repos) == 1:
+        scope = f"{len(snaps)} {noun} in `{repos[0]}`"
+    else:
+        scope = f"{len(snaps)} {noun} across {len(repos)} repos"
+    if events:
+        changed = len({ev.pr for ev in events})
+        ev_noun = "PR" if changed == 1 else "PRs"
+        return f"{scope} · {changed} {ev_noun} updated"
+    return scope
+
+
+def review_board_data_model(
+    snapshots: Mapping[str, PrSnapshot] | Sequence[PrSnapshot],
+    *,
+    viewer: str,
+    durations: Mapping[str, Sequence[int]] | None = None,
+    subtitle: str | None = None,
+    events: Sequence[Event] | None = None,
+    now: float | None = None,
+    observed_at: str = "",
+) -> dict[str, Any]:
+    """Builds the reviewer queue board ``dataModel`` dictionary."""
+    sorted_rows = sort_review_snapshots(snapshots, viewer)
+    repos = {snap.repo for snap, _, _, _ in sorted_rows if snap.repo}
+    multi_repo = len(repos) > 1
+    events_by_pr: dict[str, list[Event]] = {}
+    for ev in events or ():
+        events_by_pr.setdefault(ev.pr, []).append(ev)
+    items = [
+        review_item_for(
+            snap,
+            viewer=viewer,
+            multi_repo=multi_repo,
+            durations=durations,
+            now=now,
+            wave=wave,
+            events=events_by_pr.get(snap.key),
+        )
+        for snap, _, _, wave in sorted_rows
+    ]
+    segments, progress_summary = _review_progress_segments(sorted_rows)
+    status_text, status_tone, status_pulse = _review_status_badge(sorted_rows, observed_at)
+    resolved_subtitle = (
+        subtitle if subtitle is not None else _review_subtitle(sorted_rows, viewer, events)
+    )
+    title = f"Review Queue ({len(items)})" if items else "Review Queue"
+    return {
+        "title": title,
+        "subtitle": resolved_subtitle,
+        "status": status_text,
+        "statusTone": status_tone,
+        "statusPulse": status_pulse,
+        "steps": REVIEW_BOARD_STEPS,
+        "segments": segments,
+        "progressSummary": progress_summary,
+        "items": items,
+        "ackLabel": "Acknowledge",
+    }
+
+
+def review_board_dsl(
+    data_model: Mapping[str, Any] | Sequence[PrSnapshot],
+    *,
+    surface_id: str = "monitor",
+    viewer: str = "",
+    durations: Mapping[str, Sequence[int]] | None = None,
+    subtitle: str | None = None,
+    events: Sequence[Event] | None = None,
+    now: float | None = None,
+    observed_at: str = "",
+) -> str:
+    """Renders A2UI Express data statements for the reviewer queue board."""
+    _ = surface_id
+    if isinstance(data_model, Mapping) and "items" in data_model and "steps" in data_model:
+        dm: Mapping[str, Any] = data_model
+    else:
+        dm = review_board_data_model(
+            data_model,
+            viewer=viewer,
+            durations=durations,
+            subtitle=subtitle,
+            events=events,
+            now=now,
+            observed_at=observed_at,
+        )
+    keys = (
+        "title",
+        "subtitle",
+        "status",
+        "statusTone",
+        "statusPulse",
+        "steps",
+        "segments",
+        "progressSummary",
+        "items",
+        "ackLabel",
+    )
+    return "\n".join(f"$/{key} = {json.dumps(dm[key])}" for key in keys if key in dm)
+
+
 def write_board_file(path: str | os.PathLike[str], dsl: str) -> Path:
     """Atomically writes ``dsl`` to ``path`` and returns the resolved ``Path``."""
     dest = Path(path)
@@ -535,7 +1201,7 @@ def _try_create_lock(lock_path: Path, token: str) -> bool:
         fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     try:
         try:
             os.write(fd, f"{os.getpid()} {stamp} {token}\n".encode())
@@ -646,12 +1312,26 @@ def _stored_create(line: dict[str, Any]) -> dict[str, Any]:
     return create if isinstance(create, dict) else {}
 
 
-def _is_unchanged(line: dict[str, Any], data_model: dict[str, Any]) -> bool:
+def _stored_components(line: dict[str, Any]) -> Any:
+    create = _stored_create(line)
+    if "components" in create:
+        return create.get("components")
+    msg = line.get("message")
+    update_comp = msg.get("updateComponents") if isinstance(msg, dict) else None
+    return update_comp.get("components") if isinstance(update_comp, dict) else None
+
+
+def _is_unchanged(
+    line: dict[str, Any],
+    data_model: dict[str, Any],
+    components: list[dict[str, Any]] | None = None,
+) -> bool:
     """Compares only components and ``items``: ``status`` carries a minute timestamp."""
+    target_components = STACK_BOARD_COMPONENTS if components is None else components
     create = _stored_create(line)
     stored_dm = create.get("dataModel")
     return (
-        create.get("components") == STACK_BOARD_COMPONENTS
+        _stored_components(line) == target_components
         and isinstance(stored_dm, dict)
         and stored_dm.get("items") == data_model.get("items")
     )
@@ -689,13 +1369,15 @@ def _commit_board(
     ts: str,
     force: bool,
     allow_create: bool,
+    components: list[dict[str, Any]] | None = None,
 ) -> StoreStatus:
     """Replaces the board's surface file; must run under ``_conversation_lock``."""
+    target_components = STACK_BOARD_COMPONENTS if components is None else components
     surface_path = conv_dir / f"{surface_id}.jsonl"
     current = _read_surface_line(surface_path)
     if current is None and not allow_create:
         return "dismissed"
-    if current is not None and not force and _is_unchanged(current, data_model):
+    if current is not None and not force and _is_unchanged(current, data_model, target_components):
         return "unchanged"
     # Creating the board keeps it the sole surface, as the append-only store did.
     removed = _foreign_surface_files(conv_dir, surface_id) if current is None else []
@@ -709,7 +1391,7 @@ def _commit_board(
             "createSurface": {
                 "surfaceId": surface_id,
                 "sendDataModel": True,
-                "components": STACK_BOARD_COMPONENTS,
+                "components": target_components,
                 "dataModel": data_model,
             },
         },
@@ -731,6 +1413,7 @@ def sync_pane_store(
     observed_at: str = "",
     force: bool = False,
     allow_create: bool = True,
+    components: list[dict[str, Any]] | None = None,
 ) -> StoreStatus:
     """Replaces ``conversations/<convId>/<surface_id>.jsonl`` with the board's full snapshot.
 
@@ -753,9 +1436,17 @@ def sync_pane_store(
     conv_dir = conv_root / conversation_id
     if not allow_create and not conv_dir.is_dir():
         return "dismissed"
-    ts = observed_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = observed_at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         with _conversation_lock(conv_dir):
-            return _commit_board(conv_dir, surface_id, data_model, ts, force, allow_create)
+            return _commit_board(
+                conv_dir,
+                surface_id,
+                data_model,
+                ts,
+                force,
+                allow_create,
+                components=components,
+            )
     except StoreLockTimeout:
         return "unavailable"

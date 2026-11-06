@@ -16,6 +16,7 @@ from gh_client import (
     build_query,
     fetch_prs,
     graphql,
+    search_review_keys,
     split_http_response,
 )
 from testing import FakeGh, load_fixture
@@ -243,6 +244,72 @@ class TestGhClient(unittest.TestCase):
         self.assertEqual(logged, [])
         self.assertIsNone(result.rate_limit.cost)
         self.assertEqual(result.headers, {})
+
+    def test_build_query_includes_reviews_fragment_with_commit_oid(self) -> None:
+        query = build_query(["acme/widget#3339"])
+        self.assertIn("reviews(last: 20)", query)
+        self.assertIn("commit {\n        oid\n      }", query)
+
+    def test_search_review_keys_deduplicates_and_handles_empty_and_repo_filter(self) -> None:
+        payload_with_prs = {
+            "data": {
+                "viewer": {"login": "alice"},
+                "rateLimit": {"cost": 1, "remaining": 4990, "resetAt": "2026-10-27T22:00:00Z"},
+                "reviewRequested": {
+                    "nodes": [
+                        {"number": 10, "repository": {"nameWithOwner": "acme/widget"}},
+                        {"number": 20, "repository": {"nameWithOwner": "other/repo"}},
+                        {},
+                    ]
+                },
+                "reviewed": {
+                    "nodes": [
+                        {"number": 20, "repository": {"nameWithOwner": "other/repo"}},
+                        {"number": 30, "repository": {"nameWithOwner": "acme/widget"}},
+                    ]
+                },
+            }
+        }
+        payload_empty = {
+            "data": {
+                "viewer": {"login": "alice"},
+                "rateLimit": {"cost": 1, "remaining": 4989, "resetAt": "2026-10-27T22:00:00Z"},
+                "reviewRequested": {"nodes": []},
+                "reviewed": {"nodes": []},
+            }
+        }
+        fake = FakeGh(
+            [
+                ("graphql", 0, http(json.dumps(payload_with_prs)), ""),
+                ("graphql", 0, http(json.dumps(payload_empty)), ""),
+            ]
+        )
+        backoff = RateLimitBackoff()
+        backoff.next_delay()
+        self.assertEqual(backoff.failures, 1)
+
+        viewer, keys = search_review_keys(fake, backoff=backoff)
+        self.assertEqual(viewer, "alice")
+        self.assertEqual(keys, ["acme/widget#10", "other/repo#20", "acme/widget#30"])
+        self.assertEqual(backoff.failures, 0)
+        first_call = " ".join(fake.calls[0][0])
+        self.assertIn("reqQuery=is:pr is:open review-requested:@me archived:false", first_call)
+        self.assertIn(
+            "revQuery=is:pr is:open reviewed-by:@me -author:@me archived:false", first_call
+        )
+
+        viewer_empty, keys_empty = search_review_keys(fake, repo="acme/widget")
+        self.assertEqual(viewer_empty, "alice")
+        self.assertEqual(keys_empty, [])
+        second_call = " ".join(fake.calls[1][0])
+        self.assertIn(
+            "reqQuery=is:pr is:open review-requested:@me archived:false repo:acme/widget",
+            second_call,
+        )
+        self.assertIn(
+            "revQuery=is:pr is:open reviewed-by:@me -author:@me archived:false repo:acme/widget",
+            second_call,
+        )
 
 
 if __name__ == "__main__":

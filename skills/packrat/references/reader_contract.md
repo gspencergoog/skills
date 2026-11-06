@@ -180,6 +180,14 @@ GraphQL `latestOpinionatedReviews`: the latest approving or change-requesting
 review per author. Columns: `item_key`, `author`, `author_type` (`User` or
 `Bot`), `state`, `submitted_at`.
 
+### `v_pr_latest_author_reviews`
+
+The latest non-pending review per author on a pull request, including `COMMENTED`
+reviews and the reviewed commit OID (`latest_reviews`, schema v8). Columns:
+`item_key`, `repo_full_name`, `pr_number`, `author`, `author_type` (`User` or
+`Bot`), `state` (`APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED`),
+`submitted_at`, `commit_oid`.
+
 ### `v_pr_threads`
 
 One row per review thread: `item_key`, `thread_id`, `is_resolved`,
@@ -195,6 +203,7 @@ The authenticated user's current sets: `set_name`, `item_key`,
 | :--- | :--- |
 | `authored` | PRs the user wrote, open or recently merged/closed, updated in the last 7 days |
 | `review_requested` | Open PRs that request the user's review, any age |
+| `reviewed` | Open PRs reviewed by the user (excluding self-authored PRs), any age |
 | `issues` | Issues that involve the user, open or closed, updated in the last 7 days |
 
 Only open PRs in these sets get the service's own lease
@@ -281,7 +290,7 @@ any row has been pruned it returns `reset` instead.
 | `pr` | the changed `v_pr_live` column names (including `rollup_state` and `rollup_total`), plus `body` when the description changed |
 | `checks` | `["check_runs"]` |
 | `review_requests` | `["review_requests"]` |
-| `reviews` | `["latest_opinionated_reviews"]` |
+| `reviews` | `["latest_opinionated_reviews"]` or `["latest_reviews"]` |
 | `threads` | `["thread_activity"]` |
 | `comments` | `["comments"]` |
 | `notification` | `["reason"]` |

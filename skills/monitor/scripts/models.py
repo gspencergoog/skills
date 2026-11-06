@@ -4,9 +4,53 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
+from enum import IntEnum, StrEnum
 from typing import Any
 
 SCHEMA_VERSION = 1
+
+
+class ReviewRole(StrEnum):
+    """Role of the monitor session relative to the watched pull requests."""
+
+    AUTHOR = "author"
+    REVIEWER = "reviewer"
+
+
+class ReviewStep(IntEnum):
+    """Five-step progression index for a pull request in the reviewer queue."""
+
+    REQUESTED = 0
+    WAITING_ON_AUTHOR = 1
+    RE_REVIEW_NEEDED = 2
+    APPROVED = 3
+    MERGED = 4
+
+
+class ReviewSortTier(IntEnum):
+    """Six-tier priority bucket for sorting reviewer queue rows."""
+
+    RE_REVIEW_NEEDED = 0
+    REVIEW_REQUESTED = 1
+    DRAFT_REQUESTED = 2
+    WAITING_ON_AUTHOR = 3
+    APPROVED_OPEN = 4
+    TERMINAL = 5
+
+
+class ReviewerEventKind(StrEnum):
+    """Event kinds emitted when diffing pull request snapshots in reviewer mode."""
+
+    NEW_REVIEW_REQUEST = "new_review_request"
+    DRAFT_READY = "draft_ready"
+    AUTHOR_HEAD_PUSH = "author_head_push"
+    AUTHOR_THREAD_REPLY = "author_thread_reply"
+    RE_REQUESTED_REVIEW = "re_requested_review"
+    APPROVAL_DISMISSED = "approval_dismissed"
+    TERMINAL = "terminal"
+
+
+REVIEWER_EVENT_KINDS: tuple[str, ...] = tuple(k.value for k in ReviewerEventKind)
 
 EVENT_KINDS: tuple[str, ...] = (
     "review_decision",
@@ -121,6 +165,26 @@ class Thread:
         )
 
 
+@dataclass(frozen=True)
+class ViewerReview:
+    """Most recent non-pending review submitted by the authenticated viewer."""
+
+    state: str
+    submitted_at: str
+    commit_oid: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ViewerReview:
+        return cls(
+            state=str(data.get("state") or ""),
+            submitted_at=str(data.get("submitted_at") or ""),
+            commit_oid=data.get("commit_oid"),
+        )
+
+
 @dataclass
 class PrSnapshot:
     """Point-in-time state of a watched GitHub pull request."""
@@ -153,6 +217,8 @@ class PrSnapshot:
     stack_parent_state: str | None = None
     truncated: list[str] = field(default_factory=list)
     updated_at: str = ""
+    viewer_last_review: ViewerReview | None = None
+    viewer_opinionated_state: str | None = None
 
     def effective_required_checks(self) -> list[CheckRun]:
         """Returns all checks on the pull request so status and rollup stay consistent."""
@@ -182,6 +248,12 @@ class PrSnapshot:
                 repo, number = parse_pr_ref(url)
             except ValueError:
                 pass
+        raw_viewer_review = data.get("viewer_last_review")
+        viewer_last_review = (
+            ViewerReview.from_dict(raw_viewer_review)
+            if isinstance(raw_viewer_review, dict)
+            else None
+        )
         return cls(
             key=pr_key(repo, number),
             number=number,
@@ -211,7 +283,83 @@ class PrSnapshot:
             stack_parent_state=data.get("stack_parent_state"),
             truncated=list(data.get("truncated") or []),
             updated_at=str(data.get("updated_at") or ""),
+            viewer_last_review=viewer_last_review,
+            viewer_opinionated_state=data.get("viewer_opinionated_state"),
         )
+
+
+def parse_event_list(
+    raw: str | None, role: ReviewRole | str = ReviewRole.AUTHOR
+) -> set[str] | None:
+    """Parses and validates comma-separated event names against ``role``'s event kinds."""
+    if not raw:
+        return None
+    items = {part.strip() for part in raw.split(",") if part.strip()}
+    if not items:
+        return None
+    valid = (
+        REVIEWER_EVENT_KINDS
+        if ReviewRole(role) == ReviewRole.REVIEWER
+        else EVENT_KINDS
+    )
+    unknown = sorted(items - set(valid))
+    if unknown:
+        raise ValueError(
+            f"Unknown event kind(s): {', '.join(unknown)}. Valid kinds: {', '.join(valid)}"
+        )
+    return items
+
+
+def _is_viewer_approved(snap: PrSnapshot, viewer_norm: str) -> bool:
+    if snap.viewer_opinionated_state == "APPROVED":
+        return True
+    return bool(viewer_norm) and any(a.lower() == viewer_norm for a in snap.approvals)
+
+
+def _needs_re_review(
+    snap: PrSnapshot, last: ViewerReview, viewer_norm: str, direct_requested: bool
+) -> bool:
+    if direct_requested:
+        return True
+    if bool(last.commit_oid) and bool(snap.head_sha) and snap.head_sha != last.commit_oid:
+        return True
+    return any(
+        not t.resolved
+        and t.last_author.lower() != viewer_norm
+        and bool(t.last_comment_at)
+        and bool(last.submitted_at)
+        and t.last_comment_at > last.submitted_at
+        for t in snap.threads
+    )
+
+
+def classify_review_turn(snap: PrSnapshot, viewer: str) -> tuple[ReviewStep, ReviewSortTier]:
+    """Computes the 5-step progression index and 6-tier sort bucket for a reviewer row."""
+    if snap.state == "MERGED":
+        return (ReviewStep.MERGED, ReviewSortTier.TERMINAL)
+    if snap.state == "CLOSED":
+        return (ReviewStep.REQUESTED, ReviewSortTier.TERMINAL)
+    if snap.draft:
+        step = (
+            ReviewStep.WAITING_ON_AUTHOR
+            if snap.viewer_last_review is not None
+            else ReviewStep.REQUESTED
+        )
+        return (step, ReviewSortTier.DRAFT_REQUESTED)
+
+    viewer_norm = viewer.strip().lower()
+    direct_requested = bool(viewer_norm) and any(
+        r.lower() == viewer_norm for r in snap.requested_reviewers
+    )
+    if _is_viewer_approved(snap, viewer_norm) and not direct_requested:
+        return (ReviewStep.APPROVED, ReviewSortTier.APPROVED_OPEN)
+
+    last = snap.viewer_last_review
+    if last is None:
+        return (ReviewStep.REQUESTED, ReviewSortTier.REVIEW_REQUESTED)
+    if _needs_re_review(snap, last, viewer_norm, direct_requested):
+        return (ReviewStep.RE_REVIEW_NEEDED, ReviewSortTier.RE_REVIEW_NEEDED)
+    return (ReviewStep.WAITING_ON_AUTHOR, ReviewSortTier.WAITING_ON_AUTHOR)
 
 
 @dataclass

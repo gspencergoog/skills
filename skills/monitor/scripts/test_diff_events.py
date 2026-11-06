@@ -6,6 +6,7 @@ import unittest
 
 from diff_events import (
     DiffContext,
+    diff_reviewer_snapshots,
     diff_snapshots,
     filter_events,
     is_green,
@@ -13,7 +14,8 @@ from diff_events import (
     snapshot_thread_watermarks,
     summarize,
 )
-from testing import make_check, make_snapshot, make_thread
+from models import ReviewerEventKind
+from testing import make_check, make_snapshot, make_thread, make_viewer_review
 
 
 class TestDiffEvents(unittest.TestCase):
@@ -205,6 +207,384 @@ class TestDiffEvents(unittest.TestCase):
         self.assertTrue(is_green(no_rules_pr))
         self.assertTrue(is_terminal({no_rules_pr.key: no_rules_pr}, "all-green"))
         self.assertFalse(is_terminal({no_rules_pr.key: no_rules_pr}, "merged"))
+
+    def test_is_terminal_none_vs_default(self) -> None:
+        merged_pr = make_snapshot(state="MERGED")
+        closed_pr = make_snapshot(number=3340, state="CLOSED")
+        snaps = {merged_pr.key: merged_pr, closed_pr.key: closed_pr}
+
+        self.assertFalse(is_terminal({}, None))
+        self.assertFalse(is_terminal({}, "none"))
+        self.assertFalse(is_terminal(snaps, "none"))
+        self.assertFalse(is_terminal(snaps, " NONE "))
+        self.assertTrue(is_terminal(snaps, None))
+        self.assertTrue(is_terminal(snaps, "closed"))
+
+    def test_reviewer_initial_observation_states(self) -> None:
+        ctx = DiffContext(viewer="bob")
+
+        # 1. Initial unreviewed open PR -> new_review_request
+        unreviewed = make_snapshot(mine=False, requested_reviewers=["bob"], viewer_last_review=None)
+        evs = diff_reviewer_snapshots(None, unreviewed, ctx)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].kind, ReviewerEventKind.NEW_REVIEW_REQUEST.value)
+        self.assertIsNone(evs[0].from_value)
+        self.assertEqual(evs[0].to_value, "REQUESTED")
+        self.assertTrue(evs[0].actionable)
+        self.assertEqual(evs[0].suggested_action, "review_pr")
+        self.assertEqual(evs[0].summary, "review requested")
+        self.assertEqual(evs[0].detail, {"author": "alice", "head_sha": "aaa1111"})
+
+        # 2. Initial WAITING_ON_AUTHOR, APPROVED, draft, MERGED, CLOSED -> quiet
+        waiting = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(state="COMMENTED", commit_oid="aaa1111"),
+        )
+        approved = make_snapshot(
+            mine=False,
+            requested_reviewers=[],
+            approvals=["bob"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(state="APPROVED", commit_oid="aaa1111"),
+        )
+        draft_pr = make_snapshot(mine=False, draft=True, viewer_last_review=None)
+        merged_pr = make_snapshot(mine=False, state="MERGED")
+        closed_pr = make_snapshot(mine=False, state="CLOSED")
+        for quiet_snap in (waiting, approved, draft_pr, merged_pr, closed_pr):
+            self.assertEqual(diff_reviewer_snapshots(None, quiet_snap, ctx), [])
+
+        # 3a. Initial RE_REVIEW_NEEDED via direct re-request
+        re_req = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=["bob"],
+            viewer_last_review=make_viewer_review(state="COMMENTED", commit_oid="aaa1111"),
+        )
+        evs_re_req = diff_reviewer_snapshots(None, re_req, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_re_req], [ReviewerEventKind.RE_REQUESTED_REVIEW.value]
+        )
+        self.assertTrue(evs_re_req[0].actionable)
+        self.assertEqual(evs_re_req[0].suggested_action, "review_pr")
+
+        # 3b. Initial RE_REVIEW_NEEDED via post-review head push
+        pushed = make_snapshot(
+            mine=False,
+            head_sha="bbb2222",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(state="COMMENTED", commit_oid="aaa1111"),
+        )
+        evs_push = diff_reviewer_snapshots(None, pushed, ctx)
+        self.assertEqual([e.kind for e in evs_push], [ReviewerEventKind.AUTHOR_HEAD_PUSH.value])
+        self.assertTrue(evs_push[0].actionable)
+        self.assertEqual(evs_push[0].detail["reviewed_sha"], "aaa1111")
+
+        # 3c. Initial RE_REVIEW_NEEDED via thread reply -> fires once, suppressed when watermarked
+        replied = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-10-27T21:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    last_author="alice",
+                    last_comment_at="2026-10-27T21:05:00Z",
+                )
+            ],
+        )
+        evs_reply = diff_reviewer_snapshots(None, replied, ctx)
+        self.assertEqual([e.kind for e in evs_reply], [ReviewerEventKind.AUTHOR_THREAD_REPLY.value])
+        self.assertEqual(evs_reply[0].detail["thread_ids"], ["t1"])
+
+        watermarked_ctx = DiffContext(
+            viewer="bob",
+            reported_threads={replied.key: {"t1": "2026-10-27T21:05:00Z"}},
+        )
+        self.assertEqual(diff_reviewer_snapshots(None, replied, watermarked_ctx), [])
+
+    def test_reviewer_draft_rework_muting_and_ready_promotion(self) -> None:
+        ctx = DiffContext(viewer="bob")
+        reviewed_open = make_snapshot(
+            mine=False,
+            draft=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-10-27T21:00:00Z",
+                commit_oid="aaa1111",
+            ),
+        )
+        # Author converts PR to draft and pushes a new commit + replies -> muted while in draft
+        draft_rework = make_snapshot(
+            mine=False,
+            draft=True,
+            head_sha="bbb2222",
+            requested_reviewers=[],
+            viewer_last_review=reviewed_open.viewer_last_review,
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    last_author="alice",
+                    last_comment_at="2026-10-27T21:05:00Z",
+                )
+            ],
+        )
+        self.assertEqual(diff_reviewer_snapshots(reviewed_open, draft_rework, ctx), [])
+
+        # Author marks draft ready for review -> draft_ready (actionable because RE_REVIEW_NEEDED)
+        ready_rework = make_snapshot(
+            mine=False,
+            draft=False,
+            head_sha="bbb2222",
+            requested_reviewers=[],
+            viewer_last_review=reviewed_open.viewer_last_review,
+        )
+        evs_ready = diff_reviewer_snapshots(draft_rework, ready_rework, ctx)
+        self.assertEqual([e.kind for e in evs_ready], [ReviewerEventKind.DRAFT_READY.value])
+        self.assertTrue(evs_ready[0].actionable)
+        self.assertEqual(evs_ready[0].suggested_action, "review_pr")
+        self.assertEqual(evs_ready[0].summary, "ready for review")
+
+        # Draft -> Ready when WAITING_ON_AUTHOR is non-actionable
+        draft_waiting = make_snapshot(
+            mine=False,
+            draft=True,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=reviewed_open.viewer_last_review,
+        )
+        ready_waiting = make_snapshot(
+            mine=False,
+            draft=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=reviewed_open.viewer_last_review,
+        )
+        evs_waiting = diff_reviewer_snapshots(draft_waiting, ready_waiting, ctx)
+        self.assertEqual([e.kind for e in evs_waiting], [ReviewerEventKind.DRAFT_READY.value])
+        self.assertFalse(evs_waiting[0].actionable)
+        self.assertIsNone(evs_waiting[0].suggested_action)
+
+    def test_reviewer_head_push_and_post_approval_commit_suppression(self) -> None:
+        ctx = DiffContext(viewer="bob")
+        prev = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(state="COMMENTED", commit_oid="aaa1111"),
+        )
+        cur = make_snapshot(
+            mine=False,
+            head_sha="bbb2222",
+            requested_reviewers=[],
+            viewer_last_review=make_viewer_review(state="COMMENTED", commit_oid="aaa1111"),
+        )
+        evs = diff_reviewer_snapshots(prev, cur, ctx)
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0].kind, ReviewerEventKind.AUTHOR_HEAD_PUSH.value)
+        self.assertEqual(evs[0].from_value, "aaa1111")
+        self.assertEqual(evs[0].to_value, "bbb2222")
+        self.assertTrue(evs[0].actionable)
+        self.assertEqual(evs[0].suggested_action, "review_pr")
+        self.assertEqual(evs[0].summary, "author pushed bbb2222")
+        self.assertEqual(evs[0].detail, {"reviewed_sha": "aaa1111"})
+
+        # Post-approval commit when approval stays intact -> APPROVED stays quiet!
+        approved_prev = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=["team:acme/core"],
+            approvals=["bob"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(state="APPROVED", commit_oid="aaa1111"),
+        )
+        approved_pushed = make_snapshot(
+            mine=False,
+            head_sha="ccc3333",
+            requested_reviewers=["team:acme/core"],
+            approvals=["bob"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(state="APPROVED", commit_oid="aaa1111"),
+        )
+        self.assertEqual(diff_reviewer_snapshots(approved_prev, approved_pushed, ctx), [])
+
+    def test_reviewer_thread_reply_and_watermark_deduplication(self) -> None:
+        review = make_viewer_review(
+            state="COMMENTED",
+            submitted_at="2026-10-27T21:00:00Z",
+            commit_oid="aaa1111",
+        )
+        s1 = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    last_author="bob",
+                    last_comment_at="2026-10-27T21:00:00Z",
+                )
+            ],
+        )
+        s2 = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    last_author="alice",
+                    last_comment_at="2026-10-27T21:05:00Z",
+                ),
+                make_thread(
+                    thread_id="t_self",
+                    last_author="bob",
+                    last_comment_at="2026-10-27T21:06:00Z",
+                ),
+            ],
+        )
+        ctx = DiffContext(viewer="bob")
+        evs = diff_reviewer_snapshots(s1, s2, ctx)
+        self.assertEqual([e.kind for e in evs], [ReviewerEventKind.AUTHOR_THREAD_REPLY.value])
+        self.assertTrue(evs[0].actionable)
+        self.assertEqual(evs[0].suggested_action, "review_pr")
+        self.assertEqual(evs[0].detail["thread_ids"], ["t1"])
+
+        # Watermarked at 21:05 -> suppressed on next poll at same timestamp
+        watermarks = snapshot_thread_watermarks(s2, viewer="bob")
+        ctx_marked = DiffContext(viewer="bob", reported_threads={s2.key: watermarks})
+        self.assertEqual(diff_reviewer_snapshots(s2, s2, ctx_marked), [])
+
+        # Newer reply at 21:10 -> fires again
+        s3 = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    last_author="alice",
+                    last_comment_at="2026-10-27T21:10:00Z",
+                )
+            ],
+        )
+        evs_newer = diff_reviewer_snapshots(s2, s3, ctx_marked)
+        self.assertEqual([e.kind for e in evs_newer], [ReviewerEventKind.AUTHOR_THREAD_REPLY.value])
+        self.assertEqual(evs_newer[0].detail["thread_ids"], ["t1"])
+
+    def test_reviewer_direct_vs_team_rerequests_and_approval_dismissed(self) -> None:
+        ctx = DiffContext(viewer="bob")
+        review = make_viewer_review(state="COMMENTED", commit_oid="aaa1111")
+        s_waiting = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+        )
+        # Team request added after viewer already reviewed -> does NOT trigger re_requested_review
+        s_team = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=["team:acme/core"],
+            viewer_last_review=review,
+        )
+        self.assertEqual(diff_reviewer_snapshots(s_waiting, s_team, ctx), [])
+
+        # Direct viewer request added -> triggers re_requested_review
+        s_direct = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=["team:acme/core", "Bob"],
+            viewer_last_review=review,
+        )
+        evs_direct = diff_reviewer_snapshots(s_team, s_direct, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_direct], [ReviewerEventKind.RE_REQUESTED_REVIEW.value]
+        )
+        self.assertTrue(evs_direct[0].actionable)
+        self.assertEqual(evs_direct[0].suggested_action, "review_pr")
+
+        # Approval dismissed on open PR -> actionable approval_dismissed
+        s_approved = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            approvals=["bob"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(state="APPROVED", commit_oid="aaa1111"),
+        )
+        s_dismissed = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            approvals=[],
+            viewer_opinionated_state="DISMISSED",
+            viewer_last_review=make_viewer_review(state="DISMISSED", commit_oid="aaa1111"),
+        )
+        evs_dismissed = diff_reviewer_snapshots(s_approved, s_dismissed, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_dismissed], [ReviewerEventKind.APPROVAL_DISMISSED.value]
+        )
+        self.assertTrue(evs_dismissed[0].actionable)
+        self.assertEqual(evs_dismissed[0].suggested_action, "review_pr")
+
+        # Approval dismissed when converted to draft -> non-actionable
+        s_dismissed_draft = make_snapshot(
+            mine=False,
+            draft=True,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            approvals=[],
+            viewer_opinionated_state="DISMISSED",
+            viewer_last_review=make_viewer_review(state="DISMISSED", commit_oid="aaa1111"),
+        )
+        evs_dismissed_draft = diff_reviewer_snapshots(s_approved, s_dismissed_draft, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_dismissed_draft], [ReviewerEventKind.APPROVAL_DISMISSED.value]
+        )
+        self.assertFalse(evs_dismissed_draft[0].actionable)
+        self.assertIsNone(evs_dismissed_draft[0].suggested_action)
+
+    def test_reviewer_terminal_merged_and_closed_events(self) -> None:
+        ctx = DiffContext(viewer="bob")
+        s_open = make_snapshot(mine=False, state="OPEN", requested_reviewers=["bob"])
+        s_merged = make_snapshot(mine=False, state="MERGED", requested_reviewers=["bob"])
+        s_closed = make_snapshot(mine=False, state="CLOSED", requested_reviewers=["bob"])
+
+        evs_merged = diff_reviewer_snapshots(s_open, s_merged, ctx)
+        self.assertEqual(len(evs_merged), 1)
+        self.assertEqual(evs_merged[0].kind, ReviewerEventKind.TERMINAL.value)
+        self.assertEqual(evs_merged[0].from_value, "OPEN")
+        self.assertEqual(evs_merged[0].to_value, "MERGED")
+        self.assertFalse(evs_merged[0].actionable)
+        self.assertIsNone(evs_merged[0].suggested_action)
+        self.assertEqual(evs_merged[0].summary, "PR merged")
+
+        evs_closed = diff_reviewer_snapshots(s_open, s_closed, ctx)
+        self.assertEqual(len(evs_closed), 1)
+        self.assertEqual(evs_closed[0].kind, ReviewerEventKind.TERMINAL.value)
+        self.assertEqual(evs_closed[0].from_value, "OPEN")
+        self.assertEqual(evs_closed[0].to_value, "CLOSED")
+        self.assertFalse(evs_closed[0].actionable)
+        self.assertIsNone(evs_closed[0].suggested_action)
+        self.assertEqual(evs_closed[0].summary, "PR closed")
+
+        # Reopened unreviewed PR transitions CLOSED -> OPEN and fires new_review_request
+        evs_reopened = diff_reviewer_snapshots(s_closed, s_open, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_reopened], [ReviewerEventKind.NEW_REVIEW_REQUEST.value]
+        )
 
 
 if __name__ == "__main__":

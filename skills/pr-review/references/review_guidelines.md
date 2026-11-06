@@ -33,7 +33,7 @@ These review guidelines ensure feedback is actionable, objective, and respectful
 5. **State the Problem Before the Fix**:
    - Each comment is read on its own, next to the code. Open with what is wrong and what it causes in 1–3 short sentences, then give the fix or suggestion block.
    - Never restate what the diff lines already show; the author can see the diff right above the comment.
-   - Keep each comment's prose within 80 words and 4 sentences ($\le 25$ words per sentence, $\text{PCC} \le 5$), with no em-dashes or AI filler words (see [`write-prose`](../../write-prose/references/audiences.md)).
+   - Keep each comment's prose within 80 words and 4 sentences ($\le 30$ words per sentence, $\text{PCC} \le 5$), with no em-dashes or AI filler words (see [`write-prose`](../../write-prose/references/audiences.md)).
    - Keep `description` to one short sentence naming the problem for the dashboard card header; `launch_dashboard.py` does not prepend `**{description}**` onto non-empty `draft_comment` text.
 
 6. **Keep the Review Summary Short**:

@@ -7,7 +7,8 @@ This document defines the division of work between the background monitor daemon
 Check `prs[pr].mine` before taking any action:
 
 - When `mine` is `true` (the authenticated GitHub user authored the pull request), the monitor daemon collects events, sends a notification message to the conversation via `agentapi send-message`, sets an `AckGate`, and waits for an acknowledgment. The main agent handles all code edits, branch rebases, merge conflict resolutions, flaky-CI reruns, and review feedback dashboards.
-- When `mine` is `false`, the pull request is watch-only. `monitor_prs.py` updates the `stack_board` pane in place, and neither agent ever pushes commits, reruns workflows, or modifies branches on that pull request.
+- When `mine` is `false` in author mode, the pull request is watch-only. `monitor_prs.py` updates the `stack_board` pane in place, and neither agent ever pushes commits, reruns workflows, or changes branches on that pull request.
+- Under `--reviews` (reviewer mode), `monitor_prs.py` tracks incoming and active reviews across the user's review queue (`mine` is `false` on every reviewed pull request). By default in `--reviews --daemon`, the daemon updates the A2UI review-queue pane (`REVIEW_BOARD_COMPONENTS`), `last.json`, and `events.jsonl` in the background without waking the main agent. When `--wake-on-review` is passed, the daemon sends an `agentapi send-message` batch notification on actionable reviewer events. Neither agent ever changes branches, pushes commits, or reruns CI jobs on reviewed pull requests.
 - While `/monitor` is active, `monitor_prs.py` owns the `stack_board` surface (`surfaceId: "monitor"`) in the A2UI Pane and clears stale surfaces on each sync. Neither agent may call `render_a2ui` to open a separate `progress_board`, `stack_board`, or `git-stack` surface during CI remediation or stack rebases.
 
 ## 2. Daemon Control Commands (`control.jsonl`)
@@ -32,7 +33,7 @@ Each item in `events[]` includes `actionable` (`true` or `false`) and an advisor
 
 Suggested when an effective required check failed on a new commit after passing on the previous head commit, and no rerun has been recorded for `<check>@<head_sha>`:
 
-1. Verify `detail.run_id` is present and `detail.rerun_attempted` is `false`.
+1. Check that `detail.run_id` is present and `detail.rerun_attempted` is `false`.
 2. Inspect the failed job log tail (`gh run view <run_id> --repo <owner/repo> --log-failed | tail -n 120`). If the log shows an obvious infrastructure or transient failure (runner lost, network timeout, registry 5xx, rate limit) or no code diff in the pull request could explain the failure, trigger a single rerun:
    ```bash
    gh run rerun <run_id> --repo <owner/repo> --failed
@@ -51,7 +52,7 @@ Suggested when an effective required check fails and `rerun_ci` does not apply:
 1. Capture `gh run view <run_id> --repo <owner/repo> --log-failed | tail -n 120` into `<conversation-scratch-dir>/monitor/ci_<repo>_<pr>.log` (or record `detail.url` when `run_id` is null).
 2. Read the captured log file and identify the root cause in the local checkout or worktree for the pull request branch (`head_ref`).
 3. Check the **Confirmation Gates** in Section 4 before editing or pushing if the fix is wide or risky.
-4. Implement the fix, run the relevant linter and unit tests locally to verify the failure is resolved, commit the change on the pull request branch, and push to the remote head branch.
+4. Implement the fix, run the relevant linter and unit tests locally to check that the failure is resolved, commit the change on the pull request branch, and push to the remote head branch.
 5. Notify the daemon of the pushed SHA and acknowledge the batch:
    ```bash
    echo '{"pushed_sha": {"<pr>": "<new_head_sha>"}}' >> <state-dir>/control.jsonl
@@ -101,14 +102,31 @@ Suggested when a pull request has `review_decision == "APPROVED"` and all requir
    echo '{"stop": true}' >> <state-dir>/control.jsonl
    ```
 
+### `review_pr` and `<a2ui-action>` `trigger_pr_review` (Reviewer Mode)
+
+Suggested on actionable reviewer events under `--reviews`, or triggered when the user clicks **Review** or **Re-review** on a review-queue card:
+
+1. On a `--reviews --wake-on-review` wakeup, summarize the updated review items, link `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)`, and acknowledge the batch in `control.jsonl`:
+   ```bash
+   echo '{"ack": <batch_id>}' >> <state-dir>/control.jsonl
+   ```
+   Do not start a review automatically on a daemon wakeup unless the user asks you to review a pull request.
+2. When the user clicks **Review** or **Re-review** in the pane, the host sends `<a2ui-action>` with `name: "trigger_pr_review"` and `context: {"pr": "<display_id>", "key": "<repo>#<number>", "repo": "<repo>", "number": <number>, "url": "<url>", "headSha": "<sha>"}`:
+   - If `agentapi` is on `PATH`, start an isolated conversation for the review:
+     ```bash
+     env -u ANTIGRAVITY_SOURCE_METADATA agentapi new-conversation --title "Review <repo>#<number>" "/pr-review <url>"
+     ```
+     Pass only `"/pr-review <url>"` as the prompt. Omit the pull request title and branch name so [pr-review](../../pr-review/SKILL.md) Stage 1 blind diff summary stays unanchored. Reply with `[Review <repo>#<number>](conversation://<id>)`.
+   - If `agentapi` is not on `PATH`, run [pr-review](../../pr-review/SKILL.md) inline on `<url>`.
+
 ## 4. Confirmation Gates
 
 Pause and ask the user for confirmation in the main agent (using `render_a2ui` with `template: "confirm_gate"`, `surfaceId: "monitor-confirm"`, and `stack: true`, or `ask_question` when `a2ui-pane` is unavailable) before pushing when any of the following conditions hold:
 
 1. The push requires `--force` or `--force-with-lease`.
-2. The proposed fix modifies files outside the pull request's existing diff against `base_ref`.
+2. The proposed fix changes files outside the pull request's existing diff against `base_ref`.
 3. The proposed fix touches more than 5 files.
-4. The relevant test suite cannot be executed locally to verify the fix before pushing.
+4. The relevant test suite cannot be executed locally to check the fix before pushing.
 5. Three consecutive fix attempts on the same pull request have failed to make CI green.
 
 ## 5. Actions Neither Agent May Ever Take
@@ -116,4 +134,4 @@ Pause and ask the user for confirmation in the main agent (using `render_a2ui` w
 - Never push directly to `main`, `master`, or any shared base branch.
 - Never post pull request comments, submit reviews, reply to review threads, or resolve review threads without presenting the draft text to the user and obtaining explicit approval.
 - Never merge a pull request or enable `gh pr merge --auto` unless explicitly instructed by the user.
-- Never modify branches or rerun jobs on pull requests where `mine` is `false`.
+- Never change branches or rerun jobs on pull requests where `mine` is `false`.

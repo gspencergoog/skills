@@ -1828,6 +1828,68 @@ class TestPrepareCodeReview(unittest.TestCase):
         )
         self.assertIn("packrat_context.py unavailable or failed", result["warnings"])
 
+    def test_stage_failure_cleans_up_temp_diff_dir(self):
+        created_dirs: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def _track_mkdtemp(*args, **kwargs):
+            d = real_mkdtemp(*args, **kwargs)
+            created_dirs.append(Path(d))
+            return d
+
+        with (
+            patch("review_engine.tempfile.mkdtemp", side_effect=_track_mkdtemp),
+            patch("review_engine._stage_diff_for_review", return_value="boom"),
+            patch("review_engine._run_packrat_context", return_value=None),
+        ):
+            result = prepare_code_review(
+                {"base_ref": "", "pull_number": 7}, self.diff, self.repo, self.tmp
+            )
+        self.assertIsNone(result["diff_dir"])
+        self.assertEqual(len(created_dirs), 1)
+        self.assertFalse(created_dirs[0].exists())
+        self.assertIn("stage_diffs.py failed: boom", result["warnings"])
+
+    def test_fallback_fix_hints_match_lint_review_rules(self):
+        import lint_review
+        import review_engine
+
+        self.assertEqual(
+            review_engine._FALLBACK_FIX_HINTS, dict(lint_review._FIX_HINTS)
+        )
+
+    def test_reconcile_places_blind_preamble_before_stack_and_prior_blocks(self):
+        from review_engine import reconcile_pr_description
+
+        blind = self.tmp / "blind.md"
+        rec = self.tmp / "rec.json"
+        out = self.tmp / "pr_desc.md"
+        blind.write_text(
+            "Intro preamble paragraph.\n\n## Summary\nBody text.\n",
+            encoding="utf-8",
+        )
+        rec.write_text(
+            json.dumps(
+                {
+                    "alignment": "MATCHES",
+                    "stack_markdown": "Stack table.",
+                    "prior_resolution_markdown": "Prior table.",
+                    "callouts": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        reconcile_pr_description(blind, rec, out)
+        rendered = out.read_text(encoding="utf-8")
+        self.assertLess(
+            rendered.index("Intro preamble paragraph."),
+            rendered.index("## Stack Context"),
+        )
+        self.assertLess(
+            rendered.index("## Stack Context"),
+            rendered.index("## Prior Review Resolution"),
+        )
+
     def test_cli_stores_code_review_prep_in_context(self):
         coords_file = self.tmp / "pr_coords.json"
         coords_file.write_text(

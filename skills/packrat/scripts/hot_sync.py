@@ -18,6 +18,7 @@ from typing import Any, Protocol
 from models import (
     CheckRunRecord,
     ItemCommentRecord,
+    LatestReviewRecord,
     OpinionatedReviewRecord,
     PrLiveRecord,
     ReviewRequestRecord,
@@ -69,6 +70,9 @@ fragment HotPrFields on PullRequest {
   }
   latestOpinionatedReviews(first: 20) {
     nodes { state submittedAt author { login __typename } }
+  }
+  reviews(last: 20) {
+    nodes { state submittedAt commit { oid } author { login __typename } }
   }
   reviewThreads(first: 50) {
     pageInfo { hasNextPage endCursor }
@@ -375,9 +379,32 @@ class HotPrSnapshot:
     checks: list[CheckRunRecord] = field(default_factory=list)
     review_requests: list[ReviewRequestRecord] = field(default_factory=list)
     reviews: list[OpinionatedReviewRecord] = field(default_factory=list)
+    latest_reviews: list[LatestReviewRecord] = field(default_factory=list)
     threads: list[ThreadActivityRecord] = field(default_factory=list)
     comments: list[ItemCommentRecord] = field(default_factory=list)
     repo_full_name: str | None = None
+
+
+def parse_latest_reviews(conn: Any) -> list[LatestReviewRecord]:
+    """Extracts the latest non-pending review per author from a `reviews` connection."""
+    by_author: dict[str, LatestReviewRecord] = {}
+    for rev in _nodes(conn):
+        login = _login(rev.get("author"))
+        state = str(rev.get("state") or "")
+        if not login or state in ("", "PENDING"):
+            continue
+        commit_oid = (rev.get("commit") or {}).get("oid") or None
+        record = LatestReviewRecord(
+            author=login,
+            state=state,
+            author_type=actor_type(rev.get("author")),
+            submitted_at=rev.get("submittedAt"),
+            commit_oid=commit_oid,
+        )
+        prior = by_author.get(login)
+        if prior is None or (record.submitted_at or "") >= (prior.submitted_at or ""):
+            by_author[login] = record
+    return list(by_author.values())
 
 
 def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
@@ -406,6 +433,7 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
             if r
         ],
         reviews=reviews,
+        latest_reviews=parse_latest_reviews(node.get("reviews")),
         threads=[t for t in map(parse_thread, _nodes(node.get("reviewThreads"))) if t],
         comments=list(item_comments_from_graphql(node.get("comments"))),
         repo_full_name=repo_full_name,
@@ -450,6 +478,14 @@ class HotStore(Protocol):
 
     def replace_latest_opinionated_reviews(
         self, repo_id: int, pr_number: int, reviews: Sequence[OpinionatedReviewRecord]
+    ) -> bool: ...
+
+    def replace_latest_reviews(
+        self,
+        repo_id: int,
+        pr_number: int,
+        reviews: Sequence[LatestReviewRecord],
+        now: float | None = None,
     ) -> bool: ...
 
     def replace_thread_activity(
@@ -587,6 +623,9 @@ class HotRefresher:
         )
         changed |= self.store.replace_latest_opinionated_reviews(
             rec.repo_id, rec.number, snap.reviews
+        )
+        changed |= self.store.replace_latest_reviews(
+            rec.repo_id, rec.number, snap.latest_reviews
         )
         changed |= self._write_threads(rec.repo_id, rec.number, snap.threads)
         changed |= self.store.upsert_item_comments(

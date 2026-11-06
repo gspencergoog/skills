@@ -436,6 +436,25 @@ def migrate_0007_timeline_events(conn: sqlite3.Connection) -> None:
     _execute_script(conn, TIMELINE_SQL)
 
 
+LATEST_REVIEWS_SQL = """
+CREATE TABLE IF NOT EXISTS latest_reviews (
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  pr_number INTEGER NOT NULL,
+  author TEXT NOT NULL,
+  author_type TEXT,
+  state TEXT NOT NULL,
+  submitted_at TEXT,
+  commit_oid TEXT,
+  PRIMARY KEY (repo_id, pr_number, author)
+);
+"""
+
+
+def migrate_0008_latest_reviews(conn: sqlite3.Connection) -> None:
+    """Adds `latest_reviews` storing the latest non-pending review per author and commit OID."""
+    _execute_script(conn, LATEST_REVIEWS_SQL)
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -446,6 +465,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (5, migrate_0005_quantized_embeddings),
     (6, migrate_0006_repo_aliases),
     (7, migrate_0007_timeline_events),
+    (8, migrate_0008_latest_reviews),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

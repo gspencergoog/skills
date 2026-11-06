@@ -9,6 +9,7 @@ from models import (
     CheckRun,
     PrSnapshot,
     Thread,
+    ViewerReview,
     is_bot,
     parse_pr_ref,
     pr_key,
@@ -148,6 +149,62 @@ def _extract_reviews(raw: dict[str, Any]) -> tuple[list[str], list[str]]:
     return sorted(approvals), sorted(changes_req)
 
 
+def _node_author_login(node: Any) -> str:
+    if not isinstance(node, dict):
+        return ""
+    author = node.get("author")
+    return str(author.get("login") or "").strip() if isinstance(author, dict) else ""
+
+
+def _extract_viewer_opinionated_state(raw: dict[str, Any], viewer: str) -> str | None:
+    viewer_norm = viewer.strip().lower()
+    if not viewer_norm:
+        return None
+    conn = raw.get("latestOpinionatedReviews")
+    nodes = (conn.get("nodes") or []) if isinstance(conn, dict) else []
+    result: str | None = None
+    for node in nodes:
+        login = _node_author_login(node)
+        if not login or login.lower() != viewer_norm:
+            continue
+        state = str(node.get("state") or "")
+        result = state if state in {"APPROVED", "CHANGES_REQUESTED"} else None
+    return result
+
+
+def _parse_viewer_review_node(node: Any, viewer_norm: str) -> ViewerReview | None:
+    login = _node_author_login(node)
+    if not login or login.lower() != viewer_norm:
+        return None
+    state = str(node.get("state") or "").strip()
+    if not state or state == "PENDING":
+        return None
+    submitted_at = str(node.get("submittedAt") or "")
+    commit = node.get("commit") if isinstance(node.get("commit"), dict) else {}
+    commit_oid = commit.get("oid") or None
+    return ViewerReview(
+        state=state,
+        submitted_at=submitted_at,
+        commit_oid=str(commit_oid) if commit_oid else None,
+    )
+
+
+def _extract_viewer_last_review(raw: dict[str, Any], viewer: str) -> ViewerReview | None:
+    viewer_norm = viewer.strip().lower()
+    if not viewer_norm:
+        return None
+    conn = raw.get("reviews")
+    nodes = (conn.get("nodes") or []) if isinstance(conn, dict) else []
+    best: ViewerReview | None = None
+    for node in nodes:
+        candidate = _parse_viewer_review_node(node, viewer_norm)
+        if candidate is None:
+            continue
+        if best is None or candidate.submitted_at >= best.submitted_at:
+            best = candidate
+    return best
+
+
 def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:
     nodes = _check_truncation(raw.get("reviewThreads"), "reviewThreads", truncated)
     threads: list[Thread] = []
@@ -269,6 +326,8 @@ def normalize_pr(raw: dict[str, Any], viewer: str, repo: str | None = None) -> P
         stack_parent_state=None,
         truncated=truncated,
         updated_at=str(raw.get("updatedAt") or ""),
+        viewer_last_review=_extract_viewer_last_review(raw, viewer),
+        viewer_opinionated_state=_extract_viewer_opinionated_state(raw, viewer),
     )
 
 

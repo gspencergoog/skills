@@ -215,6 +215,8 @@ class AnalyzeProseTests(unittest.TestCase):
             "The authors merge feature branches.",
             "The parser normalizes token stream.",
             "The verifier identifies token drift.",
+            "The process verifies cache entries.",
+            "The status normalizes error codes.",
         ):
             with self.subTest(sentence=sentence):
                 report = self._run_on_text(sentence + "\n")
@@ -222,6 +224,8 @@ class AnalyzeProseTests(unittest.TestCase):
 
         self.assertFalse(_is_likely_noun_token("normalizes", prev="parser"))
         self.assertFalse(_is_likely_noun_token("identifies", prev="verifier"))
+        self.assertFalse(_is_likely_noun_token("verifies", prev="process"))
+        self.assertFalse(_is_likely_noun_token("normalizes", prev="status"))
         self.assertTrue(_is_likely_noun_token("normalizes", prev="parsers"))
         self.assertTrue(_is_likely_noun_token("normalizes"))
         self.assertTrue(_is_likely_noun_token("templates", prev="config"))

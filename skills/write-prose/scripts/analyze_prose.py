@@ -1740,6 +1740,16 @@ def _flush_paragraph(
         sentences_with_lines.append((buffer_text.strip(), buffer_line))
 
 
+def _has_singular_noun_subject(prev: str | None) -> bool:
+    """Returns True when `prev` looks like a singular noun subject."""
+    if prev is None:
+        return False
+    prev_clean = prev.lower().strip("'-")
+    if prev_clean.endswith("s") and not prev_clean.endswith(("ss", "us")):
+        return False
+    return _is_likely_noun_token(prev)
+
+
 def _is_likely_noun_token(word: str, prev: str | None = None) -> bool:
     """Heuristically determines whether `word` can act as a noun in a noun cluster."""
     if prose_lexicon.is_code_or_identifier(word):
@@ -1748,11 +1758,9 @@ def _is_likely_noun_token(word: str, prev: str | None = None) -> bool:
     if len(low) <= 2 or low in _NON_NOUN_CLUSTER_WORDS:
         return False
     if (
-        prev is not None
-        and word.islower()
+        word.islower()
         and low.endswith(("izes", "ifies"))
-        and not prev.lower().strip("'-").endswith("s")
-        and _is_likely_noun_token(prev)
+        and _has_singular_noun_subject(prev)
     ):
         return False
     if low in _EXCEPT_NOUNS_WITH_ADJ_SUFFIX:

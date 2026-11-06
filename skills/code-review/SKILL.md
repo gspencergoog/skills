@@ -34,7 +34,7 @@ You are an expert Senior Software Engineer specializing in code review and in re
 
 | Flag | Effect | Cost |
 | :--- | :--- | :--- |
-| *(none)* | Dynamic default determined by Ring classification (Ring 0: `--fast`; Ring 1-2: Standard; Ring 3: `--panel`; Ring 4: `--max`). Explicit depth flags skip Ring evaluation. | Scaled to blast radius |
+| *(none)* | Dynamic default determined by Ring classification (Ring 0: `--fast`; Ring 1-2: Standard; Ring 3: `--panel` above 225 substantive lines; Ring 4: `--max`). Explicit depth flags skip Ring evaluation. | Scaled to blast radius |
 | `--fast` | Single-pass in-session review without subagents; tier 1a/1b checks only | Minimal latency / no subagents |
 | `--json [<path>]` | Emits `review_results.json` via `lint_review.py --export-json`, to `<path>` when given, otherwise to `<artifact-dir>/review_results.json` | Same as underlying mode |
 | `--claude` (or `--opus`) | Pins the single reviewer (or reviewer B under `--panel`) to Claude Opus (`opus-5.5-max` on Tier 1 swarm, or `model: "opus"` on Tier 2a Claude Code) | Uses 3P quota |
@@ -93,7 +93,7 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
 - **For Whole Local Files** (for example, "review this spec"): produce an all-`+` diff with real line numbers using `git diff --no-index --no-ext-diff --no-textconv /dev/null <file>`. It exits with status 1 when it prints a diff, which is expected. The rest of the workflow treats this like any other diff.
 - **Defer `--verify` Throwaway Checkouts to Step 2c**: Do not create `--verify` throwaway checkouts or run dependency installs in Step 1. Those happen in Step 2c only after the Step 2a Pre-Execution Security Gate clears the diff.
 - **Pin Base and Head SHAs**: Record `base_sha=$(git merge-base <base> HEAD)` (or `git rev-parse HEAD` for uncommitted working-tree changes against `HEAD`). Set `head_sha` to `git rev-parse HEAD` in the source repo (updated in Step 2c to `git -C "$pr_review_dir_a" rev-parse HEAD` when a `--verify` snapshot commit is created for local working-tree changes).
-- **Stage Diff Into Size-Bounded Chunks**: For any diff over 150 lines or 6 KB, create a temporary diff directory (`diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)`) and pipe the unified diff into `stage_diffs.py --grouped`:
+- **Stage Diff Into Size-Bounded Chunks**: Skip if `code_review_prep.diff_dir` is already set (`diff_dir=<that path>`). Otherwise, for any diff over 150 lines or 6 KB, create `diff_dir=$(mktemp -d -t pr-review-diffs-XXXXXX)` and pipe the unified diff into `stage_diffs.py --grouped`:
   ```bash
   <diff command> | python3 <skill-dir>/../context-indexer/scripts/stage_diffs.py \
     --grouped --repo-dir <workspace-dir> --base-ref "$base_sha" --output-dir "$diff_dir"
@@ -102,10 +102,10 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
 
 ### Step 1b: Classify Artifacts & Evaluate Reuse Ring
 
-1. **Reuse Caller Prep**: If the caller passed a `code_review_prep` block (`pr-review` Stage 2), use its `classification`, `diff_dir`, churn, drift, and `packrat` results instead of rerunning them.
+1. **Reuse Caller Prep**: If the caller passed `code_review_prep` (`pr-review` Stage 2), skip Step 1's `stage_diffs.py` run, set `diff_dir` to `code_review_prep.diff_dir` (when non-null) so Step 6 removes it, and reuse its `classification`, `entity_churn`, `signature_drift`, and `packrat` results.
 2. **Classify in One Call**: Otherwise run:
    ```bash
-   <file list> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --combined --diff-file <diff> -
+   <diff command> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --combined --diff-file -
    ```
    `ring` holds the reuse ring and level after the [volume gates](references/lanes.md#volume-gates), `artifacts` holds each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), `rule`, and `rubric`, and `focus_dedicated_allowed` feeds Step 2d.
    - With an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`), ignore `ring`. Otherwise apply `ring.flags`, add the API Review Mandate when `ring.api_mandate` is true, and record `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).

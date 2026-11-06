@@ -33,6 +33,7 @@ from models import (
     IssuePrLink,
     IssueRecord,
     ItemCommentRecord,
+    LatestReviewRecord,
     NotificationRecord,
     OpinionatedReviewRecord,
     PrFileRecord,
@@ -1194,6 +1195,43 @@ class TestLiveStore(unittest.TestCase):
         }
         self.assertEqual(rows, [expected])
         self.assertEqual(self._kinds(), ["reviews"])
+
+    def test_replace_latest_reviews(self) -> None:
+        rid = self.repo.repo_id
+        reviews = [
+            LatestReviewRecord(
+                "bob", "COMMENTED", "User", "2027-01-15T08:00:00Z", "sha0"
+            ),
+            LatestReviewRecord(
+                "bob", "COMMENTED", "User", "2027-01-15T08:30:00Z", "sha1"
+            ),
+        ]
+        self.assertTrue(self.store.replace_latest_reviews(rid, 7, reviews, now=T0))
+        self.assertFalse(self.store.replace_latest_reviews(rid, 7, reviews, now=T0))
+        rows = self._view(
+            "SELECT item_key, repo_full_name, pr_number, author, author_type, state, "
+            "submitted_at, commit_oid FROM v_pr_latest_author_reviews"
+        )
+        expected = {
+            "item_key": self.key,
+            "repo_full_name": self.repo.full_name,
+            "pr_number": 7,
+            "author": "bob",
+            "author_type": "User",
+            "state": "COMMENTED",
+            "submitted_at": "2027-01-15T08:30:00Z",
+            "commit_oid": "sha1",
+        }
+        self.assertEqual(rows, [expected])
+        updated = [
+            LatestReviewRecord(
+                "bob", "APPROVED", "User", "2027-01-15T09:00:00Z", "sha2"
+            )
+        ]
+        self.assertTrue(self.store.replace_latest_reviews(rid, 7, updated, now=T0 + 1))
+        changes = self.store.changes_since(0)
+        self.assertEqual([c.kind for c in changes], ["reviews", "reviews"])
+        self.assertEqual(changes[-1].fields, ("latest_reviews",))
 
     def test_replace_thread_activity(self) -> None:
         rid = self.repo.repo_id

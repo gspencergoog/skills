@@ -20,6 +20,7 @@ from hot_sync import (
     build_node_id_query,
     parse_hot_node,
 )
+from models import LatestReviewRecord
 from rate_budget import Priority
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -97,6 +98,7 @@ class TestQueryBuilders(unittest.TestCase):
             "autoMergeRequest",
             "headRepositoryOwner",
             "__typename",
+            "reviews(last: 20)",
             "comments(last: 10)",
             "body",
         ):
@@ -137,8 +139,72 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(requests, {("bob", "User"), ("octo-org/ui-reviewers", "Team")})
         types = {r.author: r.author_type for r in snap.reviews}
         self.assertEqual(types, {"carol": "User", "gemini-code-assist": "Bot"})
+        self.assertEqual(snap.latest_reviews, [])
         last = {t.thread_id: (t.last_author, t.last_author_type) for t in snap.threads}
         self.assertEqual(last["PRRT_2"], ("gemini-code-assist", "Bot"))
+
+    def test_parse_latest_reviews_deduplicates_and_filters_pending(self) -> None:
+        node = copy.deepcopy(_fixture("hot_nodes_batch.json")["data"]["pr0"])
+        node["reviews"] = {
+            "nodes": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-11-02T10:00:00Z",
+                    "commit": {"oid": "111aaa"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-11-02T14:00:00Z",
+                    "commit": {"oid": "222bbb"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "APPROVED",
+                    "submittedAt": "2026-11-02T11:00:00Z",
+                    "commit": {"oid": "000999"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "PENDING",
+                    "submittedAt": "2026-11-02T16:00:00Z",
+                    "commit": {"oid": "333ccc"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-11-02T13:00:00Z",
+                    "commit": None,
+                    "author": {"login": "gemini-code-assist", "__typename": "Bot"},
+                },
+                {
+                    "state": "APPROVED",
+                    "submittedAt": "2026-11-02T15:00:00Z",
+                    "commit": {"oid": "444ddd"},
+                    "author": None,
+                },
+            ]
+        }
+        snap = parse_hot_node(1, node)
+        self.assertEqual(
+            snap.latest_reviews,
+            [
+                LatestReviewRecord(
+                    author="carol",
+                    state="COMMENTED",
+                    author_type="User",
+                    submitted_at="2026-11-02T14:00:00Z",
+                    commit_oid="222bbb",
+                ),
+                LatestReviewRecord(
+                    author="gemini-code-assist",
+                    state="COMMENTED",
+                    author_type="Bot",
+                    submitted_at="2026-11-02T13:00:00Z",
+                    commit_oid=None,
+                ),
+            ],
+        )
 
     def test_parse_bot_author_and_fork(self) -> None:
         node = _fixture("hot_nodes_batch.json")["data"]["pr1"]
@@ -287,6 +353,7 @@ class TestHotRefresher(unittest.TestCase):
 
     def test_write_calls_replace_thread_activity_on_fake_store(self) -> None:
         replaced: list[tuple[int, int, int]] = []
+        latest_reviews_calls: list[tuple[int, int, int]] = []
 
         class FakeHotStore:
             def get_node_ids(self, item_keys: Any) -> dict[str, str]:
@@ -314,6 +381,16 @@ class TestHotRefresher(unittest.TestCase):
             ) -> bool:
                 return False
 
+            def replace_latest_reviews(
+                self,
+                repo_id: int,
+                pr_number: int,
+                reviews: Any,
+                now: float | None = None,
+            ) -> bool:
+                latest_reviews_calls.append((repo_id, pr_number, len(reviews)))
+                return False
+
             def replace_thread_activity(
                 self, repo_id: int, pr_number: int, threads: Any
             ) -> bool:
@@ -330,6 +407,66 @@ class TestHotRefresher(unittest.TestCase):
         self.assertEqual(len(replaced), 1)
         self.assertEqual(replaced[0][1], 7)
         self.assertEqual(replaced[0][2], 2)
+        self.assertEqual(len(latest_reviews_calls), 1)
+        self.assertEqual(latest_reviews_calls[0][1], 7)
+
+    def test_refresh_stores_latest_reviews_with_commit_oids(self) -> None:
+        batch = _fixture("hot_nodes_batch.json")
+        batch["data"]["pr0"]["reviews"] = {
+            "nodes": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-11-02T12:00:00Z",
+                    "commit": {"oid": "old000"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-11-03T09:15:00Z",
+                    "commit": {"oid": "aaa111"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "PENDING",
+                    "submittedAt": "2026-11-03T10:00:00Z",
+                    "commit": {"oid": "aaa111"},
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+                {
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-11-02T13:00:00Z",
+                    "commit": {"oid": "aaa111"},
+                    "author": {"login": "gemini-code-assist", "__typename": "Bot"},
+                },
+            ]
+        }
+        self.transport.batch = batch
+        self.assertEqual(self.hot.refresh_hot([KEY7]), [KEY7])
+        rows = self._rows(
+            "SELECT item_key, author, author_type, state, submitted_at, commit_oid "
+            "FROM v_pr_latest_author_reviews ORDER BY author"
+        )
+        self.assertEqual(
+            rows,
+            [
+                (
+                    KEY7,
+                    "carol",
+                    "User",
+                    "COMMENTED",
+                    "2026-11-03T09:15:00Z",
+                    "aaa111",
+                ),
+                (
+                    KEY7,
+                    "gemini-code-assist",
+                    "Bot",
+                    "COMMENTED",
+                    "2026-11-02T13:00:00Z",
+                    "aaa111",
+                ),
+            ],
+        )
 
     def test_redirected_repo_merges_alias_and_writes_canonical_repo(self) -> None:
         old_key = "old-org/old-widgets#7"

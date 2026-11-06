@@ -35,6 +35,7 @@ READER_VIEWS = (
     "v_notifications",
     "v_pr_basic",
     "v_pr_checks",
+    "v_pr_latest_author_reviews",
     "v_pr_latest_reviews",
     "v_pr_live",
     "v_pr_review_requests",
@@ -111,7 +112,7 @@ class TestMigrations(unittest.TestCase):
     def test_fresh_db_reaches_latest_version_with_views(self) -> None:
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8])
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
             stored = store.conn.execute(
@@ -131,7 +132,7 @@ class TestMigrations(unittest.TestCase):
         _build_pre_migration_db(self.db_path)
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7])
+            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8])
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
             self.assertEqual(repo.mode, "mirror")
@@ -228,7 +229,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -300,7 +301,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5, 6, 7])
+            self.assertEqual(store.applied_migrations, [5, 6, 7, 8])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -323,7 +324,7 @@ class TestMigrations(unittest.TestCase):
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
             for version, migrate in db_migrations.MIGRATIONS[:5]:
                 db_migrations._run_migration(conn, version, migrate)
-            self.assertEqual(apply_migrations(conn), [6, 7])
+            self.assertEqual(apply_migrations(conn), [6, 7, 8])
             conn.execute(
                 "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
                 "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -343,7 +344,7 @@ class TestMigrations(unittest.TestCase):
             conn.close()
 
     def test_migration_0007_adds_timeline_tables_columns_and_indexes(self) -> None:
-        self.assertEqual(LATEST_SCHEMA_VERSION, 7)
+        self.assertEqual(LATEST_SCHEMA_VERSION, 8)
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
@@ -355,8 +356,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [7])
-            self.assertEqual(read_schema_version(conn), 7)
+            self.assertEqual(apply_migrations(conn), [7, 8])
+            self.assertEqual(read_schema_version(conn), 8)
             tables = {
                 str(r[0])
                 for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -399,7 +400,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0007_timeline_events(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 7)
+            self.assertEqual(read_schema_version(conn), 8)
 
             conn.execute(
                 "INSERT INTO timeline_events (event_id, repo_id, item_kind, item_number, "

@@ -491,7 +491,7 @@ def classify_combined(
     no_content: bool = False,
 ) -> dict:
     """Returns {"ring": ..., "artifacts": [...], "substantive": asdict(stats),
-    "focus_dedicated_allowed": substantive_lines > FOCUS_MIN_LINES}.
+    "focus_dedicated_allowed": substantive_lines is None or > FOCUS_MIN_LINES}.
     """
     root_path = Path(root)
     if diff_text is not None:
@@ -512,7 +512,9 @@ def classify_combined(
         "ring": ring_result,
         "artifacts": artifacts,
         "substantive": asdict(stats),
-        "focus_dedicated_allowed": stats.substantive_lines > FOCUS_MIN_LINES,
+        "focus_dedicated_allowed": (
+            substantive_lines is None or substantive_lines > FOCUS_MIN_LINES
+        ),
     }
 
 
@@ -593,6 +595,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def _resolve_paths_and_diff(
     args: argparse.Namespace,
 ) -> tuple[list[str], str | None]:
+    if args.diff_file == "-" and args.paths == ["-"]:
+        raise argparse.ArgumentError(
+            None,
+            "cannot read both --diff-file and paths from stdin (-); omit - so paths come from --diff-file -",
+        )
     diff_text = _read_diff_file(args.diff_file) if args.diff_file else None
     paths = list(args.paths)
     if paths == ["-"]:

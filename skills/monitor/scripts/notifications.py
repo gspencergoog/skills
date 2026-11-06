@@ -27,6 +27,7 @@ class PollResult:
     last_modified: str | None = None
     poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
     changed_keys: set[str] = field(default_factory=set)
+    review_requested_unwatched: bool = False
 
 
 def subject_to_pr_key(url: str | None) -> str | None:
@@ -64,7 +65,20 @@ def _parse_poll_interval(headers: dict[str, str]) -> int:
     return DEFAULT_POLL_INTERVAL_S
 
 
+def _classify_item(item: Any, watched: set[str]) -> tuple[str | None, bool]:
+    if not isinstance(item, dict):
+        return None, False
+    subj: dict[str, Any] = item.get("subject") if isinstance(item.get("subject"), dict) else {}
+    key = subject_to_pr_key(subj.get("url"))
+    if not key:
+        return None, False
+    if key in watched:
+        return key, False
+    return None, item.get("reason") == "review_requested"
+
+
 def _extract_changed_keys(body: str, watched: set[str]) -> set[str]:
+    NotificationPoller.review_requested_unwatched = False
     try:
         items = json.loads(body) if body.strip() else []
     except json.JSONDecodeError as exc:
@@ -73,17 +87,17 @@ def _extract_changed_keys(body: str, watched: set[str]) -> set[str]:
         return set()
     changed: set[str] = set()
     for item in items:
-        if not isinstance(item, dict):
-            continue
-        subj: dict[str, Any] = item.get("subject") if isinstance(item.get("subject"), dict) else {}
-        key = subject_to_pr_key(subj.get("url"))
-        if key and key in watched:
-            changed.add(key)
+        matched_key, unwatched_req = _classify_item(item, watched)
+        if matched_key:
+            changed.add(matched_key)
+        elif unwatched_req:
+            NotificationPoller.review_requested_unwatched = True
     return changed
 
 
 def poll(runner: GhRunner, since: str | None, watched: set[str]) -> PollResult:
     """Polls ``GET /notifications`` with ``If-Modified-Since``."""
+    NotificationPoller.review_requested_unwatched = False
     args = ["api", "-i", "notifications?per_page=50&all=true"]
     if since:
         args.extend(["-H", f"If-Modified-Since: {since}"])
@@ -98,6 +112,7 @@ def poll(runner: GhRunner, since: str | None, watched: set[str]) -> PollResult:
             last_modified=last_mod,
             poll_interval_s=interval,
             changed_keys=set(),
+            review_requested_unwatched=False,
         )
     if status in (401, 403):
         raise NotificationsUnavailable(
@@ -115,9 +130,83 @@ def poll(runner: GhRunner, since: str | None, watched: set[str]) -> PollResult:
             status=status or None,
             headers=headers,
         )
+    changed = _extract_changed_keys(body, watched)
     return PollResult(
         not_modified=False,
         last_modified=last_mod,
         poll_interval_s=interval,
-        changed_keys=_extract_changed_keys(body, watched),
+        changed_keys=changed,
+        review_requested_unwatched=NotificationPoller.review_requested_unwatched,
     )
+
+
+_UNSET = object()
+
+
+def _coerce_watched(watched: set[str] | None, fallback: Any) -> set[str]:
+    if watched is not None:
+        return watched
+    return fallback if isinstance(fallback, set) else set()
+
+
+def _coerce_since(first: Any, second: Any, default_since: str | None) -> str | None:
+    if isinstance(first, str):
+        return first
+    if isinstance(second, str):
+        return second
+    if first is None and second is not _UNSET:
+        return None
+    if second is None:
+        return None
+    return default_since
+
+
+class NotificationPoller:
+    """Polls GitHub REST notifications and tracks unwatched review requests."""
+
+    review_requested_unwatched: bool = False
+
+    def __init__(self, runner: GhRunner | None = None) -> None:
+        self.runner = runner
+        self.last_modified: str | None = None
+        self.poll_interval_s: int = DEFAULT_POLL_INTERVAL_S
+        self.review_requested_unwatched: bool = False
+
+    def _extract_changed_keys(self, body: str, watched: set[str]) -> set[str]:
+        self.review_requested_unwatched = False
+        changed = _extract_changed_keys(body, watched)
+        self.review_requested_unwatched = NotificationPoller.review_requested_unwatched
+        return changed
+
+    def _resolve_poll_args(
+        self,
+        runner: Any,
+        since: Any,
+        watched: set[str] | None,
+    ) -> tuple[GhRunner, str | None, set[str]]:
+        if callable(runner):
+            actual_since = since if isinstance(since, str) else None
+            return runner, actual_since, _coerce_watched(watched, since)
+        if self.runner is None:
+            raise TypeError("NotificationPoller.poll requires a GhRunner")
+        if isinstance(runner, set):
+            return self.runner, self.last_modified, runner
+        actual_since = _coerce_since(runner, since, self.last_modified)
+        return self.runner, actual_since, _coerce_watched(watched, since)
+
+    def poll(
+        self,
+        runner: Any = _UNSET,
+        since: Any = _UNSET,
+        watched: set[str] | None = None,
+    ) -> PollResult:
+        """Polls ``GET /notifications`` and updates ``review_requested_unwatched``."""
+        self.review_requested_unwatched = False
+        NotificationPoller.review_requested_unwatched = False
+        first = None if runner is _UNSET else runner
+        actual_runner, actual_since, actual_watched = self._resolve_poll_args(first, since, watched)
+        result = poll(actual_runner, since=actual_since, watched=actual_watched)
+        self.last_modified = result.last_modified
+        self.poll_interval_s = result.poll_interval_s
+        self.review_requested_unwatched = result.review_requested_unwatched
+        return result

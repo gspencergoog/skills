@@ -17,7 +17,16 @@ from pathlib import Path
 from typing import Any
 
 import packrat_source
-from a2ui_board import board_data_model, board_dsl, sync_pane_store, write_board_file
+from a2ui_board import (
+    REVIEW_BOARD_COMPONENTS,
+    board_data_model,
+    board_dsl,
+    review_board_data_model,
+    review_board_dsl,
+    sort_review_snapshots,
+    sync_pane_store,
+    write_board_file,
+)
 from daemon_support import (
     CONTROL_FILE,
     EXIT_ALREADY_RUNNING,
@@ -30,24 +39,39 @@ from daemon_support import (
 )
 from diff_events import (
     DiffContext,
+    diff_reviewer_snapshots,
     diff_snapshots,
     filter_events,
     is_terminal,
     snapshot_thread_watermarks,
     summarize,
 )
-from gh_client import GhError, GhRunner, RateLimitBackoff, SubprocessGh, fetch_prs
+from gh_client import (
+    GhError,
+    GhRunner,
+    RateLimitBackoff,
+    SubprocessGh,
+    fetch_prs,
+    search_review_keys,
+)
 from models import (
     EVENT_KINDS,
+    REVIEWER_EVENT_KINDS,
     SCHEMA_VERSION,
     Event,
     MonitorState,
     PrSnapshot,
+    ReviewRole,
+    parse_event_list,
     parse_pr_ref,
     pr_key,
 )
 from normalize import canonical_pr_repo, normalize_pr, resolve_stack_parents
-from notifications import DEFAULT_POLL_INTERVAL_S, NotificationsUnavailable, poll
+from notifications import (
+    DEFAULT_POLL_INTERVAL_S,
+    NotificationPoller,
+    NotificationsUnavailable,
+)
 from packrat_source import (
     ChangeBatch,
     PackratError,
@@ -112,16 +136,29 @@ def utcnow_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse_event_list(raw: str | None) -> set[str] | None:
-    if not raw:
-        return None
-    items = {part.strip() for part in raw.split(",") if part.strip()}
-    unknown = sorted(items - set(EVENT_KINDS))
-    if unknown:
-        raise ValueError(
-            f"Unknown event kind(s): {', '.join(unknown)}. Valid kinds: {', '.join(EVENT_KINDS)}"
-        )
-    return items
+def _parse_event_list(
+    raw: str | None, role: ReviewRole | str = ReviewRole.AUTHOR
+) -> set[str] | None:
+    return parse_event_list(raw, role=role)
+
+
+def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.wake_on_review and not args.reviews:
+        parser.error("--wake-on-review requires --reviews")
+    if args.reviews:
+        if args.stack:
+            parser.error("cannot use --reviews with --stack")
+        if args.until == "all-green":
+            parser.error("cannot use --reviews with --until all-green")
+        if args.prs:
+            parser.error("cannot pass positional PR arguments with --reviews")
+    if args.until is None:
+        args.until = "none" if args.reviews else "closed"
+    args.role = ReviewRole.REVIEWER if args.reviews else ReviewRole.AUTHOR
+    try:
+        parse_event_list(args.events, role=args.role)
+    except ValueError as exc:
+        parser.error(str(exc))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -137,6 +174,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--repo", help="Default owner/repo for bare PR numbers.")
     parser.add_argument(
+        "--reviews",
+        action="store_true",
+        help="Watch incoming and active pull request reviews for the authenticated user.",
+    )
+    parser.add_argument(
+        "--wake-on-review",
+        action="store_true",
+        help="Send agentapi wake messages on actionable reviewer events under --reviews --daemon.",
+    )
+    parser.add_argument(
         "--stack",
         action="store_true",
         help="Expand each target PR to include its stacked parent and child PRs.",
@@ -148,7 +195,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--events",
-        help=f"Comma-separated event kinds to wake on (default: all: {','.join(EVENT_KINDS)}).",
+        help=(
+            f"Comma-separated event kinds to wake on (default: all: {','.join(EVENT_KINDS)}; "
+            f"under --reviews: {','.join(REVIEWER_EVENT_KINDS)})."
+        ),
     )
     parser.add_argument(
         "--actionable-only",
@@ -157,8 +207,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--until",
-        choices=("merged", "closed", "all-green"),
-        help="Terminal condition that causes exit code 3 (default: closed).",
+        choices=("merged", "closed", "all-green", "none"),
+        help="Terminal condition that causes exit code 3 (default: closed, or none with --reviews).",
     )
     parser.add_argument(
         "--timeout",
@@ -280,6 +330,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("cannot use --daemon and --once together")
     if args.daemon and not args.conversation_id:
         parser.error("--daemon requires --conversation-id")
+    _validate_review_args(parser, args)
     return args
 
 
@@ -488,6 +539,21 @@ def _carry_over_unmirrored(snap: PrSnapshot, prev: PrSnapshot | None) -> None:
         snap.last_committer = prev.last_committer
 
 
+def _packrat_viewer(source: PackratSource) -> str:
+    viewer_fn = getattr(source, "viewer", None) or source.viewer_login
+    return str(viewer_fn() or gh_config_user())
+
+
+def _merge_key_lists(primary: list[str], secondary: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in [*primary, *secondary]:
+        if key not in seen and len(out) < MAX_WATCHED_PRS:
+            seen.add(key)
+            out.append(key)
+    return out
+
+
 class Monitor:
     """Drives the hybrid notifications + GraphQL polling loop for a set of PRs."""
 
@@ -501,11 +567,18 @@ class Monitor:
         epoch_now: Callable[[], float] = time.time,
         notifier: Notifier | None = None,
         packrat_runner: PackratRunner | None = None,
+        role: ReviewRole = ReviewRole.AUTHOR,
+        repo: str | None = None,
+        wake_on_review: bool = False,
     ) -> None:
         self.runner = runner
         self.packrat_runner = packrat_runner
         self.packrat: PackratSource | None = None
         """Set while reading from ``packrat serve``; None in direct GitHub mode."""
+        self.role: ReviewRole = role
+        self.repo: str | None = repo
+        self.wake_on_review: bool = wake_on_review
+        self.poller: NotificationPoller = NotificationPoller(runner)
         self.source_mode = "github"
         self._source_note: str | None = None
         """Board subtitle suffix naming the data source, or None for plain GitHub mode."""
@@ -607,13 +680,51 @@ class Monitor:
                     prev_snapshots[new] = old_snap
         return resolved_targets
 
+    def _update_pr_thread_watermarks(self, key: str, snap: PrSnapshot) -> None:
+        if snap.state in ("MERGED", "CLOSED"):
+            return
+        current_marks = snapshot_thread_watermarks(snap, viewer=self.viewer)
+        if current_marks:
+            merged = dict(self.state.reported_threads.get(key) or {})
+            merged.update(current_marks)
+            self.state.reported_threads[key] = merged
+
+    def _diff_target_keys(
+        self,
+        target_keys: list[str],
+        prev_snapshots: dict[str, PrSnapshot],
+        ctx: DiffContext,
+    ) -> list[Event]:
+        events: list[Event] = []
+        is_reviewer = self.role == ReviewRole.REVIEWER
+        for key in target_keys:
+            prev = prev_snapshots.get(key)
+            cur = self.state.snapshots[key]
+            if is_reviewer:
+                events.extend(diff_reviewer_snapshots(prev, cur, ctx))
+                self._update_pr_thread_watermarks(key, cur)
+            else:
+                events.extend(diff_snapshots(prev, cur, ctx))
+            record_completed_durations(self.state, prev, cur)
+        return events
+
+    def _retire_terminal_reviews(self, terminal_keys: set[str]) -> None:
+        retired = [k for k in self.watched_keys if k in terminal_keys]
+        self.watched_keys = [k for k in self.watched_keys if k not in terminal_keys]
+        if self.packrat is not None:
+            leased_terminal = sorted(set(retired) | (self.packrat.watched & terminal_keys))
+            if leased_terminal:
+                self.packrat.unlease(leased_terminal)
+
     def refresh(self, keys: list[str] | None = None) -> list[Event]:
         """Fetches ``keys`` (or all watched PRs), updates ``self.state``, and returns new events.
 
         In packrat mode the PR data comes from packrat's views; keys packrat doesn't
         have (or marked for ``gh`` after a slow startup) are fetched with GraphQL.
         """
-        target_keys = list(keys) if keys else list(self.watched_keys)
+        target_keys = list(self.watched_keys) if keys is None else list(keys)
+        if not target_keys:
+            return []
         viewer, raw_map, from_packrat = self._fetch_raw(target_keys)
         if viewer:
             self.viewer = viewer
@@ -629,17 +740,14 @@ class Monitor:
             reported_threads=self.state.reported_threads,
             reruns=self.state.reruns,
         )
-        events: list[Event] = []
-        for key in target_keys:
-            prev = prev_snapshots.get(key)
-            cur = self.state.snapshots[key]
-            events.extend(diff_snapshots(prev, cur, ctx))
-            record_completed_durations(self.state, prev, cur)
+        events = self._diff_target_keys(target_keys, prev_snapshots, ctx)
 
         terminal_keys = {
             k for k, s in self.state.snapshots.items() if s.state in ("MERGED", "CLOSED")
         }
         self.state.prune(terminal_keys)
+        if self.role == ReviewRole.REVIEWER and terminal_keys:
+            self._retire_terminal_reviews(terminal_keys)
         self._pushed_keys.difference_update(target_keys)
         self.backoff.reset()
         return events
@@ -676,7 +784,30 @@ class Monitor:
         }
 
     def _ordered_snapshots(self) -> dict[str, Any]:
+        if self.role == ReviewRole.REVIEWER:
+            return {
+                snap.key: snap
+                for snap, _, _, _ in sort_review_snapshots(self.state.snapshots, self.viewer)
+            }
         return {k: self.state.snapshots[k] for k in self.watched_keys if k in self.state.snapshots}
+
+    def _build_board_artifacts(
+        self, events: list[Event], ts: str
+    ) -> tuple[dict[str, Any], str, list[dict[str, Any]] | None]:
+        if self.role == ReviewRole.REVIEWER:
+            dm = review_board_data_model(
+                self.state.snapshots,
+                viewer=self.viewer,
+                durations=self.state.check_durations,
+                events=events,
+                now=self.epoch_now(),
+                observed_at=ts,
+            )
+            return dm, review_board_dsl(dm), REVIEW_BOARD_COMPONENTS
+        etas = self._compute_etas()
+        ordered_snaps = self._ordered_snapshots()
+        dm = board_data_model(ordered_snaps, events, etas, observed_at=ts)
+        return dm, board_dsl(ordered_snaps, events, etas, observed_at=ts), None
 
     def _sync_board(
         self,
@@ -687,10 +818,7 @@ class Monitor:
         if getattr(args, "no_a2ui", False):
             return None
         ts = observed_at or self.now()
-        etas = self._compute_etas()
-        ordered_snaps = self._ordered_snapshots()
-        dm = board_data_model(ordered_snaps, events, etas, observed_at=ts)
-        dsl = board_dsl(ordered_snaps, events, etas, observed_at=ts)
+        dm, dsl, components = self._build_board_artifacts(events, ts)
         if self._source_note:
             dm, dsl = _with_subtitle_note(dm, dsl, self._source_note)
         board_path = (
@@ -713,6 +841,7 @@ class Monitor:
             surface_id="monitor",
             observed_at=ts,
             allow_create=allow_create,
+            components=components,
         )
         self._board_synced = True
         return {
@@ -763,13 +892,7 @@ class Monitor:
 
     def _record_threads_after_emit(self) -> None:
         for key, snap in self.state.snapshots.items():
-            if snap.state in ("MERGED", "CLOSED"):
-                continue
-            current_marks = snapshot_thread_watermarks(snap, viewer=self.viewer)
-            if current_marks:
-                merged = dict(self.state.reported_threads.get(key) or {})
-                merged.update(current_marks)
-                self.state.reported_threads[key] = merged
+            self._update_pr_thread_watermarks(key, snap)
 
     def emit(self, payload: dict[str, Any], args: argparse.Namespace) -> None:
         """Writes ``payload`` to stdout, optional ``--output`` and ``--log``, then saves state."""
@@ -815,7 +938,7 @@ class Monitor:
         if not self.notifications_enabled:
             return set(), default_interval
         try:
-            res = poll(
+            res = self.poller.poll(
                 self.runner,
                 since=self.state.notifications_last_modified,
                 watched=set(self.watched_keys),
@@ -876,6 +999,8 @@ class Monitor:
         return code
 
     def _filter_wake_events_for_scope(self, events: list[Event], scope: str) -> list[Event]:
+        if self.role == ReviewRole.REVIEWER:
+            return [ev for ev in events if ev.actionable]
         if scope != "mine":
             return list(events)
         filtered: list[Event] = []
@@ -915,18 +1040,36 @@ class Monitor:
         except PackratError as exc:
             sys.stderr.write(f"warning: packrat refresh failed: {exc}\n")
 
+    def _emit_silent_daemon_batch(
+        self, accumulated: list[Event], args: argparse.Namespace
+    ) -> bool:
+        payload = self._build_payload("change", 0, accumulated, args, notify_mode="none")
+        self.emit(payload, args)
+        if not getattr(args, "output", None):
+            last_json = self.state_path.parent / "last.json"
+            last_json.parent.mkdir(parents=True, exist_ok=True)
+            last_json.write_text(
+                json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        accumulated.clear()
+        return True
+
     def _dispatch_daemon_batch(
         self,
         now: float,
         accumulated: list[Event],
         args: argparse.Namespace,
     ) -> bool:
+        if self.role == ReviewRole.REVIEWER and not self.wake_on_review:
+            return self._emit_silent_daemon_batch(accumulated, args)
         if not self.gate.can_send() or now < self._next_send_retry:
             return False
         events_to_wake = self._filter_wake_events_for_scope(
             accumulated, getattr(args, "notify_scope", "mine")
         )
         if not events_to_wake:
+            if self.role == ReviewRole.REVIEWER:
+                return self._emit_silent_daemon_batch(accumulated, args)
             self._sync_board(accumulated, args)
             save_state(self.state_path, self.state)
             accumulated.clear()
@@ -1014,6 +1157,43 @@ class Monitor:
             return self._finish_with("change", 0, accumulated, args)
         return None
 
+    def _discover_github_review_delta(self) -> list[str]:
+        viewer, discovered = search_review_keys(
+            self.runner, repo=self.repo, backoff=self.backoff
+        )
+        if viewer:
+            self.viewer = viewer
+        existing = set(self.watched_keys)
+        added: list[str] = []
+        for key in discovered[:MAX_WATCHED_PRS]:
+            if key not in existing and len(self.watched_keys) < MAX_WATCHED_PRS:
+                self.watched_keys.append(key)
+                existing.add(key)
+                added.append(key)
+        return added
+
+    def _consume_unwatched_review_request(self) -> set[str]:
+        if self.role != ReviewRole.REVIEWER:
+            return set()
+        if not (
+            self.poller.review_requested_unwatched
+            or NotificationPoller.review_requested_unwatched
+        ):
+            return set()
+        self.poller.review_requested_unwatched = False
+        NotificationPoller.review_requested_unwatched = False
+        return set(self._discover_github_review_delta())
+
+    def _sweep_github_review_keys(self) -> None:
+        viewer, discovered = search_review_keys(
+            self.runner, repo=self.repo, backoff=self.backoff
+        )
+        if viewer:
+            self.viewer = viewer
+        self.watched_keys = _merge_key_lists(
+            discovered[:MAX_WATCHED_PRS], self.watched_keys
+        )
+
     def _select_refresh_targets(
         self,
         now: float,
@@ -1037,6 +1217,7 @@ class Monitor:
             changed, interval = self._poll_notifications(cfg.notify_s)
             timers.next_notify = now + interval
             flagged |= changed
+            flagged |= self._consume_unwatched_review_request()
         if poll_due:
             flagged |= self._pending_rollup_keys()
             timers.next_poll = now + cfg.poll_s
@@ -1068,9 +1249,12 @@ class Monitor:
         accumulated: list[Event],
         args: argparse.Namespace,
     ) -> float | None:
+        sweep_due = now >= timers.next_sweep
         targets = self._select_refresh_targets(now, timers, accumulated, cfg)
         if targets is not None and not targets:
             return debounce_deadline
+        if sweep_due and self.role == ReviewRole.REVIEWER and now >= timers.backoff_until:
+            self._sweep_github_review_keys()
         raw_events = self.refresh(targets)
         if targets is None:
             timers.next_sweep = now + cfg.sweep_s
@@ -1093,6 +1277,8 @@ class Monitor:
             accumulated.extend(wake_events)
             if debounce_deadline is None:
                 debounce_deadline = now + cfg.debounce_s
+        elif self.role == ReviewRole.REVIEWER and getattr(args, "daemon", False) and matched:
+            self._emit_silent_daemon_batch(matched, args)
         else:
             self._sync_board(matched, args)
             save_state(self.state_path, self.state)
@@ -1184,7 +1370,10 @@ class Monitor:
         """
         batch: ChangeBatch | None = None
         if self.packrat is not None:
-            wait_s = self._packrat_wait_s(now, debounce_deadline, timeout_deadline, cfg)
+            sweep_deadline = timers.next_sweep if self.role == ReviewRole.REVIEWER else None
+            wait_s = self._packrat_wait_s(
+                now, debounce_deadline, timeout_deadline, cfg, sweep_deadline
+            )
             batch = self._packrat_wait(now, wait_s, timers)
         else:
             self.sleep(
@@ -1200,7 +1389,7 @@ class Monitor:
             return exit_code, debounce_deadline
         try:
             if batch is not None:
-                raw_events = self._refresh_from_batch(batch)
+                raw_events = self._refresh_from_batch(batch, now, timers, cfg)
                 return None, self._absorb_events(
                     now, raw_events, debounce_deadline, cfg, accumulated, args
                 )
@@ -1222,10 +1411,11 @@ class Monitor:
         debounce_deadline: float | None,
         timeout_deadline: float | None,
         cfg: _LoopConfig,
+        sweep_deadline: float | None = None,
     ) -> float:
         """Returns the ``packrat changes --wait`` timeout: the debounce window, capped."""
         wait = float(cfg.debounce_s or PACKRAT_DEFAULT_WAIT_S)
-        for deadline in (debounce_deadline, timeout_deadline):
+        for deadline in (debounce_deadline, timeout_deadline, sweep_deadline):
             if deadline is not None:
                 wait = min(wait, max(0.0, deadline - now))
         return max(1.0, wait)
@@ -1243,15 +1433,62 @@ class Monitor:
             if now >= self._next_renew:
                 source.renew()
                 self._next_renew = now + PACKRAT_RENEW_S
-            batch = source.wait_changes(self._packrat_seq, wait_s)
+            batch = source.wait_changes(
+                self._packrat_seq,
+                wait_s,
+                watch_viewer_sets=(self.role == ReviewRole.REVIEWER),
+            )
         except PackratError as exc:
             self._fallback_to_github(now, timers, str(exc))
             return None
         self._packrat_seq = batch.seq
         return batch
 
-    def _refresh_from_batch(self, batch: ChangeBatch) -> list[Event]:
+    def _discover_packrat_review_delta(self) -> tuple[list[str], list[str]]:
+        source = self.packrat
+        assert source is not None
+        open_keys = source.discover_review_keys(repo=self.repo)[:MAX_WATCHED_PRS]
+        self.viewer = self.viewer or _packrat_viewer(source)
+        old_set = set(self.watched_keys)
+        open_set = set(open_keys)
+        newly_added = [k for k in open_keys if k not in old_set]
+        newly_missing = [k for k in self.watched_keys if k not in open_set]
+        if newly_added:
+            source.lease(newly_added)
+        self.watched_keys = _merge_key_lists(open_keys, self.watched_keys)
+        return newly_added, newly_missing
+
+    def _refresh_reviewer_batch(
+        self,
+        batch: ChangeBatch,
+        now: float,
+        timers: _Timers | None,
+        cfg: _LoopConfig | None,
+    ) -> list[Event]:
+        sweep_due = timers is not None and now >= timers.next_sweep
+        delta_keys: list[str] = []
+        if batch.viewer_changed or batch.reset or sweep_due:
+            added, missing = self._discover_packrat_review_delta()
+            delta_keys = _merge_key_lists(added, missing)
+            if sweep_due and timers is not None and cfg is not None:
+                timers.next_sweep = now + cfg.sweep_s
+        if batch.reset or sweep_due:
+            targets = _merge_key_lists(list(self.watched_keys), delta_keys)
+        else:
+            changed = [k for k in self.watched_keys if k in batch.keys]
+            targets = _merge_key_lists(delta_keys, changed)
+        return self.refresh(targets) if targets else []
+
+    def _refresh_from_batch(
+        self,
+        batch: ChangeBatch,
+        now: float = 0.0,
+        timers: _Timers | None = None,
+        cfg: _LoopConfig | None = None,
+    ) -> list[Event]:
         """Re-reads the PRs named in ``batch`` (every watched PR after a feed reset)."""
+        if self.role == ReviewRole.REVIEWER:
+            return self._refresh_reviewer_batch(batch, now, timers, cfg)
         if batch.reset:
             return self.refresh(None)
         keys = [k for k in self.watched_keys if k in batch.keys]
@@ -1368,18 +1605,71 @@ class Monitor:
             return self._finish_with("stopped", 0, accumulated, args)
         return None
 
+    def _prune_startup_reviewer_snapshots(self) -> list[str]:
+        drop = {
+            key
+            for key, snap in self.state.snapshots.items()
+            if snap.state in ("MERGED", "CLOSED")
+            or (self.repo is not None and snap.repo != self.repo)
+        }
+        for key in drop:
+            self.state.snapshots.pop(key, None)
+        if drop:
+            self.state.prune(drop)
+        return list(self.state.snapshots.keys())
+
+    def _start_reviewer_packrat(self, prior_open: list[str]) -> list[Event]:
+        source = self.packrat
+        assert source is not None
+        open_keys = source.discover_review_keys(repo=self.repo)[:MAX_WATCHED_PRS]
+        self.viewer = _packrat_viewer(source)
+        if open_keys:
+            source.lease(open_keys)
+        self._next_renew = self.clock() + PACKRAT_RENEW_S
+        self._packrat_seq = source.wait_changes(
+            _FEED_HEAD, 0, watch_viewer_sets=True
+        ).seq
+        self.watched_keys = _merge_key_lists(open_keys, prior_open)
+        return self.refresh(self.watched_keys) if self.watched_keys else []
+
+    def _start_reviewer_github(self, prior_open: list[str]) -> list[Event]:
+        viewer, keys = search_review_keys(self.runner, repo=self.repo, backoff=self.backoff)
+        self.viewer = viewer
+        open_keys = keys[:MAX_WATCHED_PRS]
+        self.watched_keys = _merge_key_lists(open_keys, prior_open)
+        return self.refresh(self.watched_keys) if self.watched_keys else []
+
+    def _init_reviewer_targets(self) -> list[Event]:
+        prior_open = self._prune_startup_reviewer_snapshots()
+        if self.packrat is not None:
+            try:
+                return self._start_reviewer_packrat(prior_open)
+            except PackratError as exc:
+                timers = _Timers(next_poll=0.0, next_sweep=0.0, next_notify=0.0)
+                self._fallback_to_github(self.clock(), timers, str(exc))
+        return self._start_reviewer_github(prior_open)
+
     def _init_run_state(self, args: argparse.Namespace) -> tuple[set[str] | None, list[Event]]:
         self._install_signal_handlers()
         if self.notifier is None:
             self.notifier = resolve_notifier()
-        allowed_kinds = _parse_event_list(args.events)
+        self.role = getattr(
+            args,
+            "role",
+            ReviewRole.REVIEWER if getattr(args, "reviews", False) else ReviewRole.AUTHOR,
+        )
+        self.wake_on_review = bool(getattr(args, "wake_on_review", False))
+        self.repo = args.repo
+        allowed_kinds = parse_event_list(args.events, role=self.role)
         self.state = load_state(self.state_path)
         apply_cli_overrides(args, self.state)
         self.packrat = self._select_source(args)
         self.source_mode = "packrat" if self.packrat is not None else "github"
         self._source_note = "via packrat" if self.packrat is not None else None
-        self.watched_keys = resolve_targets(args, self.runner, self.state, self.packrat)
         self.notifications_enabled = not bool(args.no_notifications)
+        if self.role == ReviewRole.REVIEWER:
+            return allowed_kinds, self._init_reviewer_targets()
+        self.watched_keys = resolve_targets(args, self.runner, self.state, self.packrat)
         if self.packrat is not None:
             try:
                 self._start_packrat()
@@ -1390,7 +1680,8 @@ class Monitor:
         return allowed_kinds, self.refresh()
 
     def _setup_daemon_mode(self, args: argparse.Namespace) -> int | None:
-        if not self.notifier:
+        needs_notifier = not (self.role == ReviewRole.REVIEWER and not self.wake_on_review)
+        if not self.notifier and needs_notifier:
             sys.stderr.write(
                 "warning: agentapi notifier not found; falling back to exit-on-change mode\n"
             )

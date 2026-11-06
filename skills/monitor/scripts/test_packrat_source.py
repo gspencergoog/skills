@@ -135,7 +135,13 @@ def store_graphql_pr(
     head = live["head_sha"]
     contexts = _head_commit(pr).get("statusCheckRollup") or {}
     with _db(path) as conn:
-        for table in ("v_pr_checks", "v_pr_review_requests", "v_pr_latest_reviews", "v_pr_threads"):
+        for table in (
+            "v_pr_checks",
+            "v_pr_review_requests",
+            "v_pr_latest_reviews",
+            "v_pr_latest_author_reviews",
+            "v_pr_threads",
+        ):
             conn.execute(f"DELETE FROM {table} WHERE item_key = ?", (key,))
         _insert(conn, "v_pr_live", live)
         basic_cols = ("item_key", "repo_full_name", "repo_mode", "number", "title", "state",
@@ -156,6 +162,23 @@ def store_graphql_pr(
             [
                 (key, n["author"]["login"], "User", n["state"], n.get("submittedAt"))
                 for n in pr["latestOpinionatedReviews"]["nodes"]
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO v_pr_latest_author_reviews VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (
+                    key,
+                    repo,
+                    number,
+                    n["author"]["login"],
+                    n["author"].get("__typename") or "User",
+                    n["state"],
+                    n.get("submittedAt"),
+                    ((n.get("commit") or {}).get("oid") or None),
+                )
+                for n in ((pr.get("reviews") or {}).get("nodes") or [])
+                if n.get("state") != "PENDING" and (n.get("author") or {}).get("login")
             ],
         )
         conn.executemany(
@@ -329,6 +352,104 @@ class TestSnapshots(PackratDbCase):
             )
         self.assertEqual(self.source.viewer_login(), "alice")
 
+    def test_author_reviews_hydration_and_pre_v8_fallback(self) -> None:
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr["reviews"] = {
+            "nodes": [
+                {
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-10-27T21:03:00Z",
+                    "commit": {"oid": "deadbeef1234"},
+                    "author": {"login": "bob", "__typename": "User"},
+                },
+                {
+                    "state": "APPROVED",
+                    "submittedAt": "2026-10-27T20:50:00Z",
+                    "commit": None,
+                    "author": {"login": "carol", "__typename": "User"},
+                },
+            ]
+        }
+        key = store_graphql_pr(self.db, pr)
+        raw = self.source.snapshots([key])[key]
+        self.assertEqual(
+            raw["reviews"],
+            {
+                "nodes": [
+                    {
+                        "state": "COMMENTED",
+                        "submittedAt": "2026-10-27T21:03:00Z",
+                        "commit": {"oid": "deadbeef1234"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                    {
+                        "state": "APPROVED",
+                        "submittedAt": "2026-10-27T20:50:00Z",
+                        "commit": None,
+                        "author": {"login": "carol", "__typename": "User"},
+                    },
+                ]
+            },
+        )
+        snap = normalize_pr(raw, viewer="bob")
+        assert snap.viewer_last_review is not None
+        self.assertEqual(snap.viewer_last_review.state, "COMMENTED")
+        self.assertEqual(snap.viewer_last_review.commit_oid, "deadbeef1234")
+
+        # Simulate pre-v8 DB without v_pr_latest_author_reviews
+        with _db(self.db) as conn:
+            conn.execute("DROP VIEW v_pr_latest_author_reviews")
+            conn.execute("DROP TABLE latest_reviews")
+        raw_fallback = self.source.snapshots([key])[key]
+        self.assertEqual(raw_fallback["reviews"], {"nodes": []})
+        snap_carol = normalize_pr(raw_fallback, viewer="carol")
+        self.assertIsNone(snap_carol.viewer_last_review)
+        self.assertEqual(snap_carol.viewer_opinionated_state, "APPROVED")
+
+    def test_discover_review_keys_orders_by_updated_at_and_filters_repo(self) -> None:
+        pr_base = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr1 = {
+            **pr_base,
+            "number": 10,
+            "url": "https://github.com/acme/widget/pull/10",
+            "updatedAt": "2026-10-27T20:00:00Z",
+        }
+        pr2 = {
+            **pr_base,
+            "number": 20,
+            "url": "https://github.com/other/repo/pull/20",
+            "updatedAt": "2026-10-27T22:00:00Z",
+        }
+        pr3_closed = {
+            **pr_base,
+            "number": 30,
+            "url": "https://github.com/acme/widget/pull/30",
+            "state": "CLOSED",
+            "updatedAt": "2026-10-27T23:00:00Z",
+        }
+        store_graphql_pr(self.db, pr1)
+        store_graphql_pr(self.db, pr2)
+        store_graphql_pr(self.db, pr3_closed)
+        with _db(self.db) as conn:
+            conn.executemany(
+                "INSERT INTO v_viewer_items VALUES (?,?,?,?)",
+                [
+                    ("review_requested", "acme/widget#10", "x", "x"),
+                    ("reviewed", "acme/widget#10", "x", "x"),
+                    ("reviewed", "other/repo#20", "x", "x"),
+                    ("review_requested", "acme/widget#30", "x", "x"),
+                    ("authored", "acme/widget#99", "x", "x"),
+                ],
+            )
+        self.assertEqual(
+            self.source.discover_review_keys(),
+            ["other/repo#20", "acme/widget#10"],
+        )
+        self.assertEqual(
+            self.source.discover_review_keys(repo="acme/widget"),
+            ["acme/widget#10"],
+        )
+
 
 class TestStackNeighbors(PackratDbCase):
     def test_three_pr_stack_from_the_middle(self) -> None:
@@ -423,6 +544,64 @@ class TestCliCalls(PackratDbCase):
         self.cli.changes.append({"reset": True, "seq": 99})
         batch = self.source.wait_changes(12, 0)
         self.assertEqual((batch.seq, batch.keys, batch.reset), (99, {"acme/widget#1"}, True))
+
+    def test_unlease_and_viewer_changed_on_unwatched_pr(self) -> None:
+        self.source.lease(["acme/widget#1", "acme/widget#2"])
+        self.source.unlease([])
+        self.assertEqual(len(self.cli.calls), 1)
+        self.source.unlease(["acme/widget#2"])
+        self.assertEqual(self.source.watched, {"acme/widget#1"})
+        self.assertEqual(
+            self.cli.calls[-1],
+            [
+                "watch",
+                "remove",
+                "--consumer",
+                "monitor",
+                "--id",
+                "conv123",
+                "--json",
+                "--",
+                "acme/widget#2",
+            ],
+        )
+
+        # Unwatched viewer set change triggers viewer_changed when watch_viewer_sets=True
+        self.cli.changes.append(
+            {
+                "seq": 15,
+                "changes": [
+                    {
+                        "seq": 15,
+                        "item_key": "other/repo#88",
+                        "kind": "viewer",
+                        "fields": ["review_requested"],
+                        "at": "x",
+                    }
+                ],
+            }
+        )
+        batch_watched = self.source.wait_changes(10, 5, watch_viewer_sets=True)
+        self.assertEqual(batch_watched.seq, 15)
+        self.assertEqual(batch_watched.keys, set())
+        self.assertTrue(batch_watched.viewer_changed)
+
+        self.cli.changes.append(
+            {
+                "seq": 16,
+                "changes": [
+                    {
+                        "seq": 16,
+                        "item_key": "other/repo#88",
+                        "kind": "viewer",
+                        "fields": ["review_requested"],
+                        "at": "x",
+                    }
+                ],
+            }
+        )
+        batch_unwatched = self.source.wait_changes(15, 5, watch_viewer_sets=False)
+        self.assertFalse(batch_unwatched.viewer_changed)
 
     def test_cli_failure_raises_packrat_error(self) -> None:
         self.cli.fail_next = "database is locked"
