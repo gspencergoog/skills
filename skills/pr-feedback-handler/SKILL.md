@@ -211,4 +211,4 @@ ______________________________________________________________________
 - **`scripts/scaffold_proposals.py`**: Generates pre-populated `proposals.json` templates from `pr_comments.json` with terminal summary output.
 - **`scripts/update_thread.py`**: Bulk posts replies to and resolves approved PR review threads on GitHub.
 - **`scripts/launch_dashboard.py`**: Standalone review dashboard launcher supporting local web mode, `--dump-json` and `--git-state-json` JSON modes for the MCP App host, remote SSH/Cloud detection, URL file emission, and markdown artifact export.
-- **`assets/pr_feedback.html`**: Interactive dark-themed web dashboard with tabs for inline comments, top-level reviews, conversation comments, CI failures (with check annotations), and active checks.
+- **`assets/pr_feedback.html`**: Interactive dark-themed web dashboard with tabs for inline comments, top-level reviews, conversation comments, CI failures (with check annotations), and active checks, plus offline GFM Markdown rendering (pipe tables, Mermaid diagrams, LaTeX math, and `<details>` folds) and Write/Preview reply tabs.

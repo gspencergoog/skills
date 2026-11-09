@@ -4,7 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>PR Feedback Dashboard</title>
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <style>
     :root {
       --bg-color: #1e1e1e;
@@ -18,6 +17,17 @@
       --danger-color: #f44336;
       --badge-bg: #444;
       --code-bg: #1a1a1a;
+      --bg-canvas: var(--bg-color);
+      --bg-panel: var(--panel-bg);
+      --bg-panel-hover: #363636;
+      --bg-code: var(--code-bg);
+      --border: var(--border-color);
+      --border-muted: rgba(255, 255, 255, 0.1);
+      --text-main: var(--text-color);
+      --text-bright: #f0f6fc;
+      --text-muted: var(--text-light);
+      --accent: #58a6ff;
+      --accent-hover: #79c0ff;
     }
     
     body {
@@ -575,6 +585,396 @@
       outline: 2px solid #ffffff;
       outline-offset: 1px;
     }
+
+    .code-box {
+      background-color: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      font-size: 12px;
+      color: var(--text-main);
+      white-space: pre;
+      overflow-x: auto;
+      margin-bottom: 14px;
+    }
+
+    .markdown-rendered {
+      font-size: 0.9rem;
+      line-height: 1.6;
+      color: var(--text-main);
+    }
+
+    .comment-content.markdown-rendered {
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      padding: 0;
+    }
+
+    .markdown-rendered h1,
+    .markdown-rendered h2,
+    .markdown-rendered h3,
+    .markdown-rendered h4,
+    .markdown-rendered h5,
+    .markdown-rendered h6 {
+      color: var(--text-bright);
+      margin-top: 16px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .markdown-rendered h1:first-child,
+    .markdown-rendered h2:first-child,
+    .markdown-rendered h3:first-child,
+    .markdown-rendered h4:first-child,
+    .markdown-rendered h5:first-child,
+    .markdown-rendered h6:first-child {
+      margin-top: 0;
+    }
+
+    .markdown-rendered h2 {
+      font-size: 15px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 4px;
+    }
+
+    .markdown-rendered h3 {
+      font-size: 14px;
+    }
+
+    .markdown-rendered p {
+      margin: 8px 0;
+    }
+
+    .markdown-rendered p:first-child {
+      margin-top: 0;
+    }
+
+    .markdown-rendered p:last-child {
+      margin-bottom: 0;
+    }
+
+    .markdown-rendered ul,
+    .markdown-rendered ol {
+      margin: 8px 0 8px 22px;
+    }
+
+    .markdown-rendered li {
+      margin: 4px 0;
+    }
+
+    .markdown-rendered code {
+      font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+      font-size: 12px;
+      background: rgba(110, 118, 129, 0.2);
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: var(--text-bright);
+    }
+
+    .markdown-rendered pre.code-box {
+      margin: 10px 0;
+      padding: 12px;
+      overflow-x: auto;
+    }
+
+    .markdown-rendered pre.code-box code {
+      background: none;
+      padding: 0;
+    }
+
+    .markdown-rendered blockquote {
+      border-left: 3px solid var(--border);
+      padding: 4px 12px;
+      color: var(--text-muted);
+      margin: 10px 0;
+    }
+
+    .markdown-rendered a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+
+    .markdown-rendered a:hover {
+      text-decoration: underline;
+    }
+
+    .md-callout {
+      border-left: 4px solid var(--border);
+      border-radius: 0 6px 6px 0;
+      padding: 10px 14px;
+      margin: 12px 0;
+      background: rgba(110, 118, 129, 0.08);
+    }
+
+    .md-callout-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+
+    .callout-warning {
+      border-left-color: #d29922;
+      background: rgba(210, 153, 34, 0.1);
+    }
+
+    .callout-warning .md-callout-title {
+      color: #d29922;
+    }
+
+    .callout-important {
+      border-left-color: #a371f7;
+      background: rgba(163, 113, 247, 0.1);
+    }
+
+    .callout-important .md-callout-title {
+      color: #a371f7;
+    }
+
+    .callout-note {
+      border-left-color: var(--accent);
+      background: rgba(88, 166, 255, 0.1);
+    }
+
+    .callout-note .md-callout-title {
+      color: var(--accent);
+    }
+
+    .callout-caution {
+      border-left-color: #ff7b72;
+      background: rgba(248, 81, 73, 0.1);
+    }
+
+    .callout-caution .md-callout-title {
+      color: #ff7b72;
+    }
+
+    .md-agent-badge {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .md-agent-badge kbd {
+      font-family: inherit;
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: rgba(110, 118, 129, 0.12);
+      color: var(--text-muted);
+    }
+
+    details.md-details {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: rgba(110, 118, 129, 0.06);
+      margin: 10px 0;
+      padding: 0 12px;
+    }
+
+    details.md-details > summary {
+      cursor: pointer;
+      list-style: none;
+      padding: 8px 0;
+      color: var(--text-bright);
+      font-weight: 600;
+      user-select: none;
+    }
+
+    details.md-details > summary::-webkit-details-marker {
+      display: none;
+    }
+
+    details.md-details > summary::before {
+      content: '\25B8';
+      display: inline-block;
+      width: 1em;
+      margin-right: 4px;
+      color: var(--text-muted);
+    }
+
+    details.md-details[open] > summary::before {
+      content: '\25BE';
+    }
+
+    details.md-details > summary:hover {
+      color: var(--accent-hover);
+    }
+
+    details.md-details > summary:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
+    details.md-details[open] > summary {
+      border-bottom: 1px solid var(--border-muted);
+      margin-bottom: 8px;
+    }
+
+    .markdown-rendered .md-table-wrap {
+      margin: 10px 0;
+      overflow-x: auto;
+    }
+
+    .markdown-rendered table.md-table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 13px;
+      border: 1px solid var(--border);
+    }
+
+    .markdown-rendered .md-table th,
+    .markdown-rendered .md-table td {
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+    }
+
+    .markdown-rendered .md-table th {
+      background-color: var(--bg-panel-hover);
+      color: var(--text-bright);
+      font-weight: 600;
+    }
+
+    .markdown-rendered .md-table tbody tr:nth-child(even) {
+      background-color: rgba(110, 118, 129, 0.05);
+    }
+
+    .markdown-rendered .md-math-block {
+      margin: 12px 0;
+      padding: 8px 12px;
+      overflow-x: auto;
+      text-align: center;
+      background: rgba(110, 118, 129, 0.06);
+      border-radius: 6px;
+    }
+
+    .markdown-rendered .md-mermaid {
+      margin: 12px 0;
+      padding: 12px;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow-x: auto;
+      text-align: center;
+    }
+
+    .markdown-rendered .md-mermaid-svg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+
+    .suggestion-preview-header {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      background-color: var(--bg-panel-hover);
+      border: 1px solid var(--border);
+      border-bottom: none;
+      border-radius: 6px 6px 0 0;
+      padding: 4px 10px;
+      margin-top: 10px;
+    }
+
+    .suggestion-preview-header + pre.code-box {
+      margin-top: 0;
+      border-top-left-radius: 0;
+      border-top-right-radius: 0;
+    }
+
+    .comment-box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background-color: var(--bg-canvas);
+      overflow: hidden;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .comment-box:focus-within {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.2);
+    }
+
+    .comment-tabs-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--bg-panel-hover);
+      border-bottom: 1px solid var(--border);
+      padding: 6px 10px 0 8px;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .comment-tabs {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+    }
+
+    .comment-tab {
+      background: transparent;
+      border: 1px solid transparent;
+      border-bottom: none;
+      color: var(--text-muted);
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 500;
+      border-radius: 6px 6px 0 0;
+      cursor: pointer;
+      margin-bottom: -1px;
+      font-family: inherit;
+    }
+
+    .comment-tab:hover {
+      color: var(--text-bright);
+    }
+
+    .comment-tab.active {
+      background-color: var(--bg-canvas);
+      border-color: var(--border);
+      color: var(--text-bright);
+      font-weight: 600;
+    }
+
+    .comment-box .reply-textarea {
+      border: none;
+      border-radius: 0 0 6px 6px;
+      display: block;
+      background-color: var(--bg-canvas);
+    }
+
+    .comment-box .reply-textarea:focus {
+      outline: none;
+      box-shadow: none;
+    }
+
+    .comment-preview {
+      border: none;
+      border-radius: 0 0 6px 6px;
+      min-height: 96px;
+      padding: 12px 16px;
+      background-color: var(--bg-canvas);
+    }
+
+    .comment-preview.markdown-rendered {
+      border: none;
+      border-radius: 0 0 6px 6px;
+      min-height: 96px;
+      padding: 12px 16px;
+      background-color: var(--bg-canvas);
+    }
+
+    .preview-empty {
+      color: var(--text-muted);
+      font-style: italic;
+      margin: 0;
+    }
   </style>
 </head>
 <body>
@@ -640,6 +1040,7 @@
   <script>
     let feedbackData = null;
     const decisions = {};
+    const replyTabs = {};
 
     function httpDashboardHost() {
       return {
@@ -819,24 +1220,1414 @@
       return `<span class="badge assessment-${rating}" title="Agent assessment of this comment">${RATING_LABELS[rating]}</span>`;
     }
 
-    function unescapeNewlines(text) {
-      if (!text || typeof text !== 'string') return text || '';
-      return text.replace(/\\r\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\r/g, '\n').replace(/\\t/g, '\t');
+  // BEGIN SHARED_MARKDOWN_ENGINE
+  const GREEK_AND_SYMBOLS = {
+    alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ϵ', varepsilon: 'ε',
+    zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ',
+    lambda: 'λ', mu: 'μ', nu: 'ν', xi: 'ξ', pi: 'π', rho: 'ρ', sigma: 'σ',
+    varsigma: 'ς', tau: 'τ', upsilon: 'υ', phi: 'ϕ', varphi: 'φ', chi: 'χ',
+    psi: 'ψ', omega: 'ω', ell: 'ℓ', hbar: 'ℏ',
+    Gamma: 'Γ', Delta: 'Δ', Theta: 'Θ', Lambda: 'Λ', Xi: 'Ξ', Pi: 'Π',
+    Sigma: 'Σ', Upsilon: 'Υ', Phi: 'Φ', Psi: 'Ψ', Omega: 'Ω',
+    infty: '∞', pm: '±', mp: '∓', times: '×', div: '÷', cdot: '⋅', ast: '∗',
+    star: '⋆', circ: '∘', bullet: '∙', oplus: '⊕', otimes: '⊗',
+    le: '≤', leq: '≤', ge: '≥', geq: '≥', ne: '≠', neq: '≠', approx: '≈',
+    equiv: '≡', sim: '∼', simeq: '≃', cong: '≅', propto: '∝', ll: '≪', gg: '≫',
+    to: '→', rightarrow: '→', leftarrow: '←', leftrightarrow: '↔',
+    Rightarrow: '⇒', Leftarrow: '⇐', Leftrightarrow: '⇔',
+    implies: '⇒', iff: '⇔', mapsto: '↦',
+    in: '∈', notin: '∉', ni: '∋', subset: '⊂', subseteq: '⊆', supset: '⊃',
+    supseteq: '⊇', cup: '∪', cap: '∩', setminus: '∖', emptyset: '∅', nothing: '∅',
+    forall: '∀', exists: '∃', nexists: '∄', neg: '¬', lnot: '¬',
+    land: '∧', wedge: '∧', lor: '∨', vee: '∨', top: '⊤', bot: '⊥', perp: '⊥',
+    parallel: '∥', mid: '∣', langle: '⟨', rangle: '⟩',
+    lfloor: '⌊', rfloor: '⌋', lceil: '⌈', rceil: '⌉',
+    nabla: '∇', partial: '∂', sum: '∑', prod: '∏', coprod: '∐',
+    int: '∫', iint: '∬', iiint: '∭', oint: '∮',
+    dots: '…', ldots: '…', cdots: '⋯', vdots: '⋮', ddots: '⋱'
+  };
+
+  const MATHCAL_MAP = {
+    A: '𝒜', B: 'ℬ', C: '𝒞', D: '𝒟', E: 'ℰ', F: 'ℱ', G: '𝒢', H: 'ℋ', I: 'ℐ',
+    J: '𝒥', K: '𝒦', L: 'ℒ', M: 'ℳ', N: '𝒩', O: '𝒪', P: '𝒫', Q: '𝒬', R: 'ℛ',
+    S: '𝒮', T: '𝒯', U: '𝒰', V: '𝒱', W: '𝒲', X: '𝒳', Y: '𝒴', Z: '𝒵'
+  };
+
+  const MATHBB_MAP = {
+    A: '𝔸', B: '𝔹', C: 'ℂ', D: '𝔻', E: '𝔼', F: '𝔽', G: '𝔾', H: 'ℍ', I: '𝕀',
+    J: '𝕁', K: '𝕂', L: '𝕃', M: '𝕄', N: 'ℕ', O: '𝕆', P: 'ℙ', Q: 'ℚ', R: 'ℝ',
+    S: '𝕊', T: '𝕋', U: '𝕌', V: '𝕍', W: '𝕎', X: '𝕏', Y: '𝕐', Z: 'ℤ'
+  };
+
+  const UPRIGHT_FUNCTIONS = new Set([
+    'min', 'max', 'sup', 'inf', 'lim', 'limsup', 'liminf', 'log', 'ln', 'lg',
+    'exp', 'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'arcsin', 'arccos',
+    'arctan', 'sinh', 'cosh', 'tanh', 'det', 'dim', 'ker', 'deg', 'gcd',
+    'Pr', 'arg', 'mod', 'argmin', 'argmax', 'tr', 'rank', 'diag'
+  ]);
+
+  const LATEX_OPERATORS = new Set([
+    '+', '-', '=', '<', '>', '/', '*', ',', ';', ':', '!', '?', '|', '(', ')', '[', ']'
+  ]);
+
+  const LATEX_ACCENTS = {
+    hat: 'ˆ', widehat: 'ˆ', bar: '¯', overline: '¯', vec: '→',
+    tilde: '˜', widetilde: '˜', dot: '˙', ddot: '¨'
+  };
+
+  const LATEX_STYLE_VARIANTS = {
+    mathbf: 'bold', boldsymbol: 'bold', bf: 'bold',
+    mathtt: 'monospace', mathsf: 'sans-serif', mathit: 'italic'
+  };
+
+  const LATEX_TEXT_COMMANDS = new Set(['text', 'textrm', 'textbf', 'textit', 'texttt', 'mathrm', 'operatorname']);
+
+  const MERMAID_CHART_COLORS = [
+    '#58a6ff', '#3fb950', '#d29922', '#a371f7',
+    '#f85149', '#39d353', '#db61a2', '#79c0ff'
+  ];
+
+  function readBracedGroup(src, startIndex) {
+    let i = startIndex;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] !== '{') {
+      const ch = src[i] || '';
+      return { content: ch, nextIndex: ch ? i + 1 : i };
     }
+    let depth = 0;
+    const contentStart = i + 1;
+    while (i < src.length) {
+      if (src[i] === '{' && src[i - 1] !== '\\') {
+        depth++;
+      } else if (src[i] === '}' && src[i - 1] !== '\\') {
+        depth--;
+        if (depth === 0) return { content: src.slice(contentStart, i), nextIndex: i + 1 };
+      }
+      i++;
+    }
+    return { content: src.slice(contentStart), nextIndex: src.length };
+  }
+
+  function renderMatrixEnvironment(envName, body) {
+    const rows = body.trim().split(/\\\\/).map(r => r.trim()).filter(r => r.length > 0);
+    const rowsHtml = rows.map(row => {
+      const cells = row.split('&').map(c => `<mtd>${parseLatexTokens(c.trim())}</mtd>`);
+      return `<mtr>${cells.join('')}</mtr>`;
+    }).join('');
+    const table = `<mtable>${rowsHtml}</mtable>`;
+    const fences = {
+      pmatrix: ['(', ')'],
+      bmatrix: ['[', ']'],
+      Bmatrix: ['{', '}'],
+      vmatrix: ['|', '|'],
+      Vmatrix: ['‖', '‖']
+    };
+    if (fences[envName]) {
+      return `<mrow><mo>${fences[envName][0]}</mo>${table}<mo>${fences[envName][1]}</mo></mrow>`;
+    }
+    if (envName === 'cases') {
+      return `<mrow><mo>{</mo>${table}</mrow>`;
+    }
+    return table;
+  }
+
+  function renderLatexSqrt(src, end) {
+    let i = end;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (src[i] === '[') {
+      const closeBracket = src.indexOf(']', i + 1);
+      if (closeBracket !== -1) {
+        const rootContent = src.slice(i + 1, closeBracket);
+        const arg = readBracedGroup(src, closeBracket + 1);
+        return {
+          html: `<mroot><mrow>${parseLatexTokens(arg.content)}</mrow><mrow>${parseLatexTokens(rootContent)}</mrow></mroot>`,
+          nextIndex: arg.nextIndex
+        };
+      }
+    }
+    const arg = readBracedGroup(src, end);
+    return {
+      html: `<msqrt><mrow>${parseLatexTokens(arg.content)}</mrow></msqrt>`,
+      nextIndex: arg.nextIndex
+    };
+  }
+
+  function renderMappedAlphabet(src, end, charMap) {
+    const arg = readBracedGroup(src, end);
+    const converted = Array.from(arg.content.trim()).map(ch => charMap[ch] || ch).join('');
+    return { html: `<mi>${escapeHtml(converted)}</mi>`, nextIndex: arg.nextIndex };
+  }
+
+  function renderBeginEnvironment(src, end) {
+    const env = readBracedGroup(src, end);
+    const endMarker = `\\end{${env.content}}`;
+    const closeIdx = src.indexOf(endMarker, env.nextIndex);
+    if (closeIdx === -1) {
+      return { html: `<mi>${escapeHtml(env.content)}</mi>`, nextIndex: env.nextIndex };
+    }
+    const body = src.slice(env.nextIndex, closeIdx);
+    return {
+      html: renderMatrixEnvironment(env.content, body),
+      nextIndex: closeIdx + endMarker.length
+    };
+  }
+
+  const LATEX_NOOP_COMMANDS = new Set(['left', 'right', 'displaystyle', 'textstyle']);
+  const LATEX_FRAC_COMMANDS = new Set(['frac', 'dfrac', 'tfrac']);
+
+  function dispatchBracedLatexCommand(cmd, src, end) {
+    if (LATEX_FRAC_COMMANDS.has(cmd)) {
+      const num = readBracedGroup(src, end);
+      const den = readBracedGroup(src, num.nextIndex);
+      return {
+        html: `<mfrac><mrow>${parseLatexTokens(num.content)}</mrow><mrow>${parseLatexTokens(den.content)}</mrow></mfrac>`,
+        nextIndex: den.nextIndex
+      };
+    }
+    if (cmd === 'sqrt') return renderLatexSqrt(src, end);
+    if (LATEX_TEXT_COMMANDS.has(cmd)) {
+      const arg = readBracedGroup(src, end);
+      return { html: `<mtext>${escapeHtml(arg.content)}</mtext>`, nextIndex: arg.nextIndex };
+    }
+    if (LATEX_STYLE_VARIANTS[cmd]) {
+      const arg = readBracedGroup(src, end);
+      return {
+        html: `<mstyle mathvariant="${LATEX_STYLE_VARIANTS[cmd]}"><mrow>${parseLatexTokens(arg.content)}</mrow></mstyle>`,
+        nextIndex: arg.nextIndex
+      };
+    }
+    if (LATEX_ACCENTS[cmd]) {
+      const arg = readBracedGroup(src, end);
+      return {
+        html: `<mover><mrow>${parseLatexTokens(arg.content)}</mrow><mo>${LATEX_ACCENTS[cmd]}</mo></mover>`,
+        nextIndex: arg.nextIndex
+      };
+    }
+    if (cmd === 'mathcal') return renderMappedAlphabet(src, end, MATHCAL_MAP);
+    if (cmd === 'mathbb') return renderMappedAlphabet(src, end, MATHBB_MAP);
+    if (cmd === 'begin') return renderBeginEnvironment(src, end);
+    return null;
+  }
+
+  function dispatchNamedLatexCommand(cmd, src, end) {
+    if (LATEX_NOOP_COMMANDS.has(cmd)) return { html: '', nextIndex: end };
+    const braced = dispatchBracedLatexCommand(cmd, src, end);
+    if (braced) return braced;
+    if (UPRIGHT_FUNCTIONS.has(cmd)) {
+      return { html: `<mi mathvariant="normal">${escapeHtml(cmd)}</mi>`, nextIndex: end };
+    }
+    const mapped = GREEK_AND_SYMBOLS[cmd];
+    if (mapped) {
+      const tag = /^[α-ωϑςϕφΑ-Ωℓℏ∂∇∞∅]$/.test(mapped) ? 'mi' : 'mo';
+      return { html: `<${tag}>${escapeHtml(mapped)}</${tag}>`, nextIndex: end };
+    }
+    return { html: `<mi>${escapeHtml(cmd)}</mi>`, nextIndex: end };
+  }
+
+  function parseLatexCommand(src, cmdStart) {
+    const afterSlash = cmdStart + 1;
+    if (afterSlash >= src.length) return { html: '', nextIndex: afterSlash };
+    const firstChar = src[afterSlash];
+    if (!/[a-zA-Z]/.test(firstChar)) {
+      if (firstChar === '|') return { html: '<mo>‖</mo>', nextIndex: afterSlash + 1 };
+      if ('{}%$&#_'.includes(firstChar)) {
+        return { html: `<mo>${escapeHtml(firstChar)}</mo>`, nextIndex: afterSlash + 1 };
+      }
+      return { html: '<mspace width="0.2em"></mspace>', nextIndex: afterSlash + 1 };
+    }
+    let end = afterSlash;
+    while (end < src.length && /[a-zA-Z]/.test(src[end])) end++;
+    return dispatchNamedLatexCommand(src.slice(afterSlash, end), src, end);
+  }
+
+  function parseLatexAtom(src, index) {
+    let i = index;
+    while (i < src.length && /\s/.test(src[i])) i++;
+    if (i >= src.length) return { html: '', nextIndex: i };
+    const ch = src[i];
+    if (ch === '{') {
+      const group = readBracedGroup(src, i);
+      return { html: `<mrow>${parseLatexTokens(group.content)}</mrow>`, nextIndex: group.nextIndex };
+    }
+    if (ch === '\\') return parseLatexCommand(src, i);
+    if (/[0-9]/.test(ch)) {
+      let end = i;
+      while (end < src.length && /[0-9.]/.test(src[end])) end++;
+      return { html: `<mn>${escapeHtml(src.slice(i, end))}</mn>`, nextIndex: end };
+    }
+    if (/[a-zA-Z]/.test(ch)) return { html: `<mi>${escapeHtml(ch)}</mi>`, nextIndex: i + 1 };
+    if (LATEX_OPERATORS.has(ch)) return { html: `<mo>${escapeHtml(ch)}</mo>`, nextIndex: i + 1 };
+    return { html: `<mtext>${escapeHtml(ch)}</mtext>`, nextIndex: i + 1 };
+  }
+
+  function consumeLatexSubSup(src, startIndex) {
+    let i = startIndex;
+    let subHtml;
+    let supHtml;
+    for (let pass = 0; pass < 2; pass++) {
+      while (i < src.length && /\s/.test(src[i])) i++;
+      if (src[i] === '_' && subHtml === undefined) {
+        const subAtom = parseLatexAtom(src, i + 1);
+        subHtml = subAtom.html || '<mrow></mrow>';
+        i = subAtom.nextIndex;
+      } else if (src[i] === '^' && supHtml === undefined) {
+        const supAtom = parseLatexAtom(src, i + 1);
+        supHtml = supAtom.html || '<mrow></mrow>';
+        i = supAtom.nextIndex;
+      }
+    }
+    return { subHtml, supHtml, nextIndex: i };
+  }
+
+  function wrapWithSubSup(baseHtml, subHtml, supHtml) {
+    if (subHtml !== undefined && supHtml !== undefined) {
+      return `<msubsup>${baseHtml}${subHtml}${supHtml}</msubsup>`;
+    }
+    if (subHtml !== undefined) return `<msub>${baseHtml}${subHtml}</msub>`;
+    if (supHtml !== undefined) return `<msup>${baseHtml}${supHtml}</msup>`;
+    return baseHtml;
+  }
+
+  function parseLatexTokens(src) {
+    const parts = [];
+    let i = 0;
+    while (i < src.length) {
+      const atom = parseLatexAtom(src, i);
+      if (!atom.html && atom.nextIndex >= src.length) break;
+      const scripts = consumeLatexSubSup(src, atom.nextIndex);
+      i = scripts.nextIndex;
+      const wrapped = wrapWithSubSup(atom.html, scripts.subHtml, scripts.supHtml);
+      if (wrapped) parts.push(wrapped);
+    }
+    return parts.join('');
+  }
+
+  function renderLatexToMathMl(tex, displayMode = false) {
+    const displayAttr = displayMode ? ' display="block"' : ' display="inline"';
+    const inner = parseLatexTokens(String(tex || '').trim());
+    const mathEl = `<math xmlns="http://www.w3.org/1998/Math/MathML"${displayAttr}><mrow>${inner}</mrow></math>`;
+    return displayMode ? `<div class="md-math-block">${mathEl}</div>` : mathEl;
+  }
+
+  function resolveSeriesColor(index) {
+    return MERMAID_CHART_COLORS[Math.abs(index) % MERMAID_CHART_COLORS.length];
+  }
+
+  function formatTickNumber(value) {
+    if (!Number.isFinite(value) || Math.abs(value) === 0) return '0';
+    const abs = Math.abs(value);
+    if (abs >= 1000000) return `${Number((value / 1000000).toFixed(1))}M`;
+    if (abs >= 10000) return `${Number((value / 1000).toFixed(1))}k`;
+    return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
+  }
+
+  function niceFractionFor(fraction, round) {
+    const thresholds = round ? [1.5, 3, 7] : [1, 2, 5];
+    const values = [1, 2, 5, 10];
+    for (let i = 0; i < thresholds.length; i++) {
+      if (round ? fraction < thresholds[i] : fraction <= thresholds[i]) return values[i];
+    }
+    return 10;
+  }
+
+  function niceNum(range, round) {
+    if (range <= 0 || !Number.isFinite(range)) return 1;
+    const exponent = Math.floor(Math.log10(range));
+    const fraction = range / Math.pow(10, exponent);
+    return niceFractionFor(fraction, round) * Math.pow(10, exponent);
+  }
+
+  function computeNiceTicks(minVal, maxVal, maxTicks = 5, includeZero = true) {
+    let lo = Number.isFinite(minVal) ? minVal : 0;
+    let hi = Number.isFinite(maxVal) ? maxVal : 0;
+    if (includeZero) {
+      lo = Math.min(0, lo);
+      hi = Math.max(0, hi);
+    }
+    if (lo === hi) {
+      if (lo === 0) return { min: 0, max: 10, step: 2, ticks: [0, 2, 4, 6, 8, 10] };
+      const pad = Math.abs(lo) * 0.2 || 1;
+      lo -= pad;
+      hi += pad;
+    }
+    const tickCount = Math.max(2, maxTicks);
+    const range = niceNum(hi - lo, false);
+    const step = niceNum(range / (tickCount - 1), true);
+    const niceMin = Math.floor(lo / step) * step;
+    const niceMax = Math.ceil(hi / step) * step;
+    const ticks = [];
+    const count = Math.round((niceMax - niceMin) / step);
+    for (let i = 0; i <= count && i <= 20; i++) {
+      ticks.push(Number((niceMin + i * step).toFixed(10)));
+    }
+    return { min: niceMin, max: niceMax, step, ticks };
+  }
+
+  function polarToCartesian(cx, cy, radius, angleInDegrees) {
+    const rad = ((angleInDegrees - 90) * Math.PI) / 180.0;
+    return {
+      x: Number((cx + radius * Math.cos(rad)).toFixed(3)),
+      y: Number((cy + radius * Math.sin(rad)).toFixed(3))
+    };
+  }
+
+  function describeSectorPath(cx, cy, outerRadius, innerRadius, startAngle, endAngle) {
+    const clampedSpan = Math.min(359.999, Math.max(0, endAngle - startAngle));
+    const actualEnd = startAngle + clampedSpan;
+    const largeArcFlag = clampedSpan > 180 ? 1 : 0;
+    const outerStart = polarToCartesian(cx, cy, outerRadius, startAngle);
+    const outerEnd = polarToCartesian(cx, cy, outerRadius, actualEnd);
+    if (innerRadius <= 0) {
+      return `M ${cx} ${cy} L ${outerStart.x} ${outerStart.y} A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x} ${outerEnd.y} Z`;
+    }
+    const innerEnd = polarToCartesian(cx, cy, innerRadius, actualEnd);
+    const innerStart = polarToCartesian(cx, cy, innerRadius, startAngle);
+    return `M ${outerStart.x} ${outerStart.y} A ${outerRadius} ${outerRadius} 0 ${largeArcFlag} 1 ${outerEnd.x} ${outerEnd.y} L ${innerEnd.x} ${innerEnd.y} A ${innerRadius} ${innerRadius} 0 ${largeArcFlag} 0 ${innerStart.x} ${innerStart.y} Z`;
+  }
+
+  function renderMermaidFallback(rawText) {
+    return `<pre class="code-box md-mermaid-fallback" data-lang="mermaid"><code>${escapeHtml(String(rawText || '').trim())}</code></pre>`;
+  }
+
+  function parseNodeToken(raw, nodes, defaultShape = 'rect') {
+    const trimmed = raw.trim();
+    const match = /^([A-Za-z0-9_.-]+)\s*(?:\[\s*"?([^"\]]*)"?\s*\]|\(\s*"?([^")]*)"?\s*\)|\{\s*"?([^"}]*)?"?\s*\})?$/.exec(trimmed);
+    if (!match) {
+      const fallbackId = trimmed.replace(/\s+/g, '_') || 'node';
+      if (!nodes.has(fallbackId)) {
+        nodes.set(fallbackId, { id: fallbackId, label: trimmed, shape: defaultShape, order: nodes.size });
+      }
+      return fallbackId;
+    }
+    const id = match[1];
+    const existingOrder = nodes.has(id) ? nodes.get(id).order : nodes.size;
+    if (match[2] !== undefined) {
+      nodes.set(id, { id, label: match[2].trim(), shape: 'rect', order: existingOrder });
+    } else if (match[3] !== undefined) {
+      nodes.set(id, { id, label: match[3].trim(), shape: 'round', order: existingOrder });
+    } else if (match[4] !== undefined) {
+      nodes.set(id, { id, label: match[4].trim(), shape: 'diamond', order: existingOrder });
+    } else if (!nodes.has(id)) {
+      nodes.set(id, { id, label: id, shape: defaultShape, order: existingOrder });
+    }
+    return id;
+  }
+
+  function parseFlowchartLines(lines) {
+    const nodes = new Map();
+    const edges = [];
+    const edgePattern = /^(.+?)\s*(?:--\s*([^>-][^>]*?)\s*-->|(-\.->|==>|--+>\s*))(?:\|([^|]*)\|\s*)?(.+)$/;
+    for (const rawLine of lines) {
+      const line = rawLine.trim().replace(/;$/, '');
+      if (!line || line.startsWith('%%') || /^(?:subgraph|end|style|classDef|class)\b/i.test(line)) continue;
+      const edgeMatch = edgePattern.exec(line);
+      if (edgeMatch) {
+        const fromId = parseNodeToken(edgeMatch[1], nodes);
+        const inlineLabel = edgeMatch[2] ? edgeMatch[2].trim() : undefined;
+        const arrowToken = edgeMatch[3] || '-->';
+        const pipeLabel = edgeMatch[4] ? edgeMatch[4].trim() : undefined;
+        const toId = parseNodeToken(edgeMatch[5], nodes);
+        edges.push({ from: fromId, to: toId, label: pipeLabel || inlineLabel, dashed: arrowToken.includes('.') });
+      } else {
+        parseNodeToken(line, nodes);
+      }
+    }
+    return { nodes, edges };
+  }
+
+  function ensureStateNode(nodes, token, isSource) {
+    if (token === '[*]') {
+      const id = isSource ? '__start__' : '__end__';
+      const shape = isSource ? 'start' : 'end';
+      if (!nodes.has(id)) nodes.set(id, { id, label: '', shape, order: nodes.size });
+      return id;
+    }
+    if (!nodes.has(token)) {
+      nodes.set(token, { id: token, label: token, shape: 'round', order: nodes.size });
+    }
+    return token;
+  }
+
+  function applyStateDiagramLine(line, nodes, edges) {
+    const stateAliasPattern = /^state\s+"([^"]+)"\s+as\s+([A-Za-z0-9_.-]+)$/i;
+    const transitionPattern = /^(\[\*\]|[A-Za-z0-9_.-]+)\s*(-->|--\.->)\s*(\[\*\]|[A-Za-z0-9_.-]+)(?:\s*:\s*(.+))?$/;
+    const stateDescPattern = /^([A-Za-z0-9_.-]+)\s*:\s*(.+)$/;
+    const aliasMatch = stateAliasPattern.exec(line);
+    if (aliasMatch) {
+      const id = aliasMatch[2].trim();
+      const existingOrder = nodes.has(id) ? nodes.get(id).order : nodes.size;
+      nodes.set(id, { id, label: aliasMatch[1].trim(), shape: 'round', order: existingOrder });
+      return;
+    }
+    const transMatch = transitionPattern.exec(line);
+    if (transMatch) {
+      const fromId = ensureStateNode(nodes, transMatch[1].trim(), true);
+      const toId = ensureStateNode(nodes, transMatch[3].trim(), false);
+      edges.push({
+        from: fromId,
+        to: toId,
+        label: transMatch[4] ? transMatch[4].trim() : undefined,
+        dashed: transMatch[2].includes('.')
+      });
+      return;
+    }
+    const descMatch = stateDescPattern.exec(line);
+    if (descMatch) {
+      const id = descMatch[1].trim();
+      const desc = descMatch[2].trim();
+      const existing = nodes.get(id);
+      const label = existing && existing.label !== id ? existing.label : `${id}: ${desc}`;
+      nodes.set(id, { id, label, shape: 'round', order: existing ? existing.order : nodes.size });
+    }
+  }
+
+  function parseStateDiagramLines(lines) {
+    const nodes = new Map();
+    const edges = [];
+    let direction = 'TD';
+    for (const rawLine of lines) {
+      const line = rawLine.trim().replace(/;$/, '');
+      if (!line || line.startsWith('%%') || /^(?:note\b|end\s+note\b|\}|\{)/i.test(line)) continue;
+      const dirMatch = /^direction\s+(TD|TB|LR|RL|BT)\b/i.exec(line);
+      if (dirMatch) {
+        direction = dirMatch[1].toUpperCase();
+      } else {
+        applyStateDiagramLine(line, nodes, edges);
+      }
+    }
+    return { nodes, edges, direction };
+  }
+
+  function relaxForwardEdgeRank(ranks, nodes, edge) {
+    const fromNode = nodes.get(edge.from);
+    const toNode = nodes.get(edge.to);
+    if (!fromNode || !toNode || fromNode.order >= toNode.order || edge.from === edge.to) return;
+    const fromRank = ranks.get(edge.from) || 0;
+    const toRank = ranks.get(edge.to) || 0;
+    if (toRank <= fromRank) ranks.set(edge.to, fromRank + 1);
+  }
+
+  function computeNodeRanks(nodes, edges) {
+    const ranks = new Map();
+    for (const id of nodes.keys()) ranks.set(id, 0);
+    for (let iter = 0; iter < nodes.size; iter++) {
+      for (const edge of edges) relaxForwardEdgeRank(ranks, nodes, edge);
+    }
+    const byRank = new Map();
+    for (const [id, rank] of ranks.entries()) {
+      const group = byRank.get(rank) || [];
+      group.push(id);
+      byRank.set(rank, group);
+    }
+    const positions = new Map();
+    for (const [rank, group] of byRank.entries()) {
+      group.forEach((id, idx) => positions.set(id, { rank, row: idx, groupSize: group.length }));
+    }
+    return positions;
+  }
+
+  function computeNodeDimensions(n) {
+    if (n.shape === 'start' || n.shape === 'end') return { w: 22, h: 22 };
+    const textWidth = Math.ceil(n.label.length * 7.4) + 28;
+    return { w: Math.max(116, textWidth), h: 34 };
+  }
+
+  function layoutHorizontalGraph(positions, dims, edges, maxRank, maxGroupSize, hasBackEdge) {
+    const padX = 16;
+    const padY = 16;
+    const gapY = 54;
+    const colWidths = new Array(maxRank + 1).fill(116);
+    for (const [id, pos] of positions.entries()) {
+      colWidths[pos.rank] = Math.max(colWidths[pos.rank], dims.get(id).w);
+    }
+    const colGap = new Array(maxRank + 1).fill(46);
+    for (const e of edges) {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      if (f && t && t.rank > f.rank && e.label) {
+        colGap[f.rank] = Math.max(colGap[f.rank], Math.ceil(e.label.length * 6.4) + 28);
+      }
+    }
+    const colCenterX = [];
+    let cursorX = padX;
+    for (let r = 0; r <= maxRank; r++) {
+      colCenterX[r] = cursorX + colWidths[r] / 2;
+      cursorX += colWidths[r] + colGap[r];
+    }
+    const maxX = cursorX - (colGap[maxRank] || 46) + padX;
+    const maxY = padY * 2 + (maxGroupSize - 1) * gapY + 34 + (hasBackEdge ? 28 : 0);
+    const coords = new Map();
+    for (const [id, pos] of positions.entries()) {
+      const d = dims.get(id);
+      const rowOffset = (maxGroupSize - pos.groupSize) / 2;
+      const cy = padY + (hasBackEdge ? 20 : 0) + (pos.row + rowOffset) * gapY + 17;
+      coords.set(id, { cx: colCenterX[pos.rank], cy, w: d.w, h: d.h, rank: pos.rank, row: pos.row });
+    }
+    return { coords, maxX, maxY };
+  }
+
+  function computeVerticalLabelMetrics(edges, positions) {
+    const incomingLabelWidth = new Map();
+    const labeledEdgesByRank = new Map();
+    for (const e of edges) {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      if (f && t && f.rank < t.rank && e.label) {
+        const labelW = Math.ceil(e.label.length * 6.2) + 22;
+        incomingLabelWidth.set(e.to, Math.max(incomingLabelWidth.get(e.to) || 0, labelW));
+        labeledEdgesByRank.set(f.rank, (labeledEdgesByRank.get(f.rank) || 0) + 1);
+      }
+    }
+    return { incomingLabelWidth, labeledEdgesByRank };
+  }
+
+  function layoutVerticalGraph(positions, dims, edges, maxRank, hasBackEdge) {
+    const leftMargin = hasBackEdge ? 96 : 16;
+    const rightMargin = 24;
+    const padY = 16;
+    const colGapX = 28;
+    const byRank = new Map();
+    for (const [id, pos] of positions.entries()) {
+      const list = byRank.get(pos.rank) || [];
+      list.push(id);
+      byRank.set(pos.rank, list);
+    }
+    const { incomingLabelWidth, labeledEdgesByRank } = computeVerticalLabelMetrics(edges, positions);
+    const getSlotWidth = (id, rankSize) => {
+      const baseW = dims.get(id).w;
+      return rankSize <= 1 ? baseW : Math.max(baseW, incomingLabelWidth.get(id) || 0);
+    };
+    let maxRowWidth = 220;
+    for (const list of byRank.values()) {
+      const rowW = list.reduce((sum, id) => sum + getSlotWidth(id, list.length), 0) + Math.max(0, list.length - 1) * colGapX;
+      maxRowWidth = Math.max(maxRowWidth, rowW);
+    }
+    const rankCenterY = [];
+    let cursorY = padY + 17;
+    for (let r = 0; r <= maxRank; r++) {
+      rankCenterY[r] = cursorY;
+      cursorY += (labeledEdgesByRank.get(r) || 0) >= 2 ? 88 : 66;
+    }
+    const coords = new Map();
+    for (const [rank, list] of byRank.entries()) {
+      const rowW = list.reduce((sum, id) => sum + getSlotWidth(id, list.length), 0) + Math.max(0, list.length - 1) * colGapX;
+      let startX = leftMargin + (maxRowWidth - rowW) / 2;
+      const cy = rankCenterY[rank];
+      list.forEach((id, idx) => {
+        const d = dims.get(id);
+        const slotW = getSlotWidth(id, list.length);
+        coords.set(id, { cx: startX + slotW / 2, cy, w: d.w, h: d.h, rank, row: idx });
+        startX += slotW + colGapX;
+      });
+    }
+    return {
+      coords,
+      maxX: leftMargin + maxRowWidth + rightMargin,
+      maxY: (rankCenterY[maxRank] || padY + 17) + 17 + padY
+    };
+  }
+
+  function groupForwardEdgesBySource(edges, coords, isHorizontal) {
+    const forwardOut = new Map();
+    for (const e of edges) {
+      const f = coords.get(e.from);
+      const t = coords.get(e.to);
+      if (!f || !t || f.rank >= t.rank || e.from === e.to) continue;
+      const list = forwardOut.get(e.from) || [];
+      list.push(e);
+      forwardOut.set(e.from, list);
+    }
+    for (const list of forwardOut.values()) {
+      list.sort((a, b) => {
+        const ca = coords.get(a.to);
+        const cb = coords.get(b.to);
+        return isHorizontal ? ca.cy - cb.cy : ca.cx - cb.cx;
+      });
+    }
+    return forwardOut;
+  }
+
+  function renderBackEdgeSvg(e, from, to, isHorizontal, dash, halo) {
+    if (isHorizontal) {
+      const x1 = from.cx;
+      const y1 = from.cy - from.h / 2;
+      const x2 = to.cx;
+      const y2 = to.cy - to.h / 2 - 4;
+      const ctrlY = Math.min(y1, y2) - 26;
+      const midX = (x1 + x2) / 2;
+      const line = `<path d="M ${x1} ${y1} Q ${midX} ${ctrlY} ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+      const label = e.label ? `<text x="${midX}" y="${ctrlY + 4}" text-anchor="middle" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+      return { line, label };
+    }
+    const x1 = from.cx - from.w / 2;
+    const y1 = from.cy;
+    const x2 = to.cx - to.w / 2 - 4;
+    const y2 = to.cy;
+    const arcX = Math.min(x1, x2) - 44;
+    const midY = (y1 + y2) / 2;
+    const line = `<path d="M ${x1} ${y1} C ${arcX} ${y1}, ${arcX} ${y2}, ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    const label = e.label ? `<text x="${arcX - 4}" y="${midY + 3}" text-anchor="end" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+    return { line, label };
+  }
+
+  function renderFanOutEdgeSvg(e, from, to, outIdx, outCount, dash, halo) {
+    const spread = Math.min(44, from.w * 0.36);
+    const x1 = from.cx + ((outIdx - (outCount - 1) / 2) / Math.max(1, outCount - 1)) * spread;
+    const y1 = from.cy + from.h / 2;
+    const x2 = to.cx;
+    const y2 = to.cy - to.h / 2 - 4;
+    const ctrlY = y1 + (y2 - y1) * 0.45;
+    const line = Math.abs(x1 - x2) > 6
+      ? `<path d="M ${x1} ${y1} C ${x1} ${ctrlY}, ${x2} ${ctrlY}, ${x2} ${y2}" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`
+      : `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    let label = '';
+    if (e.label) {
+      const yFraction = outCount >= 3 ? (outIdx % 2 === 0 ? 0.46 : 0.76) : 0.58;
+      const labelX = x1 + 0.76 * (x2 - x1);
+      const labelY = y1 + yFraction * (y2 - y1) + 3;
+      label = `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>`;
+    }
+    return { line, label };
+  }
+
+  function renderDirectEdgeSvg(e, from, to, isHorizontal, dash, halo) {
+    const x1 = isHorizontal ? from.cx + from.w / 2 : from.cx;
+    const y1 = isHorizontal ? from.cy : from.cy + from.h / 2;
+    const x2 = isHorizontal ? to.cx - to.w / 2 - 4 : to.cx;
+    const y2 = isHorizontal ? to.cy : to.cy - to.h / 2 - 4;
+    const midX = (x1 + x2) / 2;
+    const midY = isHorizontal ? (y1 + y2) / 2 - 6 : (y1 + y2) / 2 + 3;
+    const textOffset = !isHorizontal && Math.abs(x1 - x2) < 8 ? 8 : 0;
+    const anchor = textOffset > 0 ? 'start' : 'middle';
+    const line = `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" />`;
+    const label = e.label ? `<text x="${midX + textOffset}" y="${midY}" text-anchor="${anchor}" font-size="10.5" ${halo} fill="var(--text-muted, #8b949e)">${escapeHtml(e.label)}</text>` : '';
+    return { line, label };
+  }
+
+  function renderGraphNodeSvg(n, c) {
+    if (n.shape === 'start') {
+      return `<g class="md-mermaid-node"><circle cx="${c.cx}" cy="${c.cy}" r="8" fill="var(--accent, #58a6ff)" /></g>`;
+    }
+    if (n.shape === 'end') {
+      return `<g class="md-mermaid-node"><circle cx="${c.cx}" cy="${c.cy}" r="9" fill="none" stroke="var(--accent, #58a6ff)" stroke-width="1.5" /><circle cx="${c.cx}" cy="${c.cy}" r="5" fill="var(--accent, #58a6ff)" /></g>`;
+    }
+    const x = c.cx - c.w / 2;
+    const y = c.cy - c.h / 2;
+    const rx = n.shape === 'round' ? 14 : 6;
+    const shapeEl = n.shape === 'diamond'
+      ? `<polygon points="${c.cx},${y} ${x + c.w},${c.cy} ${c.cx},${y + c.h} ${x},${c.cy}" fill="var(--bg-panel-hover, #21262d)" stroke="var(--accent, #58a6ff)" stroke-width="1.5" />`
+      : `<rect x="${x}" y="${y}" width="${c.w}" height="${c.h}" rx="${rx}" fill="var(--bg-panel-hover, #21262d)" stroke="var(--border, #30363d)" stroke-width="1.5" />`;
+    return `<g class="md-mermaid-node">${shapeEl}<text x="${c.cx}" y="${c.cy + 4}" text-anchor="middle" font-size="12" font-weight="500" fill="var(--text-bright, #f0f6fc)">${escapeHtml(n.label)}</text></g>`;
+  }
+
+  function renderSingleGraphEdge(e, coords, forwardOutBySource, isHorizontal, halo) {
+    const from = coords.get(e.from);
+    const to = coords.get(e.to);
+    if (!from || !to) return { line: '', label: '' };
+    const isBackEdge = from.rank >= to.rank && e.from !== e.to;
+    const dash = e.dashed || isBackEdge ? ' stroke-dasharray="4 3"' : '';
+    if (isBackEdge) return renderBackEdgeSvg(e, from, to, isHorizontal, dash, halo);
+    const siblings = forwardOutBySource.get(e.from) || [e];
+    if (!isHorizontal && siblings.length > 1) {
+      return renderFanOutEdgeSvg(e, from, to, Math.max(0, siblings.indexOf(e)), siblings.length, dash, halo);
+    }
+    return renderDirectEdgeSvg(e, from, to, isHorizontal, dash, halo);
+  }
+
+  function renderGraphSvg(nodes, edges, direction, rawLinesForFallback) {
+    if (nodes.size === 0) return renderMermaidFallback(rawLinesForFallback.join('\n'));
+    const isHorizontal = direction === 'LR' || direction === 'RL';
+    const positions = computeNodeRanks(nodes, edges);
+    const dims = new Map();
+    for (const [id, n] of nodes.entries()) dims.set(id, computeNodeDimensions(n));
+    let maxRank = 0;
+    let maxGroupSize = 1;
+    for (const pos of positions.values()) {
+      maxRank = Math.max(maxRank, pos.rank);
+      maxGroupSize = Math.max(maxGroupSize, pos.groupSize);
+    }
+    const hasBackEdge = edges.some(e => {
+      const f = positions.get(e.from);
+      const t = positions.get(e.to);
+      return Boolean(f && t && f.rank >= t.rank && e.from !== e.to);
+    });
+    const layout = isHorizontal
+      ? layoutHorizontalGraph(positions, dims, edges, maxRank, maxGroupSize, hasBackEdge)
+      : layoutVerticalGraph(positions, dims, edges, maxRank, hasBackEdge);
+    const forwardOutBySource = groupForwardEdgesBySource(edges, layout.coords, isHorizontal);
+    const halo = 'paint-order="stroke fill" stroke="var(--bg-code, #0b0e14)" stroke-width="4" stroke-linejoin="round"';
+    const edgeParts = edges.map(e => renderSingleGraphEdge(e, layout.coords, forwardOutBySource, isHorizontal, halo));
+    const edgeSvg = edgeParts.map(p => p.line).join('');
+    const edgeLabelSvg = edgeParts.map(p => p.label).join('');
+    const nodeSvg = Array.from(nodes.values()).map(n => renderGraphNodeSvg(n, layout.coords.get(n.id))).join('');
+    const maxH = isHorizontal ? 220 : 320;
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${layout.maxX} ${layout.maxY}" width="100%" style="max-width:${layout.maxX}px;max-height:${maxH}px"><defs><marker id="md-mermaid-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent, #58a6ff)" /></marker></defs>${edgeSvg}${nodeSvg}${edgeLabelSvg}</svg></div>`;
+  }
+
+  function renderFlowchartSvg(lines, direction) {
+    const { nodes, edges } = parseFlowchartLines(lines);
+    return renderGraphSvg(nodes, edges, direction, lines);
+  }
+
+  function renderStateDiagramSvg(lines) {
+    const { nodes, edges, direction } = parseStateDiagramLines(lines);
+    return renderGraphSvg(nodes, edges, direction, lines);
+  }
+
+  function parseSequenceLines(lines) {
+    const participants = new Map();
+    const messages = [];
+    const pRegex = /^(?:participant|actor)\s+([A-Za-z0-9_.-]+)(?:\s+as\s+(.+))?$/i;
+    const mRegex = /^([A-Za-z0-9_.-]+)\s*(--?>?>?|-x)\s*([A-Za-z0-9_.-]+)\s*:\s*(.+)$/;
+    for (const raw of lines) {
+      const line = raw.trim();
+      const pm = pRegex.exec(line);
+      if (pm) {
+        participants.set(pm[1], (pm[2] || pm[1]).trim());
+        continue;
+      }
+      const mm = mRegex.exec(line);
+      if (mm) {
+        if (!participants.has(mm[1])) participants.set(mm[1], mm[1]);
+        if (!participants.has(mm[3])) participants.set(mm[3], mm[3]);
+        messages.push({ from: mm[1], to: mm[3], text: mm[4].trim(), dashed: mm[2].startsWith('--') });
+      }
+    }
+    return { participants, messages };
+  }
+
+  function renderSequenceSvg(lines) {
+    const { participants, messages } = parseSequenceLines(lines);
+    if (participants.size === 0) return renderMermaidFallback(lines.join('\n'));
+    const ids = Array.from(participants.keys());
+    const colW = 150;
+    const pad = 20;
+    const boxW = 110;
+    const boxH = 32;
+    const width = pad * 2 + ids.length * colW;
+    const height = pad * 2 + boxH + Math.max(1, messages.length) * 44 + 16;
+    const lifelines = ids.map((id, idx) => {
+      const cx = pad + idx * colW + colW / 2;
+      const label = participants.get(id);
+      return `<g class="md-mermaid-actor"><line x1="${cx}" y1="${pad + boxH}" x2="${cx}" y2="${height - pad}" stroke="var(--border, #30363d)" stroke-dasharray="4 3" /><rect x="${cx - boxW / 2}" y="${pad}" width="${boxW}" height="${boxH}" rx="6" fill="var(--bg-panel-hover, #21262d)" stroke="var(--border, #30363d)" /><text x="${cx}" y="${pad + 20}" text-anchor="middle" font-size="12" font-weight="600" fill="var(--text-bright, #f0f6fc)">${escapeHtml(label)}</text></g>`;
+    }).join('');
+    const msgSvg = messages.map((m, idx) => {
+      const x1 = pad + ids.indexOf(m.from) * colW + colW / 2;
+      const x2 = pad + ids.indexOf(m.to) * colW + colW / 2;
+      const y = pad + boxH + 30 + idx * 44;
+      const dash = m.dashed ? ' stroke-dasharray="4 3"' : '';
+      return `<g class="md-mermaid-msg"><line x1="${x1}" y1="${y}" x2="${x2}" y2="${y}" stroke="var(--accent, #58a6ff)" stroke-width="1.5"${dash} marker-end="url(#md-mermaid-arrow)" /><text x="${(x1 + x2) / 2}" y="${y - 6}" text-anchor="middle" font-size="11" fill="var(--text-bright, #f0f6fc)">${escapeHtml(m.text)}</text></g>`;
+    }).join('');
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="100%" style="max-width:${width}px;max-height:240px"><defs><marker id="md-mermaid-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 10 5 L 0 9 z" fill="var(--accent, #58a6ff)" /></marker></defs>${lifelines}${msgSvg}</svg></div>`;
+  }
+
+  function parsePieSlices(header, lines) {
+    let title = '';
+    const showData = /\bshowData\b/i.test(header);
+    const inlineTitle = /^pie(?:\s+showData)?\s+title\s+(.+)$/i.exec(header);
+    if (inlineTitle) title = inlineTitle[1].trim().replace(/^"(.*)"$/, '$1');
+    const slices = [];
+    for (const raw of lines) {
+      const line = raw.trim();
+      const titleMatch = /^title\s+(.+)$/i.exec(line);
+      if (titleMatch) {
+        title = titleMatch[1].trim().replace(/^"(.*)"$/, '$1');
+        continue;
+      }
+      const sliceMatch = /^"([^"]+)"\s*:\s*([+-]?\d+(?:\.\d+)?)$/.exec(line);
+      if (sliceMatch && Number(sliceMatch[2]) >= 0) {
+        slices.push({ label: sliceMatch[1], value: Number(sliceMatch[2]) });
+      }
+    }
+    return { title, showData, slices };
+  }
+
+  function renderPieSvg(header, lines) {
+    const { title, showData, slices } = parsePieSlices(header, lines);
+    if (slices.length === 0) return renderMermaidFallback([header, ...lines].join('\n'));
+    const total = slices.reduce((acc, s) => acc + s.value, 0) || 1;
+    const width = 440;
+    const titleOffset = title ? 26 : 6;
+    const cx = 130;
+    const cy = titleOffset + 100;
+    const radius = 82;
+    const height = titleOffset + 200;
+    let angle = 0;
+    const paths = [];
+    const legendItems = [];
+    slices.forEach((s, idx) => {
+      const span = (s.value / total) * 360;
+      const start = angle;
+      angle += span;
+      const color = resolveSeriesColor(idx);
+      const d = describeSectorPath(cx, cy, radius, 0, start, angle);
+      const pct = Math.round((s.value / total) * 100);
+      const labelPos = polarToCartesian(cx, cy, radius * 0.65, start + span / 2);
+      paths.push(`<path d="${d}" fill="${color}" stroke="var(--bg-code, #0b0e14)" stroke-width="1.5" />`);
+      if (pct >= 8) {
+        paths.push(`<text x="${labelPos.x}" y="${labelPos.y + 4}" text-anchor="middle" fill="#ffffff" font-size="11" font-weight="600">${pct}%</text>`);
+      }
+      const suffix = showData ? ` (${formatTickNumber(s.value)})` : ` (${pct}%)`;
+      const ly = titleOffset + 28 + idx * 22;
+      legendItems.push(
+        `<rect x="242" y="${ly - 9}" width="11" height="11" rx="2" fill="${color}" />` +
+        `<text x="259" y="${ly}" fill="var(--text-main, #c9d1d9)" font-size="12">${escapeHtml(s.label + suffix)}</text>`
+      );
+    });
+    const titleEl = title ? `<text x="${width / 2}" y="18" text-anchor="middle" fill="var(--text-bright, #f0f6fc)" font-size="13" font-weight="600">${escapeHtml(title)}</text>` : '';
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeHtml(title || 'Pie chart')}">${titleEl}${paths.join('')}${legendItems.join('')}</svg></div>`;
+  }
+
+  function parseBracketList(raw) {
+    const inner = raw.trim().replace(/^\[/, '').replace(/\]$/, '');
+    if (!inner.trim()) return [];
+    return inner.split(',').map(item => item.trim().replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
+  }
+
+  function applyXyChartLine(line, state) {
+    const titleMatch = /^title\s+(.+)$/i.exec(line);
+    if (titleMatch) {
+      state.title = titleMatch[1].trim().replace(/^"(.*)"$/, '$1');
+      return;
+    }
+    const xAxisMatch = /^x-axis\s+(?:"[^"]*"\s+)?(\[.*\])$/i.exec(line);
+    if (xAxisMatch) {
+      state.xCategories = parseBracketList(xAxisMatch[1]);
+      return;
+    }
+    const yAxisMatch = /^y-axis\s+(?:"([^"]*)"\s*)?(?:([+-]?\d+(?:\.\d+)?)\s*-->\s*([+-]?\d+(?:\.\d+)?))?$/i.exec(line);
+    if (yAxisMatch) {
+      if (yAxisMatch[1]) state.yAxisTitle = yAxisMatch[1];
+      if (yAxisMatch[2] !== undefined && yAxisMatch[3] !== undefined) {
+        state.explicitMin = Number(yAxisMatch[2]);
+        state.explicitMax = Number(yAxisMatch[3]);
+      }
+      return;
+    }
+    const seriesMatch = /^(bar|line)\s+(?:"[^"]*"\s+)?(\[.*\])$/i.exec(line);
+    if (seriesMatch) {
+      const vals = parseBracketList(seriesMatch[2]).map(v => Number(v)).filter(n => Number.isFinite(n));
+      if (vals.length > 0) state.series.push({ kind: seriesMatch[1].toLowerCase(), values: vals });
+    }
+  }
+
+  function parseXyChartLines(lines) {
+    const state = { title: '', xCategories: [], yAxisTitle: '', explicitMin: undefined, explicitMax: undefined, series: [] };
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (line) applyXyChartLine(line, state);
+    }
+    return state;
+  }
+
+  function renderXySeriesSvg(series, padLeft, slotW, barWidth, yFor, zeroY) {
+    const parts = [];
+    let barIdx = 0;
+    series.forEach((s, sIdx) => {
+      const color = resolveSeriesColor(sIdx);
+      if (s.kind === 'bar') {
+        const bOffset = barIdx++;
+        s.values.forEach((v, idx) => {
+          const x = padLeft + idx * slotW + slotW * 0.175 + bOffset * barWidth;
+          const yTop = v >= 0 ? yFor(v) : zeroY;
+          const yBot = v >= 0 ? zeroY : yFor(v);
+          const h = Math.max(2, Math.abs(yBot - yTop));
+          parts.push(`<rect x="${Number(x.toFixed(2))}" y="${Number(Math.min(yTop, yBot).toFixed(2))}" width="${Number(barWidth.toFixed(2))}" height="${Number(h.toFixed(2))}" rx="2" fill="${color}" />`);
+        });
+      } else {
+        const pts = s.values.map((v, idx) => ({
+          x: Number((padLeft + (idx + 0.5) * slotW).toFixed(2)),
+          y: Number(yFor(v).toFixed(2))
+        }));
+        parts.push(`<polyline fill="none" stroke="${color}" stroke-width="2.2" points="${pts.map(p => `${p.x},${p.y}`).join(' ')}" />`);
+        pts.forEach(p => parts.push(`<circle cx="${p.x}" cy="${p.y}" r="3.5" fill="${color}" />`));
+      }
+    });
+    return parts;
+  }
+
+  function renderXyChartSvg(lines) {
+    const state = parseXyChartLines(lines);
+    if (state.series.length === 0) return renderMermaidFallback(['xychart-beta', ...lines].join('\n'));
+    const allVals = state.series.flatMap(s => s.values);
+    const minVal = state.explicitMin !== undefined ? state.explicitMin : Math.min(0, ...allVals);
+    const maxVal = state.explicitMax !== undefined ? state.explicitMax : Math.max(0, ...allVals);
+    const scale = computeNiceTicks(minVal, maxVal, 5, state.explicitMin === undefined);
+    const span = scale.max - scale.min || 1;
+    const width = 480;
+    const height = 230;
+    const padLeft = state.yAxisTitle ? 54 : 42;
+    const padTop = state.title ? 30 : 14;
+    const plotW = width - padLeft - 18;
+    const plotH = height - padTop - 30;
+    const yFor = v => padTop + plotH - ((v - scale.min) / span) * plotH;
+    const zeroY = yFor(Math.max(0, scale.min));
+    const maxPoints = Math.max(state.xCategories.length, ...state.series.map(s => s.values.length), 1);
+    const slotW = plotW / maxPoints;
+    const barCount = state.series.filter(s => s.kind === 'bar').length;
+    const barWidth = Math.max(6, (slotW * 0.65) / Math.max(1, barCount));
+    const parts = [];
+    if (state.title) {
+      parts.push(`<text x="${width / 2}" y="18" text-anchor="middle" fill="var(--text-bright, #f0f6fc)" font-size="13" font-weight="600">${escapeHtml(state.title)}</text>`);
+    }
+    for (const tick of scale.ticks) {
+      const y = Number(yFor(tick).toFixed(2));
+      parts.push(
+        `<line x1="${padLeft}" y1="${y}" x2="${padLeft + plotW}" y2="${y}" stroke="rgba(139,148,158,0.22)" stroke-dasharray="3 3" />`,
+        `<text x="${padLeft - 6}" y="${y + 4}" text-anchor="end" fill="var(--text-muted, #8b949e)" font-size="11">${formatTickNumber(tick)}</text>`
+      );
+    }
+    parts.push(
+      `<line x1="${padLeft}" y1="${padTop}" x2="${padLeft}" y2="${padTop + plotH}" stroke="var(--border, #30363d)" />`,
+      `<line x1="${padLeft}" y1="${Number(zeroY.toFixed(2))}" x2="${padLeft + plotW}" y2="${Number(zeroY.toFixed(2))}" stroke="var(--border, #30363d)" />`,
+      ...renderXySeriesSvg(state.series, padLeft, slotW, barWidth, yFor, zeroY)
+    );
+    for (let i = 0; i < maxPoints; i++) {
+      const lbl = state.xCategories[i] !== undefined ? state.xCategories[i] : String(i + 1);
+      const cx = Number((padLeft + (i + 0.5) * slotW).toFixed(2));
+      parts.push(`<text x="${cx}" y="${padTop + plotH + 16}" text-anchor="middle" fill="var(--text-muted, #8b949e)" font-size="11">${escapeHtml(lbl)}</text>`);
+    }
+    return `<div class="md-mermaid"><svg class="md-mermaid-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img" aria-label="${escapeHtml(state.title || 'XY chart')}">${parts.join('')}</svg></div>`;
+  }
+
+  function renderMermaidSvg(code) {
+    const rawLines = String(code || '')
+      .trim()
+      .split(/\r?\n/)
+      .filter(l => !l.trim().startsWith('%%'));
+    const header = (rawLines[0] || '').trim();
+    const flowMatch = /^(?:flowchart|graph)(?:\s+(TD|TB|LR|RL|BT))?\b/i.exec(header);
+    if (flowMatch) {
+      return renderFlowchartSvg(rawLines.slice(1), (flowMatch[1] || 'TD').toUpperCase());
+    }
+    if (/^stateDiagram(?:-v2)?\b/i.test(header)) {
+      return renderStateDiagramSvg(rawLines.slice(1));
+    }
+    if (/^sequenceDiagram\b/i.test(header)) {
+      return renderSequenceSvg(rawLines.slice(1));
+    }
+    if (/^pie\b/i.test(header)) {
+      return renderPieSvg(header, rawLines.slice(1));
+    }
+    if (/^xychart(?:-beta)?\b/i.test(header)) {
+      return renderXyChartSvg(rawLines.slice(1));
+    }
+    return renderMermaidFallback(code);
+  }
+
+  function isTableSeparatorLine(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed.includes('|')) return false;
+    const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|');
+    return cells.length > 0 && cells.every(c => /^:?-{1,}:?$/.test(c.trim()));
+  }
+
+  function splitTableRow(line) {
+    const masks = [];
+    const storeMask = match => {
+      const idx = masks.length;
+      masks.push(match);
+      return `\u0000TBL_MASK_${idx}\u0000`;
+    };
+    const masked = String(line || '')
+      .replace(/`[^`]+`/g, storeMask)
+      .replace(/\\\([\s\S]+?\\\)/g, storeMask)
+      .replace(/(^|[^\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, pre, body) => `${pre}${storeMask(`$${body}$`)}`)
+      .replace(/\\\|/g, '\u0000ESC_PIPE\u0000');
+    const stripped = masked.trim().replace(/^\|/, '').replace(/\|$/, '');
+    return stripped.split('|').map(cell =>
+      cell
+        .replace(/\u0000TBL_MASK_(\d+)\u0000/g, (_, idx) => masks[Number(idx)] || '')
+        .replace(/\u0000ESC_PIPE\u0000/g, '|')
+        .trim()
+    );
+  }
+
+  function isTableHeaderAt(lines, index) {
+    if (index + 1 >= lines.length) return false;
+    const headerLine = lines[index].trim();
+    if (!headerLine || !headerLine.includes('|') || !isTableSeparatorLine(lines[index + 1])) return false;
+    return splitTableRow(headerLine).length === splitTableRow(lines[index + 1]).length;
+  }
+
+  function parseTableAlignments(sepLine) {
+    return splitTableRow(sepLine).map(cell => {
+      const c = cell.trim();
+      if (c.startsWith(':') && c.endsWith(':')) return 'center';
+      if (c.endsWith(':')) return 'right';
+      if (c.startsWith(':')) return 'left';
+      return '';
+    });
+  }
+
+  function renderTableRowCells(cells, alignments, tag, colCount) {
+    const out = [];
+    for (let c = 0; c < colCount; c++) {
+      const align = alignments[c] ? ` style="text-align:${alignments[c]}"` : '';
+      const rawCell = c < cells.length ? cells[c] : '';
+      out.push(`<${tag}${align}>${renderInlineMarkdown(rawCell)}</${tag}>`);
+    }
+    return `<tr>${out.join('')}</tr>`;
+  }
+
+  function isTableBodyLine(line) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed || !trimmed.includes('|')) return false;
+    if (/^\u0000(?:FENCE|MATH_BLOCK)_\d+\u0000$/.test(trimmed)) return false;
+    return !/^(?:#{1,6}\s+|>\s?|[-*]\s+|\d+\.\s+)/.test(trimmed);
+  }
+
+  function renderTableBlock(lines, startIndex) {
+    const headers = splitTableRow(lines[startIndex]);
+    const alignments = parseTableAlignments(lines[startIndex + 1]);
+    const colCount = headers.length;
+    const theadHtml = `<thead>${renderTableRowCells(headers, alignments, 'th', colCount)}</thead>`;
+    const bodyRows = [];
+    let idx = startIndex + 2;
+    while (idx < lines.length && isTableBodyLine(lines[idx])) {
+      bodyRows.push(renderTableRowCells(splitTableRow(lines[idx]), alignments, 'td', colCount));
+      idx++;
+    }
+    const tbodyHtml = bodyRows.length > 0 ? `<tbody>${bodyRows.join('')}</tbody>` : '';
+    return {
+      html: `<div class="md-table-wrap"><table class="md-table">${theadHtml}${tbodyHtml}</table></div>`,
+      nextIndex: idx
+    };
+  }
+
+  // Safely formats inline Markdown after extracting inline code and inline LaTeX math spans first.
+  function renderInlineMarkdown(text) {
+    if (!text) return '';
+    const codeSpans = [];
+    const mathSpans = [];
+    const withCodeMasked = String(text).replace(/`([^`]+)`/g, (_, code) => {
+      const idx = codeSpans.length;
+      codeSpans.push(`<code>${escapeHtml(code)}</code>`);
+      return `\u0000CODE_${idx}\u0000`;
+    });
+
+    const storeInlineMath = tex => {
+      const idx = mathSpans.length;
+      mathSpans.push(renderLatexToMathMl(tex, false));
+      return `\u0000MATH_INLINE_${idx}\u0000`;
+    };
+
+    const withMathMasked = withCodeMasked
+      .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => storeInlineMath(tex))
+      .replace(/(^|[^\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, pre, tex) => `${pre}${storeInlineMath(tex)}`)
+      .replace(/\\\$/g, '$')
+      .replace(
+        /<sub><!-- agent-generated --><kbd>🤖 Agent-generated<\/kbd><\/sub>/g,
+        '\u0000AGENT_BADGE\u0000'
+      );
+
+    let safe = escapeHtml(withMathMasked);
+
+    // Markdown links restricted to http://, https://, or # anchors; strip local file:// links
+    safe = safe.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
+      if (/^(https?:\/\/|#)/i.test(url)) {
+        return `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      }
+      if (/^file:\/\//i.test(url)) {
+        return label;
+      }
+      return match;
+    });
+
+    // Bold, italic, and strikethrough
+    safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    safe = safe.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+    safe = safe.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
+
+    return safe
+      .replace(/\u0000AGENT_BADGE\u0000/g, '<sub class="md-agent-badge"><kbd>🤖 Agent-generated</kbd></sub>')
+      .replace(/\u0000MATH_INLINE_(\d+)\u0000/g, (_, idx) => mathSpans[Number(idx)] || '')
+      .replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
+  }
+
+  function extractTopLevelFences(normalized, codeBlocks) {
+    return normalized.replace(/(^|\n)([ \t]*)```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_, lead, indent, lang, code) => {
+      const idx = codeBlocks.length;
+      const cleanLang = (lang || '').trim();
+      if (cleanLang.toLowerCase() === 'mermaid') {
+        codeBlocks.push(renderMermaidSvg(code));
+        return `${lead}\n\u0000FENCE_${idx}\u0000\n`;
+      }
+      const langAttr = cleanLang ? ` data-lang="${escapeHtml(cleanLang)}"` : '';
+      const headerHtml = cleanLang.toLowerCase() === 'suggestion'
+        ? '<div class="suggestion-preview-header">Suggested change</div>'
+        : '';
+      codeBlocks.push(`${headerHtml}<pre class="code-box"${langAttr}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
+      return `${lead}\n\u0000FENCE_${idx}\u0000\n`;
+    });
+  }
+
+  function isInsideBlockquoteLine(source, matchIndex, matchBody) {
+    const lineStart = source.lastIndexOf('\n', matchIndex - 1) + 1;
+    const linePrefix = source.slice(lineStart, matchIndex);
+    return /^\s*>/.test(linePrefix) || /\n\s*>/.test(matchBody);
+  }
+
+  function extractTopLevelDisplayMath(text, mathBlocks) {
+    const tickMasks = [];
+    const maskedTicks = text.replace(/`[^`\n]+`/g, m => {
+      const idx = tickMasks.length;
+      tickMasks.push(m);
+      return `\u0000INLINE_TICK_${idx}\u0000`;
+    });
+    const storeDisplay = (fullMatch, tex, offset, fullStr) => {
+      if (isInsideBlockquoteLine(fullStr, offset, fullMatch)) return fullMatch;
+      const idx = mathBlocks.length;
+      mathBlocks.push(renderLatexToMathMl(tex, true));
+      return `\n\u0000MATH_BLOCK_${idx}\u0000\n`;
+    };
+    const withMath = maskedTicks
+      .replace(/\$\$([\s\S]+?)\$\$/g, storeDisplay)
+      .replace(/\\\[([\s\S]+?)\\\]/g, storeDisplay);
+    return withMath.replace(/\u0000INLINE_TICK_(\d+)\u0000/g, (_, idx) => tickMasks[Number(idx)] || '');
+  }
+
+  // Blockquote bodies re-enter renderMarkdownSafe with the current fold depth so a
+  // <details> nested inside a quote still counts toward MAX_DETAILS_DEPTH.
+  function consumeBlockquoteOrCallout(lines, startIndex, depth) {
+    const quoteLines = [];
+    let i = startIndex;
+    while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+      quoteLines.push(lines[i].replace(/^\s*>\s?/, ''));
+      i++;
+    }
+    const firstLine = quoteLines[0] || '';
+    const alertMatch = firstLine.match(/^\[!(WARNING|IMPORTANT|NOTE|CAUTION)\]\s*(.*)$/i);
+    if (alertMatch) {
+      const kind = alertMatch[1].toLowerCase();
+      const titleText = alertMatch[1].toUpperCase();
+      const inlineFirst = alertMatch[2].trim();
+      const innerLines = (inlineFirst ? [inlineFirst, ''] : []).concat(quoteLines.slice(1));
+      const bodyHtml = renderMarkdownSafe(innerLines.join('\n'), depth);
+      return {
+        html: `<div class="md-callout callout-${kind}"><div class="md-callout-title">${titleText}</div>${bodyHtml}</div>`,
+        nextIndex: i
+      };
+    }
+    const quoteHtml = renderMarkdownSafe(quoteLines.join('\n'), depth);
+    return { html: `<blockquote>${quoteHtml}</blockquote>`, nextIndex: i };
+  }
+
+  function consumeListBlock(lines, startIndex, ordered) {
+    const pattern = ordered ? /^\s*\d+\.\s+/ : /^\s*[-*]\s+/;
+    const tag = ordered ? 'ol' : 'ul';
+    const items = [];
+    let i = startIndex;
+    while (i < lines.length && pattern.test(lines[i])) {
+      items.push(`<li>${renderInlineMarkdown(lines[i].replace(pattern, '').trim())}</li>`);
+      i++;
+    }
+    return { html: `<${tag}>${items.join('')}</${tag}>`, nextIndex: i };
+  }
+
+  // <details> grammar: the open and close tags use bare lowercase <details> and <summary>
+  // with no attributes (either on separate lines or compact <details><summary>...</summary>).
+  // Every other form falls through to escaped paragraph text.
+  const DETAILS_OPEN_RE = /^\s*<details>\s*$/;
+  const DETAILS_CLOSE_RE = /^\s*<\/details>\s*$/;
+  const DETAILS_SUMMARY_RE = /^\s*<summary>(.*)<\/summary>\s*$/;
+  const COMPACT_DETAILS_PREFIX_RE = /^(\s*)<details>[ \t]*<summary>((?:(?!<\/summary>).)*)<\/summary>[ \t]*(.*)$/;
+  const MAX_DETAILS_DEPTH = 3;
+
+  function isCompactDetailsOpenLine(line) {
+    return COMPACT_DETAILS_PREFIX_RE.test(line);
+  }
+
+  function isSingleLineCompactDetails(line) {
+    const m = COMPACT_DETAILS_PREFIX_RE.exec(line);
+    if (!m || m[3].includes('</summary>') || m[3].includes('<details>')) return false;
+    return /^(.*?)[ \t]*<\/details>\s*$/.test(m[3]);
+  }
+
+  function expandSingleCompactDetailsLine(line) {
+    const m = COMPACT_DETAILS_PREFIX_RE.exec(line);
+    if (!m) return line;
+    const indent = m[1];
+    const summaryInner = m[2];
+    const rest = m[3];
+    // Keep extra </summary> tags on the summary line so DETAILS_SUMMARY_RE matches
+    // greedily and escapes inner markup into summary text.
+    if (rest.includes('</summary>')) {
+      return `${indent}<details>\n${indent}<summary>${summaryInner}</summary>${rest}`;
+    }
+    const singleLineClose = !rest.includes('<details>') ? /^(.*?)[ \t]*<\/details>\s*$/.exec(rest) : null;
+    if (singleLineClose) {
+      const body = singleLineClose[1].trim();
+      return body
+        ? `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}${body}\n${indent}</details>`
+        : `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}</details>`;
+    }
+    return rest
+      ? `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}${rest}`
+      : `${indent}<details>\n${indent}<summary>${summaryInner}</summary>`;
+  }
+
+  function normalizeCompactDetailsLines(text) {
+    if (!text.includes('<details>')) return text;
+    return text.split('\n').map(expandSingleCompactDetailsLine).join('\n');
+  }
+
+  function isParagraphBreakLine(lines, index) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+    if (/^\u0000(?:FENCE|MATH_BLOCK)_\d+\u0000$/.test(trimmed)) return true;
+    if (/^(?:#{1,6}\s+|\s*>\s?|\s*[-*]\s+|\s*\d+\.\s+)/.test(line)) return true;
+    if (DETAILS_OPEN_RE.test(line)) return true;
+    return isTableHeaderAt(lines, index);
+  }
+
+  // Always consumes the start line, so a line that breaks paragraphs but did not
+  // render as its own block (an unclosed or too-deep <details>) still shows as text.
+  function consumeParagraphBlock(lines, startIndex) {
+    const paraLines = [];
+    let i = startIndex;
+    do {
+      paraLines.push(renderInlineMarkdown(lines[i].trim()));
+      i++;
+    } while (i < lines.length && !isParagraphBreakLine(lines, i));
+    return {
+      html: paraLines.length > 0 ? `<p>${paraLines.join('<br>')}</p>` : '',
+      nextIndex: i
+    };
+  }
+
+  // Returns the index of the </details> line that pairs with the open line at
+  // startIndex, counting nested opens, or -1 when the block is never closed.
+  function findDetailsClose(lines, startIndex) {
+    let level = 0;
+    for (let i = startIndex; i < lines.length; i++) {
+      if (DETAILS_OPEN_RE.test(lines[i])) {
+        level++;
+      } else if (DETAILS_CLOSE_RE.test(lines[i])) {
+        level--;
+        if (level === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  // Renders a <details> fold, or returns null when it is unclosed or nested deeper
+  // than MAX_DETAILS_DEPTH. The emitted tags are fixed literals; only the summary
+  // text (through renderInlineMarkdown) and the rendered body come from the input.
+  function consumeDetailsBlock(lines, startIndex, codeBlocks, mathBlocks, depth) {
+    if (depth >= MAX_DETAILS_DEPTH) return null;
+    const closeIndex = findDetailsClose(lines, startIndex);
+    if (closeIndex < 0) return null;
+    let bodyStart = startIndex + 1;
+    let label = 'Details';
+    const summaryMatch = bodyStart < closeIndex ? lines[bodyStart].match(DETAILS_SUMMARY_RE) : null;
+    if (summaryMatch) {
+      label = summaryMatch[1].trim() || 'Details';
+      bodyStart++;
+    }
+    const bodyHtml = renderMarkdownLines(lines.slice(bodyStart, closeIndex), codeBlocks, mathBlocks, depth + 1);
+    return {
+      html: `<details class="md-details"><summary>${renderInlineMarkdown(label)}</summary>${bodyHtml}</details>`,
+      nextIndex: closeIndex + 1
+    };
+  }
+
+  function consumeNextMarkdownBlock(lines, index, codeBlocks, mathBlocks, depth) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed) return { html: '', nextIndex: index + 1 };
+    const fenceMatch = trimmed.match(/^\u0000FENCE_(\d+)\u0000$/);
+    if (fenceMatch) return { html: codeBlocks[Number(fenceMatch[1])] || '', nextIndex: index + 1 };
+    const mathMatch = trimmed.match(/^\u0000MATH_BLOCK_(\d+)\u0000$/);
+    if (mathMatch) return { html: mathBlocks[Number(mathMatch[1])] || '', nextIndex: index + 1 };
+    if (DETAILS_OPEN_RE.test(line)) {
+      const details = consumeDetailsBlock(lines, index, codeBlocks, mathBlocks, depth);
+      if (details) return details;
+      return consumeParagraphBlock(lines, index);
+    }
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      return { html: `<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`, nextIndex: index + 1 };
+    }
+    if (/^\s*>\s?/.test(line)) return consumeBlockquoteOrCallout(lines, index, depth);
+    if (isTableHeaderAt(lines, index)) return renderTableBlock(lines, index);
+    if (/^\s*[-*]\s+/.test(line)) return consumeListBlock(lines, index, false);
+    if (/^\s*\d+\.\s+/.test(line)) return consumeListBlock(lines, index, true);
+    return consumeParagraphBlock(lines, index);
+  }
+
+  // Renders already-extracted lines. Fold bodies recurse here with the parent's
+  // codeBlocks and mathBlocks so fence and math placeholders inside a fold resolve.
+  function renderMarkdownLines(lines, codeBlocks, mathBlocks, depth) {
+    const htmlParts = [];
+    let i = 0;
+    while (i < lines.length) {
+      const step = consumeNextMarkdownBlock(lines, i, codeBlocks, mathBlocks, depth);
+      if (step.html) htmlParts.push(step.html);
+      i = step.nextIndex > i ? step.nextIndex : i + 1;
+    }
+    return htmlParts.join('\n');
+  }
+
+  // Converts Markdown into safe HTML (supports fenced code blocks, Mermaid SVG,
+  // LaTeX MathML, GFM pipe tables, GitHub alert callouts, <details> folds, headings,
+  // lists, and paragraphs). Fences are extracted first, so a <details> line inside
+  // a code block never opens a fold. depth is the number of enclosing folds.
+  function renderMarkdownSafe(md, depth = 0) {
+    if (!md) return '';
+    const codeBlocks = [];
+    const mathBlocks = [];
+    const normalized = String(md).replace(/\r\n/g, '\n');
+    const withoutFences = extractTopLevelFences(normalized, codeBlocks);
+    const withoutDisplayMath = extractTopLevelDisplayMath(withoutFences, mathBlocks);
+    const withNormalizedDetails = normalizeCompactDetailsLines(withoutDisplayMath);
+    return renderMarkdownLines(withNormalizedDetails.split('\n'), codeBlocks, mathBlocks, depth);
+  }
+  // END SHARED_MARKDOWN_ENGINE
 
     function parseMarkdown(text) {
-      if (!text) return '';
-      text = unescapeNewlines(text);
-      try {
-        if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
-          return marked.parse(text);
-        } else if (typeof marked === 'function') {
-          return marked(text);
-        }
-      } catch (e) {
-        console.error('Error parsing markdown:', e);
+      return renderMarkdownSafe(text);
+    }
+
+    function renderReplyPreviewHtml(markdown) {
+      const trimmed = String(markdown || '').trim();
+      return trimmed ? renderMarkdownSafe(trimmed) : '<p class="preview-empty">Nothing to preview</p>';
+    }
+
+    function setReplyTabButtonState(btn, active) {
+      if (!btn) return;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+
+    function currentReplyMarkdown(threadId, editor) {
+      if (editor) return editor.value;
+      return decisions[threadId] ? decisions[threadId].reply : '';
+    }
+
+    function switchReplyTab(threadId, mode) {
+      const isPreview = mode === 'preview';
+      replyTabs[threadId] = isPreview ? 'preview' : 'write';
+      setReplyTabButtonState(document.getElementById(`reply-tab-write-${threadId}`), !isPreview);
+      setReplyTabButtonState(document.getElementById(`reply-tab-preview-${threadId}`), isPreview);
+      const editor = document.getElementById(`reply-text-${threadId}`);
+      const preview = document.getElementById(`reply-preview-${threadId}`);
+      if (editor) editor.style.display = isPreview ? 'none' : 'block';
+      if (!preview) return;
+      preview.style.display = isPreview ? 'block' : 'none';
+      if (isPreview) {
+        preview.innerHTML = renderReplyPreviewHtml(currentReplyMarkdown(threadId, editor));
       }
-      return escapeHtml(text);
+    }
+
+    function refreshReplyPreviewIfActive(threadId) {
+      if (replyTabs[threadId] !== 'preview') return;
+      const preview = document.getElementById(`reply-preview-${threadId}`);
+      if (preview && decisions[threadId]) {
+        preview.innerHTML = renderReplyPreviewHtml(decisions[threadId].reply);
+      }
     }
 
     async function copyToClipboard(text, btn) {
@@ -872,18 +2663,21 @@
         }
         feedbackData = loaded;
         document.getElementById('repo-name').textContent = `${feedbackData.repo} (PR #${feedbackData.pr})`;
-        
+
         document.getElementById('comments-count').textContent = (feedbackData.threads || []).length;
         document.getElementById('reviews-count').textContent = (feedbackData.reviews || []).length;
         document.getElementById('general-comments-count').textContent = (feedbackData.comments || []).length;
         document.getElementById('checks-count').textContent = (feedbackData.checks || []).length;
         document.getElementById('pending-count').textContent = (feedbackData.pendingChecks || []).length;
-        
+
         if (feedbackData.gitState) {
           checkGitState(feedbackData.gitState);
         }
         for (const k of Object.keys(decisions)) {
           delete decisions[k];
+        }
+        for (const k of Object.keys(replyTabs)) {
+          delete replyTabs[k];
         }
         renderThreads(feedbackData.threads);
         renderReviews(feedbackData.reviews);
@@ -900,188 +2694,229 @@
       }
     }
 
+    function resolveLocalStatusBadge(thread, decision) {
+      const localStatus = thread.localStatus || '';
+      if (localStatus.startsWith('Addressed')) {
+        decision.approved = true;
+        return '<span class="badge status-addressed">Addressed (Local)</span>';
+      }
+      if (localStatus.startsWith('Modified')) {
+        decision.approved = true;
+        return '<span class="badge status-modified">Modified Locally</span>';
+      }
+      return '<span class="badge">Unaddressed</span>';
+    }
+
+    function renderThreadStatusBadgesHtml(thread, decision) {
+      const localStatusBadge = resolveLocalStatusBadge(thread, decision);
+      const outdatedBadge = thread.isOutdated ? '<span class="badge outdated">Outdated (Pushed)</span>' : '';
+      const resolvedBadge = thread.isResolved ? '<span class="badge status-addressed">Resolved (GitHub)</span>' : '';
+      const hiddenBadge = thread.isHidden ? '<span class="badge outdated">Hidden/Minimized</span>' : '';
+      return `${assessmentBadgeHtml(decision.rating)}${localStatusBadge}${outdatedBadge}${resolvedBadge}${hiddenBadge}`;
+    }
+
+    function renderThreadCommentsHtml(comments) {
+      return (comments || []).map(c => `
+        <div class="comment-bubble">
+          <div class="comment-meta">
+            <span class="comment-author">@${c.author || 'unknown'}</span>
+            <span>${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
+          </div>
+          <div class="comment-content markdown-rendered">${parseMarkdown(c.body || '')}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderSuggestionHtml(thread) {
+      if (!thread.suggestion) return '';
+      const normalized = String(thread.suggestion).replace(/\r\n/g, '\n');
+      return `
+        <div class="suggestion-block">
+          <div class="suggestion-header">
+            <span>SUGGESTED CHANGE</span>
+          </div>
+          <pre class="suggestion-code"><code>${escapeHtml(normalized)}</code></pre>
+        </div>
+      `;
+    }
+
+    function renderProposedFixHtml(thread) {
+      if (!thread.proposedFix) return '';
+      return `
+        <div class="proposed-fix-block" style="background-color: rgba(0, 122, 204, 0.05); border: 1px solid rgba(0, 122, 204, 0.2); border-radius: 4px; padding: 12px; margin: 12px 0;">
+          <strong style="color: #9cdcfe;">Proposed Fix:</strong>
+          <div class="comment-content markdown-rendered" style="margin-top: 6px; font-size: 0.9rem;">${parseMarkdown(thread.proposedFix)}</div>
+        </div>
+      `;
+    }
+
+    function findMatchingSnippetLine(codeBlock, line, originalLine) {
+      const hasLine = ln => Number.isInteger(ln) && codeBlock.some(item => item.line === ln);
+      if (hasLine(line)) return line;
+      if (hasLine(originalLine)) return originalLine;
+      return null;
+    }
+
+    function renderCodeSnippetLineHtml(lineObj, matchLine) {
+      const lineNum = Number.isInteger(lineObj.line) ? lineObj.line : null;
+      const isTarget = matchLine !== null && lineNum === matchLine;
+      const targetClass = isTarget ? ' target-line' : '';
+      const targetAttr = isTarget ? ' data-target-line="true"' : '';
+      return `
+        <div class="code-snippet-line${targetClass}"${targetAttr}>
+          <div class="code-snippet-number">${lineNum !== null ? lineNum : ''}</div>
+          <div class="code-snippet-content">${escapeHtml(lineObj.content)}</div>
+        </div>
+      `;
+    }
+
+    function renderCodeBlockHtml(thread) {
+      const block = thread.rightRefCodeBlock;
+      if (!block || block.length === 0) return '';
+      const matchLine = findMatchingSnippetLine(block, thread.line, thread.originalLine);
+      const linesHtml = block.map(line => renderCodeSnippetLineHtml(line, matchLine)).join('');
+      const totalLines = block.length;
+      const lineCountLabel = `${totalLines} ${totalLines === 1 ? 'line' : 'lines'}`;
+      return `
+        <div class="code-snippet-box">
+          <div class="code-snippet-header">
+            <span>ORIGINAL CODE CONTEXT</span>
+            <span class="code-snippet-meta">${lineCountLabel}</span>
+          </div>
+          <div class="code-snippet-scroll">
+            <div class="code-snippet-lines">
+              ${linesHtml}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderThreadHeaderHtml(thread, badgesHtml) {
+      const lineRef = thread.line || thread.originalLine;
+      const displaySuffix = lineRef ? `:${lineRef}` : ' (File)';
+      const copySuffix = lineRef ? `:${lineRef}` : '';
+      return `
+        <div class="thread-header">
+          <div style="display: flex; align-items: center; gap: 4px;">
+            <span class="file-path">${thread.path}${displaySuffix}</span>
+            <button class="copy-btn" onclick="copyToClipboard('${thread.path}${copySuffix}', this)" title="Copy file path and line number">
+              <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
+                <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
+                <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
+              </svg>
+            </button>
+          </div>
+          <div class="status-badge-container">
+            ${badgesHtml}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderThreadActionPanelHtml(thread, d) {
+      const approvedClass = d.approved ? 'approved' : '';
+      const approvedBg = d.approved ? '#10b981' : '#3b82f6';
+      const approvedIcon = d.approved ? '☑' : '☐';
+      const approvedText = d.approved ? 'Action Approved' : 'Approve Action';
+      return `
+        <div class="action-panel">
+          <div class="action-row">
+            <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">DECISION:</span>
+            <label class="action-option">
+              <input type="radio" name="action-${thread.id}" value="accept" ${d.action === 'accept' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'accept')">
+              Accept Fix
+            </label>
+            <label class="action-option">
+              <input type="radio" name="action-${thread.id}" value="clarify" ${d.action === 'clarify' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'clarify')">
+              Request Clarification
+            </label>
+            <label class="action-option">
+              <input type="radio" name="action-${thread.id}" value="decline" ${d.action === 'decline' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'decline')">
+              Decline/Ignore
+            </label>
+          </div>
+
+          <div class="reply-box">
+            <label for="reply-text-${thread.id}">Draft Reply Comment:</label>
+            <div class="comment-box" id="reply-box-${thread.id}">
+              <div class="comment-tabs-header">
+                <div class="comment-tabs" role="tablist" aria-label="Draft reply view mode">
+                  <button type="button" id="reply-tab-write-${thread.id}" class="comment-tab active" role="tab" aria-selected="true" onclick="switchReplyTab('${thread.id}', 'write')">Write</button>
+                  <button type="button" id="reply-tab-preview-${thread.id}" class="comment-tab" role="tab" aria-selected="false" onclick="switchReplyTab('${thread.id}', 'preview')">Preview</button>
+                </div>
+              </div>
+              <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="4" oninput="updateReply('${thread.id}', this.value)">${escapeHtml(d.reply)}</textarea>
+              <div id="reply-preview-${thread.id}" class="markdown-rendered comment-preview" style="display: none;"></div>
+            </div>
+          </div>
+
+          <div class="reply-box" style="margin-top: 12px;">
+            <label for="instructions-${thread.id}">Instructions for Agent (adjust plan):</label>
+            <textarea id="instructions-${thread.id}" class="reply-textarea" rows="4" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
+          </div>
+
+          <div class="checkbox-row" style="align-items: center;">
+            <button
+              type="button"
+              id="approve-btn-${thread.id}"
+              class="approve-action-btn ${approvedClass}"
+              onclick="toggleApproval('${thread.id}')"
+              style="
+                background-color: ${approvedBg};
+              "
+            >
+              <span id="approve-icon-${thread.id}" style="font-size: 1.1rem; display: flex; align-items: center;">
+                ${approvedIcon}
+              </span>
+              <span id="approve-text-${thread.id}">
+                ${approvedText}
+              </span>
+            </button>
+            <label class="checkbox-option" style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-light);">
+              <input type="checkbox" id="resolve-${thread.id}" ${d.resolve ? 'checked' : ''} onchange="updateResolve('${thread.id}', this.checked)" style="cursor: pointer;">
+              Mark thread resolved
+            </label>
+          </div>
+        </div>
+      `;
+    }
+
+    function createThreadCard(thread) {
+      // Seed decision state from the proposal fields merged by the server.
+      decisions[thread.id] = initialDecision(thread);
+      replyTabs[thread.id] = 'write';
+      const d = decisions[thread.id];
+      const badgesHtml = renderThreadStatusBadgesHtml(thread, d);
+
+      const card = document.createElement('div');
+      card.className = 'thread-card';
+      card.id = `card-${thread.id}`;
+      card.innerHTML = `
+        ${renderThreadHeaderHtml(thread, badgesHtml)}
+        <div class="thread-body">
+          ${renderCodeBlockHtml(thread)}
+          <div class="comments-history">
+            ${renderThreadCommentsHtml(thread.comments)}
+          </div>
+          ${renderSuggestionHtml(thread)}
+          ${renderProposedFixHtml(thread)}
+          ${renderThreadActionPanelHtml(thread, d)}
+        </div>
+      `;
+      return card;
+    }
+
     function renderThreads(threads) {
       const container = document.getElementById('content-comments');
       if (!threads || threads.length === 0) {
         container.innerHTML = '<div class="empty-state">No active or unresolved review comments found on this PR.</div>';
         return;
       }
-      
+
       container.innerHTML = '';
-      
       threads.forEach(thread => {
-        // Seed decision state from the proposal fields merged by the server.
-        decisions[thread.id] = initialDecision(thread);
-        const d = decisions[thread.id];
-        
-        const card = document.createElement('div');
-        card.className = 'thread-card';
-        card.id = `card-${thread.id}`;
-        
-        const outdatedBadge = thread.isOutdated ? '<span class="badge outdated">Outdated (Pushed)</span>' : '';
-        const resolvedBadge = thread.isResolved ? '<span class="badge status-addressed">Resolved (GitHub)</span>' : '';
-        const hiddenBadge = thread.isHidden ? '<span class="badge outdated">Hidden/Minimized</span>' : '';
-        
-        let localStatusBadge = '';
-        const localStatus = thread.localStatus || '';
-        if (localStatus.startsWith('Addressed')) {
-          localStatusBadge = `<span class="badge status-addressed">Addressed (Local)</span>`;
-          decisions[thread.id].approved = true; // Auto check if addressed
-        } else if (localStatus.startsWith('Modified')) {
-          localStatusBadge = `<span class="badge status-modified">Modified Locally</span>`;
-          decisions[thread.id].approved = true;
-        } else {
-          localStatusBadge = `<span class="badge">Unaddressed</span>`;
-        }
-
-        const commentsHtml = (thread.comments || []).map(c => `
-          <div class="comment-bubble">
-            <div class="comment-meta">
-              <span class="comment-author">@${c.author || 'unknown'}</span>
-              <span>${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
-            </div>
-            <div class="comment-content">${parseMarkdown(c.body || '')}</div>
-          </div>
-        `).join('');
-        
-        let suggestionHtml = '';
-        if (thread.suggestion) {
-          suggestionHtml = `
-            <div class="suggestion-block">
-              <div class="suggestion-header">
-                <span>SUGGESTED CHANGE</span>
-              </div>
-              <pre class="suggestion-code"><code>${escapeHtml(unescapeNewlines(thread.suggestion))}</code></pre>
-            </div>
-          `;
-        }
-
-        let proposedFixHtml = '';
-        if (thread.proposedFix) {
-          proposedFixHtml = `
-            <div class="proposed-fix-block" style="background-color: rgba(0, 122, 204, 0.05); border: 1px solid rgba(0, 122, 204, 0.2); border-radius: 4px; padding: 12px; margin: 12px 0;">
-              <strong style="color: #9cdcfe;">Proposed Fix:</strong>
-              <div style="margin-top: 6px; white-space: pre-wrap; font-size: 0.9rem;">${escapeHtml(unescapeNewlines(thread.proposedFix))}</div>
-            </div>
-          `;
-        }
-        
-        let codeBlockHtml = '';
-        if (thread.rightRefCodeBlock && thread.rightRefCodeBlock.length > 0) {
-          const rawLine = Number.isInteger(thread.line) ? thread.line : null;
-          const rawOrigLine = Number.isInteger(thread.originalLine) ? thread.originalLine : null;
-          const hasLine = (ln) => ln !== null && thread.rightRefCodeBlock.some(item => item.line === ln);
-          const matchLine = hasLine(rawLine) ? rawLine : (hasLine(rawOrigLine) ? rawOrigLine : null);
-
-          const linesHtml = thread.rightRefCodeBlock.map(line => {
-            const lineNum = Number.isInteger(line.line) ? line.line : null;
-            const isTarget = matchLine !== null && lineNum === matchLine;
-            return `
-            <div class="code-snippet-line${isTarget ? ' target-line' : ''}"${isTarget ? ' data-target-line="true"' : ''}>
-              <div class="code-snippet-number">${lineNum !== null ? lineNum : ''}</div>
-              <div class="code-snippet-content">${escapeHtml(line.content)}</div>
-            </div>
-          `;
-          }).join('');
-          
-          const totalLines = thread.rightRefCodeBlock.length;
-          const lineCountLabel = `${totalLines} ${totalLines === 1 ? 'line' : 'lines'}`;
-          codeBlockHtml = `
-            <div class="code-snippet-box">
-              <div class="code-snippet-header">
-                <span>ORIGINAL CODE CONTEXT</span>
-                <span class="code-snippet-meta">${lineCountLabel}</span>
-              </div>
-              <div class="code-snippet-scroll">
-                <div class="code-snippet-lines">
-                  ${linesHtml}
-                </div>
-              </div>
-            </div>
-          `;
-        }
-        
-        card.innerHTML = `
-          <div class="thread-header">
-            <div style="display: flex; align-items: center; gap: 4px;">
-              <span class="file-path">${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ' (File)'}</span>
-              <button class="copy-btn" onclick="copyToClipboard('${thread.path}${(thread.line || thread.originalLine) ? ':' + (thread.line || thread.originalLine) : ''}', this)" title="Copy file path and line number">
-                <svg width="14" height="14" fill="currentColor" viewBox="0 0 16 16">
-                  <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/>
-                  <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/>
-                </svg>
-              </button>
-            </div>
-            <div class="status-badge-container">
-              ${assessmentBadgeHtml(d.rating)}
-              ${localStatusBadge}
-              ${outdatedBadge}
-              ${resolvedBadge}
-              ${hiddenBadge}
-            </div>
-          </div>
-          <div class="thread-body">
-            ${codeBlockHtml}
-            <div class="comments-history">
-              ${commentsHtml}
-            </div>
-            ${suggestionHtml}
-            ${proposedFixHtml}
-            
-            <div class="action-panel">
-              <div class="action-row">
-                <span style="font-size: 0.85rem; color: var(--text-light); font-weight:600;">DECISION:</span>
-                <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="accept" ${d.action === 'accept' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'accept')">
-                  Accept Fix
-                </label>
-                <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="clarify" ${d.action === 'clarify' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'clarify')">
-                  Request Clarification
-                </label>
-                <label class="action-option">
-                  <input type="radio" name="action-${thread.id}" value="decline" ${d.action === 'decline' ? 'checked' : ''} onchange="updateAction('${thread.id}', 'decline')">
-                  Decline/Ignore
-                </label>
-              </div>
-              
-              <div class="reply-box">
-                <label for="reply-text-${thread.id}">Draft Reply Comment:</label>
-                <textarea id="reply-text-${thread.id}" class="reply-textarea" rows="4" oninput="updateReply('${thread.id}', this.value)">${d.reply}</textarea>
-              </div>
-
-              <div class="reply-box" style="margin-top: 12px;">
-                <label for="instructions-${thread.id}">Instructions for Agent (adjust plan):</label>
-                <textarea id="instructions-${thread.id}" class="reply-textarea" rows="4" oninput="updateInstructions('${thread.id}', this.value)" placeholder="e.g., Use helper function X instead, or skip this..."></textarea>
-              </div>
-              
-              <div class="checkbox-row" style="align-items: center;">
-                <button 
-                  type="button"
-                  id="approve-btn-${thread.id}" 
-                  class="approve-action-btn ${decisions[thread.id].approved ? 'approved' : ''}" 
-                  onclick="toggleApproval('${thread.id}')"
-                  style="
-                    background-color: ${decisions[thread.id].approved ? '#10b981' : '#3b82f6'};
-                  "
-                >
-                  <span id="approve-icon-${thread.id}" style="font-size: 1.1rem; display: flex; align-items: center;">
-                    ${decisions[thread.id].approved ? '☑' : '☐'}
-                  </span>
-                  <span id="approve-text-${thread.id}">
-                    ${decisions[thread.id].approved ? 'Action Approved' : 'Approve Action'}
-                  </span>
-                </button>
-                <label class="checkbox-option" style="display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text-light);">
-                  <input type="checkbox" id="resolve-${thread.id}" ${d.resolve ? 'checked' : ''} onchange="updateResolve('${thread.id}', this.checked)" style="cursor: pointer;">
-                  Mark thread resolved
-                </label>
-              </div>
-            </div>
-          </div>
-        `;
-        
-        container.appendChild(card);
+        container.appendChild(createThreadCard(thread));
       });
 
       scrollCodeSnippetsToTarget(container);
@@ -1123,18 +2958,20 @@
     function updateAction(threadId, action) {
       decisions[threadId].action = action;
       const replyArea = document.getElementById(`reply-text-${threadId}`);
-      
+
       // Only replace the reply when it is still one of our own templates (or
       // empty). Agent-drafted replies and user edits are left alone.
-      if (isStockReply(replyArea.value)) {
+      if (replyArea && isStockReply(replyArea.value)) {
         const thread = feedbackData.threads.find(t => t.id === threadId);
         decisions[threadId].reply = stockReplyFor(thread, action);
         replyArea.value = decisions[threadId].reply;
+        refreshReplyPreviewIfActive(threadId);
       }
 
       if (action === 'clarify') {
         decisions[threadId].resolve = false; // default false for clarification
-        document.getElementById(`resolve-${threadId}`).checked = false;
+        const resolveEl = document.getElementById(`resolve-${threadId}`);
+        if (resolveEl) resolveEl.checked = false;
       }
     }
 
@@ -1154,11 +2991,11 @@
 
     function toggleApproval(threadId) {
       const isApproved = !decisions[threadId].approved;
-      
+
       const btn = document.getElementById(`approve-btn-${threadId}`);
       const icon = document.getElementById(`approve-icon-${threadId}`);
       const text = document.getElementById(`approve-text-${threadId}`);
-      
+
       if (isApproved) {
         btn.classList.add("approved");
         btn.style.backgroundColor = "#10b981"; // Green
@@ -1170,153 +3007,138 @@
         icon.textContent = "☐";
         text.textContent = "Approve Action";
       }
-      
+
       updateApproval(threadId, isApproved);
+    }
+
+    const SUMMARY_ACTION_LABELS = {
+      accept: "Accept proposed fix",
+      clarify: "Request clarification",
+      decline: "Decline/Ignore comment"
+    };
+
+    function getSummaryThreadDetails(id) {
+      const threads = (feedbackData && feedbackData.threads) || [];
+      const thread = threads.find(t => t.id === id);
+      if (!thread) return { path: "Unknown File", line: "", comment: "" };
+      const comments = thread.comments || [];
+      const firstComment = comments.length > 0 ? (comments[0].body || "") : "";
+      const commentSnippet = firstComment.length > 120 ? firstComment.substring(0, 120) + "..." : firstComment;
+      return {
+        path: thread.path,
+        line: thread.line || thread.originalLine,
+        comment: commentSnippet
+      };
+    }
+
+    function renderSummaryNoteLineHtml(label, value, borderColor, textColor) {
+      if (!value) return '';
+      return `
+        <div style="
+          background-color: #0f1115;
+          border-radius: 4px;
+          padding: 0.5rem 0.75rem;
+          font-size: 0.8rem;
+          color: ${textColor};
+          margin-top: 0.25rem;
+          border-left: 2px solid ${borderColor};
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        ">
+          <strong>${label}:</strong> "${escapeHtml(value)}"
+        </div>
+      `;
+    }
+
+    function renderApprovedSummaryCardHtml(d) {
+      const details = getSummaryThreadDetails(d.threadId);
+      const actionText = SUMMARY_ACTION_LABELS[d.action] || d.action;
+      return `
+        <div style="
+          background-color: #1a1e26;
+          border: 1px solid #2d3340;
+          border-radius: 8px;
+          padding: 1rem;
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+          text-align: left;
+        ">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
+            <h4 style="font-size: 0.925rem; font-weight: 600; color: #f3f4f6; margin: 0;">
+              ${details.path}${details.line ? ':' + details.line : ''}
+            </h4>
+            <span style="background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 0.15rem 0.4rem; border-radius: 4px; color: #34d399; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
+              Approved
+            </span>
+          </div>
+          <p style="font-size: 0.825rem; color: #9ca3af; margin: 0; font-style: italic; line-height: 1.4;">
+            "${escapeHtml(details.comment)}"
+          </p>
+          <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; margin-top: 0.25rem;">
+            <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+              Action: <strong>${actionText}</strong>
+            </span>
+            <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+              Assessment: <strong>${RATING_LABELS[d.rating]}</strong>
+            </span>
+            <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
+              Resolve Thread: <strong>${d.resolve ? 'Yes' : 'No'}</strong>
+            </span>
+          </div>
+          ${renderSummaryNoteLineHtml('Draft Reply', d.reply, '#3b82f6', '#9ca3af')}
+          ${renderSummaryNoteLineHtml('Agent Instructions', d.agentInstructions, '#6366f1', '#a5b4fc')}
+        </div>
+      `;
+    }
+
+    function renderUnapprovedSummaryCardHtml(d) {
+      const details = getSummaryThreadDetails(d.threadId);
+      return `
+        <div style="
+          background-color: #1a1e26;
+          border: 1px solid #2d3340;
+          border-radius: 8px;
+          padding: 0.85rem 1rem;
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 1rem;
+          text-align: left;
+        ">
+          <h4 style="font-size: 0.9rem; font-weight: 500; color: #9ca3af; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">
+            ${details.path}${details.line ? ':' + details.line : ''}
+          </h4>
+          <span style="
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.15rem 0.4rem;
+            border-radius: 4px;
+            background-color: #2d3340;
+            color: #9ca3af;
+            text-transform: uppercase;
+          ">Not Approved</span>
+        </div>
+      `;
     }
 
     function renderSummaryPage(decisionList) {
       const approved = decisionList.filter(d => d.approved);
       const unapproved = decisionList.filter(d => !d.approved);
-      
-      const getThreadDetails = (id) => {
-        const thread = feedbackData.threads.find(t => t.id === id);
-        if (thread) {
-          const firstComment = thread.comments && thread.comments.length > 0 ? thread.comments[0].body : "";
-          const commentSnippet = firstComment.length > 120 ? firstComment.substring(0, 120) + "..." : firstComment;
-          return {
-            path: thread.path,
-            line: thread.line || thread.originalLine,
-            comment: commentSnippet
-          };
-        }
-        return { path: "Unknown File", line: "", comment: "" };
-      };
-      
-      let approvedCardsHtml = "";
-      if (approved.length > 0) {
-        approvedCardsHtml = approved.map(d => {
-          const details = getThreadDetails(d.threadId);
-          
-          const actionLabels = {
-            accept: "Accept proposed fix",
-            clarify: "Request clarification",
-            decline: "Decline/Ignore comment"
-          };
-          const actionText = actionLabels[d.action] || d.action;
-          
-          return `
-            <div style="
-              background-color: #1a1e26;
-              border: 1px solid #2d3340;
-              border-radius: 8px;
-              padding: 1rem;
-              display: flex;
-              flex-direction: column;
-              gap: 0.5rem;
-              text-align: left;
-            ">
-              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;">
-                <h4 style="font-size: 0.925rem; font-weight: 600; color: #f3f4f6; margin: 0;">
-                  ${details.path}${details.line ? ':' + details.line : ''}
-                </h4>
-                <span style="background-color: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.3); padding: 0.15rem 0.4rem; border-radius: 4px; color: #34d399; font-size: 0.75rem; font-weight: 600; text-transform: uppercase;">
-                  Approved
-                </span>
-              </div>
-              <p style="font-size: 0.825rem; color: #9ca3af; margin: 0; font-style: italic; line-height: 1.4;">
-                "${escapeHtml(details.comment)}"
-              </p>
-              <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.75rem; margin-top: 0.25rem;">
-                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
-                  Action: <strong>${actionText}</strong>
-                </span>
-                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
-                  Assessment: <strong>${RATING_LABELS[d.rating]}</strong>
-                </span>
-                <span style="background-color: #252a36; border: 1px solid #383f52; padding: 0.15rem 0.4rem; border-radius: 4px; color: #9ca3af;">
-                  Resolve Thread: <strong>${d.resolve ? 'Yes' : 'No'}</strong>
-                </span>
-              </div>
-              ${d.reply ? `
-                <div style="
-                  background-color: #0f1115;
-                  border-radius: 4px;
-                  padding: 0.5rem 0.75rem;
-                  font-size: 0.8rem;
-                  color: #9ca3af;
-                  margin-top: 0.25rem;
-                  border-left: 2px solid #3b82f6;
-                  white-space: nowrap;
-                  overflow: hidden;
-                  text-overflow: ellipsis;
-                ">
-                  <strong>Draft Reply:</strong> "${escapeHtml(d.reply)}"
-                </div>
-              ` : ''}
-              ${d.agentInstructions ? `
-                <div style="
-                  background-color: #0f1115;
-                  border-radius: 4px;
-                  padding: 0.5rem 0.75rem;
-                  font-size: 0.8rem;
-                  color: #a5b4fc;
-                  margin-top: 0.25rem;
-                  border-left: 2px solid #6366f1;
-                  white-space: nowrap;
-                  overflow: hidden;
-                  text-overflow: ellipsis;
-                ">
-                  <strong>Agent Instructions:</strong> "${escapeHtml(d.agentInstructions)}"
-                </div>
-              ` : ''}
-            </div>
-          `;
-        }).join("");
-      } else {
-        approvedCardsHtml = `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">No feedback actions were approved in this session.</p>`;
-      }
-      
-      let unapprovedCardsHtml = "";
-      if (unapproved.length > 0) {
-        unapprovedCardsHtml = unapproved.map(d => {
-          const details = getThreadDetails(d.threadId);
-          return `
-            <div style="
-              background-color: #1a1e26;
-              border: 1px solid #2d3340;
-              border-radius: 8px;
-              padding: 0.85rem 1rem;
-              display: flex;
-              justify-content: space-between;
-              align-items: center;
-              gap: 1rem;
-              text-align: left;
-            ">
-              <h4 style="font-size: 0.9rem; font-weight: 500; color: #9ca3af; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;">
-                ${details.path}${details.line ? ':' + details.line : ''}
-              </h4>
-              <span style="
-                font-size: 0.75rem;
-                font-weight: 600;
-                padding: 0.15rem 0.4rem;
-                border-radius: 4px;
-                background-color: #2d3340;
-                color: #9ca3af;
-                text-transform: uppercase;
-              ">Not Approved</span>
-            </div>
-          `;
-        }).join("");
-      } else {
-        unapprovedCardsHtml = `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">All feedback actions were approved.</p>`;
-      }
-      
+      const approvedCardsHtml = approved.length > 0
+        ? approved.map(renderApprovedSummaryCardHtml).join("")
+        : `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">No feedback actions were approved in this session.</p>`;
+      const unapprovedCardsHtml = unapproved.length > 0
+        ? unapproved.map(renderUnapprovedSummaryCardHtml).join("")
+        : `<p style="font-size: 0.875rem; color: #6b7280; font-style: italic; text-align: left;">All feedback actions were approved.</p>`;
+
       const closeTarget = dashboardHost.kind === 'mcp-app' ? 'pane' : 'tab';
       const closeCopy = `You can close this ${closeTarget} now. The agent is resuming in the background to apply the approved changes. A summary is shown below.`;
       showDoneOverlay(submittedOverlayHtml(closeCopy, `
           <!-- Summary Content Grid -->
           <div style="width: 100%; max-width: 48rem; display: flex; flex-direction: column; gap: 2.5rem;">
-            
+
             <!-- Section 1: Approved Actions -->
             <div>
               <h3 style="font-size: 1.05rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #60a5fa; border-bottom: 1px solid #2d3340; padding-bottom: 0.5rem; margin: 0 0 1rem 0; display: flex; justify-content: space-between; align-items: center;">
@@ -1327,7 +3149,7 @@
                 ${approvedCardsHtml}
               </div>
             </div>
-            
+
             <!-- Section 2: Not Approved -->
             <div>
               <h3 style="font-size: 1.05rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #9ca3af; border-bottom: 1px solid #2d3340; padding-bottom: 0.5rem; margin: 0 0 1rem 0; display: flex; justify-content: space-between; align-items: center;">
@@ -1338,7 +3160,7 @@
                 ${unapprovedCardsHtml}
               </div>
             </div>
-            
+
           </div>
       `));
     }
@@ -1356,14 +3178,14 @@
         threadId: id,
         ...decisions[id]
       }));
-      
+
       try {
         await dashboardHost.save({
           repo: feedbackData.repo,
           pr: feedbackData.pr,
           decisions: list
         });
-        
+
         renderSummaryPage(list);
       } catch (err) {
         showNotice('Error saving plan: ' + err.message);
@@ -1438,7 +3260,7 @@
       document.querySelectorAll('.tab-content').forEach(content => {
         content.classList.remove('active');
       });
-      
+
       document.getElementById(`tab-${tabName}`).classList.add('active');
       const activeContent = document.getElementById(`content-${tabName}`);
       activeContent.classList.add('active');
@@ -1447,56 +3269,61 @@
       }
     }
 
+    function collectGitRepoWarnings(gitState) {
+      if (!gitState.isGit) {
+        return {
+          warnings: [`<strong>Error:</strong> ${gitState.error || 'Project directory is not a git repository.'}`],
+          blockSave: true
+        };
+      }
+      const warnings = [];
+      let blockSave = false;
+      if (gitState.expectedRepo && !gitState.isCorrectRepo) {
+        warnings.push(`<strong>Repository Mismatch:</strong> Expected repository <code>${gitState.expectedRepo}</code>, but local remote points to <code>${gitState.activeRepo || 'none'}</code>.`);
+        blockSave = true;
+      }
+      if (gitState.expectedBranch && !gitState.isCorrectBranch) {
+        const prNum = feedbackData ? feedbackData.pr : '';
+        warnings.push(`<strong>Branch Warning:</strong> Active branch is <code>${gitState.activeBranch}</code>, expected <code>${gitState.expectedBranch}</code>. Run <code>gh pr checkout ${prNum}</code> if needed.`);
+      }
+      if (gitState.isDirty) {
+        warnings.push('<strong>Dirty Workspace:</strong> Local repository has uncommitted changes. Ensure active changes do not conflict with review plan.');
+      }
+      if (gitState.hasUnpushed) {
+        const count = gitState.unpushedCommits.length;
+        warnings.push(`<strong>Unpushed Commits:</strong> There are ${count} unpushed commits.`);
+      }
+      return { warnings, blockSave };
+    }
+
+    function applySaveButtonLockState(saveBtn, blockSave) {
+      saveBtn.disabled = blockSave;
+      saveBtn.style.opacity = blockSave ? '0.5' : '1.0';
+      saveBtn.style.cursor = blockSave ? 'not-allowed' : 'pointer';
+      saveBtn.title = blockSave
+        ? "Save & Apply is disabled because git state is out of sync. Resolve warnings to enable."
+        : "";
+    }
+
     function checkGitState(gitState) {
       const banner = document.getElementById('warning-banner');
       const saveBtn = document.getElementById('save-all');
-      
+
       if (!gitState) {
         banner.style.display = 'none';
         return;
       }
-      
-      let warnings = [];
-      let blockSave = false;
-      
-      if (!gitState.isGit) {
-        warnings.push(`<strong>Error:</strong> ${gitState.error || 'Project directory is not a git repository.'}`);
-        blockSave = true;
-      } else {
-        if (gitState.expectedRepo && !gitState.isCorrectRepo) {
-          warnings.push(`<strong>Repository Mismatch:</strong> Expected repository <code>${gitState.expectedRepo}</code>, but local remote points to <code>${gitState.activeRepo || 'none'}</code>.`);
-          blockSave = true;
-        }
-        if (gitState.expectedBranch && !gitState.isCorrectBranch) {
-          warnings.push(`<strong>Branch Warning:</strong> Active branch is <code>${gitState.activeBranch}</code>, expected <code>${gitState.expectedBranch}</code>. Run <code>gh pr checkout ${feedbackData ? feedbackData.pr : ''}</code> if needed.`);
-        }
-        if (gitState.isDirty) {
-          warnings.push(`<strong>Dirty Workspace:</strong> Local repository has uncommitted changes. Ensure active changes do not conflict with review plan.`);
-        }
-        if (gitState.hasUnpushed) {
-          const count = gitState.unpushedCommits.length;
-          warnings.push(`<strong>Unpushed Commits:</strong> There are ${count} unpushed commits.`);
-        }
-      }
-      
+
+      const { warnings, blockSave } = collectGitRepoWarnings(gitState);
+
       if (warnings.length > 0) {
         banner.innerHTML = '<ul style="margin: 0; padding-left: 20px; font-family: inherit;">' + warnings.map(w => `<li style="margin-bottom: 4px;">${w}</li>`).join('') + '</ul>';
         banner.style.display = 'block';
       } else {
         banner.style.display = 'none';
       }
-      
-      if (blockSave) {
-        saveBtn.disabled = true;
-        saveBtn.style.opacity = '0.5';
-        saveBtn.style.cursor = 'not-allowed';
-        saveBtn.title = "Save & Apply is disabled because git state is out of sync. Resolve warnings to enable.";
-      } else {
-        saveBtn.disabled = false;
-        saveBtn.style.opacity = '1.0';
-        saveBtn.style.cursor = 'pointer';
-        saveBtn.title = "";
-      }
+
+      applySaveButtonLockState(saveBtn, blockSave);
     }
 
     function renderReviews(reviews) {
@@ -1518,7 +3345,7 @@
             <span class="badge" style="background-color: ${stateColor}; color: white; text-transform: uppercase;">${escapeHtml(r.state || 'COMMENTED')}</span>
           </div>
           <div class="check-body">
-            <div class="comment-content">${parseMarkdown(r.body || 'No summary comment provided.')}</div>
+            <div class="comment-content markdown-rendered">${parseMarkdown(r.body || 'No summary comment provided.')}</div>
           </div>
         `;
         container.appendChild(card);
@@ -1541,7 +3368,7 @@
             <span style="font-size: 0.8rem; color: var(--text-light);">${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
           </div>
           <div class="check-body">
-            <div class="comment-content">${parseMarkdown(c.body || '')}</div>
+            <div class="comment-content markdown-rendered">${parseMarkdown(c.body || '')}</div>
           </div>
         `;
         container.appendChild(card);
@@ -1582,9 +3409,9 @@
         container.innerHTML = '<div class="empty-state">All checks passing! ✅</div>';
         return;
       }
-      
+
       container.innerHTML = '';
-      
+
       checks.forEach(check => {
         const card = document.createElement('div');
         card.className = 'check-card';
@@ -1601,7 +3428,7 @@
             </div>
           `;
         }
-        
+
         card.innerHTML = `
           <div class="check-header">
             <span class="check-name">

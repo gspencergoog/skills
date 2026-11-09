@@ -327,6 +327,21 @@
       color: #ff7b72;
     }
 
+    .md-agent-badge {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .md-agent-badge kbd {
+      font-family: inherit;
+      font-size: 11px;
+      padding: 1px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: rgba(110, 118, 129, 0.12);
+      color: var(--text-muted);
+    }
+
     details.md-details {
       border: 1px solid var(--border);
       border-radius: 6px;
@@ -1260,6 +1275,23 @@
 
   let initSeq = 0;
 
+  async function loadReviewDataForSeq(seq) {
+    try {
+      const loaded = await dashboardHost.load();
+      if (seq !== initSeq) return { aborted: true };
+      const terminalHtml = terminalOverlayHtml(loaded);
+      if (terminalHtml) {
+        showDoneOverlay(terminalHtml);
+        return { aborted: true };
+      }
+      reviewData = loaded;
+    } catch (e) {
+      if (seq !== initSeq) return { aborted: true };
+      console.error("Failed to fetch /api/findings:", e);
+    }
+    return { aborted: false };
+  }
+
   async function init() {
     const seq = ++initSeq;
     window.__dashboardReload = () => {
@@ -1269,19 +1301,8 @@
       init();
     };
     if (!reviewData) {
-      try {
-        const loaded = await dashboardHost.load();
-        if (seq !== initSeq) return;
-        const terminalHtml = terminalOverlayHtml(loaded);
-        if (terminalHtml) {
-          showDoneOverlay(terminalHtml);
-          return;
-        }
-        reviewData = loaded;
-      } catch (e) {
-        if (seq !== initSeq) return;
-        console.error("Failed to fetch /api/findings:", e);
-      }
+      const res = await loadReviewDataForSeq(seq);
+      if (res.aborted) return;
     }
 
     if (!reviewData) {
@@ -1308,6 +1329,7 @@
     return reviewData.pr_metadata || reviewData.pr_meta || {};
   }
 
+  // BEGIN SHARED_MARKDOWN_ENGINE
   const GREEK_AND_SYMBOLS = {
     alpha: 'α', beta: 'β', gamma: 'γ', delta: 'δ', epsilon: 'ϵ', varepsilon: 'ε',
     zeta: 'ζ', eta: 'η', theta: 'θ', vartheta: 'ϑ', iota: 'ι', kappa: 'κ',
@@ -2402,7 +2424,11 @@
     const withMathMasked = withCodeMasked
       .replace(/\\\(([\s\S]+?)\\\)/g, (_, tex) => storeInlineMath(tex))
       .replace(/(^|[^\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$/g, (_, pre, tex) => `${pre}${storeInlineMath(tex)}`)
-      .replace(/\\\$/g, '$');
+      .replace(/\\\$/g, '$')
+      .replace(
+        /<sub><!-- agent-generated --><kbd>🤖 Agent-generated<\/kbd><\/sub>/g,
+        '\u0000AGENT_BADGE\u0000'
+      );
 
     let safe = escapeHtml(withMathMasked);
 
@@ -2423,6 +2449,7 @@
     safe = safe.replace(/~~([^~\n]+)~~/g, '<del>$1</del>');
 
     return safe
+      .replace(/\u0000AGENT_BADGE\u0000/g, '<sub class="md-agent-badge"><kbd>🤖 Agent-generated</kbd></sub>')
       .replace(/\u0000MATH_INLINE_(\d+)\u0000/g, (_, idx) => mathSpans[Number(idx)] || '')
       .replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || '');
   }
@@ -2507,12 +2534,52 @@
     return { html: `<${tag}>${items.join('')}</${tag}>`, nextIndex: i };
   }
 
-  // <details> grammar: the open and close tags sit alone on their lines, lowercase,
-  // with no attributes. Every other form falls through to escaped paragraph text.
+  // <details> grammar: the open and close tags use bare lowercase <details> and <summary>
+  // with no attributes (either on separate lines or compact <details><summary>...</summary>).
+  // Every other form falls through to escaped paragraph text.
   const DETAILS_OPEN_RE = /^\s*<details>\s*$/;
   const DETAILS_CLOSE_RE = /^\s*<\/details>\s*$/;
   const DETAILS_SUMMARY_RE = /^\s*<summary>(.*)<\/summary>\s*$/;
+  const COMPACT_DETAILS_PREFIX_RE = /^(\s*)<details>[ \t]*<summary>((?:(?!<\/summary>).)*)<\/summary>[ \t]*(.*)$/;
   const MAX_DETAILS_DEPTH = 3;
+
+  function isCompactDetailsOpenLine(line) {
+    return COMPACT_DETAILS_PREFIX_RE.test(line);
+  }
+
+  function isSingleLineCompactDetails(line) {
+    const m = COMPACT_DETAILS_PREFIX_RE.exec(line);
+    if (!m || m[3].includes('</summary>') || m[3].includes('<details>')) return false;
+    return /^(.*?)[ \t]*<\/details>\s*$/.test(m[3]);
+  }
+
+  function expandSingleCompactDetailsLine(line) {
+    const m = COMPACT_DETAILS_PREFIX_RE.exec(line);
+    if (!m) return line;
+    const indent = m[1];
+    const summaryInner = m[2];
+    const rest = m[3];
+    // Keep extra </summary> tags on the summary line so DETAILS_SUMMARY_RE matches
+    // greedily and escapes inner markup into summary text.
+    if (rest.includes('</summary>')) {
+      return `${indent}<details>\n${indent}<summary>${summaryInner}</summary>${rest}`;
+    }
+    const singleLineClose = !rest.includes('<details>') ? /^(.*?)[ \t]*<\/details>\s*$/.exec(rest) : null;
+    if (singleLineClose) {
+      const body = singleLineClose[1].trim();
+      return body
+        ? `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}${body}\n${indent}</details>`
+        : `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}</details>`;
+    }
+    return rest
+      ? `${indent}<details>\n${indent}<summary>${summaryInner}</summary>\n${indent}${rest}`
+      : `${indent}<details>\n${indent}<summary>${summaryInner}</summary>`;
+  }
+
+  function normalizeCompactDetailsLines(text) {
+    if (!text.includes('<details>')) return text;
+    return text.split('\n').map(expandSingleCompactDetailsLine).join('\n');
+  }
 
   function isParagraphBreakLine(lines, index) {
     const line = lines[index];
@@ -2624,8 +2691,10 @@
     const normalized = String(md).replace(/\r\n/g, '\n');
     const withoutFences = extractTopLevelFences(normalized, codeBlocks);
     const withoutDisplayMath = extractTopLevelDisplayMath(withoutFences, mathBlocks);
-    return renderMarkdownLines(withoutDisplayMath.split('\n'), codeBlocks, mathBlocks, depth);
+    const withNormalizedDetails = normalizeCompactDetailsLines(withoutDisplayMath);
+    return renderMarkdownLines(withNormalizedDetails.split('\n'), codeBlocks, mathBlocks, depth);
   }
+  // END SHARED_MARKDOWN_ENGINE
 
   // Flags lines that sit inside a ``` fence (the fence lines included).
   function markFencedLines(lines) {
@@ -3097,6 +3166,18 @@
     }
   }
 
+  function isDetailsOpenerLine(line) {
+    return DETAILS_OPEN_RE.test(line) || (isCompactDetailsOpenLine(line) && !isSingleLineCompactDetails(line));
+  }
+
+  function stepTrailingDetailsLine(line, isFenced, level) {
+    if (isFenced) return level === 0 ? -1 : level;
+    if (level === 0 && isSingleLineCompactDetails(line)) return 0;
+    if (DETAILS_CLOSE_RE.test(line)) return level + 1;
+    if (isDetailsOpenerLine(line)) return level > 0 ? level - 1 : -1;
+    return level === 0 ? -1 : level;
+  }
+
   // Splits off a <details> block that ends the comment, pairing tags by depth and
   // ignoring tag lines inside fences. Returns null when the comment has no such fold.
   function splitTrailingDetailsBlock(text) {
@@ -3104,20 +3185,10 @@
     const fenced = markFencedLines(lines);
     let level = 0;
     for (let i = lines.length - 1; i >= 0; i--) {
-      if (fenced[i]) {
-        if (level === 0) return null;
-        continue;
-      }
-      if (DETAILS_CLOSE_RE.test(lines[i])) {
-        level++;
-      } else if (DETAILS_OPEN_RE.test(lines[i])) {
-        if (level === 0) return null;
-        level--;
-        if (level === 0) {
-          return { head: lines.slice(0, i).join('\n').trim(), fold: lines.slice(i).join('\n') };
-        }
-      } else if (level === 0) {
-        return null;
+      level = stepTrailingDetailsLine(lines[i], fenced[i], level);
+      if (level < 0) return null;
+      if (level === 0) {
+        return { head: lines.slice(0, i).join('\n').trim(), fold: lines.slice(i).join('\n') };
       }
     }
     return null;

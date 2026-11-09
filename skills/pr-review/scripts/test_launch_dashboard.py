@@ -1243,6 +1243,148 @@ console.log(JSON.stringify(reviewData.findings.map(f => f.draft_comment)));
         self.assertEqual(out[2], f"Plain comment.\n\n{fence}")
         self.assertEqual(out[3], f"{comments[3]}\n\n{fence}")
 
+    def test_compact_details_folds_and_depth_cap(self):
+        four_compact = "\n".join(
+            [f"<details><summary>Level {i}</summary>" for i in range(1, 5)]
+            + ["deep compact"]
+            + ["</details>"] * 4
+        )
+        payloads = [
+            "<details><summary>Additional details</summary>\n\nBody with `code` and $x \\neq y$.\n</details>",
+            "<details><summary>Additional details</summary>Inline body first line\n\nSecond paragraph\n</details>",
+            "<details><summary>Quick note</summary>Inline body</details>",
+            (
+                "<details><summary>a</summary><img src=x onerror=alert(1)></summary>\n"
+                "<script>alert(1)</script>\n</details>"
+            ),
+            "<details open><summary>x</summary></details>",
+            four_compact,
+        ]
+        rendered = self._render_all(payloads)
+
+        self.assertTrue(
+            rendered[0].startswith(
+                '<details class="md-details"><summary>Additional details</summary>'
+                "<p>Body with <code>code</code> and "
+            )
+        )
+        self.assertIn("<math", rendered[0])
+        self.assertIn("≠", rendered[0])
+        self.assertTrue(rendered[0].endswith("</p></details>"))
+
+        self.assertEqual(
+            rendered[1],
+            '<details class="md-details"><summary>Additional details</summary>'
+            "<p>Inline body first line</p>\n<p>Second paragraph</p></details>",
+        )
+
+        self.assertEqual(
+            rendered[2],
+            '<details class="md-details"><summary>Quick note</summary>'
+            "<p>Inline body</p></details>",
+        )
+
+        self.assertNotIn("<img", rendered[3])
+        self.assertNotIn("<script", rendered[3])
+        self.assertIn(
+            "<summary>a&lt;/summary&gt;&lt;img src=x onerror=alert(1)&gt;</summary>",
+            rendered[3],
+        )
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered[3])
+
+        self.assertNotIn("<details", rendered[4])
+        self.assertEqual(
+            rendered[4],
+            "<p>&lt;details open&gt;&lt;summary&gt;x&lt;/summary&gt;&lt;/details&gt;</p>",
+        )
+
+        self.assertEqual(rendered[5].count('<details class="md-details">'), 3)
+        self.assertEqual(rendered[5].count("</details>"), 3)
+        self.assertIn(
+            "&lt;details&gt;\n&lt;summary&gt;Level 4&lt;/summary&gt;",
+            rendered[5].replace("<br>", "\n"),
+        )
+        self.assertIn("deep compact", rendered[5])
+
+    def test_insert_suggestion_places_fence_before_trailing_compact_folds(self):
+        body = """
+function editor(value) {
+  return { value, style: {}, classList: { toggle() {}, add() {}, remove() {} } };
+}
+INPUTS.forEach((comment, idx) => {
+  elements[`comment-editor-${idx}`] = editor(comment);
+});
+reviewData = {
+  findings: INPUTS.map(comment => ({ draft_comment: comment, original_code: 'x = 1' }))
+};
+INPUTS.forEach((_, idx) => insertSuggestion(idx));
+console.log(JSON.stringify({
+  splits: INPUTS.map(c => splitTrailingDetailsBlock(c)),
+  drafts: reviewData.findings.map(f => f.draft_comment)
+}));
+"""
+        compact_multiline = (
+            "<details><summary>Details</summary>\n\nExpanded context.\n</details>"
+        )
+        compact_singleline = "<details><summary>Details</summary>Body</details>"
+        comments = [
+            f"Check the boundary.\n\n{compact_multiline}\n",
+            f"Check the boundary.\n\n{compact_singleline}",
+            compact_singleline,
+        ]
+        out = self._run_js(body, comments)
+        fence = "```suggestion\nx = 1\n```"
+        self.assertEqual(
+            out["splits"][0],
+            {"head": "Check the boundary.", "fold": compact_multiline},
+        )
+        self.assertEqual(
+            out["splits"][1],
+            {"head": "Check the boundary.", "fold": compact_singleline},
+        )
+        self.assertEqual(
+            out["splits"][2],
+            {"head": "", "fold": compact_singleline},
+        )
+        self.assertEqual(
+            out["drafts"][0],
+            f"Check the boundary.\n\n{fence}\n\n{compact_multiline}",
+        )
+        self.assertEqual(
+            out["drafts"][1],
+            f"Check the boundary.\n\n{fence}\n\n{compact_singleline}",
+        )
+        self.assertEqual(
+            out["drafts"][2],
+            f"{fence}\n\n{compact_singleline}",
+        )
+
+    def test_agent_generated_badge_rendering_and_escaping(self):
+        badge = "<sub><!-- agent-generated --><kbd>🤖 Agent-generated</kbd></sub>"
+        payloads = [
+            f"Looks good.\n\n{badge}",
+            f"Literal `{badge}` in code.",
+            "<sub><script>alert(1)</script></sub>",
+        ]
+        rendered = self._render_all(payloads)
+        self.assertEqual(
+            rendered[0],
+            "<p>Looks good.</p>\n"
+            '<p><sub class="md-agent-badge"><kbd>🤖 Agent-generated</kbd></sub></p>',
+        )
+        self.assertNotIn('<sub class="md-agent-badge">', rendered[1])
+        self.assertIn(
+            "<code>&lt;sub&gt;&lt;!-- agent-generated --&gt;"
+            "&lt;kbd&gt;🤖 Agent-generated&lt;/kbd&gt;&lt;/sub&gt;</code>",
+            rendered[1],
+        )
+        self.assertNotIn("<script", rendered[2])
+        self.assertNotIn("<sub", rendered[2])
+        self.assertEqual(
+            rendered[2],
+            "<p>&lt;sub&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/sub&gt;</p>",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

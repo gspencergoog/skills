@@ -1,17 +1,21 @@
-import unittest
-from unittest.mock import patch, MagicMock
-import sys
-import os
-import importlib
 import http.server
-import urllib.request
-import threading
+import importlib
 import json
-import time
+import os
+import re
 import shutil
+import subprocess
+import tempfile
+import threading
+import unittest
+import urllib.request
+from pathlib import Path
+from typing import ClassVar
+from unittest.mock import MagicMock, patch
 
 import launch_dashboard
 from launch_dashboard import check_git_state
+
 
 class TestLaunchDashboard(unittest.TestCase):
     def setUp(self):
@@ -46,15 +50,11 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "~/code/project"
             elif cmd == "symbolic-ref --short HEAD":
                 return "branch-x"
-            elif cmd == "status --porcelain -uno":
-                return ""
-            elif cmd == "cherry -v":
+            elif cmd in ("status --porcelain -uno", "cherry -v"):
                 return ""
             elif cmd == "remote get-url upstream":
                 return "git@github.com:owner/repo.git"
-            elif cmd == "rev-parse --git-dir":
-                return ".git"
-            elif cmd == "rev-parse --git-common-dir":
+            elif cmd in ("rev-parse --git-dir", "rev-parse --git-common-dir"):
                 return ".git"
             return ""
 
@@ -80,9 +80,7 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "M lib/foo.dart\n"
             elif cmd == "cherry -v":
                 return "+ 1a2b3c4d commit message\n"
-            elif cmd == "remote get-url upstream":
-                return "git@github.com:wrong-owner/wrong-repo.git"
-            elif cmd == "remote get-url origin":
+            elif cmd in ("remote get-url upstream", "remote get-url origin"):
                 return "git@github.com:wrong-owner/wrong-repo.git"
             elif cmd == "rev-parse --git-dir":
                 return ".git/worktrees/branch-wrong"
@@ -109,17 +107,11 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "~/code/project"
             elif cmd == "symbolic-ref --short HEAD":
                 return "branch-x"
-            elif cmd == "status --porcelain -uno":
-                return ""
-            elif cmd == "cherry -v":
-                return ""
-            elif cmd == "remote":
+            elif cmd in ("status --porcelain -uno", "cherry -v", "remote"):
                 return ""
             elif cmd == "remote get-url upstream":
                 return "git@github.com:owner/repo.git"
-            elif cmd == "rev-parse --git-dir":
-                return ".git"
-            elif cmd == "rev-parse --git-common-dir":
+            elif cmd in ("rev-parse --git-dir", "rev-parse --git-common-dir"):
                 return ".git"
             return ""
 
@@ -141,9 +133,7 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "sha_exact_match"
             elif cmd == "remote get-url upstream":
                 return "git@github.com:owner/repo.git"
-            elif cmd == "rev-parse --git-dir":
-                return ".git"
-            elif cmd == "rev-parse --git-common-dir":
+            elif cmd in ("rev-parse --git-dir", "rev-parse --git-common-dir"):
                 return ".git"
             return ""
 
@@ -170,9 +160,7 @@ class TestLaunchDashboard(unittest.TestCase):
                 return "1111111 Commit 1\n2222222 Commit 2"
             elif cmd == "remote get-url upstream":
                 return "git@github.com:owner/repo.git"
-            elif cmd == "rev-parse --git-dir":
-                return ".git"
-            elif cmd == "rev-parse --git-common-dir":
+            elif cmd in ("rev-parse --git-dir", "rev-parse --git-common-dir"):
                 return ".git"
             return ""
 
@@ -530,7 +518,7 @@ class TestDashboardServerIntegration(unittest.TestCase):
         self.assertEqual(response.status, 200)
 
         first_line = response.readline().decode('utf-8')
-        self.assertTrue(first_line.startswith("data:") or first_line.startswith(": heartbeat"))
+        self.assertTrue(first_line.startswith(("data:", ": heartbeat")))
         response.close()
 
     def test_get_api_comments_not_found(self):
@@ -1013,6 +1001,7 @@ class TestAutoApproveMode(unittest.TestCase):
     def test_dump_json_and_git_state_json_cli(self):
         import io
         from contextlib import redirect_stdout
+
         from launch_dashboard import main
 
         buf = io.StringIO()
@@ -1045,14 +1034,12 @@ class TestAutoApproveMode(unittest.TestCase):
             self.assertEqual(cm3.exception.code, 1)
 
     def test_pr_feedback_html_caps_code_context_and_has_valid_js(self):
-        import re
-        import subprocess
-        import tempfile
-
         html_path = os.path.join(os.path.dirname(__file__), "../assets/pr_feedback.html")
         with open(html_path, "r", encoding="utf-8") as f:
             html = f.read()
 
+        self.assertEqual(re.findall(r"<script[^>]*\bsrc=", html, flags=re.IGNORECASE), [])
+        self.assertNotIn("unescapeNewlines", html)
         self.assertIn(".code-snippet-scroll", html)
         self.assertIn("max-height: calc(20 * 1.5em + 16px);", html)
         self.assertIn("max-height: calc(20lh + 16px);", html)
@@ -1068,10 +1055,367 @@ class TestAutoApproveMode(unittest.TestCase):
                 tmp.write(scripts[0])
                 tmp_path = tmp.name
             try:
-                proc = subprocess.run([node_bin, "--check", tmp_path], capture_output=True, text=True)
+                proc = subprocess.run([node_bin, "--check", tmp_path], check=False, capture_output=True, text=True)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
             finally:
                 os.unlink(tmp_path)
+
+
+def _md(*lines: str) -> str:
+    return "\n".join(lines)
+
+
+@unittest.skipUnless(shutil.which("node"), "node is required for JS Markdown tests")
+class TestPrFeedbackMarkdownAndTabs(unittest.TestCase):
+    js_code: ClassVar[str] = ""
+
+    @classmethod
+    def setUpClass(cls):
+        html_path = Path(__file__).resolve().parent.parent / "assets" / "pr_feedback.html"
+        html = html_path.read_text(encoding="utf-8")
+        scripts = re.findall(r"<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)</script>", html)
+        if len(scripts) != 1:
+            raise AssertionError(f"expected one inline <script>, found {len(scripts)}")
+        cls.js_code = scripts[0]
+
+    def _run_js(self, body: str, inputs: object = None) -> object:
+        harness = (
+            "const elements = {\n"
+            "  'save-all': { addEventListener: () => {}, style: {} },\n"
+            "  'abort-btn': { addEventListener: () => {}, style: {} }\n"
+            "};\n"
+            "const window = { addEventListener: () => {} };\n"
+            "const document = {\n"
+            "  getElementById: (id) => elements[id] || null,\n"
+            "  querySelectorAll: () => [],\n"
+            "  createElement: () => ({ style: {}, appendChild: () => {}, setAttribute: () => {} }),\n"
+            "  body: { appendChild: () => {} }\n"
+            "};\n"
+            + self.js_code
+            + "\nconst INPUTS = "
+            + json.dumps(inputs)
+            + ";\n"
+            + body
+        )
+        proc = subprocess.run(
+            ["node", "-e", harness],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return json.loads(proc.stdout)
+
+    def _parse_all(self, payloads: list[str]) -> list[str]:
+        return self._run_js(
+            "console.log(JSON.stringify(INPUTS.map(p => parseMarkdown(p))));",
+            payloads,
+        )
+
+    def test_parse_markdown_tables(self):
+        md = _md(
+            "Summary before table",
+            "| Stage | Formula | Code | Notes |",
+            "| :--- | :---: | ---: | --- |",
+            r"| Parse | $|x| + \|y\| \le 1$ | `a | b` | Escaped \| pipe and **bold** |",
+            "",
+            "> [!NOTE]",
+            "> | Inside | Callout |",
+            "> | --- | --- |",
+            "> | Yes | `ok` |",
+        )
+        (rendered,) = self._parse_all([md])
+        self.assertIn('<div class="md-table-wrap"><table class="md-table">', rendered)
+        self.assertIn('<th style="text-align:left">Stage</th>', rendered)
+        self.assertIn('<th style="text-align:center">Formula</th>', rendered)
+        self.assertIn('<th style="text-align:right">Code</th>', rendered)
+        self.assertIn("<code>a | b</code>", rendered)
+        self.assertIn("Escaped | pipe and <strong>bold</strong>", rendered)
+        self.assertIn("<mo>‖</mo>", rendered)
+        self.assertIn("callout-note", rendered)
+        self.assertEqual(rendered.count('<table class="md-table">'), 2)
+
+    def test_parse_markdown_latex_math_without_newline_corruption(self):
+        md = _md(
+            r"Inline $a \neq b$, $\nabla f \rightarrow 0$, $x \times \theta$, and $\text{ok}$.",
+            r"Price is \$100 and shell is `$HOME`.",
+            "",
+            "$$",
+            r"\sum_{i=1}^{n} x_i \neq \nabla y \times \theta \rightarrow \text{ok}",
+            "$$",
+        )
+        (rendered,) = self._parse_all([md])
+        self.assertIn(
+            '<math xmlns="http://www.w3.org/1998/Math/MathML" display="inline">',
+            rendered,
+        )
+        self.assertIn(
+            '<div class="md-math-block"><math xmlns="http://www.w3.org/1998/Math/MathML" display="block">',
+            rendered,
+        )
+        self.assertIn("<mo>≠</mo>", rendered)
+        self.assertIn("<mi>∇</mi>", rendered)
+        self.assertIn("<mo>→</mo>", rendered)
+        self.assertIn("<mo>×</mo>", rendered)
+        self.assertIn("<mi>θ</mi>", rendered)
+        self.assertIn("<mtext>ok</mtext>", rendered)
+        self.assertIn("Price is $100", rendered)
+        self.assertIn("<code>$HOME</code>", rendered)
+
+    def test_parse_markdown_mermaid_diagrams(self):
+        md = _md(
+            "```mermaid",
+            "flowchart LR",
+            "  A[Client] -->|HTTP| B(Server)",
+            "```",
+            "",
+            "```mermaid",
+            "sequenceDiagram",
+            "  participant U as User",
+            "  participant S as Server",
+            "  U->>S: Call",
+            "```",
+            "",
+            "```mermaid",
+            "stateDiagram-v2",
+            "  [*] --> Ready",
+            "  Ready --> [*]",
+            "```",
+            "",
+            "```mermaid",
+            "pie showData title Distribution",
+            '  "Pass" : 80',
+            '  "Fail" : 20',
+            "```",
+            "",
+            "```mermaid",
+            "xychart-beta",
+            '  title "Latency"',
+            '  x-axis ["p50", "p99"]',
+            '  y-axis "ms" 0 --> 100',
+            "  bar [12, 65]",
+            "  line [10, 60]",
+            "```",
+            "",
+            "```mermaid",
+            "gantt",
+            "  title Unsupported",
+            "```",
+        )
+        (rendered,) = self._parse_all([md])
+        self.assertEqual(rendered.count('<svg class="md-mermaid-svg"'), 5)
+        self.assertIn("md-mermaid-node", rendered)
+        self.assertIn("md-mermaid-actor", rendered)
+        self.assertIn('aria-label="Distribution"', rendered)
+        self.assertIn('aria-label="Latency"', rendered)
+        self.assertIn(
+            '<pre class="code-box md-mermaid-fallback" data-lang="mermaid">',
+            rendered,
+        )
+
+    def test_parse_markdown_details_folds_and_xss(self):
+        nested_three = _md(
+            "<details><summary>Level 1</summary>",
+            "<details><summary>Level 2</summary>",
+            "<details><summary>Level 3</summary>",
+            "Deep body",
+            "</details>",
+            "</details>",
+            "</details>",
+        )
+        nested_four = "\n".join(
+            ["<details><summary>D</summary>"] * 4 + ["Too deep"] + ["</details>"] * 4
+        )
+        payloads = [
+            "<details>\n<summary>Multi line</summary>\n\nParagraph\n\n</details>",
+            "<details><summary>Additional details</summary>\n\nBot body\n</details>",
+            "<details><summary>Title</summary>Inline body\nMore lines\n</details>",
+            "<details><summary>Title</summary>One line</details>",
+            nested_three,
+            nested_four,
+            "<details>\n```\n</details>\n<script>alert(1)</script>\n```\n",
+            "<details open><summary>x</summary>body</details>",
+            "<DETAILS><summary>x</summary>body</DETAILS>",
+            "<details>\n<summary onclick=alert(1)>hi</summary>\nbody\n</details>",
+            "<details><summary>a</summary><img src=x onerror=alert(1)></summary>\n<script>alert(1)</script>\n</details>",
+        ]
+        rendered = self._parse_all(payloads)
+        joined = "\n".join(rendered)
+        self.assertNotIn("<script", joined)
+        self.assertNotIn("<img", joined)
+        self.assertNotIn("<details open", joined)
+        self.assertNotIn("<summary onclick", joined)
+
+        self.assertIn(
+            '<details class="md-details"><summary>Multi line</summary><p>Paragraph</p></details>',
+            rendered[0],
+        )
+        self.assertIn(
+            '<details class="md-details"><summary>Additional details</summary><p>Bot body</p></details>',
+            rendered[1],
+        )
+        self.assertIn(
+            '<details class="md-details"><summary>Title</summary><p>Inline body<br>More lines</p></details>',
+            rendered[2],
+        )
+        self.assertEqual(
+            rendered[3],
+            '<details class="md-details"><summary>Title</summary><p>One line</p></details>',
+        )
+        self.assertEqual(rendered[4].count('<details class="md-details">'), 3)
+        self.assertEqual(rendered[5].count('<details class="md-details">'), 3)
+        self.assertIn("&lt;details&gt;", rendered[5])
+        self.assertNotIn("<details", rendered[6])
+        self.assertIn("&lt;details open&gt;", rendered[7])
+        self.assertIn("&lt;DETAILS&gt;", rendered[8])
+        self.assertIn("&lt;summary onclick=alert(1)&gt;", rendered[9])
+        self.assertIn(
+            "<summary>a&lt;/summary&gt;&lt;img src=x onerror=alert(1)&gt;</summary>",
+            rendered[10],
+        )
+
+    def test_parse_markdown_suggestion_and_agent_badge(self):
+        md = _md(
+            "Apply this change:",
+            "",
+            "```suggestion",
+            "const value = 42;",
+            "```",
+            "",
+            "<sub><!-- agent-generated --><kbd>🤖 Agent-generated</kbd></sub>",
+            "",
+            "Inline `<sub><!-- agent-generated --><kbd>🤖 Agent-generated</kbd></sub>` and <sub><script>evil()</script></sub>",
+        )
+        (rendered,) = self._parse_all([md])
+        self.assertIn(
+            '<div class="suggestion-preview-header">Suggested change</div>'
+            '<pre class="code-box" data-lang="suggestion"><code>const value = 42;</code></pre>',
+            rendered,
+        )
+        self.assertIn(
+            '<sub class="md-agent-badge"><kbd>🤖 Agent-generated</kbd></sub>',
+            rendered,
+        )
+        self.assertIn(
+            "<code>&lt;sub&gt;&lt;!-- agent-generated --&gt;&lt;kbd&gt;🤖 Agent-generated&lt;/kbd&gt;&lt;/sub&gt;</code>",
+            rendered,
+        )
+        self.assertIn("&lt;sub&gt;&lt;script&gt;evil()&lt;/script&gt;&lt;/sub&gt;", rendered)
+        self.assertNotIn("<script>", rendered)
+
+    def test_reply_write_preview_tabs_and_textarea_escaping(self):
+        body = r"""
+function makeEl(id, initial = {}) {
+  const classes = new Set(initial.classes || []);
+  const attrs = { ...(initial.attrs || {}) };
+  return {
+    id,
+    value: initial.value || '',
+    innerHTML: '',
+    textContent: '',
+    checked: Boolean(initial.checked),
+    style: { display: initial.display || 'block' },
+    classList: {
+      toggle(cls, force) {
+        if (force === undefined) {
+          if (classes.has(cls)) classes.delete(cls);
+          else classes.add(cls);
+        } else if (force) {
+          classes.add(cls);
+        } else {
+          classes.delete(cls);
+        }
+      },
+      contains(cls) { return classes.has(cls); }
+    },
+    setAttribute(k, v) { attrs[k] = String(v); },
+    getAttribute(k) { return attrs[k]; }
+  };
+}
+
+feedbackData = {
+  repo: 'owner/repo',
+  pr: 7,
+  threads: [
+    {
+      id: 't1',
+      path: 'src/a.ts',
+      line: 5,
+      action: 'accept',
+      rating: 'solid',
+      draftReply: 'Closing </textarea><script>evil()</script> and $a \\neq b$',
+      proposedFix: 'Update `foo`:\n\n| Col |\n| --- |\n| Val |',
+      comments: [{ author: 'rev', body: 'Check this' }]
+    },
+    {
+      id: 't2',
+      path: 'src/b.ts',
+      line: 9,
+      action: 'accept',
+      rating: 'solid',
+      draftReply: '',
+      comments: [{ author: 'rev', body: 'Nit' }]
+    }
+  ]
+};
+
+const card1 = createThreadCard(feedbackData.threads[0]);
+const card2 = createThreadCard(feedbackData.threads[1]);
+
+elements['reply-tab-write-t1'] = makeEl('reply-tab-write-t1', { classes: ['active'], attrs: { 'aria-selected': 'true' } });
+elements['reply-tab-preview-t1'] = makeEl('reply-tab-preview-t1', { classes: [], attrs: { 'aria-selected': 'false' } });
+elements['reply-text-t1'] = makeEl('reply-text-t1', { value: decisions['t1'].reply, display: 'block' });
+elements['reply-preview-t1'] = makeEl('reply-preview-t1', { display: 'none' });
+
+elements['reply-tab-write-t2'] = makeEl('reply-tab-write-t2', { classes: ['active'], attrs: { 'aria-selected': 'true' } });
+elements['reply-tab-preview-t2'] = makeEl('reply-tab-preview-t2', { classes: [], attrs: { 'aria-selected': 'false' } });
+elements['reply-text-t2'] = makeEl('reply-text-t2', { value: decisions['t2'].reply, display: 'block' });
+elements['reply-preview-t2'] = makeEl('reply-preview-t2', { display: 'none' });
+elements['resolve-t2'] = makeEl('resolve-t2', { checked: true });
+
+switchReplyTab('t1', 'preview');
+const t1PreviewHtml = elements['reply-preview-t1'].innerHTML;
+const t1EditorHidden = elements['reply-text-t1'].style.display === 'none';
+const t1PreviewVisible = elements['reply-preview-t1'].style.display === 'block';
+const t1PreviewSelected = elements['reply-tab-preview-t1'].getAttribute('aria-selected') === 'true';
+
+switchReplyTab('t1', 'write');
+const t1WriteRestored = elements['reply-text-t1'].style.display === 'block' && elements['reply-preview-t1'].style.display === 'none';
+
+switchReplyTab('t2', 'preview');
+updateAction('t2', 'clarify');
+const t2ClarifyPreview = elements['reply-preview-t2'].innerHTML;
+
+console.log(JSON.stringify({
+  card1Html: card1.innerHTML,
+  t1PreviewHtml,
+  t1EditorHidden,
+  t1PreviewVisible,
+  t1PreviewSelected,
+  t1WriteRestored,
+  t2ClarifyPreview,
+  decisionKeys: Object.keys(decisions['t1']).sort(),
+  emptyPreview: renderReplyPreviewHtml('   ')
+}));
+"""
+        out = self._run_js(body)
+        self.assertIn(
+            "&lt;/textarea&gt;&lt;script&gt;evil()&lt;/script&gt;",
+            out["card1Html"],
+        )
+        self.assertIn('<table class="md-table">', out["card1Html"])
+        self.assertNotIn("white-space: pre-wrap", out["card1Html"])
+        self.assertTrue(out["t1EditorHidden"])
+        self.assertTrue(out["t1PreviewVisible"])
+        self.assertTrue(out["t1PreviewSelected"])
+        self.assertTrue(out["t1WriteRestored"])
+        self.assertIn("<mo>≠</mo>", out["t1PreviewHtml"])
+        self.assertNotIn("<script>", out["t1PreviewHtml"])
+        self.assertIn("Could you clarify what you mean by...", out["t2ClarifyPreview"])
+        self.assertEqual(
+            out["decisionKeys"],
+            ["action", "agentInstructions", "approved", "rating", "reply", "resolve"],
+        )
+        self.assertIn("Nothing to preview", out["emptyPreview"])
 
 
 if __name__ == '__main__':
