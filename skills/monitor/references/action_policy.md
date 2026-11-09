@@ -118,6 +118,7 @@ Suggested on actionable reviewer events under `--reviews`, or triggered when the
      ```
      Pass only `"/pr-review <url>"` as the prompt. Omit the pull request title and branch name so [pr-review](../../pr-review/SKILL.md) Stage 1 blind diff summary stays unanchored. Reply with `[Review <repo>#<number>](conversation://<id>)`.
    - If `agentapi` is not on `PATH`, run [pr-review](../../pr-review/SKILL.md) inline on `<url>`.
+3. When the user clicks **Mute** (`name: "mute_review_pr"`) on an active review row or **Unhide** (`name: "unmute_review_pr"`) inside the bottom **Muted & Dormant** drawer, update `~/.config/monitor/review_overrides.json` and refresh `monitor.jsonl` in place by running `monitor_prs.py --reviews --mute <key> --once` (or `--unmute <key> --once`) against the same `--state` and `--conversation-id`. Muting and unhiding are local queue operations only: never remove reviewers, close pull requests, or post comments on GitHub when handling `mute_review_pr` or `unmute_review_pr`.
 
 ## 4. Confirmation Gates
 

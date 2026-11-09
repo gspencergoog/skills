@@ -15,6 +15,7 @@ from diff_events import (
     summarize,
 )
 from models import ReviewerEventKind
+from review_overrides import ReviewOverrides, mute_pr
 from testing import make_check, make_snapshot, make_thread, make_viewer_review
 
 
@@ -614,6 +615,140 @@ class TestDiffEvents(unittest.TestCase):
             changes_requested=["bob"],
         )
         self.assertEqual(diff_reviewer_snapshots(None, s_legacy_cr, ctx), [])
+
+    def test_mute_suppression_wake_and_post_2b_re_request_events(self) -> None:
+        review = make_viewer_review(
+            state="COMMENTED",
+            submitted_at="2026-10-29T21:00:00Z",
+            commit_oid="aaa1111",
+        )
+        s_muted_base = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            head_committed_date="2026-10-29T20:50:00Z",
+            requested_reviewers=["bob"],
+            viewer_requested_at="2026-10-29T22:03:21Z",
+            viewer_last_review=review,
+        )
+        overrides = ReviewOverrides()
+        mute_pr(
+            overrides,
+            s_muted_base.key,
+            s_muted_base,
+            "bob",
+            now_iso="2026-10-29T22:40:00Z",
+        )
+        ctx = DiffContext(viewer="bob", overrides=overrides)
+
+        # 1. Muted PR suppresses initial and ongoing reviewer events while mute is active.
+        self.assertEqual(diff_reviewer_snapshots(None, s_muted_base, ctx), [])
+        self.assertEqual(diff_reviewer_snapshots(s_muted_base, s_muted_base, ctx), [])
+
+        # 2. Fresh ReviewRequestedEvent after muted_at wakes mute AND emits re_requested_review
+        # even though bob never left requested_reviewers (F3).
+        s_re_req = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            head_committed_date="2026-10-29T20:50:00Z",
+            requested_reviewers=["bob"],
+            viewer_requested_at="2026-10-29T23:10:00Z",
+            viewer_last_review=review,
+        )
+        evs_wake_req = diff_reviewer_snapshots(s_muted_base, s_re_req, ctx)
+        self.assertEqual(
+            [e.kind for e in evs_wake_req], [ReviewerEventKind.RE_REQUESTED_REVIEW.value]
+        )
+
+        # 3. Post-mute push (even with local commit date before muted_at) wakes mute and emits
+        # author_head_push when summary-only review had no open viewer threads.
+        s_unreq_muted = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+        )
+        ov_push = ReviewOverrides()
+        mute_pr(ov_push, s_unreq_muted.key, s_unreq_muted, "bob", now_iso="2026-10-29T22:40:00Z")
+        s_pushed = make_snapshot(
+            mine=False,
+            head_sha="bbb2222",
+            head_committed_date="2026-10-29T22:00:00Z",
+            requested_reviewers=[],
+            viewer_last_review=review,
+        )
+        evs_wake_push = diff_reviewer_snapshots(
+            s_unreq_muted, s_pushed, DiffContext(viewer="bob", overrides=ov_push)
+        )
+        self.assertEqual(
+            [e.kind for e in evs_wake_push], [ReviewerEventKind.AUTHOR_HEAD_PUSH.value]
+        )
+
+        # 4. 2B-demoted PR (#3874 pattern) where bob stayed in requested_reviewers: a fresh
+        # ReviewRequestedEvent flips has_unanswered_direct_request False -> True and emits
+        # re_requested_review.
+        s_demoted = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            head_committed_date="2026-10-29T22:00:00Z",
+            requested_reviewers=["bob"],
+            viewer_requested_at="2026-10-29T22:03:21Z",
+            viewer_last_comment_at="2026-10-29T22:36:32Z",
+            viewer_last_review=review,
+        )
+        s_revived = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            head_committed_date="2026-10-29T22:00:00Z",
+            requested_reviewers=["bob"],
+            viewer_requested_at="2026-10-29T23:15:00Z",
+            viewer_last_comment_at="2026-10-29T22:36:32Z",
+            viewer_last_review=review,
+        )
+        evs_revived = diff_reviewer_snapshots(s_demoted, s_revived, DiffContext(viewer="bob"))
+        self.assertEqual(
+            [e.kind for e in evs_revived], [ReviewerEventKind.RE_REQUESTED_REVIEW.value]
+        )
+
+        # 5. Hydrated peer threads and bot comments do NOT emit author_thread_reply for bob.
+        s_peer_prev = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+            threads=[
+                make_thread(
+                    thread_id="t_viewer",
+                    last_author="bob",
+                    last_comment_at="2026-10-29T21:00:00Z",
+                    participants=("bob",),
+                )
+            ],
+        )
+        s_peer_bot = make_snapshot(
+            mine=False,
+            head_sha="aaa1111",
+            requested_reviewers=[],
+            viewer_last_review=review,
+            threads=[
+                make_thread(
+                    thread_id="t_viewer",
+                    last_author="ci-bot",
+                    last_author_is_bot=True,
+                    last_comment_at="2026-10-29T21:10:00Z",
+                    participants=("bob", "ci-bot"),
+                ),
+                make_thread(
+                    thread_id="t_peer",
+                    last_author="alice",
+                    last_comment_at="2026-10-29T21:12:00Z",
+                    participants=("carol", "alice"),
+                ),
+            ],
+        )
+        self.assertEqual(
+            diff_reviewer_snapshots(s_peer_prev, s_peer_bot, DiffContext(viewer="bob")),
+            [],
+        )
 
 
 if __name__ == "__main__":

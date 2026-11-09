@@ -38,6 +38,7 @@ npx skills add gspencergoog/skills --skill <skill-name>
 | **[dart-concurrency](skills/dart-concurrency/SKILL.md)** | Diagnoses and resolves asynchronous concurrency bugs, race conditions, and test timeouts in Dart. |
 | **[dart-modern-features](skills/dart-modern-features/SKILL.md)** | Applies modern Dart 3 features including patterns, records, and class modifiers. |
 | **[design](skills/design/SKILL.md)** | Interactive architecture design, trade-off evaluation, and spec convergence. |
+| **[design-review](skills/design-review/SKILL.md)** | Audits design specs, RFCs, and module architectures with scored principles and evidence caps. |
 | **[duckdb](skills/duckdb/SKILL.md)** | Queries local structured data, diffs, and Markdown files using DuckDB SQL. |
 | **[flutter-architecture](skills/flutter-architecture/SKILL.md)** | Guides Flutter app architecture following MVVM, repositories, and reactive state. |
 | **[flutter-concurrency](skills/flutter-concurrency/SKILL.md)** | Offloads CPU-bound computation and JSON parsing to Flutter background isolates. |

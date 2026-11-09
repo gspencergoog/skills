@@ -153,9 +153,7 @@ class LiveStoreMixin:
             (full_name,),
         ).fetchone()
 
-    def _ensure_items_repo_in_tx(
-        self, owner: str, name: str, now_iso: str
-    ) -> RepoConfig:
+    def _ensure_items_repo_in_tx(self, owner: str, name: str, now_iso: str) -> RepoConfig:
         """Finds or inserts an `items` repository inside the caller's transaction."""
         row = self._find_repo_row(owner, name)
         if row is None:
@@ -173,9 +171,7 @@ class LiveStoreMixin:
             raise RuntimeError(f"Failed to register repository {owner}/{name}")
         return repo
 
-    def ensure_items_repo(
-        self, owner: str, name: str, now: float | None = None
-    ) -> RepoConfig:
+    def ensure_items_repo(self, owner: str, name: str, now: float | None = None) -> RepoConfig:
         """Returns the repository for `owner/name`, registering it in `items` mode if new.
 
         An `items` repository gets no backfill, `/events` polling, or code
@@ -361,9 +357,7 @@ class LiveStoreMixin:
                     "(SELECT chunk_id FROM chunks WHERE repo_id = ?)",
                     (alias_repo_id,),
                 )
-                self.conn.execute(
-                    "DELETE FROM repos WHERE repo_id = ?", (alias_repo_id,)
-                )
+                self.conn.execute("DELETE FROM repos WHERE repo_id = ?", (alias_repo_id,))
             elif alias_mode != REPO_MODE_ITEMS:
                 LOGGER.warning(
                     "Repository %s is in mirror mode; added alias to %s without deleting mirror repo",
@@ -372,9 +366,7 @@ class LiveStoreMixin:
                 )
             return canonical
 
-    def _resolve_key(
-        self, item_key: str, *, create: bool
-    ) -> tuple[int, str, int] | None:
+    def _resolve_key(self, item_key: str, *, create: bool) -> tuple[int, str, int] | None:
         """Maps an item key to `(repo_id, canonical_key, number)`.
 
         Args:
@@ -452,9 +444,7 @@ class LiveStoreMixin:
 
     def max_change_seq(self) -> int:
         """Returns the highest sequence number ever assigned (0 when none), even if pruned."""
-        row = self.conn.execute(
-            "SELECT seq FROM sqlite_sequence WHERE name = 'changes'"
-        ).fetchone()
+        row = self.conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'changes'").fetchone()
         return int(row["seq"]) if row and row["seq"] is not None else 0
 
     def min_change_seq(self) -> int:
@@ -568,9 +558,7 @@ class LiveStoreMixin:
             key = self._item_key_for(pr.repo_id, pr.number)
             self._append_change_in_tx(key, "pr", changed, None)
 
-    def upsert_pr_live(
-        self, record: PrLiveRecord, now: float | None = None
-    ) -> list[str]:
+    def upsert_pr_live(self, record: PrLiveRecord, now: float | None = None) -> list[str]:
         """Stores a live PR refresh and returns the names of the fields that changed.
 
         Creates the `pull_requests` row when it is missing; otherwise updates
@@ -688,8 +676,12 @@ class LiveStoreMixin:
     ) -> bool:
         """Replaces a PR's pending review requests; True (plus a change row) when changed."""
         deduped = {r.reviewer: r for r in requests}
-        rows = [(r.reviewer, r.reviewer_kind) for r in deduped.values()]
-        spec = ("review_requests", "review_requests", ("reviewer", "reviewer_kind"))
+        rows = [(r.reviewer, r.reviewer_kind, r.requested_at) for r in deduped.values()]
+        spec = (
+            "review_requests",
+            "review_requests",
+            ("reviewer", "reviewer_kind", "requested_at"),
+        )
         return self._replace_pr_rows(repo_id, pr_number, spec, rows, now)
 
     def replace_latest_opinionated_reviews(
@@ -701,9 +693,7 @@ class LiveStoreMixin:
     ) -> bool:
         """Replaces a PR's latest review per author; True (plus a change row) when changed."""
         deduped = {r.author: r for r in reviews}
-        rows = [
-            (r.author, r.author_type, r.state, r.submitted_at) for r in deduped.values()
-        ]
+        rows = [(r.author, r.author_type, r.state, r.submitted_at) for r in deduped.values()]
         spec = (
             "latest_opinionated_reviews",
             "reviews",
@@ -748,6 +738,7 @@ class LiveStoreMixin:
                 t.last_author,
                 t.last_author_type,
                 t.last_at,
+                json.dumps(list(t.participants)),
             )
             for t in deduped.values()
         ]
@@ -761,6 +752,7 @@ class LiveStoreMixin:
                 "last_author",
                 "last_author_type",
                 "last_at",
+                "participants_json",
             ),
         )
         return self._replace_pr_rows(repo_id, pr_number, spec, rows, now)
@@ -867,9 +859,7 @@ class LiveStoreMixin:
                 )
                 if is_new and rec.item_key:
                     changed.append(rec.item_key)
-                    self._append_change_in_tx(
-                        rec.item_key, "notification", ["reason"], now
-                    )
+                    self._append_change_in_tx(rec.item_key, "notification", ["reason"], now)
         return changed
 
     def replace_viewer_set(
@@ -907,9 +897,7 @@ class LiveStoreMixin:
                 """,
                 [(set_name, key, now_iso, now_iso) for key in sorted(current)],
             )
-            self._set_state_in_tx(
-                f"{VIEWER_SET_STATE_PREFIX}{set_name}", now_iso, now_iso
-            )
+            self._set_state_in_tx(f"{VIEWER_SET_STATE_PREFIX}{set_name}", now_iso, now_iso)
             for key in [*added, *removed]:
                 self._append_change_in_tx(key, "viewer", [set_name], now)
         return added, removed
@@ -942,10 +930,7 @@ class LiveStoreMixin:
                 ON CONFLICT(consumer, consumer_id, item_key) DO UPDATE SET
                   freshness_s = excluded.freshness_s, lease_expires_at = excluded.lease_expires_at
                 """,
-                [
-                    (consumer, consumer_id, key, int(freshness_s), expires)
-                    for key in canonical
-                ],
+                [(consumer, consumer_id, key, int(freshness_s), expires) for key in canonical],
             )
         return canonical
 
@@ -1013,9 +998,7 @@ class LiveStoreMixin:
             )
         return cur.rowcount
 
-    def request_refresh(
-        self, item_keys: Iterable[str], now: float | None = None
-    ) -> list[str]:
+    def request_refresh(self, item_keys: Iterable[str], now: float | None = None) -> list[str]:
         """Queues items for an immediate refresh by the service; returns the canonical keys."""
         keys = [self.canonical_item_key(k) for k in item_keys]
         with self.conn:
@@ -1079,9 +1062,7 @@ class LiveStoreMixin:
 
     def read_heartbeat(self) -> ServiceHeartbeat | None:
         """Returns the service heartbeat, or None if the service never ran."""
-        row = self.conn.execute(
-            "SELECT * FROM service_heartbeat WHERE id = 1"
-        ).fetchone()
+        row = self.conn.execute("SELECT * FROM service_heartbeat WHERE id = 1").fetchone()
         if row is None:
             return None
         return ServiceHeartbeat(
@@ -1100,9 +1081,7 @@ class LiveStoreMixin:
 
     def get_state(self, key: str) -> str | None:
         """Returns a `service_state` value, or None when unset."""
-        row = self.conn.execute(
-            "SELECT value FROM service_state WHERE key = ?", (key,)
-        ).fetchone()
+        row = self.conn.execute("SELECT value FROM service_state WHERE key = ?", (key,)).fetchone()
         return None if row is None or row["value"] is None else str(row["value"])
 
     def set_state(self, key: str, value: str | None, now: float | None = None) -> None:
@@ -1145,9 +1124,7 @@ class LiveStoreMixin:
                 )
             if cur.rowcount:
                 return
-        self.set_state(
-            f"{NODE_ID_STATE_PREFIX}{self.canonical_item_key(item_key)}", node_id
-        )
+        self.set_state(f"{NODE_ID_STATE_PREFIX}{self.canonical_item_key(item_key)}", node_id)
 
     def get_live_fetched_at(self, item_keys: Iterable[str]) -> dict[str, float]:
         """Returns `live_fetched_at` (epoch seconds) for the PRs in `item_keys` that have one.
@@ -1168,9 +1145,7 @@ class LiveStoreMixin:
             keys,
         ).fetchall()
         return {
-            str(r["item_key"]): datetime.fromisoformat(
-                str(r["live_fetched_at"])
-            ).timestamp()
+            str(r["item_key"]): datetime.fromisoformat(str(r["live_fetched_at"])).timestamp()
             for r in rows
         }
 
@@ -1185,9 +1160,7 @@ class LiveStoreMixin:
         ).fetchone()
         return str(row["head_sha"]) if row and row["head_sha"] else None
 
-    def get_rollup_etags(
-        self, item_key: str
-    ) -> tuple[str | None, str | None, str | None]:
+    def get_rollup_etags(self, item_key: str) -> tuple[str | None, str | None, str | None]:
         """Returns `(head_oid, checks_etag, status_etag)` for a PR, or Nones if unknown."""
         resolved = self._resolve_key(item_key, create=False)
         if resolved is None:
@@ -1283,9 +1256,7 @@ class LiveStoreMixin:
             """,
             repo_ids,
         )
-        cur = self.conn.execute(
-            f"DELETE FROM repos WHERE repo_id IN ({marks})", repo_ids
-        )
+        cur = self.conn.execute(f"DELETE FROM repos WHERE repo_id IN ({marks})", repo_ids)
         return cur.rowcount
 
     def prune(

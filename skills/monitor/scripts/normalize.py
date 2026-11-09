@@ -11,6 +11,7 @@ from models import (
     Thread,
     ViewerReview,
     is_bot,
+    parse_iso_seconds,
     parse_pr_ref,
     pr_key,
 )
@@ -210,6 +211,35 @@ def _extract_viewer_last_review(raw: dict[str, Any], viewer: str) -> ViewerRevie
     ) or _latest_viewer_review_in_conn(raw.get("latestOpinionatedReviews"), viewer_norm)
 
 
+def _conn_nodes(conn: Any) -> list[dict[str, Any]]:
+    if not isinstance(conn, dict):
+        return []
+    return [n for n in (conn.get("nodes") or []) if isinstance(n, dict)]
+
+
+def _dedup_logins(values: list[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for val in values:
+        cleaned = val.strip()
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            seen.add(key)
+            ordered.append(cleaned)
+    return tuple(ordered)
+
+
+def _thread_participants(node: dict[str, Any]) -> tuple[str, ...]:
+    raw_list = node.get("participants")
+    if isinstance(raw_list, (list, tuple)):
+        return _dedup_logins([str(item) for item in raw_list if item])
+    comment_items = [
+        *_conn_nodes(node.get("firstComment")),
+        *_conn_nodes(node.get("comments")),
+    ]
+    return _dedup_logins([_node_author_login(item) for item in comment_items])
+
+
 def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:
     nodes = _check_truncation(raw.get("reviewThreads"), "reviewThreads", truncated)
     threads: list[Thread] = []
@@ -217,9 +247,8 @@ def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:
         tid = str(node.get("id") or "")
         if not tid:
             continue
-        comments_conn = node.get("comments")
-        c_nodes = (comments_conn.get("nodes") or []) if isinstance(comments_conn, dict) else []
-        last = c_nodes[-1] if c_nodes and isinstance(c_nodes[-1], dict) else {}
+        c_nodes = _conn_nodes(node.get("comments"))
+        last = c_nodes[-1] if c_nodes else {}
         author_obj = last.get("author") if isinstance(last.get("author"), dict) else None
         last_login = str((author_obj or {}).get("login") or "")
         threads.append(
@@ -229,6 +258,8 @@ def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:
                 last_author=last_login,
                 last_author_is_bot=is_bot(author_obj),
                 last_comment_at=str(last.get("createdAt") or ""),
+                outdated=bool(node.get("isOutdated", False)),
+                participants=_thread_participants(node),
             )
         )
     return threads
@@ -236,23 +267,144 @@ def _extract_threads(raw: dict[str, Any], truncated: list[str]) -> list[Thread]:
 
 def _extract_commit(
     raw: dict[str, Any], truncated: list[str]
-) -> tuple[str | None, str | None, list[CheckRun]]:
-    commits_conn = raw.get("commits")
-    c_nodes = (commits_conn.get("nodes") or []) if isinstance(commits_conn, dict) else []
-    if not c_nodes or not isinstance(c_nodes[-1], dict):
-        return None, None, []
+) -> tuple[str | None, str | None, str | None, list[CheckRun]]:
+    c_nodes = _conn_nodes(raw.get("commits"))
+    if not c_nodes:
+        return None, None, None, []
     commit = c_nodes[-1].get("commit")
     if not isinstance(commit, dict):
-        return None, None, []
+        return None, None, None, []
     committer = commit.get("committer") if isinstance(commit.get("committer"), dict) else {}
     user = committer.get("user") if isinstance(committer.get("user"), dict) else {}
     last_committer = str(user["login"]) if user.get("login") else None
+    committed_raw = commit.get("committedDate")
+    committed_date = str(committed_raw) if committed_raw else None
     rollup = commit.get("statusCheckRollup")
-    rollup_state = (
-        str(rollup["state"]) if isinstance(rollup, dict) and rollup.get("state") else None
+    rollup_dict = rollup if isinstance(rollup, dict) else None
+    rollup_state = str(rollup_dict["state"]) if rollup_dict and rollup_dict.get("state") else None
+    checks = normalize_checks(rollup_dict, truncated)
+    return last_committer, committed_date, rollup_state, checks
+
+
+def _is_newer_or_equal_ts(candidate: str, current: str) -> bool:
+    cand_ts = parse_iso_seconds(candidate)
+    curr_ts = parse_iso_seconds(current)
+    if cand_ts is not None and curr_ts is not None:
+        return cand_ts >= curr_ts
+    return candidate >= current
+
+
+def _is_strictly_newer_ts(candidate: str, anchor: str) -> bool:
+    cand_ts = parse_iso_seconds(candidate)
+    anch_ts = parse_iso_seconds(anchor)
+    if cand_ts is not None and anch_ts is not None:
+        return cand_ts > anch_ts
+    return candidate > anchor
+
+
+def _pick_latest_ts(timestamps: list[str]) -> str | None:
+    best: str | None = None
+    for ts in timestamps:
+        if best is None or _is_newer_or_equal_ts(ts, best):
+            best = ts
+    return best
+
+
+def _reviewer_login(node: dict[str, Any]) -> str:
+    req = node.get("requestedReviewer")
+    return str(req.get("login") or "").strip() if isinstance(req, dict) else ""
+
+
+def _extract_viewer_requested_at(raw: dict[str, Any], viewer: str) -> str | None:
+    viewer_norm = viewer.strip().lower()
+    if not viewer_norm:
+        return None
+    candidates: list[str] = []
+    for node in _conn_nodes(raw.get("timelineItems")):
+        created_at = str(node.get("createdAt") or "").strip()
+        if created_at and _reviewer_login(node).lower() == viewer_norm:
+            candidates.append(created_at)
+    for node in _conn_nodes(raw.get("reviewRequests")):
+        requested_at = str(node.get("requestedAt") or "").strip()
+        if requested_at and _reviewer_login(node).lower() == viewer_norm:
+            candidates.append(requested_at)
+    return _pick_latest_ts(candidates)
+
+
+def _is_viewer_directly_requested(raw: dict[str, Any], viewer_norm: str) -> bool:
+    if not viewer_norm:
+        return False
+    return any(
+        _reviewer_login(node).lower() == viewer_norm
+        for node in _conn_nodes(raw.get("reviewRequests"))
     )
-    checks = normalize_checks(rollup if isinstance(rollup, dict) else None, truncated)
-    return last_committer, rollup_state, checks
+
+
+def _human_issue_comments(raw: dict[str, Any]) -> list[tuple[str, str, str]]:
+    out: list[tuple[str, str, str]] = []
+    for node in _conn_nodes(raw.get("comments")):
+        author_obj = node.get("author") if isinstance(node.get("author"), dict) else None
+        if is_bot(author_obj):
+            continue
+        created_at = str(node.get("createdAt") or "").strip()
+        if not created_at:
+            continue
+        comment_id = str(node.get("id") or "").strip()
+        login = str((author_obj or {}).get("login") or "").strip().lower()
+        out.append((comment_id, created_at, login))
+    return out
+
+
+def _latest_comment_pair(human_comments: list[tuple[str, str, str]]) -> tuple[str, str]:
+    latest_id = ""
+    latest_at = ""
+    for comment_id, created_at, _login in human_comments:
+        if not latest_at or _is_newer_or_equal_ts(created_at, latest_at):
+            latest_id = comment_id
+            latest_at = created_at
+    return latest_id, latest_at
+
+
+def _should_emit_watermark(
+    latest_at: str,
+    last_review: ViewerReview | None,
+    viewer_last_comment_at: str | None,
+    direct_requested: bool,
+) -> bool:
+    if last_review is not None and last_review.submitted_at:
+        return _is_strictly_newer_ts(latest_at, last_review.submitted_at)
+    return last_review is None and viewer_last_comment_at is not None and direct_requested
+
+
+def _extract_comment_watermarks(
+    raw: dict[str, Any],
+    viewer: str,
+    author: str,
+    last_review: ViewerReview | None,
+) -> tuple[str | None, str | None, str | None]:
+    viewer_norm = viewer.strip().lower()
+    author_norm = author.strip().lower()
+    human_comments = _human_issue_comments(raw)
+    if not human_comments:
+        return None, None, None
+    viewer_ts = (
+        _pick_latest_ts([ts for _cid, ts, login in human_comments if login == viewer_norm])
+        if viewer_norm
+        else None
+    )
+    author_ts = (
+        _pick_latest_ts([ts for _cid, ts, login in human_comments if login == author_norm])
+        if author_norm and author_norm != viewer_norm
+        else None
+    )
+    latest_id, latest_at = _latest_comment_pair(human_comments)
+    direct_req = _is_viewer_directly_requested(raw, viewer_norm)
+    watermark = (
+        f"{latest_id}:{latest_at}"
+        if _should_emit_watermark(latest_at, last_review, viewer_ts, direct_req)
+        else None
+    )
+    return viewer_ts, author_ts, watermark
 
 
 def _resolve_pr_state(raw: dict[str, Any]) -> str:
@@ -300,7 +452,11 @@ def normalize_pr(raw: dict[str, Any], viewer: str, repo: str | None = None) -> P
     reviewers = _extract_reviewers(raw, truncated)
     approvals, changes_req = _extract_reviews(raw)
     threads = _extract_threads(raw, truncated)
-    last_committer, rollup_state, checks = _extract_commit(raw, truncated)
+    last_committer, committed_date, rollup_state, checks = _extract_commit(raw, truncated)
+    last_review = _extract_viewer_last_review(raw, viewer)
+    viewer_comment_at, author_comment_at, watermark = _extract_comment_watermarks(
+        raw, viewer, author, last_review
+    )
 
     return PrSnapshot(
         key=pr_key(resolved_repo, number),
@@ -331,8 +487,13 @@ def normalize_pr(raw: dict[str, Any], viewer: str, repo: str | None = None) -> P
         stack_parent_state=None,
         truncated=truncated,
         updated_at=str(raw.get("updatedAt") or ""),
-        viewer_last_review=_extract_viewer_last_review(raw, viewer),
+        viewer_last_review=last_review,
         viewer_opinionated_state=_extract_viewer_opinionated_state(raw, viewer),
+        head_committed_date=committed_date,
+        viewer_requested_at=_extract_viewer_requested_at(raw, viewer),
+        viewer_last_comment_at=viewer_comment_at,
+        author_last_comment_at=author_comment_at,
+        discussion_watermark=watermark,
     )
 
 

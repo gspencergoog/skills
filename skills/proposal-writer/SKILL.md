@@ -79,18 +79,8 @@ Avoid AI-specific phrasing, puffery, and promotional language.
 
 ## Run a self-critique
 
-Before presenting the proposal to the user, review the draft from the
-perspective of a senior reviewer.
+Before presenting the proposal to the user, audit the draft using [design-review](../design-review/SKILL.md) in `--post-design` mode (pass `--fast` for **Lightweight** proposals, and run clean-room Standard or `--panel` for **Standard** and **Detailed** proposals, supplying explicit user constraints in the `Design Briefing Packet`):
 
-1. Analyze the design for:
-   - Single points of failure.
-   - Scalability bottlenecks.
-   - Security vulnerabilities.
-   - Data migration difficulties.
-2. Update the "Alternatives considered" or "Risks and mitigations" sections to
-   address these findings.
-3. Document the critique and how it was resolved in your final response to the
-   user.
-
-If the self-critique reveals major unresolved design trade-offs, recommend that
-the user runs the `/grill-me` slash command to align on the best path forward.
+1. Check problem/mechanism isolation, module boundaries, single points of failure, scalability bottlenecks, security boundaries, and migration/rollback safety.
+2. When `0` `critical`/`high` blockers and fewer than `3` items appear, fold improvements directly into `"Alternatives considered"` or `"Risks and mitigations"` and summarize the sign-off in your reply.
+3. When unresolved `critical`/`high` blockers or `3+` trade-off findings surface, present them via `design-review`'s `scorecard` and `triage_matrix` surfaces (or recommend `/grill-me` when requirements remain open).

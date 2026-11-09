@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +79,8 @@ def make_thread(
     last_author: str = "reviewer1",
     last_author_is_bot: bool = False,
     last_comment_at: str = "2026-10-27T21:05:00Z",
+    outdated: bool = False,
+    participants: Sequence[str] = (),
 ) -> Thread:
     """Constructs a ``Thread`` with defaults for unit tests."""
     return Thread(
@@ -87,6 +89,8 @@ def make_thread(
         last_author=last_author,
         last_author_is_bot=last_author_is_bot,
         last_comment_at=last_comment_at,
+        outdated=outdated,
+        participants=tuple(participants),
     )
 
 
@@ -138,6 +142,11 @@ def make_snapshot(**overrides: Any) -> PrSnapshot:
         "updated_at": "2026-10-27T21:05:00Z",
         "viewer_last_review": None,
         "viewer_opinionated_state": None,
+        "head_committed_date": None,
+        "viewer_requested_at": None,
+        "viewer_last_comment_at": None,
+        "author_last_comment_at": None,
+        "discussion_watermark": None,
     }
     defaults.update(overrides)
     return PrSnapshot(**defaults)

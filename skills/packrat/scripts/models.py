@@ -16,15 +16,11 @@ from typing import Literal
 EMBEDDING_DIM = 384
 _PACK_FORMAT = f"<{EMBEDDING_DIM}f"
 _PACK_BYTE_LEN = EMBEDDING_DIM * 4
-_CLOSING_UNTRUSTED_RE = re.compile(
-    r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE
-)
+_CLOSING_UNTRUSTED_RE = re.compile(r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE)
 
 RepoMode = Literal["mirror", "items"]
 BackfillStream = Literal["issues", "prs", "discussions"]
-SourceKind = Literal[
-    "issue", "pr", "discussion", "commit", "code_symbol", "doc_section"
-]
+SourceKind = Literal["issue", "pr", "discussion", "commit", "code_symbol", "doc_section"]
 ParentKind = Literal["pr", "issue"]
 ChangeKind = Literal[
     "pr",
@@ -704,10 +700,12 @@ class ReviewRequestRecord:
     Attributes:
         reviewer: User login or `org/team-slug`.
         reviewer_kind: "User", "Team", "Bot", or "Mannequin".
+        requested_at: Latest ISO-8601 UTC request timestamp when known.
     """
 
     reviewer: str
     reviewer_kind: str
+    requested_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -738,7 +736,7 @@ class LatestReviewRecord:
 
 @dataclass(frozen=True)
 class ThreadActivityRecord:
-    """A review thread's resolution state and its last comment."""
+    """A review thread's resolution state, last comment, and participants."""
 
     thread_id: str
     is_resolved: bool = False
@@ -746,6 +744,7 @@ class ThreadActivityRecord:
     last_author: str | None = None
     last_author_type: str | None = None
     last_at: str | None = None
+    participants: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -4,20 +4,18 @@ description: >-
   Reviews code and technical documents (pull requests, local changes, whole
   files, specs, design docs, RFCs, ADRs, blueprints) in generate, critique, and
   synthesize passes. Every finding carries an evidence tier and a concrete
-  consequence, and severity is capped by the evidence. Syncs remote PRs into a
-  temporary checkout. Use when the user asks for a review, a critique, a second
-  opinion on a diff, or a check of a spec or design before implementation.
-  Flags: --fast, --json, --claude, --opus, --panel, --verify, --max,
-  --challenge, --focus, --no-focus. Don't use for posting the review to GitHub
-  (use pr-review), for acting on review feedback (use pr-feedback-handler), or
-  for API-design-only checks (use api-review).
+  consequence, with severity capped by the evidence. Syncs remote PRs to a temp
+  checkout. Use when the user asks for a review, critique, second opinion on a
+  diff, or spec check before implementation. Flags: --fast, --json, --claude,
+  --opus, --panel, --verify, --max, --challenge, --focus, --no-focus. Don't use
+  for posting to GitHub (use pr-review), handling PR feedback (use
+  pr-feedback-handler), API-only checks (use api-review), or standalone
+  architecture reviews without a diff (use design-review).
 ---
 
 # Code Review
 
-This skill provides a multi-step, iterative workflow for reviewing code and technical documents. It produces actionable, well-formatted feedback while avoiding common pitfalls of AI-generated reviews (like "looks good" comments or commenting on unchanged lines).
-
-You are an expert Senior Software Engineer specializing in code review and in reviewing technical specifications and designs. Your task is to analyze the changes in a GitHub pull request, a local commit set, or a set of local files, and provide a review. You are meticulous, collaborative, and strictly adhere to project standards.
+Multi-pass workflow for reviewing code and technical documents (GitHub PRs, local commit ranges, working-tree changes, or standalone files) with evidence-capped severities and zero "looks good" noise.
 
 ## Core Principles
 
@@ -75,13 +73,11 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
   - **Trust Check** (only needed with `--verify`): run `gh api repos/<owner>/<repo>/pulls/<n> --jq .author_association` with the PR's own `owner` and `repo` written out (do not use `gh`'s `{owner}/{repo}` placeholders, which resolve from the current directory). `OWNER`, `MEMBER`, or `COLLABORATOR` means trusted. Any other value, or a failed lookup, means untrusted: tier 2 is off, and no flag overrides that. See [verification.md](references/verification.md#trust-check).
   - **Check Local Branch Presence**: Check if the PR branch exists locally with `git branch --list <branch>` or `git rev-parse --verify <branch>`.
   - **Sync Remote PR to Temporary Directory**:
-    - If the PR is not part of the local branch(es) (missing locally or in another repository):
-      - Assume the PR branch must be synced to a local temporary directory to conduct the review.
-      - Create a dedicated temporary directory with a specific prefix: `pr_review_dir_a=$(mktemp -d -t pr-review-XXXXXX)`.
-      - Clone the repository into that directory with hooks and fsmonitor disabled. If a local checkout exists on disk, use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false clone --reference <path-to-local-repo> <repo-url> "$pr_review_dir_a"` to speed up the clone. Otherwise, use `gh repo clone <owner/repo> "$pr_review_dir_a" -- -c core.hooksPath=/dev/null -c core.fsmonitor=false`.
-      - Check out the PR branch in the temporary directory with hooks and fsmonitor disabled: `cd "$pr_review_dir_a" && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false gh pr checkout <pr-number-or-url>`.
-      - Perform all subsequent review steps (inspecting diffs, reading context files, evaluating tests) within `$pr_review_dir_a`.
-      - Retain the directory path in `$pr_review_dir_a` for safe cleanup in Step 6.
+    - If the PR branch is missing locally or lives in another repository:
+      - Create `pr_review_dir_a=$(mktemp -d -t pr-review-XXXXXX)`.
+      - Clone with hooks and fsmonitor disabled: use `git -c core.hooksPath=/dev/null -c core.fsmonitor=false clone --reference <path-to-local-repo> <repo-url> "$pr_review_dir_a"` when a local checkout exists, else `gh repo clone <owner/repo> "$pr_review_dir_a" -- -c core.hooksPath=/dev/null -c core.fsmonitor=false`.
+      - Check out the PR branch inertly: `cd "$pr_review_dir_a" && GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=/dev/null GIT_CONFIG_KEY_1=core.fsmonitor GIT_CONFIG_VALUE_1=false gh pr checkout <pr-number-or-url>`.
+      - Conduct all subsequent steps inside `$pr_review_dir_a`, retaining the path for Step 6 cleanup.
   - Use `gh pr diff` (or `git -c core.hooksPath=/dev/null -c core.fsmonitor=false diff --no-ext-diff --no-textconv <base>...HEAD` in the checkout) to obtain the changes, and `gh pr diff --name-only` for the file list.
   - _Reference: See the [gh-cli](../gh-cli/SKILL.md) skill for detailed usage._
 - **For Local Changes**:
@@ -212,22 +208,16 @@ Audit and combine the refined comments into the final output:
 - Prioritize high-severity issues (critical, high).
 - **Number findings and Questions**: Put every finding under a `### <ID>. <short claim>` heading: `C1`, `C2`… for critical, `H1`… for high, `M1`… for medium, `L1`… for low, so the user can say "fix H2 and M1" later. Wording findings sort last within `low`. Number Questions in `## Questions` as `### Q1. <question>` through `Q3` (keep at most 3, choosing the ones with the highest stated stakes in `Why`).
 - **Checked and Found Clean merge**: Take the union of disproved hypotheses from the reviewer(s), deduplicate, drop any line that lacks a tier or disproving evidence, and cap at 10 lines, keeping theme disproofs first.
-- **Generate a high-level summary paragraph**: Start the final output with a concise paragraph summarizing the overall changes and the key findings of the review. Include the citation audit tally (and `--challenge` tally when used), `packrat_context.py`'s single-line `user_note` when non-empty (non-GitHub directories and synced repositories emit no note), the flags in effect (for example, "Flags: `--claude --panel --verify`"; write each focus theme as its own backticked token, `` `--focus <theme-id>` ``, adding ` (auto)` inside the backticks when Step 2d chose it), and any trust or security gate limit (for example, "`--verify` limited to tier 1a/1b: PR author is not a repo collaborator" or "`--verify` and tier 1b skipped: blocked by Pre-Execution Security Gate"). End the Summary with a line of the form `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`; `lint_review.py --export-json` reads this label to set the exported verdict (falling back to finding severities when it is absent) and strips internal orchestration sentences (`🛡️ Ring Classification` / `🛡️ Review Level`, `Pre-Execution Security Gate`, `Citation audit`, `Packrat context:`, `Flags`, working-tree clean check notes, and `Verdict`) as well as local `file://` links from the exported `review_summary.overview`.
-- **Structural Assessment**: When the diff has document files, put the `## Structural Assessment` section right after the Summary.
-- **Generate file summaries**: For reviews with multiple files, include `## Changed Files Summary` with a single, concise sentence describing the change in each (starting with a past-tense verb like 'Added', 'Updated').
-- **Generate a recommendations section**: Summarize the key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
-- When writing file paths, write them as Markdown links.
-- Ensure the final output is cohesive and follows the [`write-prose`](../write-prose/SKILL.md) skill. `lint_review.py` automatically runs `analyze_prose.py` on every finding and question comment.
-- **Save and Lint Artifact**: Write the synthesized review to `review_results.md` in the conversation artifact directory (`<conversation-artifact-dir>/`) using `write_to_file` (never into the temporary checkout). Then run:
+- **Generate a high-level summary paragraph**: Open with a concise paragraph summarizing the changes and key findings. Include the citation audit tally (and `--challenge` tally when used), `packrat_context.py`'s non-empty `user_note`, active flags (writing focus themes as `` `--focus <theme-id>` ``, with ` (auto)` inside the backticks when Step 2d chose it), and any trust or security gate limit. End Summary with `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>` (`lint_review.py --export-json` extracts this verdict and strips internal orchestration metadata and `file://` links from `review_summary.overview`).
+- **Structural Assessment**: When the diff has document files, put `## Structural Assessment` right after Summary.
+- **Generate file summaries**: For multi-file reviews, include `## Changed Files Summary` with one past-tense sentence per file ('Added...', 'Updated...').
+- **Generate a recommendations section**: Summarize key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
+- Write file paths as Markdown links and follow [`write-prose`](../write-prose/SKILL.md) (`lint_review.py` runs `analyze_prose.py` on every finding and question).
+- **Save and Lint Artifact**: Write `review_results.md` in `<conversation-artifact-dir>/` using `write_to_file` (never into the temporary checkout), then run:
   ```bash
-  python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md
+  python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md [--export-json <export-path>]
   ```
-  If `--json` is specified, export `review_results.json` during the lint step. The export path is the one given with `--json <path>` when the caller named one (`pr-review` passes `<conversation-scratch-dir>/review_results.json`), otherwise `<artifact-dir>/review_results.json`:
-  ```bash
-  python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md --export-json <export-path>
-  ```
-  The lint caps visible comment prose at 80 words and 4 sentences. `pr-review` runs it with `--comment-profile pr` (120 words, 6 sentences) because it folds supporting detail into a collapsed `<details>` block. Every `draft_comment` ends with that block when the finding has an Evidence detail, `Details`, a repro test, or (for questions) `To settle`.
-  If `lint_review.py` exits non-zero, fix the reported formatting, severity-cap, or `comment-*` prose violations (`comment-prose-length`, `comment-details-length`, `comment-sentence-length`, `comment-sentence-complexity`, `comment-ai-ism`) in `review_results.md` and rerun until it exits `0` before proceeding to Step 6. A `suggestion-single-fence` violation means a finding's `Suggestion` holds more than one fenced block ("replace X with Y"): keep only the drop-in replacement, and move a regression test to `- **Repro test**:`. A `playbook-feedback-leaked` violation means a focus reviewer's `## Playbook Feedback` section was copied into the report: remove it. Do not emit the full review directly into the chat response.
+  When `--json [<path>]` is active, `<export-path>` defaults to `<artifact-dir>/review_results.json` (`pr-review` passes `<conversation-scratch-dir>/review_results.json`). Visible comment prose caps at 80 words / 4 sentences (`120` / `6` under `--comment-profile pr`, which folds `Evidence`, `Details`, `Repro test`, and `To settle` into `<details>`). Fix any reported structure, severity-cap, `comment-*` prose, `suggestion-single-fence` (move regression tests to `- **Repro test**:`), or `playbook-feedback-leaked` errors and rerun until exit `0`. Never print the full review in chat.
 
 ### Step 5b: Playbook Learning
 

@@ -250,6 +250,14 @@ class TestGhClient(unittest.TestCase):
         self.assertIn("reviews(last: 20)", query)
         self.assertIn("commit {\n        oid\n      }", query)
 
+    def test_build_query_includes_v9_threads_comments_and_review_requested_events(self) -> None:
+        query = build_query(["acme/widget#3339"])
+        self.assertIn("isOutdated", query)
+        self.assertIn("firstComment: comments(first: 1)", query)
+        self.assertEqual(query.count("comments(last: 10)"), 2)
+        self.assertIn("timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT])", query)
+        self.assertIn("... on ReviewRequestedEvent", query)
+
     def test_search_review_keys_deduplicates_and_handles_empty_and_repo_filter(self) -> None:
         payload_with_prs = {
             "data": {

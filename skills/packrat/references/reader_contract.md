@@ -172,7 +172,8 @@ force-push the old head's rows disappear from this view.
 ### `v_pr_review_requests`
 
 Pending review requests: `item_key`, `reviewer` (login or `org/team-slug`),
-`reviewer_kind` (`User`, `Team`, `Bot`, `Mannequin`).
+`reviewer_kind` (`User`, `Team`, `Bot`, `Mannequin`), `requested_at` (latest
+`ReviewRequestedEvent` timestamp for that reviewer, or `NULL` when unknown).
 
 ### `v_pr_latest_reviews`
 
@@ -192,7 +193,9 @@ reviews and the reviewed commit OID (`latest_reviews`, schema v8). Columns:
 
 One row per review thread: `item_key`, `thread_id`, `is_resolved`,
 `is_outdated`, `last_author`, `last_author_type`, `last_at` (the thread's last
-comment).
+comment), and `participants_json`. `participants_json` holds a JSON array of
+deduplicated comment logins from the opening comment and the latest 10 comments
+(`'[]'` before refresh).
 
 ### `v_viewer_items`
 

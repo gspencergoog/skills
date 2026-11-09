@@ -15,13 +15,23 @@ from pathlib import Path
 from typing import Any, Literal
 
 from models import (
+    DrawerReason,
     Event,
     PrSnapshot,
     ReviewSortTier,
     ReviewStep,
+    Thread,
+    TriageEntry,
+    TriageVerdict,
     classify_review_turn,
+    dormant_age_days,
     effective_viewer_review,
+    has_unanswered_direct_request,
+    is_dormant_review,
+    is_mute_active,
+    viewer_thread_progress,
 )
+from review_overrides import ReviewOverrides
 
 BASIC_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
 STATUS_CATALOG = "https://a2ui.org/specification/v1_0/catalogs/status/catalog.json"
@@ -238,6 +248,7 @@ REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
             "stack_progress",
             "stack_divider",
             "stack_rows",
+            "stack_drawer",
             "stack_footer",
         ],
     },
@@ -307,7 +318,9 @@ REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
             "stack_row_state",
             "stack_row_ci",
             "stack_row_review",
+            "triage_row_badge",
             "review_row_btn",
+            "mute_row_btn",
         ],
         "align": "center",
     },
@@ -341,6 +354,13 @@ REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
         "catalogId": STATUS_CATALOG,
         "text": {"@path": "review"},
         "tone": {"@path": "reviewTone"},
+    },
+    {
+        "id": "triage_row_badge",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "triageLabel"},
+        "tone": {"@path": "triageTone"},
     },
     {
         "id": "review_row_btn",
@@ -385,6 +405,48 @@ REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
         "text": {"@path": "actionLabel"},
     },
     {
+        "id": "mute_row_btn",
+        "component": "Button",
+        "catalogId": BASIC_CATALOG,
+        "child": "mute_row_btn_label",
+        "variant": "borderless",
+        "action": {
+            "event": {
+                "name": "mute_review_pr",
+                "context": {
+                    "pr": {"@path": "id"},
+                    "key": {"@path": "key"},
+                    "repo": {"@path": "repo"},
+                    "number": {"@path": "number"},
+                    "headSha": {"@path": "headSha"},
+                    "updatedAt": {"@path": "updatedAt"},
+                    "_oneShot": False,
+                },
+            }
+        },
+        "checks": [
+            {
+                "condition": {
+                    "@call": "and",
+                    "catalogId": BASIC_CATALOG,
+                    "args": {
+                        "values": [
+                            {"@path": "canReview"},
+                            True,
+                        ]
+                    },
+                },
+                "message": "PR is closed or merged",
+            }
+        ],
+    },
+    {
+        "id": "mute_row_btn_label",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": "Mute",
+    },
+    {
         "id": "stack_row_link",
         "component": "Text",
         "catalogId": BASIC_CATALOG,
@@ -415,6 +477,85 @@ REVIEW_BOARD_COMPONENTS: list[dict[str, Any]] = [
         "steps": {"@path": "/steps"},
         "current": {"@path": "step"},
         "tone": {"@path": "tone"},
+    },
+    {
+        "id": "stack_drawer",
+        "component": "Collapsible",
+        "catalogId": STATUS_CATALOG,
+        "title": {"@path": "/drawerTitle"},
+        "summary": {"@path": "/drawerSummary"},
+        "child": "drawer_rows",
+    },
+    {
+        "id": "drawer_rows",
+        "component": "List",
+        "catalogId": BASIC_CATALOG,
+        "children": {"path": "/drawerItems", "componentId": "drawer_row"},
+    },
+    {
+        "id": "drawer_row",
+        "component": "Row",
+        "catalogId": BASIC_CATALOG,
+        "children": [
+            "drawer_row_id",
+            "drawer_row_badge",
+            "drawer_row_title",
+            "unhide_row_btn",
+        ],
+        "align": "center",
+    },
+    {
+        "id": "drawer_row_id",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {
+            "@call": "formatString",
+            "catalogId": BASIC_CATALOG,
+            "args": {"value": "**${id}**"},
+        },
+    },
+    {
+        "id": "drawer_row_badge",
+        "component": "Badge",
+        "catalogId": STATUS_CATALOG,
+        "text": {"@path": "drawerBadge"},
+        "tone": {"@path": "drawerTone"},
+    },
+    {
+        "id": "drawer_row_title",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": {
+            "@call": "formatString",
+            "catalogId": BASIC_CATALOG,
+            "args": {"value": "[${title}](${url})"},
+        },
+        "weight": 1,
+    },
+    {
+        "id": "unhide_row_btn",
+        "component": "Button",
+        "catalogId": BASIC_CATALOG,
+        "child": "unhide_row_btn_label",
+        "variant": "borderless",
+        "action": {
+            "event": {
+                "name": "unmute_review_pr",
+                "context": {
+                    "pr": {"@path": "pr"},
+                    "key": {"@path": "key"},
+                    "repo": {"@path": "repo"},
+                    "number": {"@path": "number"},
+                    "_oneShot": False,
+                },
+            }
+        },
+    },
+    {
+        "id": "unhide_row_btn_label",
+        "component": "Text",
+        "catalogId": BASIC_CATALOG,
+        "text": "Unhide",
     },
     {
         "id": "stack_footer",
@@ -842,20 +983,83 @@ def _estimate_eta_s(
     return best
 
 
-def _unread_thread_count(snap: PrSnapshot, viewer_norm: str) -> int:
+def _is_unread_reviewer_thread(
+    thread: Thread,
+    submitted_at: str,
+    viewer_norm: str,
+    restrict_to_viewer: bool,
+) -> bool:
+    if thread.resolved or thread.last_author_is_bot:
+        return False
+    if thread.last_author.lower() == viewer_norm:
+        return False
+    if restrict_to_viewer and not thread.has_participant(viewer_norm):
+        return False
+    if not submitted_at:
+        return True
+    return bool(thread.last_comment_at) and thread.last_comment_at > submitted_at
+
+
+def _unread_thread_count(snap: PrSnapshot, viewer: str) -> int:
+    viewer_norm = viewer.strip().lower()
     last = snap.viewer_last_review
     if last is None:
         return 0
+    restrict_to_viewer = any(t.participants for t in snap.threads)
     return sum(
         1
         for t in snap.threads
-        if not t.resolved
-        and t.last_author.lower() != viewer_norm
-        and (
-            not last.submitted_at
-            or (bool(t.last_comment_at) and t.last_comment_at > last.submitted_at)
-        )
+        if _is_unread_reviewer_thread(t, last.submitted_at, viewer_norm, restrict_to_viewer)
     )
+
+
+def _triage_badge(snap: PrSnapshot, triage: TriageEntry | None) -> tuple[str, str]:
+    if (
+        triage is None
+        or not snap.discussion_watermark
+        or triage.watermark != snap.discussion_watermark
+    ):
+        return "", "neutral"
+    if triage.verdict == TriageVerdict.LIKELY_SHELVED:
+        return "Likely shelved", "warning"
+    if triage.verdict == TriageVerdict.DEFERRED:
+        return "Deferred", "neutral"
+    return "", "neutral"
+
+
+def _thread_progress_bullet(snap: PrSnapshot, viewer: str) -> str:
+    step, _ = classify_review_turn(snap, viewer)
+    if step != ReviewStep.WAITING_ON_AUTHOR:
+        return ""
+    addressed, total = viewer_thread_progress(snap, viewer)
+    if total <= 0:
+        return ""
+    if 0 < addressed < total:
+        return f"- {addressed}/{total} of your threads updated; {total - addressed} awaiting author"
+    last = effective_viewer_review(snap, viewer)
+    has_new_head = (
+        last is not None
+        and bool(last.commit_oid)
+        and bool(snap.head_sha)
+        and snap.head_sha != last.commit_oid
+    )
+    if addressed == 0 and has_new_head:
+        return f"- {total} of your threads awaiting author"
+    return ""
+
+
+def _triage_bullet(snap: PrSnapshot, triage: TriageEntry | None) -> str:
+    label, _tone = _triage_badge(snap, triage)
+    if not label or triage is None or not triage.summary.strip():
+        return ""
+    return f"- {label}: {triage.summary.strip()}"
+
+
+def _has_answered_direct_request(snap: PrSnapshot, viewer: str) -> bool:
+    viewer_norm = viewer.strip().lower()
+    if not viewer_norm or not any(r.lower() == viewer_norm for r in snap.requested_reviewers):
+        return False
+    return not has_unanswered_direct_request(snap, viewer_norm)
 
 
 def _review_fallback_bullet(snap: PrSnapshot) -> str:
@@ -881,6 +1085,7 @@ def _review_detail_bullets(
     snap: PrSnapshot,
     viewer_norm: str,
     pr_events: Sequence[Event] | None = None,
+    triage: TriageEntry | None = None,
 ) -> str:
     candidates: list[str] = [ev.summary for ev in (pr_events or ())]
     last = snap.viewer_last_review
@@ -888,15 +1093,21 @@ def _review_detail_bullets(
         candidates.append(
             f"New commit `{snap.head_sha[:7]}` since your review (`{last.commit_oid[:7]}`)"
         )
+    candidates.append(_thread_progress_bullet(snap, viewer_norm))
+    if _has_answered_direct_request(snap, viewer_norm):
+        candidates.append("- Replied in PR comments after review request")
+    candidates.append(_triage_bullet(snap, triage))
     unread = _unread_thread_count(snap, viewer_norm)
     if unread > 0:
         noun = "thread reply" if unread == 1 else "thread replies"
         candidates.append(f"{unread} unread {noun}")
     if snap.draft:
         candidates.append("Draft PR — review requested")
-    for check in snap.effective_required_checks():
-        if check.is_failed():
-            candidates.append(f"CI failed ({check.name})")
+    candidates.extend(
+        f"CI failed ({check.name})"
+        for check in snap.effective_required_checks()
+        if check.is_failed()
+    )
     result = _dedup_bullets(candidates)
     return result if result else _dedup_bullets([_review_fallback_bullet(snap)])
 
@@ -911,15 +1122,21 @@ def _review_action_label(snap: PrSnapshot) -> str:
     return "Review"
 
 
+def _review_row_id(snap: PrSnapshot, *, multi_repo: bool) -> str:
+    short_repo = snap.repo.split("/")[-1] if snap.repo else ""
+    return f"{short_repo}#{snap.number}" if multi_repo and short_repo else f"PR {snap.number}"
+
+
 def review_item_for(
     snap: PrSnapshot,
+    viewer: str = "",
     *,
-    viewer: str,
     multi_repo: bool = False,
     durations: Mapping[str, Sequence[int]] | None = None,
     now: float | None = None,
     wave: int = 0,
     events: Sequence[Event] | None = None,
+    triage: TriageEntry | None = None,
 ) -> dict[str, Any]:
     """Builds a single reviewer queue board item dictionary for ``snap``."""
     viewer_norm = viewer.strip().lower()
@@ -928,8 +1145,8 @@ def review_item_for(
     eta_s = _estimate_eta_s(snap, durations, now)
     ci_text, ci_tone = _ci_badge(snap, eta_s)
     rev_text, rev_tone = _reviewer_badge(snap, step, tier, viewer_norm)
-    short_repo = snap.repo.split("/")[-1] if snap.repo else ""
-    item_id = f"{short_repo}#{snap.number}" if multi_repo and short_repo else f"PR {snap.number}"
+    triage_label, triage_tone = _triage_badge(snap, triage)
+    item_id = _review_row_id(snap, multi_repo=multi_repo)
     base_label = f"PR {snap.stack_parent.split('#')[-1]}" if snap.stack_parent else snap.base_ref
     return {
         "id": item_id,
@@ -941,6 +1158,7 @@ def review_item_for(
         "author": snap.author,
         "meta": f"by @{snap.author} · {snap.repo} · base {snap.base_ref}",
         "headSha": snap.head_sha,
+        "updatedAt": snap.updated_at,
         "wave": str(wave),
         "base": base_label,
         "state": state_text,
@@ -949,10 +1167,39 @@ def review_item_for(
         "ciTone": ci_tone,
         "review": rev_text,
         "reviewTone": rev_tone,
+        "triageLabel": triage_label,
+        "triageTone": triage_tone,
         "step": int(step),
-        "detail": _review_detail_bullets(snap, viewer_norm, events),
+        "detail": _review_detail_bullets(snap, viewer_norm, events, triage=triage),
         "actionLabel": _review_action_label(snap),
         "canReview": snap.state == "OPEN",
+    }
+
+
+def drawer_item_for(
+    snap: PrSnapshot,
+    reason: DrawerReason,
+    *,
+    now_epoch: float,
+    multi_repo: bool = False,
+) -> dict[str, Any]:
+    """Builds a compact collapsible-drawer item dictionary for a muted or dormant PR."""
+    badge = (
+        "Muted"
+        if reason == DrawerReason.MUTED
+        else f"Dormant · {dormant_age_days(snap, now_epoch)}d"
+    )
+    return {
+        "id": _review_row_id(snap, multi_repo=multi_repo),
+        "pr": snap.key,
+        "key": snap.key,
+        "repo": snap.repo,
+        "number": snap.number,
+        "title": snap.title,
+        "url": snap.url,
+        "drawerReason": reason.value,
+        "drawerBadge": badge,
+        "drawerTone": "neutral",
     }
 
 
@@ -983,6 +1230,7 @@ def _segment_bucket_label(snap: PrSnapshot, tier: ReviewSortTier) -> str:
 
 def _review_progress_segments(
     sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    drawer_count: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
     counts: dict[str, int] = {}
     for snap, _, tier, _ in sorted_rows:
@@ -993,6 +1241,15 @@ def _review_progress_segments(
         for label, tone in _SEGMENT_ORDER
         if counts.get(label, 0) > 0
     ]
+    if drawer_count > 0:
+        segments.append(
+            {
+                "label": "Muted / Dormant",
+                "count": drawer_count,
+                "value": drawer_count,
+                "tone": "neutral",
+            }
+        )
     summary = (
         " · ".join(f"{seg['count']} {seg['label'].lower()}" for seg in segments)
         if segments
@@ -1004,10 +1261,13 @@ def _review_progress_segments(
 def _review_status_badge(
     sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
     observed_at: str,
+    drawer_count: int = 0,
 ) -> tuple[str, str, bool]:
     short_ts = _format_utc_short(observed_at)
     suffix = f" · {short_ts}" if short_ts else ""
     if not sorted_rows:
+        if drawer_count > 0:
+            return f"Watching{suffix}", "active", True
         return f"Queue empty{suffix}", "success", False
     action_count = sum(
         1
@@ -1016,7 +1276,7 @@ def _review_status_badge(
     )
     if action_count > 0:
         return f"{action_count} awaiting review{suffix}", "warning", True
-    if all(tier == ReviewSortTier.TERMINAL for _, _, tier, _ in sorted_rows):
+    if drawer_count == 0 and all(tier == ReviewSortTier.TERMINAL for _, _, tier, _ in sorted_rows):
         return f"Queue complete{suffix}", "success", False
     return f"Watching{suffix}", "active", True
 
@@ -1042,20 +1302,114 @@ def _review_subtitle(
     return scope
 
 
+def _resolve_now_epoch(
+    now_epoch: float | None,
+    now: float | None,
+    observed_at: str,
+) -> float:
+    if now_epoch is not None:
+        return now_epoch
+    if now is not None:
+        return now
+    parsed = _parse_iso_ts(observed_at)
+    return parsed if parsed > 0 else time.time()
+
+
+def _drawer_reason_for(
+    snap: PrSnapshot,
+    viewer: str,
+    overrides: ReviewOverrides,
+    stale_days: int,
+    now_epoch: float,
+) -> DrawerReason | None:
+    if snap.state != "OPEN":
+        return None
+    if is_mute_active(snap, overrides.get_mute(snap.key), viewer):
+        return DrawerReason.MUTED
+    if is_dormant_review(
+        snap,
+        viewer,
+        stale_days,
+        now_epoch,
+        pinned_at=overrides.get_pin(snap.key),
+    ):
+        return DrawerReason.DORMANT
+    return None
+
+
+def _build_drawer_section(
+    drawer_entries: Sequence[tuple[PrSnapshot, DrawerReason]],
+    *,
+    now_epoch: float,
+    multi_repo: bool,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    if not drawer_entries:
+        return "", "", []
+    ordered = sorted(
+        drawer_entries,
+        key=lambda pair: (
+            0 if pair[1] == DrawerReason.MUTED else 1,
+            -_parse_iso_ts(pair[0].updated_at),
+            pair[0].repo,
+            pair[0].number,
+        ),
+    )
+    items = [
+        drawer_item_for(snap, reason, now_epoch=now_epoch, multi_repo=multi_repo)
+        for snap, reason in ordered
+    ]
+    muted_count = sum(1 for _, reason in ordered if reason == DrawerReason.MUTED)
+    dormant_count = len(ordered) - muted_count
+    parts: list[str] = []
+    if muted_count > 0:
+        parts.append(f"{muted_count} muted")
+    if dormant_count > 0:
+        parts.append(f"{dormant_count} dormant")
+    return f"Muted & Dormant ({len(items)})", " · ".join(parts), items
+
+
+def _partition_review_rows(
+    all_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    viewer: str,
+    overrides: ReviewOverrides,
+    stale_days: int,
+    now_epoch: float,
+) -> tuple[
+    list[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    list[tuple[PrSnapshot, DrawerReason]],
+]:
+    active_rows: list[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]] = []
+    drawer_entries: list[tuple[PrSnapshot, DrawerReason]] = []
+    for row in all_rows:
+        reason = _drawer_reason_for(row[0], viewer, overrides, stale_days, now_epoch)
+        if reason is not None:
+            drawer_entries.append((row[0], reason))
+        else:
+            active_rows.append(row)
+    return active_rows, drawer_entries
+
+
 def review_board_data_model(
     snapshots: Mapping[str, PrSnapshot] | Sequence[PrSnapshot],
+    viewer: str = "",
     *,
-    viewer: str,
     durations: Mapping[str, Sequence[int]] | None = None,
     subtitle: str | None = None,
     events: Sequence[Event] | None = None,
     now: float | None = None,
     observed_at: str = "",
+    overrides: ReviewOverrides | None = None,
+    stale_days: int = 30,
+    now_epoch: float | None = None,
 ) -> dict[str, Any]:
     """Builds the reviewer queue board ``dataModel`` dictionary."""
-    sorted_rows = sort_review_snapshots(snapshots, viewer)
-    repos = {snap.repo for snap, _, _, _ in sorted_rows if snap.repo}
+    all_rows = sort_review_snapshots(snapshots, viewer)
+    repos = {snap.repo for snap, _, _, _ in all_rows if snap.repo}
     multi_repo = len(repos) > 1
+    ov = overrides if overrides is not None else ReviewOverrides()
+    ts_now = _resolve_now_epoch(now_epoch, now, observed_at)
+    eta_now = now if now is not None else now_epoch
+    active_rows, drawer_entries = _partition_review_rows(all_rows, viewer, ov, stale_days, ts_now)
     events_by_pr: dict[str, list[Event]] = {}
     for ev in events or ():
         events_by_pr.setdefault(ev.pr, []).append(ev)
@@ -1065,16 +1419,26 @@ def review_board_data_model(
             viewer=viewer,
             multi_repo=multi_repo,
             durations=durations,
-            now=now,
+            now=eta_now,
             wave=wave,
             events=events_by_pr.get(snap.key),
+            triage=ov.get_triage(snap.key),
         )
-        for snap, _, _, wave in sorted_rows
+        for snap, _, _, wave in active_rows
     ]
-    segments, progress_summary = _review_progress_segments(sorted_rows)
-    status_text, status_tone, status_pulse = _review_status_badge(sorted_rows, observed_at)
+    drawer_title, drawer_summary, drawer_items = _build_drawer_section(
+        drawer_entries,
+        now_epoch=ts_now,
+        multi_repo=multi_repo,
+    )
+    segments, progress_summary = _review_progress_segments(
+        active_rows, drawer_count=len(drawer_items)
+    )
+    status_text, status_tone, status_pulse = _review_status_badge(
+        active_rows, observed_at, drawer_count=len(drawer_items)
+    )
     resolved_subtitle = (
-        subtitle if subtitle is not None else _review_subtitle(sorted_rows, viewer, events)
+        subtitle if subtitle is not None else _review_subtitle(active_rows, viewer, events)
     )
     title = f"Review Queue ({len(items)})" if items else "Review Queue"
     return {
@@ -1087,6 +1451,9 @@ def review_board_data_model(
         "segments": segments,
         "progressSummary": progress_summary,
         "items": items,
+        "drawerTitle": drawer_title,
+        "drawerSummary": drawer_summary,
+        "drawerItems": drawer_items,
         "ackLabel": "Acknowledge",
     }
 
@@ -1101,6 +1468,9 @@ def review_board_dsl(
     events: Sequence[Event] | None = None,
     now: float | None = None,
     observed_at: str = "",
+    overrides: ReviewOverrides | None = None,
+    stale_days: int = 30,
+    now_epoch: float | None = None,
 ) -> str:
     """Renders A2UI Express data statements for the reviewer queue board."""
     _ = surface_id
@@ -1115,6 +1485,9 @@ def review_board_dsl(
             events=events,
             now=now,
             observed_at=observed_at,
+            overrides=overrides,
+            stale_days=stale_days,
+            now_epoch=now_epoch,
         )
     keys = (
         "title",
@@ -1126,6 +1499,9 @@ def review_board_dsl(
         "segments",
         "progressSummary",
         "items",
+        "drawerTitle",
+        "drawerSummary",
+        "drawerItems",
         "ackLabel",
     )
     return "\n".join(f"$/{key} = {json.dumps(dm[key])}" for key in keys if key in dm)
@@ -1329,7 +1705,7 @@ def _is_unchanged(
     data_model: dict[str, Any],
     components: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """Compares only components and ``items``: ``status`` carries a minute timestamp."""
+    """Compares components, ``items``, and ``drawerItems`` (``status`` carries a timestamp)."""
     target_components = STACK_BOARD_COMPONENTS if components is None else components
     create = _stored_create(line)
     stored_dm = create.get("dataModel")
@@ -1337,6 +1713,7 @@ def _is_unchanged(
         _stored_components(line) == target_components
         and isinstance(stored_dm, dict)
         and stored_dm.get("items") == data_model.get("items")
+        and stored_dm.get("drawerItems") == data_model.get("drawerItems")
     )
 
 
@@ -1420,11 +1797,12 @@ def sync_pane_store(
 ) -> StoreStatus:
     """Replaces ``conversations/<convId>/<surface_id>.jsonl`` with the board's full snapshot.
 
-    Returns ``"written"`` after a write, ``"unchanged"`` when the stored components and
-    ``items`` already match (unless ``force``), ``"dismissed"`` when the surface file is
-    missing and ``allow_create`` is false, and ``"unavailable"`` when there is no store,
-    the ids are invalid, a legacy flat file is still waiting for migration, or the lock
-    times out. Callers fall back to ``board.a2ui`` and ``render_a2ui`` on ``"unavailable"``.
+    Returns ``"written"`` after a write, ``"unchanged"`` when the stored components,
+    ``items``, and ``drawerItems`` already match (unless ``force``), ``"dismissed"`` when
+    the surface file is missing and ``allow_create`` is false, and ``"unavailable"`` when
+    there is no store, the ids are invalid, a legacy flat file is still waiting for
+    migration, or the lock times out. Callers fall back to ``board.a2ui`` and
+    ``render_a2ui`` on ``"unavailable"``.
     """
     if not conversation_id or not VALID_ID_RE.match(conversation_id):
         return "unavailable"

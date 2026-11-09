@@ -24,7 +24,9 @@ CREATE TABLE v_pr_checks (
   is_required INTEGER, workflow_run_id INTEGER
 );
 
-CREATE TABLE v_pr_review_requests (item_key TEXT, reviewer TEXT, reviewer_kind TEXT);
+CREATE TABLE v_pr_review_requests (
+  item_key TEXT, reviewer TEXT, reviewer_kind TEXT, requested_at TEXT
+);
 
 CREATE TABLE v_pr_latest_reviews (
   item_key TEXT, author TEXT, author_type TEXT, state TEXT, submitted_at TEXT
@@ -75,7 +77,11 @@ END;
 
 CREATE TABLE v_pr_threads (
   item_key TEXT, thread_id TEXT, is_resolved INTEGER, is_outdated INTEGER, last_author TEXT,
-  last_author_type TEXT, last_at TEXT
+  last_author_type TEXT, last_at TEXT, participants_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE TABLE v_item_comments (
+  item_key TEXT, kind TEXT, comment_id TEXT, author TEXT, author_type TEXT, created_at TEXT
 );
 
 CREATE TABLE v_viewer_items (

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from models import ViewerReview, parse_pr_ref
-from normalize import normalize_pr
+from normalize import _thread_participants, normalize_pr
 from packrat_source import (
     PackratError,
     PackratSource,
@@ -66,18 +66,63 @@ def _check_row(key: str, head: str, node: dict[str, Any]) -> tuple[Any, ...]:
             node.get("completedAt"), req, run)  # fmt: skip
 
 
-def _reviewer_row(key: str, repo: str, node: dict[str, Any]) -> tuple[str, str, str]:
+def _requested_at_map(pr: dict[str, Any], repo: str) -> dict[str, str]:
+    owner = repo.split("/")[0]
+    nodes = ((pr.get("timelineItems") or {}).get("nodes") or []) if isinstance(pr, dict) else []
+    out: dict[str, str] = {}
+    for node in nodes:
+        if not isinstance(node, dict) or not node.get("createdAt"):
+            continue
+        req = node.get("requestedReviewer") or {}
+        ident = (
+            f"{owner}/{req['slug']}" if req.get("slug") else str(req.get("login") or "")
+        ).lower()
+        created_at = str(node["createdAt"])
+        if ident and created_at >= out.get(ident, ""):
+            out[ident] = created_at
+    return out
+
+
+def _reviewer_row(
+    key: str, repo: str, node: dict[str, Any], req_map: dict[str, str] | None = None
+) -> tuple[str, str, str, str | None]:
     req = node["requestedReviewer"]
     if req.get("slug"):
-        return key, f"{repo.split('/')[0]}/{req['slug']}", "Team"
-    return key, req["login"], "User"
+        reviewer = f"{repo.split('/')[0]}/{req['slug']}"
+        kind = "Team"
+    else:
+        reviewer = req["login"]
+        kind = "User"
+    requested_at = node.get("requestedAt") or (req_map or {}).get(reviewer.lower())
+    return key, reviewer, kind, requested_at
 
 
 def _thread_row(key: str, node: dict[str, Any]) -> tuple[Any, ...]:
     last = node["comments"]["nodes"][-1]
     author = last.get("author") or {}
-    return (key, node["id"], int(node["isResolved"]), 0, author.get("login"),
-            author.get("__typename"), last.get("createdAt"))  # fmt: skip
+    participants_json = json.dumps(list(_thread_participants(node)))
+    return (
+        key,
+        node["id"],
+        int(bool(node.get("isResolved", False))),
+        int(bool(node.get("isOutdated", False))),
+        author.get("login"),
+        author.get("__typename"),
+        last.get("createdAt"),
+        participants_json,
+    )
+
+
+def _comment_row(key: str, node: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    author = node.get("author") or {}
+    return (
+        key,
+        "pr",
+        str(node.get("id") or ""),
+        str(author.get("login") or ""),
+        str(author.get("__typename") or "User"),
+        str(node.get("createdAt") or ""),
+    )
 
 
 def _head_commit(pr: dict[str, Any]) -> dict[str, Any]:
@@ -125,6 +170,75 @@ def _insert(conn: sqlite3.Connection, table: str, row: dict[str, Any]) -> None:
     conn.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({marks})", list(row.values()))
 
 
+def _author_review_rows(
+    key: str, repo: str, number: int, pr: dict[str, Any]
+) -> list[tuple[Any, ...]]:
+    rows: list[tuple[Any, ...]] = []
+    for node in (pr.get("reviews") or {}).get("nodes") or []:
+        login = (node.get("author") or {}).get("login")
+        if node.get("state") == "PENDING" or not login:
+            continue
+        rows.append(
+            (
+                key,
+                repo,
+                number,
+                login,
+                (node.get("author") or {}).get("__typename") or "User",
+                node["state"],
+                node.get("submittedAt"),
+                (node.get("commit") or {}).get("oid") or None,
+            )
+        )
+    return rows
+
+
+def _insert_pr_relations(
+    conn: sqlite3.Connection, key: str, repo: str, number: int, head: str, pr: dict[str, Any]
+) -> None:
+    contexts = _head_commit(pr).get("statusCheckRollup") or {}
+    req_map = _requested_at_map(pr, repo)
+    conn.executemany(
+        "INSERT INTO v_pr_checks ("
+        "item_key, head_oid, run_key, kind, name, status, conclusion, "
+        "details_url, started_at, completed_at, is_required, workflow_run_id"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        [_check_row(key, head, n) for n in (contexts.get("contexts") or {}).get("nodes", [])],
+    )
+    conn.executemany(
+        "INSERT INTO v_pr_review_requests (item_key, reviewer, reviewer_kind, requested_at) "
+        "VALUES (?,?,?,?)",
+        [_reviewer_row(key, repo, n, req_map) for n in pr["reviewRequests"]["nodes"]],
+    )
+    conn.executemany(
+        "INSERT INTO v_pr_latest_reviews (item_key, author, author_type, state, submitted_at) "
+        "VALUES (?,?,?,?,?)",
+        [
+            (key, n["author"]["login"], "User", n["state"], n.get("submittedAt"))
+            for n in pr["latestOpinionatedReviews"]["nodes"]
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO v_pr_latest_author_reviews ("
+        "item_key, repo_full_name, pr_number, author, author_type, state, submitted_at, commit_oid"
+        ") VALUES (?,?,?,?,?,?,?,?)",
+        _author_review_rows(key, repo, number, pr),
+    )
+    conn.executemany(
+        "INSERT INTO v_pr_threads ("
+        "item_key, thread_id, is_resolved, is_outdated, last_author, "
+        "last_author_type, last_at, participants_json"
+        ") VALUES (?,?,?,?,?,?,?,?)",
+        [_thread_row(key, n) for n in pr["reviewThreads"]["nodes"]],
+    )
+    comment_nodes = (pr.get("comments") or {}).get("nodes") or []
+    conn.executemany(
+        "INSERT INTO v_item_comments (item_key, kind, comment_id, author, author_type, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        [_comment_row(key, n) for n in comment_nodes],
+    )
+
+
 def store_graphql_pr(
     path: Path, pr: dict[str, Any], mode: str = "mirror", **live_extra: Any
 ) -> str:
@@ -132,8 +246,25 @@ def store_graphql_pr(
     repo, number = parse_pr_ref(pr["url"])
     key = f"{repo}#{number}"
     live = _live_row(key, repo, mode, pr, **live_extra)
-    head = live["head_sha"]
-    contexts = _head_commit(pr).get("statusCheckRollup") or {}
+    basic_cols = (
+        "item_key",
+        "repo_full_name",
+        "repo_mode",
+        "number",
+        "title",
+        "state",
+        "is_draft",
+        "url",
+        "author",
+        "updated_at",
+        "merged_at",
+        "closed_at",
+        "base_ref",
+        "head_ref",
+        "head_sha",
+        "head_repo_owner",
+        "is_cross_repository",
+    )
     with _db(path) as conn:
         for table in (
             "v_pr_checks",
@@ -141,50 +272,12 @@ def store_graphql_pr(
             "v_pr_latest_reviews",
             "v_pr_latest_author_reviews",
             "v_pr_threads",
+            "v_item_comments",
         ):
             conn.execute(f"DELETE FROM {table} WHERE item_key = ?", (key,))
         _insert(conn, "v_pr_live", live)
-        basic_cols = ("item_key", "repo_full_name", "repo_mode", "number", "title", "state",
-                      "is_draft", "url", "author", "updated_at", "merged_at", "closed_at",
-                      "base_ref", "head_ref", "head_sha", "head_repo_owner",
-                      "is_cross_repository")  # fmt: skip
         _insert(conn, "v_pr_basic", {c: live[c] for c in basic_cols})
-        conn.executemany(
-            "INSERT INTO v_pr_checks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            [_check_row(key, head, n) for n in (contexts.get("contexts") or {}).get("nodes", [])],
-        )
-        conn.executemany(
-            "INSERT INTO v_pr_review_requests VALUES (?,?,?)",
-            [_reviewer_row(key, repo, n) for n in pr["reviewRequests"]["nodes"]],
-        )
-        conn.executemany(
-            "INSERT INTO v_pr_latest_reviews VALUES (?,?,?,?,?)",
-            [
-                (key, n["author"]["login"], "User", n["state"], n.get("submittedAt"))
-                for n in pr["latestOpinionatedReviews"]["nodes"]
-            ],
-        )
-        conn.executemany(
-            "INSERT INTO v_pr_latest_author_reviews VALUES (?,?,?,?,?,?,?,?)",
-            [
-                (
-                    key,
-                    repo,
-                    number,
-                    n["author"]["login"],
-                    n["author"].get("__typename") or "User",
-                    n["state"],
-                    n.get("submittedAt"),
-                    ((n.get("commit") or {}).get("oid") or None),
-                )
-                for n in ((pr.get("reviews") or {}).get("nodes") or [])
-                if n.get("state") != "PENDING" and (n.get("author") or {}).get("login")
-            ],
-        )
-        conn.executemany(
-            "INSERT INTO v_pr_threads VALUES (?,?,?,?,?,?,?)",
-            [_thread_row(key, n) for n in pr["reviewThreads"]["nodes"]],
-        )
+        _insert_pr_relations(conn, key, repo, number, str(live["head_sha"]), pr)
     return key
 
 
@@ -412,6 +505,96 @@ class TestSnapshots(PackratDbCase):
             ),
         )
         self.assertEqual(snap_carol.viewer_opinionated_state, "APPROVED")
+
+    def test_v9_threads_requests_and_comments_round_trip_and_pre_v9_fallback(self) -> None:
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr["timelineItems"] = {
+            "nodes": [
+                {
+                    "createdAt": "2026-10-27T21:02:00Z",
+                    "requestedReviewer": {"__typename": "User", "login": "bob"},
+                }
+            ]
+        }
+        pr["reviews"] = {
+            "nodes": [
+                {
+                    "state": "CHANGES_REQUESTED",
+                    "submittedAt": "2026-10-27T20:30:00Z",
+                    "commit": {"oid": "11112222"},
+                    "author": {"login": "bob", "__typename": "User"},
+                }
+            ]
+        }
+        pr["reviewThreads"] = {
+            "totalCount": 1,
+            "nodes": [
+                {
+                    "id": "PRRT_v9",
+                    "isResolved": False,
+                    "isOutdated": True,
+                    "firstComment": {"nodes": [{"author": {"login": "bob", "__typename": "User"}}]},
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "carol", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:40:00Z",
+                            },
+                            {
+                                "author": {"login": "alice", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:55:00Z",
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+        pr["comments"] = {
+            "nodes": [
+                {
+                    "id": "IC_10",
+                    "createdAt": "2026-10-27T21:03:00Z",
+                    "author": {"login": "bob", "__typename": "User"},
+                },
+                {
+                    "id": "IC_11",
+                    "createdAt": "2026-10-27T21:06:00Z",
+                    "author": {"login": "alice", "__typename": "User"},
+                },
+                {
+                    "id": "IC_bot",
+                    "createdAt": "2026-10-27T21:08:00Z",
+                    "author": {"login": "ci-bot", "__typename": "Bot"},
+                },
+            ]
+        }
+        key = store_graphql_pr(self.db, pr)
+        raw = self.source.snapshots([key])[key]
+        snap = normalize_pr(raw, viewer="bob")
+        self.assertEqual(snap.head_committed_date, "2026-10-27T21:00:00Z")
+        self.assertEqual(snap.viewer_requested_at, "2026-10-27T21:02:00Z")
+        self.assertEqual(snap.viewer_last_comment_at, "2026-10-27T21:03:00Z")
+        self.assertEqual(snap.author_last_comment_at, "2026-10-27T21:06:00Z")
+        self.assertEqual(snap.discussion_watermark, "IC_11:2026-10-27T21:06:00Z")
+        self.assertEqual(len(snap.threads), 1)
+        self.assertTrue(snap.threads[0].outdated)
+        self.assertEqual(snap.threads[0].participants, ("bob", "carol", "alice"))
+        self.assertEqual(snap.threads[0].last_author, "alice")
+
+        # Downgrade DB to pre-v9 schema: drop v_item_comments, requested_at, and participants_json
+        with _db(self.db) as conn:
+            conn.execute("DROP TABLE v_item_comments")
+            conn.execute("ALTER TABLE v_pr_review_requests DROP COLUMN requested_at")
+            conn.execute("ALTER TABLE v_pr_threads DROP COLUMN participants_json")
+        raw_pre_v9 = self.source.snapshots([key])[key]
+        snap_pre_v9 = normalize_pr(raw_pre_v9, viewer="bob")
+        self.assertEqual(snap_pre_v9.requested_reviewers, ["bob", "team:core-reviewers"])
+        self.assertIsNone(snap_pre_v9.viewer_requested_at)
+        self.assertIsNone(snap_pre_v9.viewer_last_comment_at)
+        self.assertIsNone(snap_pre_v9.author_last_comment_at)
+        self.assertIsNone(snap_pre_v9.discussion_watermark)
+        self.assertTrue(snap_pre_v9.threads[0].outdated)
+        self.assertEqual(snap_pre_v9.threads[0].participants, ())
 
     def test_discover_review_keys_orders_by_updated_at_and_filters_repo(self) -> None:
         pr_base = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]

@@ -20,6 +20,14 @@ Whenever Phase 2 raises 2 or more decisions, render an interactive surface inste
 
 Copy-pasteable Express v1.0 snippets for all four improvised patterns live in `genui`'s `references/templates.md` under `## Improvising Custom A2UI Express Surfaces`.
 
+### Pre-Checked Independent Design Review Option (`runReview`)
+
+For **Architecture or feature design** and **Empirical audit and redesign** sessions (skip for **Creative, naming, or demo ideation**), include a preselected review toggle so Phase 3 automatically runs `/design-review --post-design` with a `< 4 KB` `Design Briefing Packet`:
+
+- **Custom A2UI Express (`dsl` without `template`)**: Set `$/runReview = true`, mount `review_check = CheckBox("Run independent design review after convergence (recommended)", $/runReview)` inside the shared footer `Row([review_check, submit_btn], "spaceBetween", "center")`, and pass `runReview: $/runReview` in the `Event(...)` context. Never declare an unmounted `CheckBox` inside a named template (`consequence_cards`, `comparison_matrix`, `decision_batch`), which fails orphan validation.
+- **`template: "decision_batch"`**: Append a final item `{prompt: "Post-convergence design review", hint: "Runs a clean-room /design-review --post-design check on the converged spec.", options: [{value: "yes", label: "Yes · Clean-room review", badge: "Recommended", tone: "success"}, {value: "no", label: "No · Skip review"}], choice: ["yes"]}`.
+- **Tier 2 / Tier 3 Fallback (`ask_question` / `AskUserQuestion` or numbered chat)**: Include `"Run an independent design review on the converged spec?"` with `"(Recommended) Yes"` listed first.
+
 ### Cross-Harness Fallback (When `a2ui-pane` Is Not Installed)
 
 1. Use your host's structured question tool (`ask_question` or `AskUserQuestion`). Place `(Recommended)` on the first option and include `"Defer"` where appropriate.
@@ -103,4 +111,7 @@ When user decisions arrive on an architectural or feature task, update the **exi
 | Option | Summary | Why Not Selected | Revisit If |
 | :--- | :--- | :--- | :--- |
 | <Rejected Option B> | <1-line summary> | <Key tradeoff> | <Trigger condition> |
+
+## Design Review Sign-Off
+<Included when `--post-design` ran cleanly: overall principle score, verdict, and 1 to 3 disproved pre-mortem or simpler-baseline hypotheses.>
 ```

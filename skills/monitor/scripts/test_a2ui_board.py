@@ -24,6 +24,7 @@ from a2ui_board import (
     board_data_model,
     board_dsl,
     default_store_dir,
+    drawer_item_for,
     item_for,
     lifecycle_step,
     review_board_data_model,
@@ -33,7 +34,8 @@ from a2ui_board import (
     sync_pane_store,
     write_board_file,
 )
-from models import Event, ReviewSortTier, ReviewStep
+from models import DrawerReason, Event, ReviewSortTier, ReviewStep, TriageEntry, TriageVerdict
+from review_overrides import ReviewOverrides, mute_pr, record_triage_entry, unmute_pr
 from testing import make_check, make_snapshot, make_thread, make_viewer_review
 
 
@@ -586,6 +588,40 @@ class TestReviewBoard(unittest.TestCase):
         )
         by_id = {comp["id"]: comp for comp in REVIEW_BOARD_COMPONENTS}
         self.assertIn("root", by_id)
+        allowed_button_keys = {
+            "id",
+            "component",
+            "catalogId",
+            "child",
+            "variant",
+            "action",
+            "checks",
+            "weight",
+            "accessibility",
+        }
+        allowed_badge_keys = {
+            "id",
+            "component",
+            "catalogId",
+            "text",
+            "tone",
+            "icon",
+            "pulse",
+            "weight",
+            "accessibility",
+        }
+        allowed_collapsible_keys = {
+            "id",
+            "component",
+            "catalogId",
+            "title",
+            "child",
+            "summary",
+            "badge",
+            "open",
+            "weight",
+            "accessibility",
+        }
         for comp in REVIEW_BOARD_COMPONENTS:
             self.assertIn(comp["catalogId"], (BASIC_CATALOG, STATUS_CATALOG))
             if "child" in comp:
@@ -596,6 +632,27 @@ class TestReviewBoard(unittest.TestCase):
                     self.assertIn(child_id, by_id)
             elif isinstance(children, dict):
                 self.assertIn(children["componentId"], by_id)
+            if comp["component"] == "Button":
+                self.assertTrue(set(comp).issubset(allowed_button_keys))
+                self.assertNotIn("label", comp)
+                self.assertEqual(by_id[comp["child"]]["component"], "Text")
+            elif comp["component"] == "Badge":
+                self.assertTrue(set(comp).issubset(allowed_badge_keys))
+            elif comp["component"] == "Collapsible":
+                self.assertTrue(set(comp).issubset(allowed_collapsible_keys))
+
+        self.assertEqual(
+            by_id["stack_col"]["children"],
+            [
+                "stack_header",
+                "stack_subtitle",
+                "stack_progress",
+                "stack_divider",
+                "stack_rows",
+                "stack_drawer",
+                "stack_footer",
+            ],
+        )
 
         progress = by_id["stack_progress"]
         self.assertEqual(progress["component"], "ProgressBar")
@@ -611,9 +668,17 @@ class TestReviewBoard(unittest.TestCase):
                 "stack_row_state",
                 "stack_row_ci",
                 "stack_row_review",
+                "triage_row_badge",
                 "review_row_btn",
+                "mute_row_btn",
             ],
         )
+
+        triage_badge = by_id["triage_row_badge"]
+        self.assertEqual(triage_badge["component"], "Badge")
+        self.assertEqual(triage_badge["catalogId"], STATUS_CATALOG)
+        self.assertEqual(triage_badge["text"], {"@path": "triageLabel"})
+        self.assertEqual(triage_badge["tone"], {"@path": "triageTone"})
 
         btn = by_id["review_row_btn"]
         self.assertEqual(btn["component"], "Button")
@@ -628,19 +693,75 @@ class TestReviewBoard(unittest.TestCase):
         self.assertEqual(event["context"]["number"], {"@path": "number"})
         self.assertEqual(event["context"]["url"], {"@path": "url"})
         self.assertEqual(event["context"]["headSha"], {"@path": "headSha"})
+        expected_can_review_checks = [
+            {
+                "condition": {
+                    "@call": "and",
+                    "catalogId": BASIC_CATALOG,
+                    "args": {"values": [{"@path": "canReview"}, True]},
+                },
+                "message": "PR is closed or merged",
+            }
+        ]
+        self.assertEqual(btn["checks"], expected_can_review_checks)
+
+        mute_btn = by_id["mute_row_btn"]
+        self.assertEqual(mute_btn["component"], "Button")
+        self.assertEqual(mute_btn["variant"], "borderless")
+        self.assertEqual(mute_btn["child"], "mute_row_btn_label")
+        self.assertEqual(by_id["mute_row_btn_label"]["text"], "Mute")
+        self.assertEqual(mute_btn["checks"], expected_can_review_checks)
+        mute_event = mute_btn["action"]["event"]
+        self.assertEqual(mute_event["name"], "mute_review_pr")
         self.assertEqual(
-            btn["checks"],
-            [
-                {
-                    "condition": {
-                        "@call": "and",
-                        "catalogId": BASIC_CATALOG,
-                        "args": {"values": [{"@path": "canReview"}, True]},
-                    },
-                    "message": "PR is closed or merged",
-                }
-            ],
+            mute_event["context"],
+            {
+                "pr": {"@path": "id"},
+                "key": {"@path": "key"},
+                "repo": {"@path": "repo"},
+                "number": {"@path": "number"},
+                "headSha": {"@path": "headSha"},
+                "updatedAt": {"@path": "updatedAt"},
+                "_oneShot": False,
+            },
         )
+        self.assertIs(mute_event["context"]["_oneShot"], False)
+
+        drawer = by_id["stack_drawer"]
+        self.assertEqual(drawer["component"], "Collapsible")
+        self.assertEqual(drawer["catalogId"], STATUS_CATALOG)
+        self.assertEqual(drawer["title"], {"@path": "/drawerTitle"})
+        self.assertEqual(drawer["summary"], {"@path": "/drawerSummary"})
+        self.assertEqual(drawer["child"], "drawer_rows")
+        self.assertEqual(
+            by_id["drawer_rows"]["children"],
+            {"path": "/drawerItems", "componentId": "drawer_row"},
+        )
+        self.assertEqual(
+            by_id["drawer_row"]["children"],
+            ["drawer_row_id", "drawer_row_badge", "drawer_row_title", "unhide_row_btn"],
+        )
+        self.assertEqual(by_id["drawer_row_badge"]["text"], {"@path": "drawerBadge"})
+        self.assertEqual(by_id["drawer_row_badge"]["tone"], {"@path": "drawerTone"})
+
+        unhide_btn = by_id["unhide_row_btn"]
+        self.assertEqual(unhide_btn["component"], "Button")
+        self.assertEqual(unhide_btn["variant"], "borderless")
+        self.assertEqual(unhide_btn["child"], "unhide_row_btn_label")
+        self.assertEqual(by_id["unhide_row_btn_label"]["text"], "Unhide")
+        unhide_event = unhide_btn["action"]["event"]
+        self.assertEqual(unhide_event["name"], "unmute_review_pr")
+        self.assertEqual(
+            unhide_event["context"],
+            {
+                "pr": {"@path": "pr"},
+                "key": {"@path": "key"},
+                "repo": {"@path": "repo"},
+                "number": {"@path": "number"},
+                "_oneShot": False,
+            },
+        )
+        self.assertIs(unhide_event["context"]["_oneShot"], False)
         self.assertIs(by_id["ack_btn"]["action"]["event"]["context"]["_oneShot"], True)
 
     def test_sort_review_snapshots_tiers_clusters_and_waves(self) -> None:
@@ -1009,6 +1130,466 @@ class TestReviewBoard(unittest.TestCase):
                 lines[0]["message"]["createSurface"]["components"],
                 STACK_BOARD_COMPONENTS,
             )
+
+    def test_empty_drawer_suppresses_title_and_dsl_emits_drawer_keys(self) -> None:
+        snap = make_snapshot(
+            number=600,
+            key="acme/widget#600",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        dm = review_board_data_model(
+            [snap],
+            viewer="alice",
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        self.assertEqual(dm["drawerTitle"], "")
+        self.assertEqual(dm["drawerSummary"], "")
+        self.assertEqual(dm["drawerItems"], [])
+        self.assertNotIn("Muted / Dormant", {seg["label"] for seg in dm["segments"]})
+
+        dsl_from_snaps = review_board_dsl(
+            [snap],
+            viewer="alice",
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        parsed = {
+            line.split(" = ", 1)[0]: json.loads(line.split(" = ", 1)[1])
+            for line in dsl_from_snaps.splitlines()
+        }
+        self.assertEqual(parsed["$/drawerTitle"], "")
+        self.assertEqual(parsed["$/drawerSummary"], "")
+        self.assertEqual(parsed["$/drawerItems"], [])
+
+    def test_mute_and_dormancy_partitioning_segments_and_unhide_pin(self) -> None:
+        now_ts = 1793880000.0  # 2026-11-05T12:00:00Z
+        active_req = make_snapshot(
+            number=601,
+            key="acme/widget#601",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T11:00:00Z",
+        )
+        muted_snap = make_snapshot(
+            number=602,
+            key="acme/widget#602",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            head_sha="aaa1111",
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        dormant_waiting = make_snapshot(
+            number=603,
+            key="acme/widget#603",
+            mine=False,
+            author="carol",
+            requested_reviewers=[],
+            head_sha="bbb2222",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-09-21T12:00:00Z",
+                commit_oid="bbb2222",
+            ),
+            updated_at="2026-09-21T12:00:00Z",  # 45 days before now_ts
+        )
+        dormant_approved = make_snapshot(
+            number=604,
+            key="acme/widget#604",
+            mine=False,
+            author="dave",
+            requested_reviewers=[],
+            approvals=["alice"],
+            viewer_opinionated_state="APPROVED",
+            viewer_last_review=make_viewer_review(
+                state="APPROVED",
+                submitted_at="2026-10-06T12:00:00Z",
+                commit_oid="ccc3333",
+            ),
+            head_sha="ccc3333",
+            updated_at="2026-10-06T12:00:00Z",  # 30 days before now_ts
+        )
+
+        overrides = ReviewOverrides()
+        mute_pr(
+            overrides,
+            "acme/widget#602",
+            muted_snap,
+            "alice",
+            now_iso="2026-11-05T11:30:00Z",
+        )
+
+        dm = review_board_data_model(
+            [active_req, muted_snap, dormant_waiting, dormant_approved],
+            viewer="alice",
+            overrides=overrides,
+            stale_days=30,
+            now_epoch=now_ts,
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        self.assertEqual([it["number"] for it in dm["items"]], [601])
+        self.assertEqual(dm["title"], "Review Queue (1)")
+        self.assertEqual(dm["status"], "1 awaiting review · 12:00 UTC")
+        self.assertEqual(dm["drawerTitle"], "Muted & Dormant (3)")
+        self.assertEqual(dm["drawerSummary"], "1 muted · 2 dormant")
+        self.assertEqual(
+            [(d["number"], d["drawerReason"], d["drawerBadge"]) for d in dm["drawerItems"]],
+            [
+                (602, "muted", "Muted"),
+                (604, "dormant", "Dormant · 30d"),
+                (603, "dormant", "Dormant · 45d"),
+            ],
+        )
+        direct_drawer = drawer_item_for(muted_snap, DrawerReason.MUTED, now_epoch=now_ts)
+        self.assertEqual(direct_drawer["id"], "PR 602")
+        self.assertEqual(direct_drawer["pr"], "acme/widget#602")
+        self.assertEqual(direct_drawer["key"], "acme/widget#602")
+        self.assertEqual(direct_drawer["drawerTone"], "neutral")
+
+        seg_by_label = {seg["label"]: seg for seg in dm["segments"]}
+        self.assertEqual(seg_by_label["Requested"]["count"], 1)
+        self.assertEqual(seg_by_label["Muted / Dormant"]["count"], 3)
+        self.assertEqual(seg_by_label["Muted / Dormant"]["tone"], "neutral")
+        self.assertEqual(dm["progressSummary"], "1 requested · 3 muted / dormant")
+
+        # Unhide pins a dormant PR active for a fresh stale_days window.
+        unmute_pr(overrides, "acme/widget#603", now_iso="2026-11-05T12:00:00Z")
+        dm_pinned = review_board_data_model(
+            [active_req, muted_snap, dormant_waiting, dormant_approved],
+            viewer="alice",
+            overrides=overrides,
+            stale_days=30,
+            now_epoch=now_ts,
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        self.assertEqual([it["number"] for it in dm_pinned["items"]], [601, 603])
+        self.assertEqual([d["number"] for d in dm_pinned["drawerItems"]], [602, 604])
+        self.assertEqual(dm_pinned["drawerSummary"], "1 muted · 1 dormant")
+
+        # stale_days=0 disables dormancy partitioning while keeping explicit mutes.
+        dm_no_stale = review_board_data_model(
+            [active_req, muted_snap, dormant_waiting, dormant_approved],
+            viewer="alice",
+            overrides=overrides,
+            stale_days=0,
+            now_epoch=now_ts,
+        )
+        self.assertEqual([d["number"] for d in dm_no_stale["drawerItems"]], [602])
+
+    def test_muted_pr_auto_wakeup_restores_row_to_active_items(self) -> None:
+        now_ts = 1793880000.0
+        muted_snap = make_snapshot(
+            number=610,
+            key="acme/widget#610",
+            mine=False,
+            author="bob",
+            requested_reviewers=[],
+            head_sha="aaa1111",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        overrides = ReviewOverrides()
+        mute_pr(
+            overrides,
+            "acme/widget#610",
+            muted_snap,
+            "alice",
+            now_iso="2026-11-05T11:00:00Z",
+        )
+
+        dm_muted = review_board_data_model(
+            [muted_snap],
+            viewer="alice",
+            overrides=overrides,
+            now_epoch=now_ts,
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        self.assertEqual(dm_muted["items"], [])
+        self.assertEqual([d["number"] for d in dm_muted["drawerItems"]], [610])
+        self.assertEqual(dm_muted["status"], "Watching · 12:00 UTC")
+
+        # Post-mute push changes head_sha -> auto-wakes back into /items.
+        pushed_snap = make_snapshot(
+            number=610,
+            key="acme/widget#610",
+            mine=False,
+            author="bob",
+            requested_reviewers=[],
+            head_sha="bbb2222",
+            head_committed_date="2026-11-05T11:30:00Z",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            updated_at="2026-11-05T11:30:00Z",
+        )
+        dm_woke = review_board_data_model(
+            [pushed_snap],
+            viewer="alice",
+            overrides=overrides,
+            now_epoch=now_ts,
+            observed_at="2026-11-05T12:00:00Z",
+        )
+        self.assertEqual([it["number"] for it in dm_woke["items"]], [610])
+        self.assertEqual(dm_woke["drawerItems"], [])
+        self.assertEqual(dm_woke["drawerTitle"], "")
+
+    def test_triage_badges_watermark_invalidation_and_detail_bullets(self) -> None:
+        shelved_snap = make_snapshot(
+            number=620,
+            key="acme/widget#620",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            head_sha="aaa1111",
+            head_committed_date="2026-11-05T08:00:00Z",
+            viewer_requested_at="2026-11-05T09:00:00Z",
+            viewer_last_comment_at="2026-11-05T10:30:00Z",
+            discussion_watermark="IC_10:2026-11-05T10:30:00Z",
+            updated_at="2026-11-05T10:30:00Z",
+        )
+        overrides = ReviewOverrides()
+        triage_entry = record_triage_entry(
+            overrides,
+            "acme/widget#620",
+            watermark="IC_10:2026-11-05T10:30:00Z",
+            verdict=TriageVerdict.LIKELY_SHELVED,
+            summary="Author noted feature is on hold",
+            evaluated_at="2026-11-05T11:00:00Z",
+        )
+        item = review_item_for(shelved_snap, "alice", triage=triage_entry)
+        self.assertEqual(item["updatedAt"], "2026-11-05T10:30:00Z")
+        self.assertEqual(item["triageLabel"], "Likely shelved")
+        self.assertEqual(item["triageTone"], "warning")
+        self.assertIn("- Replied in PR comments after review request", item["detail"])
+        self.assertIn("- Likely shelved: Author noted feature is on hold", item["detail"])
+
+        # Deferred verdict uses neutral tone.
+        deferred_entry = TriageEntry(
+            watermark="IC_10:2026-11-05T10:30:00Z",
+            verdict=TriageVerdict.DEFERRED,
+            summary="Deferred until next milestone",
+            evaluated_at="2026-11-05T11:00:00Z",
+        )
+        deferred_item = review_item_for(shelved_snap, "alice", triage=deferred_entry)
+        self.assertEqual(deferred_item["triageLabel"], "Deferred")
+        self.assertEqual(deferred_item["triageTone"], "neutral")
+        self.assertIn("- Deferred: Deferred until next milestone", deferred_item["detail"])
+
+        # New comment watermark invalidates stale TriageEntry badge and bullet.
+        newer_watermark_snap = make_snapshot(
+            number=620,
+            key="acme/widget#620",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            discussion_watermark="IC_11:2026-11-05T11:45:00Z",
+            updated_at="2026-11-05T11:45:00Z",
+        )
+        invalidated_item = review_item_for(newer_watermark_snap, "alice", triage=triage_entry)
+        self.assertEqual(invalidated_item["triageLabel"], "")
+        self.assertEqual(invalidated_item["triageTone"], "neutral")
+        self.assertNotIn("Likely shelved", invalidated_item["detail"])
+
+        # Partial viewer-thread progress & bot/non-viewer thread filtering.
+        partial_threads_snap = make_snapshot(
+            number=621,
+            key="acme/widget#621",
+            mine=False,
+            author="bob",
+            requested_reviewers=[],
+            head_sha="bbb2222",
+            head_committed_date="2026-11-05T10:00:00Z",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    resolved=False,
+                    last_author="bob",
+                    last_comment_at="2026-11-05T09:30:00Z",
+                    participants=("alice", "bob"),
+                ),
+                make_thread(
+                    thread_id="t2",
+                    resolved=False,
+                    last_author="alice",
+                    last_comment_at="2026-11-05T08:55:00Z",
+                    participants=("alice",),
+                ),
+                make_thread(
+                    thread_id="t3",
+                    resolved=False,
+                    last_author="carol",
+                    last_comment_at="2026-11-05T10:15:00Z",
+                    participants=("carol", "bob"),
+                ),
+                make_thread(
+                    thread_id="t4",
+                    resolved=False,
+                    last_author="ci-bot[bot]",
+                    last_author_is_bot=True,
+                    last_comment_at="2026-11-05T10:20:00Z",
+                    participants=("alice", "ci-bot[bot]"),
+                ),
+            ],
+            updated_at="2026-11-05T10:20:00Z",
+        )
+        partial_item = review_item_for(partial_threads_snap, "alice")
+        self.assertIn("1/3 of your threads updated; 2 awaiting author", partial_item["detail"])
+        # Only t1 is unread for alice (t3 is carol's thread, t4 is a bot comment).
+        self.assertIn("1 unread thread reply", partial_item["detail"])
+
+        unaddressed_snap = make_snapshot(
+            number=622,
+            key="acme/widget#622",
+            mine=False,
+            author="bob",
+            requested_reviewers=[],
+            head_sha="bbb2222",
+            head_committed_date="2026-11-05T10:00:00Z",
+            viewer_last_review=make_viewer_review(
+                state="CHANGES_REQUESTED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            threads=[
+                make_thread(
+                    thread_id="t1",
+                    resolved=False,
+                    last_author="alice",
+                    last_comment_at="2026-11-05T08:55:00Z",
+                    participants=("alice",),
+                ),
+                make_thread(
+                    thread_id="t2",
+                    resolved=False,
+                    last_author="alice",
+                    last_comment_at="2026-11-05T08:56:00Z",
+                    participants=("alice",),
+                ),
+            ],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        unaddressed_item = review_item_for(unaddressed_snap, "alice")
+        self.assertIn("2 of your threads awaiting author", unaddressed_item["detail"])
+
+        peer_only_threads_snap = make_snapshot(
+            number=623,
+            key="acme/widget#623",
+            mine=False,
+            author="bob",
+            requested_reviewers=[],
+            head_sha="aaa1111",
+            viewer_last_review=make_viewer_review(
+                state="COMMENTED",
+                submitted_at="2026-11-05T09:00:00Z",
+                commit_oid="aaa1111",
+            ),
+            threads=[
+                make_thread(
+                    thread_id="t_peer_only",
+                    resolved=False,
+                    last_author="bob",
+                    last_comment_at="2026-11-05T09:30:00Z",
+                    participants=("carol", "bob"),
+                ),
+            ],
+            updated_at="2026-11-05T09:30:00Z",
+        )
+        peer_only_item = review_item_for(peer_only_threads_snap, "alice")
+        self.assertNotIn("unread thread", peer_only_item["detail"])
+
+    def test_is_unchanged_and_sync_pane_store_detect_drawer_items_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store_dir = Path(tmp) / "plugin_data"
+            active_snap = make_snapshot(
+                number=701,
+                key="acme/widget#701",
+                mine=False,
+                author="bob",
+                requested_reviewers=["alice"],
+                updated_at="2026-11-05T10:00:00Z",
+            )
+            dormant_snap = make_snapshot(
+                number=702,
+                key="acme/widget#702",
+                mine=False,
+                author="carol",
+                requested_reviewers=[],
+                head_sha="aaa1111",
+                viewer_last_review=make_viewer_review(
+                    state="CHANGES_REQUESTED",
+                    submitted_at="2026-09-20T10:00:00Z",
+                    commit_oid="aaa1111",
+                ),
+                updated_at="2026-09-20T10:00:00Z",
+            )
+            now_day1 = 1793880000.0
+            dm1 = review_board_data_model(
+                [active_snap],
+                viewer="alice",
+                now_epoch=now_day1,
+                observed_at="2026-11-05T12:00:00Z",
+            )
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-drawer",
+                    dm1,
+                    store_dir=store_dir,
+                    components=REVIEW_BOARD_COMPONENTS,
+                ),
+                "written",
+            )
+            self.assertEqual(_read_seq(store_dir, "conv-drawer"), 1)
+
+            # Timestamp-only update with identical items and drawerItems stays unchanged.
+            dm1_later = review_board_data_model(
+                [active_snap],
+                viewer="alice",
+                now_epoch=now_day1 + 60,
+                observed_at="2026-11-05T12:01:00Z",
+            )
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-drawer",
+                    dm1_later,
+                    store_dir=store_dir,
+                    components=REVIEW_BOARD_COMPONENTS,
+                ),
+                "unchanged",
+            )
+
+            # Adding a dormant row mutates ONLY drawerItems (items stays [701]) -> must write!
+            dm2 = review_board_data_model(
+                [active_snap, dormant_snap],
+                viewer="alice",
+                now_epoch=now_day1,
+                observed_at="2026-11-05T12:02:00Z",
+            )
+            self.assertEqual(dm2["items"], dm1["items"])
+            self.assertNotEqual(dm2["drawerItems"], dm1["drawerItems"])
+            self.assertEqual(
+                sync_pane_store(
+                    "conv-drawer",
+                    dm2,
+                    store_dir=store_dir,
+                    components=REVIEW_BOARD_COMPONENTS,
+                ),
+                "written",
+            )
+            self.assertEqual(_read_seq(store_dir, "conv-drawer"), 2)
 
 
 if __name__ == "__main__":

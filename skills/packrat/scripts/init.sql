@@ -320,7 +320,8 @@ JOIN kb.pull_requests p
 JOIN kb.repos r ON r.repo_id = c.repo_id;
 
 CREATE OR REPLACE VIEW v_pr_review_requests AS
-SELECT r.full_name || '#' || q.pr_number AS item_key, q.reviewer, q.reviewer_kind
+SELECT r.full_name || '#' || q.pr_number AS item_key, q.reviewer, q.reviewer_kind,
+  q.requested_at AS requested_at
 FROM kb.review_requests q
 JOIN kb.repos r ON r.repo_id = q.repo_id;
 
@@ -345,7 +346,8 @@ JOIN kb.repos r ON r.repo_id = lr.repo_id;
 
 CREATE OR REPLACE VIEW v_pr_threads AS
 SELECT r.full_name || '#' || t.pr_number AS item_key, t.thread_id, t.is_resolved,
-  t.is_outdated, t.last_author, t.last_author_type, t.last_at
+  t.is_outdated, t.last_author, t.last_author_type, t.last_at,
+  t.participants_json AS participants_json
 FROM kb.thread_activity t
 JOIN kb.repos r ON r.repo_id = t.repo_id;
 

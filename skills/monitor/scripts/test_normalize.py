@@ -37,6 +37,7 @@ class TestNormalize(unittest.TestCase):
         self.assertEqual(snap.state, "OPEN")
         self.assertFalse(snap.draft)
         self.assertEqual(snap.last_committer, "alice")
+        self.assertEqual(snap.head_committed_date, "2026-10-27T21:00:00Z")
         self.assertEqual(snap.rollup_state, "PENDING")
         self.assertEqual(snap.requested_reviewers, ["bob", "team:core-reviewers"])
         self.assertEqual(snap.assignees, ["alice"])
@@ -246,6 +247,202 @@ class TestNormalize(unittest.TestCase):
                 commit_oid=None,
             ),
         )
+
+    def test_normalize_pr_extracts_thread_outdated_and_participants(self) -> None:
+        payload = json.loads(load_fixture("pr_open_ci_running.json"))
+        raw = copy.deepcopy(payload["data"]["pr0"]["pullRequest"])
+        raw["reviewThreads"] = {
+            "totalCount": 3,
+            "nodes": [
+                {
+                    "id": "PRRT_long",
+                    "isResolved": False,
+                    "isOutdated": True,
+                    "firstComment": {"nodes": [{"author": {"login": "bob", "__typename": "User"}}]},
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "carol", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:10:00Z",
+                            },
+                            {
+                                "author": {"login": "Bob", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:20:00Z",
+                            },
+                            {
+                                "author": {"login": "alice", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:30:00Z",
+                            },
+                        ]
+                    },
+                },
+                {
+                    "id": "PRRT_packrat_hydrated",
+                    "isResolved": True,
+                    "isOutdated": False,
+                    "participants": ["bob", "alice", "bob", ""],
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "alice", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:40:00Z",
+                            }
+                        ]
+                    },
+                },
+                {
+                    "id": "PRRT_packrat_unhydrated",
+                    "isResolved": False,
+                    "participants": [],
+                    "comments": {
+                        "nodes": [
+                            {
+                                "author": {"login": "alice", "__typename": "User"},
+                                "createdAt": "2026-10-27T20:50:00Z",
+                            }
+                        ]
+                    },
+                },
+            ],
+        }
+        snap = normalize_pr(raw, viewer="bob")
+        by_id = {t.id: t for t in snap.threads}
+
+        long_t = by_id["PRRT_long"]
+        self.assertTrue(long_t.outdated)
+        self.assertEqual(long_t.participants, ("bob", "carol", "alice"))
+        self.assertEqual(long_t.last_author, "alice")
+        self.assertEqual(long_t.last_comment_at, "2026-10-27T20:30:00Z")
+
+        hydrated_t = by_id["PRRT_packrat_hydrated"]
+        self.assertFalse(hydrated_t.outdated)
+        self.assertEqual(hydrated_t.participants, ("bob", "alice"))
+
+        unhydrated_t = by_id["PRRT_packrat_unhydrated"]
+        self.assertEqual(unhydrated_t.participants, ())
+
+    def test_normalize_pr_extracts_viewer_requested_at_and_comment_watermarks(self) -> None:
+        payload = json.loads(load_fixture("pr_open_ci_running.json"))
+        base_raw = payload["data"]["pr0"]["pullRequest"]
+
+        # 1. Post-review human comments + timelineItems vs reviewRequests max requestedAt
+        raw_reviewed = {
+            **copy.deepcopy(base_raw),
+            "reviewRequests": {
+                "totalCount": 1,
+                "nodes": [
+                    {
+                        "requestedReviewer": {"login": "bob"},
+                        "requestedAt": "2026-10-27T20:15:00Z",
+                    }
+                ],
+            },
+            "timelineItems": {
+                "nodes": [
+                    {
+                        "createdAt": "2026-10-27T20:10:00Z",
+                        "requestedReviewer": {"__typename": "User", "login": "bob"},
+                    },
+                    {
+                        "createdAt": "2026-10-27T20:45:00Z",
+                        "requestedReviewer": {"__typename": "User", "login": "BOB"},
+                    },
+                    {
+                        "createdAt": "2026-10-27T21:30:00Z",
+                        "requestedReviewer": {"__typename": "User", "login": "carol"},
+                    },
+                ]
+            },
+            "reviews": {
+                "nodes": [
+                    {
+                        "state": "CHANGES_REQUESTED",
+                        "submittedAt": "2026-10-27T20:30:00Z",
+                        "commit": {"oid": "deadbeef"},
+                        "author": {"login": "bob", "__typename": "User"},
+                    }
+                ]
+            },
+            "comments": {
+                "nodes": [
+                    {
+                        "id": "IC_1",
+                        "createdAt": "2026-10-27T20:20:00Z",
+                        "author": {"login": "bob", "__typename": "User"},
+                    },
+                    {
+                        "id": "IC_2",
+                        "createdAt": "2026-10-27T20:50:00Z",
+                        "author": {"login": "alice", "__typename": "User"},
+                    },
+                    {
+                        "id": "IC_3",
+                        "createdAt": "2026-10-27T21:10:00Z",
+                        "author": {"login": "Bob", "__typename": "User"},
+                    },
+                    {
+                        "id": "IC_bot",
+                        "createdAt": "2026-10-27T21:55:00Z",
+                        "author": {"login": "ci-helper[bot]", "__typename": "Bot"},
+                    },
+                ]
+            },
+        }
+        snap = normalize_pr(raw_reviewed, viewer="bob")
+        self.assertEqual(snap.viewer_requested_at, "2026-10-27T20:45:00Z")
+        self.assertEqual(snap.viewer_last_comment_at, "2026-10-27T21:10:00Z")
+        self.assertEqual(snap.author_last_comment_at, "2026-10-27T20:50:00Z")
+        self.assertEqual(snap.discussion_watermark, "IC_3:2026-10-27T21:10:00Z")
+
+        # 2. Comments older than last_review (with only bot comments newer) -> watermark None
+        raw_no_post_review = {
+            **copy.deepcopy(raw_reviewed),
+            "comments": {
+                "nodes": [
+                    {
+                        "id": "IC_old",
+                        "createdAt": "2026-10-27T20:00:00Z",
+                        "author": {"login": "alice", "__typename": "User"},
+                    },
+                    {
+                        "id": "IC_bot",
+                        "createdAt": "2026-10-27T21:55:00Z",
+                        "author": {"login": "ci-helper", "is_bot": True, "__typename": "User"},
+                    },
+                ]
+            },
+        }
+        snap_old = normalize_pr(raw_no_post_review, viewer="bob")
+        self.assertIsNone(snap_old.viewer_last_comment_at)
+        self.assertEqual(snap_old.author_last_comment_at, "2026-10-27T20:00:00Z")
+        self.assertIsNone(snap_old.discussion_watermark)
+
+        # 3. Directly requested PR with no formal review yet + viewer comment -> watermark set
+        raw_direct_comment = {
+            **copy.deepcopy(base_raw),
+            "latestOpinionatedReviews": {"nodes": []},
+            "reviews": {"nodes": []},
+            "comments": {
+                "nodes": [
+                    {
+                        "id": "IC_hold",
+                        "createdAt": "2026-10-27T21:12:00Z",
+                        "author": {"login": "bob", "__typename": "User"},
+                    }
+                ]
+            },
+        }
+        snap_direct = normalize_pr(raw_direct_comment, viewer="bob")
+        self.assertIsNone(snap_direct.viewer_last_review)
+        self.assertEqual(snap_direct.viewer_last_comment_at, "2026-10-27T21:12:00Z")
+        self.assertEqual(snap_direct.discussion_watermark, "IC_hold:2026-10-27T21:12:00Z")
+
+        # 4. Author viewing own PR: author_last_comment_at is None and watermark is None
+        snap_self = normalize_pr(raw_reviewed, viewer="alice")
+        self.assertIsNone(snap_self.viewer_requested_at)
+        self.assertEqual(snap_self.viewer_last_comment_at, "2026-10-27T20:50:00Z")
+        self.assertIsNone(snap_self.author_last_comment_at)
+        self.assertIsNone(snap_self.discussion_watermark)
 
 
 if __name__ == "__main__":

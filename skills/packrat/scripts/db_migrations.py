@@ -460,6 +460,18 @@ def migrate_0008_latest_reviews(conn: sqlite3.Connection) -> None:
     )
 
 
+REVIEW_TURN_SIGNALS_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("thread_activity", "participants_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("review_requests", "requested_at", "TEXT"),
+)
+"""Columns added by migration 9 for thread participants and review request timestamps."""
+
+
+def migrate_0009_review_turn_signals(conn: sqlite3.Connection) -> None:
+    """Adds `thread_activity.participants_json` and `review_requests.requested_at`."""
+    _add_missing_columns(conn, REVIEW_TURN_SIGNALS_COLUMNS)
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -471,6 +483,7 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (6, migrate_0006_repo_aliases),
     (7, migrate_0007_timeline_events),
     (8, migrate_0008_latest_reviews),
+    (9, migrate_0009_review_turn_signals),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]

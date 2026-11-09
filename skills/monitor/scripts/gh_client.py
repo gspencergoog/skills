@@ -90,13 +90,48 @@ fragment PrFields on PullRequest {
     nodes {
       id
       isResolved
-      comments(last: 1) {
+      isOutdated
+      firstComment: comments(first: 1) {
+        nodes {
+          author {
+            login
+            __typename
+          }
+        }
+      }
+      comments(last: 10) {
         nodes {
           author {
             login
             __typename
           }
           createdAt
+        }
+      }
+    }
+  }
+  comments(last: 10) {
+    nodes {
+      id
+      createdAt
+      author {
+        login
+        __typename
+      }
+    }
+  }
+  timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+    nodes {
+      ... on ReviewRequestedEvent {
+        createdAt
+        requestedReviewer {
+          __typename
+          ... on User {
+            login
+          }
+          ... on Bot {
+            login
+          }
         }
       }
     }

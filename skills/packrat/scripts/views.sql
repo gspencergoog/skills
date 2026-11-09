@@ -138,7 +138,8 @@ CREATE VIEW v_pr_review_requests AS
 SELECT
   r.full_name || '#' || q.pr_number AS item_key,
   q.reviewer AS reviewer,
-  q.reviewer_kind AS reviewer_kind
+  q.reviewer_kind AS reviewer_kind,
+  q.requested_at AS requested_at
 FROM review_requests q
 JOIN repos r ON r.repo_id = q.repo_id;
 
@@ -176,7 +177,8 @@ SELECT
   t.is_outdated AS is_outdated,
   t.last_author AS last_author,
   t.last_author_type AS last_author_type,
-  t.last_at AS last_at
+  t.last_at AS last_at,
+  t.participants_json AS participants_json
 FROM thread_activity t
 JOIN repos r ON r.repo_id = t.repo_id;
 

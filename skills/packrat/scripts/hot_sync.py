@@ -79,13 +79,28 @@ fragment HotPrFields on PullRequest {
     nodes { ...HotThread }
   }
   comments(last: 10) { nodes { id createdAt author { login __typename } } }
+  timelineItems(last: 20, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+    nodes {
+      ... on ReviewRequestedEvent {
+        createdAt
+        requestedReviewer {
+          __typename
+          ... on User { login }
+          ... on Bot { login }
+          ... on Mannequin { login }
+          ... on Team { slug organization { login } }
+        }
+      }
+    }
+  }
 }
 
 fragment HotThread on PullRequestReviewThread {
   id
   isResolved
   isOutdated
-  comments(last: 1) { nodes { createdAt author { login __typename } } }
+  firstComment: comments(first: 1) { nodes { author { login } } }
+  comments(last: 10) { nodes { createdAt author { login __typename } } }
 }
 """.strip()
 
@@ -182,7 +197,8 @@ fragment HotThread on PullRequestReviewThread {{
   id
   isResolved
   isOutdated
-  comments(last: 1) {{ nodes {{ createdAt author {{ login __typename }} }} }}
+  firstComment: comments(first: 1) {{ nodes {{ author {{ login }} }} }}
+  comments(last: 10) {{ nodes {{ createdAt author {{ login __typename }} }} }}
 }}
 """
 
@@ -251,9 +267,7 @@ def parse_check_context(ctx: dict[str, Any]) -> CheckRunRecord | None:
     required = ctx.get("isRequired")
     is_required = required if isinstance(required, bool) else None
     if ctx.get("__typename") == "CheckRun" and ctx.get("name"):
-        run_id = _dict(_dict(ctx.get("checkSuite")).get("workflowRun")).get(
-            "databaseId"
-        )
+        run_id = _dict(_dict(ctx.get("checkSuite")).get("workflowRun")).get("databaseId")
         check_id = ctx.get("databaseId")
         return CheckRunRecord(
             name=str(ctx["name"]),
@@ -279,24 +293,78 @@ def parse_check_context(ctx: dict[str, Any]) -> CheckRunRecord | None:
     return None
 
 
-def parse_review_request(node: dict[str, Any]) -> ReviewRequestRecord | None:
-    """Converts one `reviewRequests` node; teams become `org/slug`."""
+def parse_review_request(
+    node: dict[str, Any], *, requested_at: str | None = None
+) -> ReviewRequestRecord | None:
+    """Converts one `reviewRequests` or `ReviewRequestedEvent` node; teams become `org/slug`."""
     reviewer = _dict(node.get("requestedReviewer"))
     kind = reviewer.get("__typename")
+    raw_at = requested_at if requested_at is not None else node.get("requestedAt")
+    ts = str(raw_at) if isinstance(raw_at, str) and raw_at else None
     if kind == "Team" and reviewer.get("slug"):
         org = _login(reviewer.get("organization"))
         slug = str(reviewer["slug"])
         return ReviewRequestRecord(
-            reviewer=f"{org}/{slug}" if org else slug, reviewer_kind="Team"
+            reviewer=f"{org}/{slug}" if org else slug,
+            reviewer_kind="Team",
+            requested_at=ts,
         )
     login = _login(reviewer)
     if login and kind:
-        return ReviewRequestRecord(reviewer=login, reviewer_kind=str(kind))
+        return ReviewRequestRecord(reviewer=login, reviewer_kind=str(kind), requested_at=ts)
     return None
 
 
+def _reviewer_request_key(rec: ReviewRequestRecord) -> str:
+    """Returns the case-normalized lookup key for `rec` (`team:org/slug` or `login`)."""
+    if rec.reviewer_kind == "Team":
+        return f"team:{rec.reviewer.lower()}"
+    return rec.reviewer.lower()
+
+
+def _parse_requested_at_map(node: dict[str, Any]) -> dict[str, str]:
+    """Maps normalized reviewer keys to their latest `ReviewRequestedEvent.createdAt`."""
+    latest: dict[str, str] = {}
+    for ev in _nodes(node.get("timelineItems")):
+        created_at = ev.get("createdAt")
+        if not isinstance(created_at, str) or not created_at:
+            continue
+        parsed = parse_review_request(ev)
+        if parsed is None:
+            continue
+        key = _reviewer_request_key(parsed)
+        if created_at >= latest.get(key, ""):
+            latest[key] = created_at
+    return latest
+
+
+def _parse_review_requests(node: dict[str, Any]) -> list[ReviewRequestRecord]:
+    """Parses `reviewRequests` nodes and attaches latest `requested_at` timestamps."""
+    requested_at = _parse_requested_at_map(node)
+    out: list[ReviewRequestRecord] = []
+    for raw in _nodes(node.get("reviewRequests")):
+        rec = parse_review_request(raw)
+        if rec is None:
+            continue
+        ts = requested_at.get(_reviewer_request_key(rec)) or rec.requested_at
+        out.append(ReviewRequestRecord(rec.reviewer, rec.reviewer_kind, ts) if ts else rec)
+    return out
+
+
+def _thread_participants(node: dict[str, Any]) -> tuple[str, ...]:
+    """Returns ordered deduplicated logins across `firstComment` and `comments`."""
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in (*_nodes(node.get("firstComment")), *_nodes(node.get("comments"))):
+        login = _login(item.get("author"))
+        if login and login.lower() not in seen:
+            seen.add(login.lower())
+            ordered.append(login)
+    return tuple(ordered)
+
+
 def parse_thread(node: dict[str, Any]) -> ThreadActivityRecord | None:
-    """Converts one review-thread node, keeping only its last comment."""
+    """Converts one review-thread node into resolution state, last comment, and participants."""
     if not node.get("id"):
         return None
     comments = _nodes(node.get("comments"))
@@ -309,6 +377,7 @@ def parse_thread(node: dict[str, Any]) -> ThreadActivityRecord | None:
         last_author=_login(author),
         last_author_type=actor_type(author),
         last_at=last.get("createdAt"),
+        participants=_thread_participants(node),
     )
 
 
@@ -411,9 +480,7 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     """Parses one aliased PR node (first pages of threads and contexts) into a snapshot."""
     contexts = _nodes(_dict(_rollup(node).get("contexts")))
     raw_repo = _dict(node.get("repository")).get("nameWithOwner")
-    repo_full_name = (
-        str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
-    )
+    repo_full_name = str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
     reviews = [
         OpinionatedReviewRecord(
             author=str(_login(r.get("author"))),
@@ -427,11 +494,7 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     return HotPrSnapshot(
         record=parse_pr_live(repo_id, node),
         checks=[c for c in map(parse_check_context, contexts) if c is not None],
-        review_requests=[
-            r
-            for r in map(parse_review_request, _nodes(node.get("reviewRequests")))
-            if r
-        ],
+        review_requests=_parse_review_requests(node),
         reviews=reviews,
         latest_reviews=parse_latest_reviews(node.get("reviews")),
         threads=[t for t in map(parse_thread, _nodes(node.get("reviewThreads"))) if t],
@@ -459,9 +522,7 @@ class HotStore(Protocol):
 
     def ensure_items_repo(self, owner: str, name: str) -> Any: ...
 
-    def upsert_pr_live(
-        self, record: PrLiveRecord, now: float | None = None
-    ) -> list[str]: ...
+    def upsert_pr_live(self, record: PrLiveRecord, now: float | None = None) -> list[str]: ...
 
     def replace_check_runs(
         self,
@@ -534,9 +595,7 @@ class HotRefresher:
 
     def _query(self, query: str) -> dict[str, Any]:
         """Runs `query` through the transport and returns its `data` object."""
-        payload = self.transport.graphql(
-            query, {}, worker=self.worker, priority=self.priority
-        )
+        payload = self.transport.graphql(query, {}, worker=self.worker, priority=self.priority)
         return _dict(payload.get("data"))
 
     def resolve_node_ids(self, keys: Sequence[str]) -> dict[str, str]:
@@ -556,33 +615,25 @@ class HotRefresher:
                     known[key] = str(node_id)
         return known
 
-    def _extra_threads(
-        self, node_id: str, after: str | None
-    ) -> list[ThreadActivityRecord]:
+    def _extra_threads(self, node_id: str, after: str | None) -> list[ThreadActivityRecord]:
         """Fetches review threads beyond the first page."""
         out: list[ThreadActivityRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
-            conn = _dict(
-                self._query(build_threads_page_query(node_id, after)).get("node")
-            ).get("reviewThreads")
+            conn = _dict(self._query(build_threads_page_query(node_id, after)).get("node")).get(
+                "reviewThreads"
+            )
             out.extend(t for t in map(parse_thread, _nodes(conn)) if t)
             after = _page_info(conn)
             pages += 1
         return out
 
-    def _extra_contexts(
-        self, node_id: str, number: int, after: str | None
-    ) -> list[CheckRunRecord]:
+    def _extra_contexts(self, node_id: str, number: int, after: str | None) -> list[CheckRunRecord]:
         """Fetches head-commit check contexts beyond the first page."""
         out: list[CheckRunRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
-            node = _dict(
-                self._query(build_contexts_page_query(node_id, number, after)).get(
-                    "node"
-                )
-            )
+            node = _dict(self._query(build_contexts_page_query(node_id, number, after)).get("node"))
             conn = _dict(_rollup(node).get("contexts"))
             out.extend(c for c in map(parse_check_context, _nodes(conn)) if c)
             after = _page_info(conn)
@@ -592,13 +643,9 @@ class HotRefresher:
     def _complete(self, snap: HotPrSnapshot, node: dict[str, Any]) -> None:
         """Adds follow-up pages of threads and check contexts to `snap` when needed."""
         node_id = str(node.get("id") or "")
-        snap.threads.extend(
-            self._extra_threads(node_id, _page_info(node.get("reviewThreads")))
-        )
+        snap.threads.extend(self._extra_threads(node_id, _page_info(node.get("reviewThreads"))))
         contexts = _dict(_rollup(node).get("contexts"))
-        snap.checks.extend(
-            self._extra_contexts(node_id, snap.record.number, _page_info(contexts))
-        )
+        snap.checks.extend(self._extra_contexts(node_id, snap.record.number, _page_info(contexts)))
 
     def _write_threads(
         self, repo_id: int, number: int, threads: Sequence[ThreadActivityRecord]
@@ -618,19 +665,13 @@ class HotRefresher:
             changed |= self.store.replace_check_runs(
                 rec.repo_id, rec.number, rec.head_sha, snap.checks
             )
-        changed |= self.store.replace_review_requests(
-            rec.repo_id, rec.number, snap.review_requests
-        )
+        changed |= self.store.replace_review_requests(rec.repo_id, rec.number, snap.review_requests)
         changed |= self.store.replace_latest_opinionated_reviews(
             rec.repo_id, rec.number, snap.reviews
         )
-        changed |= self.store.replace_latest_reviews(
-            rec.repo_id, rec.number, snap.latest_reviews
-        )
+        changed |= self.store.replace_latest_reviews(rec.repo_id, rec.number, snap.latest_reviews)
         changed |= self._write_threads(rec.repo_id, rec.number, snap.threads)
-        changed |= self.store.upsert_item_comments(
-            rec.repo_id, "pr", rec.number, snap.comments
-        )
+        changed |= self.store.upsert_item_comments(rec.repo_id, "pr", rec.number, snap.comments)
         return changed
 
     def _stored_repo_for_node(
@@ -659,9 +700,7 @@ class HotRefresher:
             return merge_fn(stored.repo_id, repo_name)
         return stored
 
-    def _apply_node(
-        self, node: dict[str, Any], requested_key: str | None = None
-    ) -> str | None:
+    def _apply_node(self, node: dict[str, Any], requested_key: str | None = None) -> str | None:
         """Parses, completes, and stores one PR node; returns its key when it changed."""
         repo_name = str(_dict(node.get("repository")).get("nameWithOwner") or "")
         if "/" not in repo_name or node.get("number") is None:
@@ -708,7 +747,5 @@ class HotRefresher:
         changed: list[str] = []
         for start in range(0, len(targets), self.batch_size):
             end = start + self.batch_size
-            changed.extend(
-                self._refresh_batch(targets[start:end], resolved_keys[start:end])
-            )
+            changed.extend(self._refresh_batch(targets[start:end], resolved_keys[start:end]))
         return changed

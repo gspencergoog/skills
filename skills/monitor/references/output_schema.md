@@ -38,6 +38,12 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--notify-scope SCOPE` | `mine` | Which pull request events trigger conversation notifications: `mine` (viewer PRs + terminal) or `all` |
 | `--source MODE` | `auto` | Data source: `packrat` (read a running `packrat serve`), `github` (poll GitHub directly), or `auto` (`packrat` when its heartbeat is fresh, else `github`) |
 | `--packrat-db FILE` | `~/.local/share/packrat/repos.sqlite` | `packrat` database to read in `packrat` mode |
+| `--stale-days DAYS` | `30` | Days of inactivity before unrequested `Waiting on author` or `Approved` pull requests move into the bottom **Muted & Dormant** drawer under `--reviews` (`0` disables) |
+| `--overrides-file FILE` | `~/.config/monitor/review_overrides.json` (`$XDG_CONFIG_HOME/monitor/review_overrides.json` when set) | Cross-session reviewer overrides JSON storing mutes, dormant pins, and watermarked discussion triage entries |
+| `--mute PR` | repeatable | Record a cross-session mute for `PR` under `--reviews` until a post-mute push or review request arrives |
+| `--unmute PR` | repeatable | Clear any mute on `PR` and pin dormant rows active for a fresh `--stale-days` window under `--reviews` |
+| `--record-triage PR=VERDICT` | repeatable | Record a watermarked discussion triage verdict (`active`, `likely_shelved`, or `deferred`) under `--reviews` |
+| `--triage-summary PR=TEXT` | repeatable | Optional plain-text rationale paired with `--record-triage` for `PR` |
 
 Direct GitHub polling (`--source github` or fallback) uses `gh` with a standard `repo`-scoped token; no extra `notifications` scope is needed.
 
@@ -160,12 +166,21 @@ Example:
 
 ### Reviewer Snapshot and Board Fields (`--reviews`)
 
-Each `PrSnapshot` in `prs` includes two viewer-specific review fields used by `classify_review_turn(snap, viewer)`:
+Each `PrSnapshot` in `prs` includes viewer-specific review and turn-detection fields used by `classify_review_turn(snap, viewer)`:
 
-- `viewer_last_review`: object `{"state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED", "submitted_at": "<ISO-8601>", "commit_oid": "<sha>"}` for the viewer's latest non-pending review, or `null`.
-- `viewer_opinionated_state`: `"APPROVED"`, `"CHANGES_REQUESTED"`, or `null` from `latestOpinionatedReviews` for the viewer.
+- `viewer_last_review` holds `{"state": "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED", "submitted_at": "<ISO-8601>", "commit_oid": "<sha>"}` for the viewer's latest non-pending review, or `null`.
+- `viewer_opinionated_state` holds `"APPROVED"`, `"CHANGES_REQUESTED"`, or `null` from `latestOpinionatedReviews` for the viewer.
+- `head_committed_date` holds the ISO-8601 `committedDate` of `head_sha` (or `null`), preventing older commits bound to inline thread replies from masquerading as post-review pushes.
+- `viewer_requested_at` holds the latest `ReviewRequestedEvent` timestamp targeting the viewer (or `null`).
+- `viewer_last_comment_at` and `author_last_comment_at` hold the latest human `IssueComment` timestamps for the viewer and pull request author (or `null`), demoting `direct_requested` rows when the viewer already replied in top-level comments after the latest request and commit.
+- `discussion_watermark` holds `"<comment_id>:<created_at>"` when a human `IssueComment` postdates `viewer_last_review.submitted_at` (or `null`).
+- Each `Thread` entry in `threads` also carries `outdated` (`boolean`) and `participants` (`string[]` of unique comment author logins).
 
-Under `--reviews`, `monitor_prs.py` renders `REVIEW_BOARD_COMPONENTS` into the `a2ui-pane` store (`surfaceId: "monitor"`) and writes `review_board_dsl` to `board.a2ui`. The data model provides `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/segments`, `$/progressSummary`, `$/ackLabel`, and `$/items`. Each `$/items` entry includes `id`, `key`, `number`, `repo`, `url`, `title`, `author`, `meta`, `headSha`, `wave`, `base`, `state`, `tone`, `ci`, `ciTone`, `review`, `reviewTone`, `step`, `detail`, `actionLabel`, and `canReview`. `actionLabel` is `"Review"`, `"Re-review"`, `"Merged"`, or `"Closed"`, and `canReview` is `true` whenever `state == "OPEN"` (including open draft pull requests for early review passes), enabling the `trigger_pr_review` button.
+Under `--reviews`, the top-level JSON payload also emits `viewer`, `stale_days`, and `untriaged_discussions` (the list of open, non-muted, non-dormant pull request keys whose `discussion_watermark` has no matching entry in `review_overrides.json`).
+
+`monitor_prs.py` renders `REVIEW_BOARD_COMPONENTS` into the `a2ui-pane` store (`surfaceId: "monitor"`) and writes `review_board_dsl` to `board.a2ui`. The data model provides `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/segments`, `$/progressSummary`, `$/ackLabel`, `$/items`, `$/drawerTitle`, `$/drawerSummary`, and `$/drawerItems`. Each `$/items` entry includes `id`, `key`, `number`, `repo`, `url`, `title`, `author`, `meta`, `headSha`, `updatedAt`, `wave`, `base`, `state`, `tone`, `ci`, `ciTone`, `review`, `reviewTone`, `triageLabel`, `triageTone`, `step`, `detail`, `actionLabel`, and `canReview`. `actionLabel` is `"Review"`, `"Re-review"`, `"Merged"`, or `"Closed"`, `triageLabel` is `"Likely shelved"`, `"Deferred"`, or `""`, and `canReview` is `true` whenever `state == "OPEN"`, enabling both the `trigger_pr_review` button and the borderless `mute_review_pr` **Mute** button. Muted and dormant open pull requests move into `$/drawerItems` inside the bottom `Collapsible` (`$/drawerTitle` is `""` when empty so the drawer hides automatically), where each compact row exposes an **Unhide** button emitting `unmute_review_pr`.
+
+Cross-session overrides in `~/.config/monitor/review_overrides.json` use schema `1` with three lowercase-keyed maps: `mutes` (`{muted_at, head_sha, updated_at, was_requested, reason}`), `pins` (`owner/repo#N -> pinned_at`), and `triage` (`{watermark, verdict, summary, evaluated_at}`).
 
 ## 4. Event Kinds (`EVENT_KINDS` and `REVIEWER_EVENT_KINDS`)
 

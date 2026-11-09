@@ -133,10 +133,23 @@ def _bool(value: Any) -> bool:
     return bool(value) if value is not None else False
 
 
-def _reviewer_node(reviewer: str, kind: str | None) -> dict[str, Any]:
-    if kind == "Team":
-        return {"requestedReviewer": {"slug": reviewer.split("/", 1)[-1]}}
-    return {"requestedReviewer": {"login": reviewer}}
+def _row_get(row: sqlite3.Row, column: str) -> Any:
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
+
+
+def _reviewer_node(row: sqlite3.Row) -> dict[str, Any]:
+    reviewer = str(row["reviewer"] or "")
+    if row["reviewer_kind"] == "Team":
+        node: dict[str, Any] = {"requestedReviewer": {"slug": reviewer.split("/", 1)[-1]}}
+    else:
+        node = {"requestedReviewer": {"login": reviewer}}
+    requested_at = _row_get(row, "requested_at")
+    if requested_at:
+        node["requestedAt"] = str(requested_at)
+    return node
 
 
 def _check_node(row: sqlite3.Row) -> dict[str, Any]:
@@ -164,6 +177,19 @@ def _check_node(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _thread_row_participants(row: sqlite3.Row) -> list[str]:
+    raw = _row_get(row, "participants_json")
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(x) for x in parsed if str(x)]
+
+
 def _thread_node(row: sqlite3.Row) -> dict[str, Any]:
     author = {
         "login": row["last_author"] or "",
@@ -172,7 +198,22 @@ def _thread_node(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": row["thread_id"],
         "isResolved": _bool(row["is_resolved"]),
+        "isOutdated": _bool(_row_get(row, "is_outdated")),
+        "participants": _thread_row_participants(row),
         "comments": {"nodes": [{"author": author, "createdAt": row["last_at"]}]},
+    }
+
+
+def _comment_node(row: sqlite3.Row) -> dict[str, Any]:
+    author_type = str(row["author_type"] or "User")
+    return {
+        "id": str(row["comment_id"] or ""),
+        "createdAt": str(row["created_at"] or ""),
+        "author": {
+            "login": str(row["author"] or ""),
+            "is_bot": str(row["author_type"] or "") == "Bot",
+            "__typename": author_type,
+        },
     }
 
 
@@ -229,6 +270,7 @@ def build_raw_pr(
     reviews: list[sqlite3.Row],
     threads: list[sqlite3.Row],
     author_reviews: Sequence[sqlite3.Row] = (),
+    comments: Sequence[sqlite3.Row] = (),
 ) -> dict[str, Any]:
     """Builds the GraphQL `PullRequest` node shape `normalize_pr()` reads from view rows."""
     auto_merge = live["auto_merge_enabled_at"]
@@ -256,7 +298,7 @@ def build_raw_pr(
         "autoMergeRequest": {"enabledAt": auto_merge} if auto_merge else None,
         "reviewRequests": {
             "totalCount": len(reviewers),
-            "nodes": [_reviewer_node(r["reviewer"], r["reviewer_kind"]) for r in reviewers],
+            "nodes": [_reviewer_node(r) for r in reviewers],
         },
         "assignees": {"nodes": []},
         "latestOpinionatedReviews": {"nodes": [_review_node(r) for r in reviews]},
@@ -265,6 +307,7 @@ def build_raw_pr(
             "totalCount": len(threads),
             "nodes": [_thread_node(t) for t in threads],
         },
+        "comments": {"nodes": [_comment_node(c) for c in comments]},
         "commits": _commit_node(live, [_check_node(c) for c in checks]),
     }
 
@@ -277,6 +320,15 @@ def _rows_by_key(
     for row in conn.execute(sql.format(marks=marks), list(keys)):
         grouped.setdefault(str(row["item_key"]), []).append(row)
     return grouped
+
+
+def _optional_rows_by_key(
+    conn: sqlite3.Connection, sql: str, keys: Sequence[str]
+) -> dict[str, list[sqlite3.Row]]:
+    try:
+        return _rows_by_key(conn, sql, keys)
+    except sqlite3.OperationalError:
+        return {}
 
 
 class PackratSource:
@@ -412,14 +464,17 @@ class PackratSource:
                     )
                     for view in _DETAIL_VIEWS
                 ]
-                try:
-                    author_reviews = _rows_by_key(
-                        conn,
-                        "SELECT * FROM v_pr_latest_author_reviews WHERE item_key IN ({marks})",
-                        keys,
-                    )
-                except sqlite3.OperationalError:
-                    author_reviews = {}
+                author_reviews = _optional_rows_by_key(
+                    conn,
+                    "SELECT * FROM v_pr_latest_author_reviews WHERE item_key IN ({marks})",
+                    keys,
+                )
+                comments_by_key = _optional_rows_by_key(
+                    conn,
+                    "SELECT * FROM v_item_comments WHERE kind = 'pr' AND item_key IN ({marks}) "
+                    "ORDER BY created_at ASC",
+                    keys,
+                )
                 conn.execute("COMMIT")
         except sqlite3.Error as exc:
             raise PackratError(f"packrat view read failed: {exc}") from exc
@@ -432,6 +487,7 @@ class PackratSource:
                 reviews.get(key, []),
                 threads.get(key, []),
                 author_reviews.get(key, []),
+                comments_by_key.get(key, []),
             )
             for key, rows in live.items()
         }

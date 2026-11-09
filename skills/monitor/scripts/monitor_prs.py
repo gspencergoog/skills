@@ -62,7 +62,10 @@ from models import (
     MonitorState,
     PrSnapshot,
     ReviewRole,
+    TriageVerdict,
     effective_viewer_review,
+    is_dormant_review,
+    is_mute_active,
     parse_event_list,
     parse_pr_ref,
     pr_key,
@@ -81,6 +84,17 @@ from packrat_source import (
     available,
     gh_config_user,
 )
+from review_overrides import (
+    OverridesWatcher,
+    ReviewOverrides,
+    default_overrides_path,
+    load_overrides,
+    mute_pr,
+    normalize_override_key,
+    record_triage_entry,
+    save_overrides,
+    unmute_pr,
+)
 from state import (
     StateError,
     append_event_log,
@@ -94,6 +108,7 @@ MAX_WATCHED_PRS = 60
 MAX_CONSECUTIVE_ERRORS = 5
 FAST_POLL_INTERVAL_S = 10
 DEFAULT_SWEEP_S = 600
+DEFAULT_STALE_DAYS = 30
 BASE_BRANCHES = frozenset({"main", "master", "develop"})
 PACKRAT_RENEW_S = 300
 """Interval between ``packrat watch renew`` calls (the lease TTL is 900 s)."""
@@ -143,6 +158,32 @@ def _parse_event_list(
     return parse_event_list(raw, role=role)
 
 
+def _validate_override_entries(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> None:
+    try:
+        for raw_ref in [*(args.mute or []), *(args.unmute or [])]:
+            normalize_override_key(raw_ref, default_repo=args.repo)
+        for item in args.record_triage or []:
+            _key, verdict = _parse_kv(item, args.repo)
+            TriageVerdict(verdict)
+        for item in args.triage_summary or []:
+            _parse_kv(item, args.repo)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+
+def _validate_override_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if int(getattr(args, "stale_days", DEFAULT_STALE_DAYS)) < 0:
+        parser.error("--stale-days must be >= 0")
+    has_mutations = bool(args.mute or args.unmute or args.record_triage or args.triage_summary)
+    if has_mutations and not args.reviews:
+        parser.error("--mute, --unmute, --record-triage, and --triage-summary require --reviews")
+    if has_mutations:
+        _validate_override_entries(parser, args)
+
+
 def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.wake_on_review and not args.reviews:
         parser.error("--wake-on-review requires --reviews")
@@ -153,6 +194,7 @@ def _validate_review_args(parser: argparse.ArgumentParser, args: argparse.Namesp
             parser.error("cannot use --reviews with --until all-green")
         if args.prs:
             parser.error("cannot pass positional PR arguments with --reviews")
+    _validate_override_args(parser, args)
     if args.until is None:
         args.until = "none" if args.reviews else "closed"
     args.role = ReviewRole.REVIEWER if args.reviews else ReviewRole.AUTHOR
@@ -325,6 +367,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--packrat-db",
         help="packrat database path (default: ~/.local/share/packrat/repos.sqlite).",
+    )
+    parser.add_argument(
+        "--stale-days",
+        type=int,
+        default=DEFAULT_STALE_DAYS,
+        help=(
+            "Days of inactivity before unrequested Waiting or Approved PRs move to the Dormant "
+            f"drawer under --reviews (default: {DEFAULT_STALE_DAYS}; 0 disables)."
+        ),
+    )
+    parser.add_argument(
+        "--overrides-file",
+        help="Path to cross-session reviewer overrides JSON (default: ~/.config/monitor/review_overrides.json).",
+    )
+    parser.add_argument(
+        "--mute",
+        action="append",
+        default=[],
+        metavar="PR",
+        help="Mute a pull request in --reviews until a post-mute push or review request arrives.",
+    )
+    parser.add_argument(
+        "--unmute",
+        action="append",
+        default=[],
+        metavar="PR",
+        help="Unhide a muted or dormant pull request in --reviews and pin dormant rows active.",
+    )
+    parser.add_argument(
+        "--record-triage",
+        action="append",
+        default=[],
+        metavar="PR=VERDICT",
+        help="Record a watermarked discussion triage verdict (active, likely_shelved, deferred).",
+    )
+    parser.add_argument(
+        "--triage-summary",
+        action="append",
+        default=[],
+        metavar="PR=TEXT",
+        help="Optional plain-text rationale paired with --record-triage for PR.",
     )
     args = parser.parse_args(argv)
     if args.daemon and args.once:
@@ -610,6 +693,15 @@ class Monitor:
         self._last_batch_id: int | None = None
         self._pushed_keys: set[str] = set()
         """Keys named in a ``control.jsonl`` ``pushed_sha`` since their last refresh."""
+        self.stale_days: int = DEFAULT_STALE_DAYS
+        self.overrides_watcher: OverridesWatcher | None = None
+
+    def _current_overrides(self) -> ReviewOverrides | None:
+        return self.overrides_watcher.current() if self.overrides_watcher is not None else None
+
+    def _sync_board_if_overrides_changed(self, args: argparse.Namespace) -> None:
+        if self.overrides_watcher is not None and self.overrides_watcher.changed():
+            self._sync_board([], args)
 
     def _warn_truncation(self, pr: str, fields: list[str]) -> None:
         if not fields or pr in self._warned_truncated:
@@ -713,12 +805,12 @@ class Monitor:
     def _is_unassigned_open_review(self, key: str, snap: PrSnapshot) -> bool:
         if snap.state != "OPEN" or effective_viewer_review(snap, self.viewer) is not None:
             return False
+        viewer_norm = self.viewer.strip().lower()
+        if viewer_norm and any(r.lower() == viewer_norm for r in snap.requested_reviewers):
+            return False
         if key in self._missing_review_keys or not snap.requested_reviewers:
             return True
-        viewer_norm = self.viewer.strip().lower()
-        if not viewer_norm or any(r.startswith("team:") for r in snap.requested_reviewers):
-            return False
-        return all(r.lower() != viewer_norm for r in snap.requested_reviewers)
+        return not any(r.startswith("team:") for r in snap.requested_reviewers)
 
     def _retire_terminal_reviews(self, terminal_keys: set[str]) -> None:
         retired = [k for k in self.watched_keys if k in terminal_keys]
@@ -762,6 +854,7 @@ class Monitor:
             pushed_shas=self.state.pushed_shas,
             reported_threads=self.state.reported_threads,
             reruns=self.state.reruns,
+            overrides=self._current_overrides(),
         )
         events = self._diff_target_keys(target_keys, prev_snapshots, ctx)
 
@@ -820,13 +913,18 @@ class Monitor:
         self, events: list[Event], ts: str
     ) -> tuple[dict[str, Any], str, list[dict[str, Any]] | None]:
         if self.role == ReviewRole.REVIEWER:
+            now_ep = self.epoch_now()
+            ov = self._current_overrides()
             dm = review_board_data_model(
                 self.state.snapshots,
                 viewer=self.viewer,
                 durations=self.state.check_durations,
                 events=events,
-                now=self.epoch_now(),
+                now=now_ep,
                 observed_at=ts,
+                overrides=ov,
+                stale_days=self.stale_days,
+                now_epoch=now_ep,
             )
             return dm, review_board_dsl(dm), REVIEW_BOARD_COMPONENTS
         etas = self._compute_etas()
@@ -877,6 +975,40 @@ class Monitor:
             "store_status": store_status,
         }
 
+    def _is_untriaged_review_snapshot(
+        self,
+        key: str,
+        snap: PrSnapshot,
+        ov: ReviewOverrides,
+        now_ep: float,
+    ) -> bool:
+        if snap.state != "OPEN" or not snap.discussion_watermark:
+            return False
+        if is_mute_active(snap, ov.get_mute(key), self.viewer):
+            return False
+        if is_dormant_review(
+            snap,
+            self.viewer,
+            self.stale_days,
+            now_ep,
+            pinned_at=ov.get_pin(key),
+        ):
+            return False
+        cached = ov.get_triage(key)
+        return cached is None or cached.watermark != snap.discussion_watermark
+
+    def _compute_untriaged_discussions(
+        self,
+        ordered_snaps: dict[str, Any],
+    ) -> list[str]:
+        ov = self._current_overrides() or ReviewOverrides()
+        now_ep = self.epoch_now()
+        return [
+            key
+            for key, snap in ordered_snaps.items()
+            if self._is_untriaged_review_snapshot(key, snap, ov, now_ep)
+        ]
+
     def _build_payload(
         self,
         exit_reason: str,
@@ -908,6 +1040,10 @@ class Monitor:
             "notifier": list(self.notifier.argv_prefix) if self.notifier else None,
             "source": self.source_mode,
         }
+        if self.role == ReviewRole.REVIEWER:
+            payload["viewer"] = self.viewer
+            payload["stale_days"] = self.stale_days
+            payload["untriaged_discussions"] = self._compute_untriaged_discussions(ordered_snaps)
         if batch_id is not None:
             payload["batch_id"] = batch_id
         a2ui_meta = self._sync_board(events, args, observed_at=observed_at)
@@ -1271,6 +1407,7 @@ class Monitor:
         sweep_due = now >= timers.next_sweep
         targets = self._select_refresh_targets(now, timers, accumulated, cfg)
         if targets is not None and not targets:
+            self._sync_board_if_overrides_changed(args)
             return debounce_deadline
         if sweep_due and self.role == ReviewRole.REVIEWER and now >= timers.backoff_until:
             self._sweep_github_review_keys()
@@ -1622,6 +1759,7 @@ class Monitor:
     ) -> int | None:
         if self.liveness is not None:
             self.liveness.beat()
+        self._sync_board_if_overrides_changed(args)
         if getattr(args, "daemon", False) and self._process_control(args.repo):
             return self._finish_with("stopped", 0, accumulated, args)
         return None
@@ -1674,6 +1812,111 @@ class Monitor:
                 self._fallback_to_github(self.clock(), timers, str(exc))
         return self._start_reviewer_github(prior_open)
 
+    def _find_snapshot_case_insensitive(self, norm_key: str) -> PrSnapshot | None:
+        for key, snap in self.state.snapshots.items():
+            if key.lower() == norm_key:
+                return snap
+        return None
+
+    def _resolve_snapshot_for_override(
+        self,
+        raw_ref: str,
+        default_repo: str | None,
+    ) -> tuple[str, PrSnapshot | None]:
+        repo, number = parse_pr_ref(raw_ref, default_repo)
+        canon_hint = pr_key(repo, number)
+        norm_key = canon_hint.lower()
+        snap = self._find_snapshot_case_insensitive(norm_key)
+        if snap is not None:
+            return norm_key, snap
+        target_key = canon_hint
+        if self.packrat is not None:
+            known = self.packrat.known_keys([canon_hint, norm_key])
+            target_key = known.get(canon_hint) or known.get(norm_key) or norm_key
+            try:
+                self.packrat.lease([target_key])
+            except PackratError:
+                pass
+        self.refresh([target_key])
+        return norm_key, self._find_snapshot_case_insensitive(norm_key)
+
+    def _parse_triage_summaries(self, args: argparse.Namespace) -> dict[str, str]:
+        summaries: dict[str, str] = {}
+        for item in getattr(args, "triage_summary", None) or []:
+            key, text = _parse_kv(item, args.repo)
+            summaries[key.lower()] = text
+        return summaries
+
+    def _record_cli_triage_items(
+        self,
+        overrides: ReviewOverrides,
+        triage_items: list[str],
+        summaries: dict[str, str],
+        default_repo: str | None,
+        now_ts: str,
+    ) -> None:
+        for item in triage_items:
+            key, verdict_str = _parse_kv(item, default_repo)
+            norm_key, snap = self._resolve_snapshot_for_override(key, default_repo)
+            if snap is not None and snap.discussion_watermark:
+                watermark = snap.discussion_watermark
+            elif snap is not None:
+                watermark = f"manual:{snap.updated_at}"
+            else:
+                watermark = "manual"
+            record_triage_entry(
+                overrides,
+                norm_key,
+                watermark=watermark,
+                verdict=TriageVerdict(verdict_str),
+                summary=summaries.get(norm_key, ""),
+                evaluated_at=now_ts,
+            )
+
+    def _filter_unmuted_events(
+        self,
+        raw_events: list[Event],
+        overrides: ReviewOverrides,
+    ) -> list[Event]:
+        kept: list[Event] = []
+        for ev in raw_events:
+            snap = self.state.snapshots.get(ev.pr)
+            if snap is None or not is_mute_active(snap, overrides.get_mute(ev.pr), self.viewer):
+                kept.append(ev)
+        return kept
+
+    def _apply_cli_review_overrides(
+        self,
+        args: argparse.Namespace,
+        raw_events: list[Event],
+    ) -> list[Event]:
+        if self.overrides_watcher is None:
+            return raw_events
+        mutes = list(getattr(args, "mute", None) or [])
+        unmutes = list(getattr(args, "unmute", None) or [])
+        triage_items = list(getattr(args, "record_triage", None) or [])
+        if not (mutes or unmutes or triage_items):
+            return raw_events
+        ov_path = self.overrides_watcher.path
+        overrides = load_overrides(ov_path)
+        now_ts = self.now()
+        for raw_ref in mutes:
+            norm_key, snap = self._resolve_snapshot_for_override(raw_ref, args.repo)
+            mute_pr(overrides, norm_key, snap, self.viewer, now_iso=now_ts)
+        for raw_ref in unmutes:
+            norm_key = normalize_override_key(raw_ref, default_repo=args.repo)
+            unmute_pr(overrides, norm_key, now_iso=now_ts)
+        self._record_cli_triage_items(
+            overrides,
+            triage_items,
+            self._parse_triage_summaries(args),
+            args.repo,
+            now_ts,
+        )
+        save_overrides(ov_path, overrides)
+        self.overrides_watcher = OverridesWatcher(ov_path)
+        return self._filter_unmuted_events(raw_events, overrides)
+
     def _init_run_state(self, args: argparse.Namespace) -> tuple[set[str] | None, list[Event]]:
         self._install_signal_handlers()
         if self.notifier is None:
@@ -1684,6 +1927,7 @@ class Monitor:
             ReviewRole.REVIEWER if getattr(args, "reviews", False) else ReviewRole.AUTHOR,
         )
         self.wake_on_review = bool(getattr(args, "wake_on_review", False))
+        self.stale_days = int(getattr(args, "stale_days", DEFAULT_STALE_DAYS))
         self.repo = args.repo
         allowed_kinds = parse_event_list(args.events, role=self.role)
         self.state = load_state(self.state_path)
@@ -1693,7 +1937,12 @@ class Monitor:
         self._source_note = "via packrat" if self.packrat is not None else None
         self.notifications_enabled = not bool(args.no_notifications)
         if self.role == ReviewRole.REVIEWER:
-            return allowed_kinds, self._init_reviewer_targets()
+            raw_ov_path = getattr(args, "overrides_file", None)
+            ov_path = Path(raw_ov_path).expanduser() if raw_ov_path else default_overrides_path()
+            self.overrides_watcher = OverridesWatcher(ov_path)
+            raw_events = self._init_reviewer_targets()
+            return allowed_kinds, self._apply_cli_review_overrides(args, raw_events)
+        self.overrides_watcher = None
         self.watched_keys = resolve_targets(args, self.runner, self.state, self.packrat)
         if self.packrat is not None:
             try:

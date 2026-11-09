@@ -1902,6 +1902,259 @@ class TestReviewsMode(unittest.TestCase):
             mon_gh._consume_unwatched_review_request()
         self.assertTrue(mon_gh.poller.review_requested_unwatched)
 
+    def test_reviews_cli_overrides_validation_and_mute_unmute_triage_flow(self) -> None:
+        # 1. Override flags require --reviews and --stale-days >= 0.
+        for bad_argv in (
+            ["acme/widget#1", "--state", self.state_path, "--mute", "acme/widget#1"],
+            ["acme/widget#1", "--state", self.state_path, "--unmute", "acme/widget#1"],
+            [
+                "acme/widget#1",
+                "--state",
+                self.state_path,
+                "--record-triage",
+                "acme/widget#1=likely_shelved",
+            ],
+            ["--reviews", "--state", self.state_path, "--stale-days", "-1"],
+            [
+                "--reviews",
+                "--state",
+                self.state_path,
+                "--record-triage",
+                "acme/widget#1=invalid_verdict",
+            ],
+        ):
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(bad_argv)
+
+        # 2. Seed three PRs in packrat:
+        # - #3339: active PR with post-review comment watermark
+        # - #3340: unleased PR muted via case-insensitive --mute Acme/Widget#3340
+        # - #3341: 60-day-old unrequested Waiting PR (dormant under --stale-days 30)
+        pr_active = _review_pr_node(
+            3339,
+            repo="acme/widget",
+            requested_viewer=None,
+            head_sha="1111111",
+            updated_at="2026-10-27T21:10:00Z",
+            reviews=[
+                {
+                    "author": {"login": "alice", "__typename": "User"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-10-27T20:00:00Z",
+                    "commit": {"oid": "1111111"},
+                }
+            ],
+        )
+        pr_active["comments"] = {
+            "nodes": [
+                {
+                    "id": "IC_shelved_1",
+                    "createdAt": "2026-10-27T21:05:00Z",
+                    "author": {"login": "bob", "__typename": "User"},
+                }
+            ]
+        }
+        pr_unleased = _review_pr_node(
+            3340,
+            repo="acme/widget",
+            requested_viewer="alice",
+            head_sha="9999999",
+            updated_at="2026-10-27T21:08:00Z",
+        )
+        pr_dormant = _review_pr_node(
+            3341,
+            repo="acme/widget",
+            requested_viewer=None,
+            head_sha="7777777",
+            updated_at="2026-08-15T12:00:00Z",
+            reviews=[
+                {
+                    "author": {"login": "alice", "__typename": "User"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-08-15T12:00:00Z",
+                    "commit": {"oid": "7777777"},
+                }
+            ],
+        )
+        pr_dormant["comments"] = {
+            "nodes": [
+                {
+                    "id": "IC_old_1",
+                    "createdAt": "2026-08-15T12:05:00Z",
+                    "author": {"login": "carol", "__typename": "User"},
+                }
+            ]
+        }
+        for node in (pr_active, pr_unleased, pr_dormant):
+            store_graphql_pr(self.db, node)
+        self._add_viewer_item("reviewed", "acme/widget#3339")
+        self._add_viewer_item("reviewed", "acme/widget#3341")
+
+        ov_file = self.dir / "overrides.json"
+        args_mute = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--stale-days",
+                "30",
+                "--overrides-file",
+                str(ov_file),
+                "--mute",
+                "Acme/Widget#3340",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        out_mute = io.StringIO()
+        with redirect_stdout(out_mute), redirect_stderr(io.StringIO()):
+            code_mute = self._monitor(FakeGh([])).run(args_mute)
+        self.assertEqual(code_mute, 0)
+        payload_mute = json.loads(out_mute.getvalue())
+        # Only active non-muted non-dormant #3339 appears in untriaged_discussions!
+        self.assertEqual(payload_mute["untriaged_discussions"], ["acme/widget#3339"])
+        board_dsl = (self.dir / "board.a2ui").read_text(encoding="utf-8")
+        self.assertIn("Muted & Dormant (2)", board_dsl)
+        saved_ov = json.loads(ov_file.read_text(encoding="utf-8"))
+        self.assertEqual(saved_ov["mutes"]["acme/widget#3340"]["head_sha"], "9999999")
+        self.assertTrue(saved_ov["mutes"]["acme/widget#3340"]["was_requested"])
+
+        # 3. Record triage on #3339 and unmute/pin dormant #3341 -> #3341 moves back to active
+        # items and #3339 drops out of untriaged_discussions with Likely shelved badge!
+        args_unmute = parse_args(
+            [
+                "--reviews",
+                "--once",
+                "--stale-days",
+                "30",
+                "--overrides-file",
+                str(ov_file),
+                "--unmute",
+                "acme/widget#3341",
+                "--record-triage",
+                "acme/widget#3339=likely_shelved",
+                "--triage-summary",
+                "acme/widget#3339=Participants agreed not to pursue this PR.",
+                "--source",
+                "packrat",
+                "--packrat-db",
+                str(self.db),
+                "--state",
+                self.state_path,
+            ]
+        )
+        out_unmute = io.StringIO()
+        with redirect_stdout(out_unmute), redirect_stderr(io.StringIO()):
+            code_unmute = self._monitor(FakeGh([])).run(args_unmute)
+        self.assertEqual(code_unmute, 0)
+        payload_unmute = json.loads(out_unmute.getvalue())
+        # Unhidden #3341 is now active (no longer dormant), so its untriaged comment surfaces!
+        self.assertEqual(payload_unmute["untriaged_discussions"], ["acme/widget#3341"])
+        board_dsl_after = (self.dir / "board.a2ui").read_text(encoding="utf-8")
+        self.assertIn("Likely shelved", board_dsl_after)
+        self.assertIn("Muted & Dormant (1)", board_dsl_after)
+
+    def test_reviews_github_idle_tick_reloads_external_overrides_immediately(self) -> None:
+        pr_node = _review_pr_node(
+            3339,
+            repo="acme/widget",
+            requested_viewer=None,
+            head_sha="1111111",
+            reviews=[
+                {
+                    "author": {"login": "alice", "__typename": "User"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-10-27T20:00:00Z",
+                    "commit": {"oid": "1111111"},
+                }
+            ],
+        )
+        pr_node["mergeable"] = "MERGEABLE"
+        pr_node["mergeStateStatus"] = "CLEAN"
+        pr_node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"] = "SUCCESS"
+        fake_gh = FakeGh(
+            [
+                ("graphql", 0, _search_response("alice", [], [("acme/widget", 3339)]), ""),
+                ("graphql", 0, _fetch_response("alice", pr_node), ""),
+                ("notifications", 0, "HTTP/2.0 304 Not Modified\r\n\r\n", ""),
+                ("notifications", 0, "HTTP/2.0 304 Not Modified\r\n\r\n", ""),
+            ]
+        )
+        ov_file = self.dir / "idle_overrides.json"
+        store_dir = self.dir / "idle_store"
+        control = self.dir / "control.jsonl"
+        args = parse_args(
+            [
+                "--reviews",
+                "--daemon",
+                "--poll",
+                "120",
+                "--notify-poll",
+                "60",
+                "--sweep",
+                "600",
+                "--overrides-file",
+                str(ov_file),
+                "--conversation-id",
+                "conv-idle-ov",
+                "--a2ui-store-dir",
+                str(store_dir),
+                "--source",
+                "github",
+                "--state",
+                self.state_path,
+            ]
+        )
+        sleeps = 0
+
+        def sleep_and_mutate(seconds: float) -> None:
+            nonlocal sleeps
+            sleeps += 1
+            self.clk.sleep(seconds)
+            if sleeps == 1:
+                # External CLI writes review_overrides.json while github targets == [] on next tick
+                ov_file.write_text(
+                    json.dumps(
+                        {
+                            "schema": 1,
+                            "mutes": {
+                                "acme/widget#3339": {
+                                    "muted_at": "2026-10-27T21:20:00Z",
+                                    "head_sha": "1111111",
+                                    "updated_at": "2026-10-27T21:05:00Z",
+                                    "was_requested": True,
+                                    "reason": "",
+                                }
+                            },
+                            "pins": {},
+                            "triage": {},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            else:
+                control.write_text('{"stop": true}\n', encoding="utf-8")
+
+        mon = Monitor(
+            runner=fake_gh,
+            state_path=self.state_path,
+            clock=self.clk,
+            sleep=sleep_and_mutate,
+            now=lambda: "2026-10-27T21:15:00Z",
+            epoch_now=lambda: 1793135700.0,
+            notifier=FakeNotifier(),
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            code = mon.run(args)
+        self.assertEqual(code, 0)
+        pane_text = (store_dir / "conversations" / "conv-idle-ov" / "monitor.jsonl").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Muted & Dormant (1)", pane_text)
+
 
 if __name__ == "__main__":
     unittest.main()

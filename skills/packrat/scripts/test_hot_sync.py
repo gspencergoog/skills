@@ -18,9 +18,11 @@ from hot_sync import (
     build_contexts_page_query,
     build_hot_query,
     build_node_id_query,
+    build_threads_page_query,
     parse_hot_node,
+    parse_thread,
 )
-from models import LatestReviewRecord
+from models import LatestReviewRecord, ReviewRequestRecord
 from rate_budget import Priority
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -77,9 +79,7 @@ class FakeTransport:
             r"(k\d+): repository\(.*?pullRequest\(number: (\d+)\)", query
         ):
             found = number != "404"
-            data[alias] = {
-                "pullRequest": {"id": f"PR_kwDOA{number}"} if found else None
-            }
+            data[alias] = {"pullRequest": {"id": f"PR_kwDOA{number}"} if found else None}
         return {"data": data}
 
 
@@ -100,6 +100,8 @@ class TestQueryBuilders(unittest.TestCase):
             "__typename",
             "reviews(last: 20)",
             "comments(last: 10)",
+            "firstComment: comments(first: 1)",
+            "REVIEW_REQUESTED_EVENT",
             "body",
         ):
             self.assertIn(field, query)
@@ -113,6 +115,10 @@ class TestQueryBuilders(unittest.TestCase):
         page = build_contexts_page_query("PR_x", 12, 'C"1')
         self.assertIn('after: "C\\"1"', page)
         self.assertIn("isRequired(pullRequestNumber: 12)", page)
+        threads_page = build_threads_page_query("PR_x", 'T"1')
+        self.assertIn('after: "T\\"1"', threads_page)
+        self.assertIn("firstComment: comments(first: 1)", threads_page)
+        self.assertIn("comments(last: 10)", threads_page)
 
 
 class TestParsing(unittest.TestCase):
@@ -122,9 +128,7 @@ class TestParsing(unittest.TestCase):
         node = _fixture("hot_nodes_batch.json")["data"]["pr0"]
         snap = parse_hot_node(1, node)
         rec = snap.record
-        self.assertEqual(
-            (rec.number, rec.author, rec.author_type), (7, "alice", "User")
-        )
+        self.assertEqual((rec.number, rec.author, rec.author_type), (7, "alice", "User"))
         self.assertEqual(rec.merge_state_status, "BLOCKED")
         self.assertEqual(rec.auto_merge_enabled_at, "2026-11-03T09:30:00Z")
         self.assertEqual((rec.rollup_state, rec.rollup_total), ("FAILURE", 3))
@@ -215,6 +219,80 @@ class TestParsing(unittest.TestCase):
         self.assertTrue(rec.is_draft)
         self.assertIsNone(rec.auto_merge_enabled_at)
 
+    def test_parse_thread_merges_first_and_last_comments_without_duplicates(self) -> None:
+        thread = parse_thread(
+            {
+                "id": "PRRT_99",
+                "isResolved": False,
+                "isOutdated": True,
+                "firstComment": {"nodes": [{"author": {"login": "alice"}}]},
+                "comments": {
+                    "nodes": [
+                        {
+                            "createdAt": "2026-11-03T09:00:00Z",
+                            "author": {"login": "bob", "__typename": "User"},
+                        },
+                        {
+                            "createdAt": "2026-11-03T09:05:00Z",
+                            "author": {"login": "Alice", "__typename": "User"},
+                        },
+                        {
+                            "createdAt": "2026-11-03T09:10:00Z",
+                            "author": None,
+                        },
+                        {
+                            "createdAt": "2026-11-03T09:15:00Z",
+                            "author": {"login": "carol", "__typename": "User"},
+                        },
+                    ]
+                },
+            }
+        )
+        assert thread is not None
+        self.assertTrue(thread.is_outdated)
+        self.assertEqual(thread.participants, ("alice", "bob", "carol"))
+        self.assertEqual(
+            (thread.last_author, thread.last_author_type, thread.last_at),
+            ("carol", "User", "2026-11-03T09:15:00Z"),
+        )
+
+    def test_parse_hot_node_populates_requested_at_for_user_and_team(self) -> None:
+        node = copy.deepcopy(_fixture("hot_nodes_batch.json")["data"]["pr0"])
+        node["reviewRequests"]["nodes"].append(
+            {"requestedReviewer": {"__typename": "User", "login": "erin"}}
+        )
+        node["timelineItems"] = {
+            "nodes": [
+                {
+                    "createdAt": "2026-11-02T09:00:00Z",
+                    "requestedReviewer": {"__typename": "User", "login": "Bob"},
+                },
+                {
+                    "createdAt": "2026-11-03T10:30:00Z",
+                    "requestedReviewer": {"__typename": "User", "login": "bob"},
+                },
+                {
+                    "createdAt": "2026-11-03T08:45:00Z",
+                    "requestedReviewer": {
+                        "__typename": "Team",
+                        "slug": "ui-reviewers",
+                        "organization": {"login": "Octo-Org"},
+                    },
+                },
+                {"createdAt": "2026-11-03T11:00:00Z", "requestedReviewer": None},
+                {},
+            ]
+        }
+        snap = parse_hot_node(1, node)
+        self.assertEqual(
+            snap.review_requests,
+            [
+                ReviewRequestRecord("bob", "User", "2026-11-03T10:30:00Z"),
+                ReviewRequestRecord("octo-org/ui-reviewers", "Team", "2026-11-03T08:45:00Z"),
+                ReviewRequestRecord("erin", "User", None),
+            ],
+        )
+
 
 class TestHotRefresher(unittest.TestCase):
     """Tests HotRefresher against a real store and a fixture transport."""
@@ -244,9 +322,7 @@ class TestHotRefresher(unittest.TestCase):
             "SELECT item_key, author_type, rollup_state, is_cross_repository FROM v_pr_live "
             "ORDER BY item_key"
         )
-        self.assertEqual(
-            live, [(KEY7, "User", "FAILURE", 0), (KEY9, "Bot", "PENDING", 1)]
-        )
+        self.assertEqual(live, [(KEY7, "User", "FAILURE", 0), (KEY9, "Bot", "PENDING", 1)])
         checks = self._rows(
             "SELECT name, kind, is_required FROM v_pr_checks WHERE item_key = ? ORDER BY name",
             KEY7,
@@ -273,9 +349,7 @@ class TestHotRefresher(unittest.TestCase):
 
     def test_follow_up_pages_for_threads_and_contexts(self) -> None:
         self.hot.refresh_hot([KEY9])
-        threads = self._rows(
-            "SELECT thread_id FROM v_pr_threads WHERE item_key = ?", KEY9
-        )
+        threads = self._rows("SELECT thread_id FROM v_pr_threads WHERE item_key = ?", KEY9)
         self.assertEqual(sorted(t[0] for t in threads), ["PRRT_9a", "PRRT_9b"])
         checks = self._rows(
             "SELECT name, is_required FROM v_pr_checks WHERE item_key = ? ORDER BY name",
@@ -309,9 +383,7 @@ class TestHotRefresher(unittest.TestCase):
 
     def test_same_named_check_runs_are_all_stored(self) -> None:
         batch = _fixture("hot_nodes_batch.json")
-        contexts = batch["data"]["pr0"]["commits"]["nodes"][0]["commit"][
-            "statusCheckRollup"
-        ]
+        contexts = batch["data"]["pr0"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]
         rerun = copy.deepcopy(contexts["contexts"]["nodes"][0])
         rerun.update({"databaseId": 999, "conclusion": "FAILURE"})
         contexts["contexts"]["nodes"].append(rerun)
@@ -323,15 +395,9 @@ class TestHotRefresher(unittest.TestCase):
             "ORDER BY run_key",
             KEY7,
         )
-        self.assertEqual(
-            builds, [("CheckRun:111", "SUCCESS"), ("CheckRun:999", "FAILURE")]
-        )
-        total = self._rows(
-            "SELECT rollup_total FROM v_pr_live WHERE item_key = ?", KEY7
-        )[0][0]
-        stored = self._rows(
-            "SELECT COUNT(*) FROM v_pr_checks WHERE item_key = ?", KEY7
-        )[0][0]
+        self.assertEqual(builds, [("CheckRun:111", "SUCCESS"), ("CheckRun:999", "FAILURE")])
+        total = self._rows("SELECT rollup_total FROM v_pr_live WHERE item_key = ?", KEY7)[0][0]
+        stored = self._rows("SELECT COUNT(*) FROM v_pr_checks WHERE item_key = ?", KEY7)[0][0]
         self.assertEqual(stored, total)
 
     def test_batches_of_twenty(self) -> None:
@@ -365,9 +431,7 @@ class TestHotRefresher(unittest.TestCase):
             def ensure_items_repo(self, owner: str, name: str) -> Any:
                 return self_outer.store.ensure_items_repo(owner, name)
 
-            def upsert_pr_live(
-                self, record: Any, now: float | None = None
-            ) -> list[str]:
+            def upsert_pr_live(self, record: Any, now: float | None = None) -> list[str]:
                 return ["updated_at"]
 
             def replace_check_runs(self, *args: Any, **kwargs: Any) -> bool:
@@ -376,9 +440,7 @@ class TestHotRefresher(unittest.TestCase):
             def replace_review_requests(self, *args: Any, **kwargs: Any) -> bool:
                 return False
 
-            def replace_latest_opinionated_reviews(
-                self, *args: Any, **kwargs: Any
-            ) -> bool:
+            def replace_latest_opinionated_reviews(self, *args: Any, **kwargs: Any) -> bool:
                 return False
 
             def replace_latest_reviews(
@@ -391,9 +453,7 @@ class TestHotRefresher(unittest.TestCase):
                 latest_reviews_calls.append((repo_id, pr_number, len(reviews)))
                 return False
 
-            def replace_thread_activity(
-                self, repo_id: int, pr_number: int, threads: Any
-            ) -> bool:
+            def replace_thread_activity(self, repo_id: int, pr_number: int, threads: Any) -> bool:
                 replaced.append((repo_id, pr_number, len(threads)))
                 return True
 
@@ -472,15 +532,11 @@ class TestHotRefresher(unittest.TestCase):
         old_key = "old-org/old-widgets#7"
         leased = self.store.add_watch("monitor", "c1", [old_key], 60, 600)
         self.assertEqual(leased, [old_key])
-        self.assertEqual(
-            [r.full_name for r in self.store.list_repos()], ["old-org/old-widgets"]
-        )
+        self.assertEqual([r.full_name for r in self.store.list_repos()], ["old-org/old-widgets"])
 
         changed = self.hot.refresh_hot([old_key])
         self.assertEqual(changed, [KEY7])
-        self.assertEqual(
-            [r.full_name for r in self.store.list_repos()], ["octo-org/widgets"]
-        )
+        self.assertEqual([r.full_name for r in self.store.list_repos()], ["octo-org/widgets"])
         self.assertEqual(self.store.canonical_item_key(old_key), KEY7)
         self.assertEqual([w.item_key for w in self.store.active_watches()], [KEY7])
         live = self._rows("SELECT item_key FROM v_pr_live")

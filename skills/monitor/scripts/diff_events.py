@@ -13,7 +13,12 @@ from models import (
     ReviewStep,
     classify_review_turn,
     effective_viewer_review,
+    has_unanswered_direct_request,
+    is_mute_active,
+    is_post_review_commit,
+    parse_iso_seconds,
 )
+from review_overrides import ReviewOverrides
 
 
 @dataclass
@@ -24,6 +29,7 @@ class DiffContext:
     pushed_shas: dict[str, str] = field(default_factory=dict)
     reported_threads: dict[str, dict[str, str]] = field(default_factory=dict)
     reruns: dict[str, list[str]] = field(default_factory=dict)
+    overrides: ReviewOverrides | None = None
 
 
 def _check_rerun_attempted(ctx: DiffContext, pr: str, check_name: str, head_sha: str) -> bool:
@@ -490,10 +496,18 @@ def _is_reviewer_approved(snap: PrSnapshot, viewer_norm: str) -> bool:
     return bool(viewer_norm) and any(a.lower() == viewer_norm for a in snap.approvals)
 
 
-def _is_unread_reviewer_thread(thread: Any, viewer_norm: str, cutoff: str) -> bool:
-    if thread.resolved or not thread.last_comment_at:
+def _is_unread_reviewer_thread(
+    thread: Any,
+    viewer_norm: str,
+    cutoff: str,
+    *,
+    restrict_to_viewer: bool = False,
+) -> bool:
+    if thread.resolved or thread.last_author_is_bot or not thread.last_comment_at:
         return False
     if viewer_norm and thread.last_author.lower() == viewer_norm:
+        return False
+    if restrict_to_viewer and not thread.has_participant(viewer_norm):
         return False
     return bool(cutoff) and thread.last_comment_at > cutoff
 
@@ -503,10 +517,16 @@ def _unread_reviewer_threads(snap: PrSnapshot, ctx: DiffContext, viewer_norm: st
     if last is None or not last.submitted_at:
         return []
     reported_map = ctx.reported_threads.get(snap.key) or {}
+    restrict_to_viewer = any(t.participants for t in snap.threads)
     unread: list[str] = []
     for thread in snap.threads:
         cutoff = max(reported_map.get(thread.id, ""), last.submitted_at)
-        if _is_unread_reviewer_thread(thread, viewer_norm, cutoff):
+        if _is_unread_reviewer_thread(
+            thread,
+            viewer_norm,
+            cutoff,
+            restrict_to_viewer=restrict_to_viewer,
+        ):
             unread.append(thread.id)
     return unread
 
@@ -578,15 +598,29 @@ def _diff_reviewer_initial(
         return [_make_new_review_request_event(cur)]
     if cur_step != ReviewStep.RE_REVIEW_NEEDED:
         return []
-    if _is_directly_requested(cur, viewer_norm):
+    if has_unanswered_direct_request(cur, viewer_norm):
         return [_make_re_requested_event(cur)]
     last = effective_viewer_review(cur, viewer_norm)
-    if last is not None and bool(last.commit_oid) and last.commit_oid != cur.head_sha:
+    if last is not None and is_post_review_commit(cur, last):
         return [_make_author_head_push_event(cur, last.commit_oid)]
     unread = _unread_reviewer_threads(cur, ctx, viewer_norm)
     if unread:
         return [_make_author_thread_reply_event(cur, unread)]
     return []
+
+
+def _is_newly_requested_review(prev: PrSnapshot, cur: PrSnapshot, viewer_norm: str) -> bool:
+    if not has_unanswered_direct_request(cur, viewer_norm):
+        return False
+    if prev.state != "OPEN" and cur.state == "OPEN":
+        return True
+    if not _is_directly_requested(prev, viewer_norm):
+        return True
+    if not has_unanswered_direct_request(prev, viewer_norm):
+        return True
+    prev_req_ts = parse_iso_seconds(prev.viewer_requested_at)
+    cur_req_ts = parse_iso_seconds(cur.viewer_requested_at)
+    return prev_req_ts is not None and cur_req_ts is not None and cur_req_ts > prev_req_ts
 
 
 def _diff_reviewer_draft_and_requests(
@@ -595,6 +629,8 @@ def _diff_reviewer_draft_and_requests(
     prev_step: ReviewStep,
     cur_step: ReviewStep,
     viewer_norm: str,
+    *,
+    woke_from_mute: bool = False,
 ) -> list[Event]:
     events: list[Event] = []
     if prev.draft and not cur.draft:
@@ -612,9 +648,7 @@ def _diff_reviewer_draft_and_requests(
             )
         )
     reopened = prev.state != "OPEN" and cur.state == "OPEN"
-    newly_requested = _is_directly_requested(cur, viewer_norm) and (
-        reopened or not _is_directly_requested(prev, viewer_norm)
-    )
+    newly_requested = _is_newly_requested_review(prev, cur, viewer_norm)
     prev_review = effective_viewer_review(prev, viewer_norm)
     cur_review = effective_viewer_review(cur, viewer_norm)
     if (
@@ -622,7 +656,7 @@ def _diff_reviewer_draft_and_requests(
         and not prev.draft
         and prev_review is None
         and cur_step == ReviewStep.REQUESTED
-        and (prev_step != ReviewStep.REQUESTED or reopened or newly_requested)
+        and (prev_step != ReviewStep.REQUESTED or reopened or newly_requested or woke_from_mute)
     ):
         events.append(_make_new_review_request_event(cur))
     if cur_review is not None and not cur.draft and newly_requested:
@@ -655,7 +689,7 @@ def _diff_reviewer_rework(
     last = effective_viewer_review(cur, viewer_norm)
     if cur.draft or last is None or cur_step != ReviewStep.RE_REVIEW_NEEDED:
         return events
-    if prev.head_sha != cur.head_sha and bool(last.commit_oid) and cur.head_sha != last.commit_oid:
+    if prev.head_sha != cur.head_sha and is_post_review_commit(cur, last):
         events.append(_make_author_head_push_event(cur, prev.head_sha))
     unread = _unread_reviewer_threads(cur, ctx, viewer_norm)
     if unread:
@@ -667,6 +701,9 @@ def diff_reviewer_snapshots(
     prev: PrSnapshot | None, cur: PrSnapshot, ctx: DiffContext
 ) -> list[Event]:
     """Computes reviewer-mode ``Event`` transitions between ``prev`` and ``cur``."""
+    mute = ctx.overrides.get_mute(cur.key) if ctx.overrides is not None else None
+    if cur.state == "OPEN" and is_mute_active(cur, mute, ctx.viewer):
+        return []
     cur_step, _cur_tier = classify_review_turn(cur, ctx.viewer)
     viewer_norm = ctx.viewer.strip().lower()
     if prev is None:
@@ -686,8 +723,16 @@ def diff_reviewer_snapshots(
         ]
     if cur.state != "OPEN":
         return []
+    woke_from_mute = is_mute_active(prev, mute, ctx.viewer)
     prev_step, _prev_tier = classify_review_turn(prev, ctx.viewer)
-    events = _diff_reviewer_draft_and_requests(prev, cur, prev_step, cur_step, viewer_norm)
+    events = _diff_reviewer_draft_and_requests(
+        prev,
+        cur,
+        prev_step,
+        cur_step,
+        viewer_norm,
+        woke_from_mute=woke_from_mute,
+    )
     events.extend(_diff_reviewer_rework(prev, cur, ctx, cur_step, viewer_norm))
     return events
 
