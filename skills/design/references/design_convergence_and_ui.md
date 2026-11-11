@@ -95,7 +95,7 @@ When user decisions arrive on an architectural or feature task, update the **exi
 <Unified prose and Mermaid architecture diagram for the chosen design.>
 
 ## Data Model & API Contracts
-<Concrete types, schemas, wire envelopes, or function signatures verified against api-review principles.>
+<Concrete types, schemas, wire envelopes, or function signatures verified against `review-core/references/canonical_api_design.md`.>
 
 ## Lifecycle, State & Failure Modes
 <Mermaid stateDiagram-v2, sequenceDiagram, or erDiagram where applicable, plus timeout, retry, compatibility, and rollback behavior.>

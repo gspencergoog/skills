@@ -128,6 +128,9 @@ class TestSearchEngine(unittest.TestCase):
                     ),
                 ]
                 store.upsert_chunks(chunks)
+                store.conn.execute(
+                    "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+                )
 
                 embedder = DeterministicHashEmbedder()
                 sync_repo_embeddings(store, None, embedder=embedder)

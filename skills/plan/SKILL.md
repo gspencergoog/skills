@@ -10,8 +10,7 @@ description: >-
   implementation plan", or runs /plan, when a design session has settled on a
   direction, when a task spans several files or a migration, or when the user
   wants steps laid out before code is written. Don't use for exploring options
-  before a direction is chosen (use design), or for stakeholder-facing RFCs
-  (use proposal-writer).
+  before a direction is chosen (use design).
 ---
 
 # Implementation Plan
@@ -150,8 +149,7 @@ ______________________________________________________________________
 
 - Use [design](../design/SKILL.md) to explore candidate architectures, weigh tradeoffs interactively, and converge on a single-direction design spec before running `plan`.
 - Use [design-review](../design-review/SKILL.md) to audit a design specification, RFC, or existing module architecture for boundary, tradeoff, and failure-mode gaps before planning.
-- Use [proposal-writer](../proposal-writer/SKILL.md) for stakeholder-facing RFCs and architecture documents ("why" and "what"), whereas `plan` produces the execution blueprint ("how").
 - Use [grill-me](../grill-me/SKILL.md) and the `genui` skill when requirements are underspecified or wave ordering needs interactive alignment (`wave_sequencer`, `decision_batch`, `assumption_ledger`).
 - Use [duckdb](../duckdb/SKILL.md), [packrat](../packrat/SKILL.md), [context-indexer](../context-indexer/SKILL.md), and [sem-semantic-info](../sem-semantic-info/SKILL.md) in Step 2 to query specs, repo history, diffs, and symbol blast radius with low token cost.
-- Use [api-review](../api-review/SKILL.md) and [cognitive-complexity](../cognitive-complexity/SKILL.md) to check API signatures and function complexity budgets ($\le 15$) in the design.
+- Use [canonical_api_design.md](../review-core/references/canonical_api_design.md) and [cognitive-complexity](../cognitive-complexity/SKILL.md) to check API signatures and function complexity budgets ($\le 15$) in the design.
 - Use `swarm`, `run-workflow`, [ship-it](../ship-it/SKILL.md), and [commit-changes](../commit-changes/SKILL.md) to execute, test, and land the approved waves after the user clicks **"Proceed"**.

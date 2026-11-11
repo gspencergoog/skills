@@ -15,6 +15,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from gh_transport import GhApiError
 from models import (
     CheckRunRecord,
     ItemCommentRecord,
@@ -267,7 +268,9 @@ def parse_check_context(ctx: dict[str, Any]) -> CheckRunRecord | None:
     required = ctx.get("isRequired")
     is_required = required if isinstance(required, bool) else None
     if ctx.get("__typename") == "CheckRun" and ctx.get("name"):
-        run_id = _dict(_dict(ctx.get("checkSuite")).get("workflowRun")).get("databaseId")
+        run_id = _dict(_dict(ctx.get("checkSuite")).get("workflowRun")).get(
+            "databaseId"
+        )
         check_id = ctx.get("databaseId")
         return CheckRunRecord(
             name=str(ctx["name"]),
@@ -311,7 +314,9 @@ def parse_review_request(
         )
     login = _login(reviewer)
     if login and kind:
-        return ReviewRequestRecord(reviewer=login, reviewer_kind=str(kind), requested_at=ts)
+        return ReviewRequestRecord(
+            reviewer=login, reviewer_kind=str(kind), requested_at=ts
+        )
     return None
 
 
@@ -347,7 +352,9 @@ def _parse_review_requests(node: dict[str, Any]) -> list[ReviewRequestRecord]:
         if rec is None:
             continue
         ts = requested_at.get(_reviewer_request_key(rec)) or rec.requested_at
-        out.append(ReviewRequestRecord(rec.reviewer, rec.reviewer_kind, ts) if ts else rec)
+        out.append(
+            ReviewRequestRecord(rec.reviewer, rec.reviewer_kind, ts) if ts else rec
+        )
     return out
 
 
@@ -480,7 +487,9 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     """Parses one aliased PR node (first pages of threads and contexts) into a snapshot."""
     contexts = _nodes(_dict(_rollup(node).get("contexts")))
     raw_repo = _dict(node.get("repository")).get("nameWithOwner")
-    repo_full_name = str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
+    repo_full_name = (
+        str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
+    )
     reviews = [
         OpinionatedReviewRecord(
             author=str(_login(r.get("author"))),
@@ -522,7 +531,9 @@ class HotStore(Protocol):
 
     def ensure_items_repo(self, owner: str, name: str) -> Any: ...
 
-    def upsert_pr_live(self, record: PrLiveRecord, now: float | None = None) -> list[str]: ...
+    def upsert_pr_live(
+        self, record: PrLiveRecord, now: float | None = None
+    ) -> list[str]: ...
 
     def replace_check_runs(
         self,
@@ -595,7 +606,9 @@ class HotRefresher:
 
     def _query(self, query: str) -> dict[str, Any]:
         """Runs `query` through the transport and returns its `data` object."""
-        payload = self.transport.graphql(query, {}, worker=self.worker, priority=self.priority)
+        payload = self.transport.graphql(
+            query, {}, worker=self.worker, priority=self.priority
+        )
         return _dict(payload.get("data"))
 
     def resolve_node_ids(self, keys: Sequence[str]) -> dict[str, str]:
@@ -615,25 +628,33 @@ class HotRefresher:
                     known[key] = str(node_id)
         return known
 
-    def _extra_threads(self, node_id: str, after: str | None) -> list[ThreadActivityRecord]:
+    def _extra_threads(
+        self, node_id: str, after: str | None
+    ) -> list[ThreadActivityRecord]:
         """Fetches review threads beyond the first page."""
         out: list[ThreadActivityRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
-            conn = _dict(self._query(build_threads_page_query(node_id, after)).get("node")).get(
-                "reviewThreads"
-            )
+            conn = _dict(
+                self._query(build_threads_page_query(node_id, after)).get("node")
+            ).get("reviewThreads")
             out.extend(t for t in map(parse_thread, _nodes(conn)) if t)
             after = _page_info(conn)
             pages += 1
         return out
 
-    def _extra_contexts(self, node_id: str, number: int, after: str | None) -> list[CheckRunRecord]:
+    def _extra_contexts(
+        self, node_id: str, number: int, after: str | None
+    ) -> list[CheckRunRecord]:
         """Fetches head-commit check contexts beyond the first page."""
         out: list[CheckRunRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
-            node = _dict(self._query(build_contexts_page_query(node_id, number, after)).get("node"))
+            node = _dict(
+                self._query(build_contexts_page_query(node_id, number, after)).get(
+                    "node"
+                )
+            )
             conn = _dict(_rollup(node).get("contexts"))
             out.extend(c for c in map(parse_check_context, _nodes(conn)) if c)
             after = _page_info(conn)
@@ -643,9 +664,13 @@ class HotRefresher:
     def _complete(self, snap: HotPrSnapshot, node: dict[str, Any]) -> None:
         """Adds follow-up pages of threads and check contexts to `snap` when needed."""
         node_id = str(node.get("id") or "")
-        snap.threads.extend(self._extra_threads(node_id, _page_info(node.get("reviewThreads"))))
+        snap.threads.extend(
+            self._extra_threads(node_id, _page_info(node.get("reviewThreads")))
+        )
         contexts = _dict(_rollup(node).get("contexts"))
-        snap.checks.extend(self._extra_contexts(node_id, snap.record.number, _page_info(contexts)))
+        snap.checks.extend(
+            self._extra_contexts(node_id, snap.record.number, _page_info(contexts))
+        )
 
     def _write_threads(
         self, repo_id: int, number: int, threads: Sequence[ThreadActivityRecord]
@@ -665,13 +690,19 @@ class HotRefresher:
             changed |= self.store.replace_check_runs(
                 rec.repo_id, rec.number, rec.head_sha, snap.checks
             )
-        changed |= self.store.replace_review_requests(rec.repo_id, rec.number, snap.review_requests)
+        changed |= self.store.replace_review_requests(
+            rec.repo_id, rec.number, snap.review_requests
+        )
         changed |= self.store.replace_latest_opinionated_reviews(
             rec.repo_id, rec.number, snap.reviews
         )
-        changed |= self.store.replace_latest_reviews(rec.repo_id, rec.number, snap.latest_reviews)
+        changed |= self.store.replace_latest_reviews(
+            rec.repo_id, rec.number, snap.latest_reviews
+        )
         changed |= self._write_threads(rec.repo_id, rec.number, snap.threads)
-        changed |= self.store.upsert_item_comments(rec.repo_id, "pr", rec.number, snap.comments)
+        changed |= self.store.upsert_item_comments(
+            rec.repo_id, "pr", rec.number, snap.comments
+        )
         return changed
 
     def _stored_repo_for_node(
@@ -700,7 +731,9 @@ class HotRefresher:
             return merge_fn(stored.repo_id, repo_name)
         return stored
 
-    def _apply_node(self, node: dict[str, Any], requested_key: str | None = None) -> str | None:
+    def _apply_node(
+        self, node: dict[str, Any], requested_key: str | None = None
+    ) -> str | None:
         """Parses, completes, and stores one PR node; returns its key when it changed."""
         repo_name = str(_dict(node.get("repository")).get("nameWithOwner") or "")
         if "/" not in repo_name or node.get("number") is None:
@@ -717,8 +750,18 @@ class HotRefresher:
         targets: Sequence[tuple[str, int]],
         requested_keys: Sequence[str] | None = None,
     ) -> list[str]:
-        """Refreshes one batch of `(node_id, number)` targets."""
-        data = self._query(build_hot_query(targets))
+        """Refreshes one batch of `(node_id, number)` targets, splitting on transient errors."""
+        try:
+            data = self._query(build_hot_query(targets))
+        except GhApiError as exc:
+            if len(targets) <= 1 or exc.status in (401, 403):
+                raise
+            mid = len(targets) // 2
+            left_keys = requested_keys[:mid] if requested_keys is not None else None
+            right_keys = requested_keys[mid:] if requested_keys is not None else None
+            return self._refresh_batch(targets[:mid], left_keys) + self._refresh_batch(
+                targets[mid:], right_keys
+            )
         changed: list[str] = []
         for i in range(len(targets)):
             node = data.get(f"pr{i}")
@@ -747,5 +790,7 @@ class HotRefresher:
         changed: list[str] = []
         for start in range(0, len(targets), self.batch_size):
             end = start + self.batch_size
-            changed.extend(self._refresh_batch(targets[start:end], resolved_keys[start:end]))
+            changed.extend(
+                self._refresh_batch(targets[start:end], resolved_keys[start:end])
+            )
         return changed

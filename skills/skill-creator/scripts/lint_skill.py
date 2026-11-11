@@ -40,6 +40,7 @@ ALLOWED_FRONTMATTER_KEYS = {
     "compatibility",
     "metadata",
     "allowed-tools",
+    "disable-slash-command",
 }
 
 # Description quality thresholds. The description is injected into every

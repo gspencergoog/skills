@@ -199,7 +199,7 @@ def search_fts5_bm25(
       c.chunk_id,
       bm25(chunks_fts, 1.0, 1.0, 1.5, 5.0, 1.0) AS raw_bm25
     FROM chunks_fts
-    JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+    JOIN chunks c ON c.rowid = chunks_fts.rowid
     JOIN repos r ON r.repo_id = c.repo_id
     WHERE chunks_fts MATCH ?
     {filter_sql}

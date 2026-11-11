@@ -41,14 +41,14 @@ When the prompt includes an **API Review Mandate**, evaluate modified public API
 
 When the prompt includes a **Lane Assignment** block (`--panel`), evaluate only the criteria and lenses it lists. Another reviewer covers the remaining criteria in parallel. Report an issue outside your lane only at `critical` or `high`, and tag its Body with `out-of-lane`. In `## Structural Assessment`, fill in only your assigned lenses.
 
-When the prompt includes a **Focus Mandate** block, you are a focus reviewer working beside one or more general reviewers ([lanes.md](lanes.md#focus-mandate-block)):
+When the prompt includes a **Focus Mandate** block, you are a focus reviewer working beside one or more general reviewers ([focus_blocks.md](../../review-core/references/focus_blocks.md#focus-mandate-block)):
 
 - Read the playbook the block names (or its inline `#### Ad hoc playbook`) before the diff. It is required reading.
 - Review the whole diff through that theme only, tracing the mechanism across callers, tests, and lifecycle boundaries.
 - Add `- **Focus**: `<theme-id>`` to every finding that belongs to the theme. Report an issue outside the theme only at `critical` or `high`, tagged `out-of-lane` in its Body.
 - End your report with `## Playbook Feedback`, opening with `Failure modes checked: <numbers>`.
 
-When the prompt includes a **Focus Priority** block, you are still a general or lane reviewer ([lanes.md](lanes.md#focus-priority-block)):
+When the prompt includes a **Focus Priority** block, you are still a general or lane reviewer ([focus_blocks.md](../../review-core/references/focus_blocks.md#focus-priority-block)):
 
 - Read the named playbook before the diff and test the theme hypotheses first.
 - Then complete your full mandate. The theme sets the order of work; it never narrows what you report.
@@ -57,7 +57,7 @@ When the prompt includes a **Focus Priority** block, you are still a general or 
 
 ## Evidence Standard
 
-Every finding states its evidence tier in `Evidence` ([evidence.md](evidence.md)), and severity is capped by that tier:
+Every finding states its evidence tier in `Evidence` ([evidence.md](../../review-core/references/evidence.md)), and severity is capped by that tier:
 
 - `Executed`: Real command output from this session (failing test, repro test, mutation run, benchmark, or dry-run query). Allowed at any severity.
 - `Read`: Literal text opened from disk this session, cited by `path:line` and quoted. Allowed at any severity.
@@ -88,7 +88,7 @@ Before returning your findings, apply the self-critique and falsification pass f
 - Keep at most 3 Questions (`Q1...`), each naming a specific claim and the exact check (`To settle`) that settles it. Drop generic "make sure that..." reminders.
 - Quote the exact text for every document finding at `Read` (or `Fetched`) with its location (both sides for an inconsistency). Search the document and its linked files before claiming a term or section is missing.
 - Drop API findings that demand refactoring untouched legacy code outside the diff or adding speculative design patterns (builders, factories) without concrete cognitive complexity.
-- Keep each finding's combined comment prose (`Body` + `Why` + unfenced `Suggestion`) to at most 80 words and 4 sentences. Keep every sentence to at most 30 words and cognitive complexity $\text{PCC} \le 5$, with zero banned AI words, em-dashes, or 4-noun clusters.
+- Keep each finding's combined comment prose (`Body` + `Why` + unfenced `Suggestion`) to at most 120 words and 6 sentences. Keep every sentence to at most 30 words and cognitive complexity $\text{PCC} \le 5$, with zero banned AI words, em-dashes, or 4-noun clusters.
 
 ## Read-Only and Worker Isolation Mandate
 
@@ -145,7 +145,7 @@ Format your report using these exact sections and field labels:
 - **Focus**: `<theme-id>` (focus reviewers only, on findings that belong to the assigned theme)
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` -- <command and trimmed output (<=15 lines), quoted text with `path:line`, or line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5).>
-- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences).>
+- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 120 words and <= 6 sentences).>
 - **Suggestion**: (Optional) <Compilable drop-in code replacement, replacement text, or specific question. At most one fenced block.>
 - **Repro test**: (Optional, `--verify` only) <The `review_scratch_*` test that reproduces the defect, in one fenced block.>
 

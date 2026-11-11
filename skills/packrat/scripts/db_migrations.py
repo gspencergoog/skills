@@ -182,7 +182,9 @@ def _iter_statements(sql: str) -> Iterator[str]:
                 yield candidate
             buf = []
     tail = "".join(buf).strip()
-    if tail and not all(ln.strip().startswith("--") for ln in tail.splitlines() if ln.strip()):
+    if tail and not all(
+        ln.strip().startswith("--") for ln in tail.splitlines() if ln.strip()
+    ):
         yield tail
 
 
@@ -326,7 +328,9 @@ def _copy_legacy_f32_batches(conn: sqlite3.Connection) -> None:
         batch = cursor.fetchmany(2000)
         if not batch:
             break
-        converted = [item for row in batch if (item := _quantize_legacy_f32_row(row)) is not None]
+        converted = [
+            item for row in batch if (item := _quantize_legacy_f32_row(row)) is not None
+        ]
         if converted:
             conn.executemany(
                 """
@@ -472,6 +476,57 @@ def migrate_0009_review_turn_signals(conn: sqlite3.Connection) -> None:
     _add_missing_columns(conn, REVIEW_TURN_SIGNALS_COLUMNS)
 
 
+def migrate_0010_fts_rowid_and_file_index(conn: sqlite3.Connection) -> None:
+    """Indexes `chunks(repo_id, file_path)` and aligns `chunks_fts.rowid` with `chunks.rowid`."""
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunks_repo_file ON chunks(repo_id, file_path)"
+    )
+    mismatch = conn.execute(
+        """
+        SELECT 1
+        WHERE (SELECT COUNT(*) FROM chunks) <> (SELECT COUNT(*) FROM chunks_fts)
+           OR EXISTS (
+             SELECT 1 FROM chunks c
+             LEFT JOIN chunks_fts f ON f.rowid = c.rowid
+             WHERE f.chunk_id IS NULL OR f.chunk_id <> c.chunk_id
+           )
+        """
+    ).fetchone()
+    if mismatch is not None:
+        conn.execute("DELETE FROM chunks_fts")
+        conn.execute(
+            """
+            INSERT INTO chunks_fts (rowid, chunk_id, source_kind, source_ref, title, text)
+            SELECT rowid, chunk_id, source_kind, source_ref, title, text
+            FROM chunks
+            """
+        )
+
+
+def migrate_0011_external_content_chunks_fts(conn: sqlite3.Connection) -> None:
+    """Converts `chunks_fts` into an external-content FTS5 table backed by `chunks`."""
+    has_content_shadow = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts_content'"
+    ).fetchone()
+    if has_content_shadow is not None:
+        conn.execute("DROP TABLE IF EXISTS chunks_fts")
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+              chunk_id UNINDEXED,
+              source_kind UNINDEXED,
+              source_ref UNINDEXED,
+              title,
+              text,
+              content='chunks',
+              content_rowid='rowid',
+              tokenize='porter unicode61'
+            )
+            """
+        )
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -484,6 +539,8 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (7, migrate_0007_timeline_events),
     (8, migrate_0008_latest_reviews),
     (9, migrate_0009_review_turn_signals),
+    (10, migrate_0010_fts_rowid_and_file_index),
+    (11, migrate_0011_external_content_chunks_fts),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -560,7 +617,9 @@ def refresh_views(conn: sqlite3.Connection, path: Path = VIEWS_SQL_PATH) -> None
         raise
 
 
-def apply_migrations(conn: sqlite3.Connection, views_path: Path = VIEWS_SQL_PATH) -> list[int]:
+def apply_migrations(
+    conn: sqlite3.Connection, views_path: Path = VIEWS_SQL_PATH
+) -> list[int]:
     """Brings `conn`'s database to `LATEST_SCHEMA_VERSION` and refreshes stale views.
 
     Args:

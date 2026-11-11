@@ -11,14 +11,7 @@ Optimize for finding survival rate over finding count. Every architectural claim
 
 ## Evidence Tiers and Severity Caps
 
-| Tier | Meaning in `/design-review` | Allowed Severities |
-| :--- | :--- | :--- |
-| `Executed` | Output from a command run this session (`sem`, `cognitive_complexity.py`, `prepare_design_context.py`, a validator, or a read-only query). | `critical`, `high`, `medium`, `low` |
-| `Read` | Exact text or code opened from disk this session, quoted with `path:line`. Contradictions must quote both sides. | `critical`, `high`, `medium`, `low` |
-| `Fetched` | Verbatim text retrieved from an official specification or reference URL this session (at most 3 network fetches), cited by URL. | `critical`, `high`, `medium`, `low` |
-| `Deduction` | Step-by-step state trace, dependency trace, or back-of-envelope capacity arithmetic derived from exact `path:line` citations. | `critical`, `high` (with line citations), `medium`, `low` |
-| `Speculation` | Unmeasured scaling hunch, incomplete call trace, or external unknown that could not be verified within read budget. | `medium`, `low`, or `Question` (`Q1..Q3`) |
-| `Recalled` | Memory of how a library, protocol, or repo file works without reading it this session. | Forbidden. Verify on disk or drop. |
+Apply the shared evidence tiers (`Executed`, `Read`, `Fetched`, `Deduction`, `Speculation`, and forbidden `Recalled`), severity caps, hypothesis tracking, and anti-patterns in [evidence.md](../../review-core/references/evidence.md#tiers). In `/design-review`, `Executed` includes output from `sem`, `cognitive_complexity.py`, `prepare_design_context.py`, schema validators, and read-only queries; `Read` requires quoting both sides when flagging a cross-view or spec-to-code contradiction.
 
 ## Design-Specific Critique Rules
 
@@ -41,7 +34,7 @@ Run four checks on every candidate finding before emitting it:
 
 `lint_design_review.py` validates these exact seven `##` sections in order:
 
-1. `## Summary` (ending with `Verdict: <Ready for /plan | Revisions Recommended | Architectural Blockers>`)
+1. `## Summary` (ending with `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>`)
 2. `## Principle Scorecard` (pipe table with columns `| Principle | Score | Assessment |` covering all 7 `Principle` IDs, scored `0/10`..`10/10` or `N/A`)
 3. `## View & Boundary Assessment` (concise bullets covering Module, Runtime, and State/Allocation coherence, One-Way Doors, and downstream files)
 4. `## Findings (Ordered by Severity)` (`None.` when clean, or sequential `### C1.`, `### H1.`, `### M1.`, `### L1.` blocks)
@@ -51,22 +44,7 @@ Run four checks on every candidate finding before emitting it:
 
 ### Finding and Question Field Layout
 
-```markdown
-### H1. <short architectural claim>
-- **Target**: `path/to/file:42` (or `path/to/spec.md:88 (## Data Model)`)
-- **Door**: `one-way | two-way`
-- **Severity**: `critical | high | medium | low`
-- **Principle**: `<one of the 7 canonical principle IDs>`
-- **Focus**: `<playbook-id>` (optional; include when a focus playbook applies)
-- **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>`: <command output, exact quote with path:line, or line-cited trace>
-- **Body**: <1 to 3 concise sentences stating the structural flaw without restating the spec>
-- **Why**: <1 concise sentence naming what breaks, drifts, or amplifies change if built as-is>
-- **Suggestion**: <concrete counter-design, replacement text, or fitness test with at most one code fence>
-- **Details**: <optional root-cause trace or rejected alternatives, <= 150 words>
+Format findings (`### C1/H1/M1/L1.`), open design questions (`### Q1..Q3.`), and `Checked and Found Clean` bullets using the design-review variant in [evidence.md](../../review-core/references/evidence.md#formats):
 
-### Q1. <high-stakes open question?>
-- **Target**: `path/to/file:15`
-- **Evidence**: `<Speculation | Deduction>`: <what was checked and where the trace stopped>
-- **Why**: <1 concise sentence stating what breaks if the assumption fails>
-- **To settle**: <the exact file, benchmark, or stakeholder check that resolves it>
-```
+- **Findings**: `Target`, `Door` (`one-way | two-way`), `Severity` (`critical | high | medium | low`), `Principle` (one of the 7 canonical IDs), optional `Focus` (`<playbook-id>` or `adhoc:<slug>`), `Evidence` (`<Tier>: <proof>`), `Body`, `Why`, `Suggestion` (at most one code fence), and optional `Details` (`<= 150` words).
+- **Questions (`Q1..Q3`)**: `Target`, `Evidence` (`Speculation` or `Deduction` with detail), `Why`, and `To settle`.

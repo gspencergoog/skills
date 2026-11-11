@@ -1,6 +1,6 @@
 # Focus Area Catalog
 
-A focus theme is a cross-cutting mechanism change in a diff whose failure modes are non-local: reading each hunk in isolation would not reveal them. `code-review` Step 2d (focus triage) reads this index to recognize familiar themes quickly, and a focus reviewer reads the matching playbook before the diff. See [lanes.md](../lanes.md) for how themes become focus reviewers or Focus Priority blocks.
+A focus theme is a cross-cutting mechanism change in a diff whose failure modes are non-local: reading each hunk in isolation would not reveal them. `code-review` Step 2d (focus triage) reads this index to recognize familiar themes quickly, and a focus reviewer reads the matching playbook before the diff. See [focus_blocks.md](../../../review-core/references/focus_blocks.md) for how themes become focus reviewers or Focus Priority blocks, and [lanes.md](../lanes.md#depth-cap) for the focus depth cap.
 
 ## How Triage Uses This Catalog
 

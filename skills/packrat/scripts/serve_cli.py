@@ -312,6 +312,7 @@ class MirrorAdapter:
                 self.store,
                 repo,
                 max_pages=MIRROR_MAX_PAGES,
+                backfill_max_pages=0,
                 runner=self.runner,
                 budget=self.budget,
                 skip_events_poll=True,
@@ -377,7 +378,9 @@ class TimelineAdapter:
             if stats.deferred:
                 detail = "; ".join(stats.errors) or "budget below threshold"
                 raise BudgetDeferred(
-                    "graphql", Priority.VIEWER, f"timeline deferred ({repo.full_name}: {detail})"
+                    "graphql",
+                    Priority.VIEWER,
+                    f"timeline deferred ({repo.full_name}: {detail})",
                 )
             results.append(stats)
         failed = [err for stats in results for err in stats.errors]

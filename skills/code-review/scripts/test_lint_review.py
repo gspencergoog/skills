@@ -611,10 +611,18 @@ Verdict: Minor revisions needed.
 
         text = self._profile_report(self._sentences(4))
         rules_default = {v.rule for v in check_report(parse_report(text))}
-        self.assertIn("comment-prose-length", rules_default)
+        self.assertNotIn("comment-prose-length", rules_default)
         pr_violations = check_report(parse_report(text), profile="pr")
         self.assertNotIn("comment-prose-length", {v.rule for v in pr_violations})
+        over_text = self._profile_report(self._sentences(6))
+        self.assertIn(
+            "comment-prose-length",
+            {v.rule for v in check_report(parse_report(over_text))},
+        )
+        self.assertEqual(COMMENT_PROFILES["default"].words, 120)
+        self.assertEqual(COMMENT_PROFILES["default"].sentences, 6)
         self.assertEqual(COMMENT_PROFILES["pr"].words, 120)
+        self.assertEqual(COMMENT_PROFILES["pr"].sentences, 6)
 
     def test_pr_profile_fix_hint_names_active_caps(self):
         text = self._profile_report(self._sentences(6))
@@ -634,9 +642,15 @@ Verdict: Minor revisions needed.
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "r.md"
             path.write_text(self._profile_report(self._sentences(4)), encoding="utf-8")
+            over_path = pathlib.Path(tmp) / "over.md"
+            over_path.write_text(
+                self._profile_report(self._sentences(6)), encoding="utf-8"
+            )
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(main([str(path)]), 1)
+                self.assertEqual(main([str(path)]), 0)
                 self.assertEqual(main([str(path), "--comment-profile", "pr"]), 0)
+                self.assertEqual(main([str(over_path)]), 1)
+                self.assertEqual(main([str(over_path), "--comment-profile", "pr"]), 1)
 
     def test_details_too_long_fails(self):
         details = self._sentences(8)
@@ -716,12 +730,13 @@ return _byte_len(text) <= max_bytes
         self.assertNotIn("**Impact**:", comment)
 
     def test_comment_prose_length_fails(self):
-        five_sentences = (
+        six_sentences = (
             "First short sentence here. "
             "Second short sentence here. "
             "Third short sentence here. "
             "Fourth short sentence here. "
-            "Fifth short sentence here."
+            "Fifth short sentence here. "
+            "Sixth short sentence here."
         )
         bad = f"""\
 ## Review Comments (Ordered by Severity)
@@ -730,7 +745,7 @@ return _byte_len(text) <= max_bytes
 - **Line**: `10`
 - **Severity**: `medium`
 - **Evidence**: `Read` - `foo.py:10`
-- **Body**: {five_sentences}
+- **Body**: {six_sentences}
 - **Why**: Causes a bug.
 """
         rules = [v.rule for v in check_report(parse_report(bad))]
@@ -785,7 +800,7 @@ return _byte_len(text) <= max_bytes
 - **Focus**: bad focus
 - **Verified**: `pytest`
 - **Evidence**: `Recalled` - memory
-- **Body**: We should delve into this parser branch. The parser, which when tokens that are not yet validated arrive while the buffer is still locked, fails unless the caller retries. When the caller passes a dictionary with more than thirty entries and the configuration flag for strict validation is enabled in the runtime environment, the validator drops every remaining key without logging a warning. Fourth sentence here. Fifth sentence here.
+- **Body**: We should delve into this parser branch. The parser, which when tokens that are not yet validated arrive while the buffer is still locked, fails unless the caller retries. When the caller passes a dictionary with more than thirty entries and the configuration flag for strict validation is enabled in the runtime environment, the validator drops every remaining key without logging a warning. Fourth sentence here. Fifth sentence here. Sixth sentence here. Seventh sentence here.
 - **Suggestion**:
 ```python
 old()

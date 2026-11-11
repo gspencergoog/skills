@@ -17,11 +17,40 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-_WRITE_PROSE_SCRIPTS = Path(__file__).resolve().parents[2] / "write-prose" / "scripts"
-if str(_WRITE_PROSE_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_WRITE_PROSE_SCRIPTS))
+_SKILLS_ROOT = Path(__file__).resolve().parents[2]
+for _rel_scripts in (("review-core", "scripts"), ("write-prose", "scripts")):
+    _p = _SKILLS_ROOT.joinpath(*_rel_scripts)
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
 
 from analyze_prose import analyze_prose
+from review_lint_common import (
+    CLASS_ORDER,
+    CLEAN_TIERS,
+    ID_TO_SEVERITY,
+    MAX_SENTENCE_PCC,
+    MAX_SENTENCE_WORDS,
+    VALID_TIERS,
+    VALID_VERDICTS,
+    FenceMeta,
+    Item,
+    ParsedReport,
+    ReportProfile,
+    Violation,
+    check_clean_lines,
+    check_evidence_caps,
+    check_id_sequence,
+    check_prose,
+    check_questions,
+    check_required_fields,
+    check_sections,
+    check_severity_matches_id,
+    check_single_fence_per_field,
+    extract_evidence_detail,
+    extract_tier,
+    strip_ticks,
+    update_fence,
+)
 
 PRINCIPLE_IDS = (
     "problem-scope",
@@ -52,18 +81,12 @@ EXPECTED_SECTIONS = (
     "Recommended Next Steps",
 )
 
-VALID_TIERS = ("Executed", "Read", "Fetched", "Deduction", "Speculation", "Recalled")
-CLEAN_TIERS = ("Executed", "Read", "Fetched", "Deduction")
-VALID_VERDICTS = ("Ready for /plan", "Revisions Recommended", "Architectural Blockers")
 VALID_DOORS = ("one-way", "two-way")
-ID_TO_SEVERITY = {"C": "critical", "H": "high", "M": "medium", "L": "low"}
-SEVERITY_ORDER = {"C": 0, "H": 1, "M": 2, "L": 3}
+SEVERITY_ORDER = CLASS_ORDER
 
 MAX_VISIBLE_WORDS = 120
 MAX_VISIBLE_SENTENCES = 6
 MAX_DETAILS_WORDS = 150
-MAX_SENTENCE_WORDS = 30
-MAX_SENTENCE_PCC = 5
 
 _H2_RE = re.compile(r"^##\s+(?P<title>.+?)\s*$")
 _H3_ITEM_RE = re.compile(r"^###\s+(?P<fid>[CHMLQ]\d+)\.\s+(?P<claim>.+?)\s*$")
@@ -71,9 +94,11 @@ _FIELD_RE = re.compile(r"^-\s+\*\*(?P<name>[A-Za-z][A-Za-z ]*)\*\*:\s*(?P<val>.*
 _SCORE_CELL_RE = re.compile(
     r"^(?:(?P<num>10|[0-9])(?:\s*/\s*10)?|(?P<na>N/A))$", re.IGNORECASE
 )
-_FOCUS_RE = re.compile(r"^(?:adhoc:)?[a-z0-9]+(?:-[a-z0-9]+)*$")
+_FOCUS_RE = re.compile(r"^`?(?:adhoc:)?[a-z0-9]+(?:-[a-z0-9]+)*`?$")
+_DOOR_RE = re.compile(r"^`?(?:one-way|two-way)`?$", re.IGNORECASE)
+_PRINCIPLE_RE = re.compile(rf"^`?(?:{'|'.join(PRINCIPLE_IDS)})`?$")
 _VERDICT_RE = re.compile(
-    r"Verdict:\s*`?(?P<verdict>Ready for /plan|Revisions Recommended|Architectural Blockers)`?",
+    r"Verdict:\s*`?(?P<verdict>Ready|Minor Revisions Needed|Critical Blockers)`?",
     re.IGNORECASE,
 )
 _OVERALL_SCORE_RE = re.compile(
@@ -83,10 +108,38 @@ _CITATION_RE = re.compile(
     r"Citation\s+audit:\s*(?P<checked>\d+)\s+checked,\s*(?P<dropped>\d+)\s+dropped",
     re.IGNORECASE,
 )
-_CLEAN_BULLET_RE = re.compile(
-    r"^-\s+(?P<hyp>.+?):\s*`?(?P<tier>Executed|Read|Fetched|Deduction|Speculation|Recalled)`?\s*(?:[:\-—])\s*(?P<proof>.+)$"
-)
 _FILE_LINK_RE = re.compile(r"\[(?P<label>[^\]]+)\]\(file://[^\)]+\)")
+
+DESIGN_PROFILE = ReportProfile(
+    name="design",
+    sections=EXPECTED_SECTIONS,
+    findings_section="Findings (Ordered by Severity)",
+    questions_section="Open Design Questions",
+    required_fields=(
+        "Target",
+        "Door",
+        "Severity",
+        "Principle",
+        "Evidence",
+        "Body",
+        "Why",
+        "Suggestion",
+    ),
+    optional_fields=("Focus", "Details"),
+    max_words=MAX_VISIBLE_WORDS,
+    max_sentences=MAX_VISIBLE_SENTENCES,
+    details_words=MAX_DETAILS_WORDS,
+    validators={
+        "Door": _DOOR_RE,
+        "Principle": _PRINCIPLE_RE,
+        "Focus": _FOCUS_RE,
+    },
+    rule_names={
+        "evidence-required": "invalid-evidence-tier",
+        "evidence-recalled": "recalled-forbidden",
+        "invalid-focus": "focus-id-format",
+    },
+)
 
 
 @dataclass
@@ -142,37 +195,6 @@ class DesignReviewReport:
     unparsed_item_lines: list[tuple[int, str]] = field(default_factory=list)
 
 
-@dataclass(frozen=True)
-class Violation:
-    """One lint violation with line number, rule code, message, and fix hint."""
-
-    lineno: int
-    rule: str
-    message: str
-    fix_hint: str
-
-
-def _strip_ticks(value: str) -> str:
-    """Strips surrounding whitespace and single backticks."""
-    val = value.strip()
-    if len(val) >= 2 and val.startswith("`") and val.endswith("`"):
-        return val[1:-1].strip()
-    return val
-
-
-def _fence_marker_update(active_fence: str, stripped: str) -> tuple[str, bool]:
-    """Updates fence tracking state and returns (new_fence, is_fence_delimiter)."""
-    if not stripped.startswith(("```", "~~~")):
-        return active_fence, False
-    char = stripped[0]
-    length = len(stripped) - len(stripped.lstrip(char))
-    if not active_fence:
-        return char * length, True
-    if char == active_fence[0] and length >= len(active_fence):
-        return "", True
-    return active_fence, False
-
-
 def _extract_principle_id(cell_text: str) -> tuple[str, str]:
     """Extracts (principle_id, display_label) from the first scorecard cell."""
     for pid in PRINCIPLE_IDS:
@@ -184,7 +206,7 @@ def _extract_principle_id(cell_text: str) -> tuple[str, str]:
             )
             label = cleaned.strip("* ") or PRINCIPLE_LABELS[pid]
             return pid, label
-    return _strip_ticks(cell_text), cell_text.strip()
+    return strip_ticks(cell_text), cell_text.strip()
 
 
 def _parse_scorecard_line(stripped: str, lineno: int) -> PrincipleRow | None:
@@ -200,7 +222,7 @@ def _parse_scorecard_line(stripped: str, lineno: int) -> PrincipleRow | None:
     }:
         return None
     pid, label = _extract_principle_id(cells[0])
-    score_raw = _strip_ticks(cells[1])
+    score_raw = strip_ticks(cells[1])
     match = _SCORE_CELL_RE.match(score_raw)
     if not match:
         return PrincipleRow(pid, label, -1, cells[2], lineno)
@@ -220,13 +242,17 @@ class _ParseCursor:
 
 
 def _append_item_line(
-    cursor: _ParseCursor, raw_line: str, stripped: str, is_open_fence: bool
+    cursor: _ParseCursor,
+    raw_line: str,
+    stripped: str,
+    in_fence_or_delim: bool,
+    is_open_fence: bool,
 ) -> None:
     """Appends a field line or continuation line to the active finding/question."""
     item = cursor.current_item
     if item is None:
         return
-    if not cursor.active_fence and not is_open_fence:
+    if not in_fence_or_delim:
         fmatch = _FIELD_RE.match(stripped)
         if fmatch:
             fname = fmatch.group("name").strip()
@@ -244,20 +270,27 @@ def _append_item_line(
 
 
 def _handle_section_body_line(
-    cursor: _ParseCursor, lineno: int, raw_line: str, stripped: str, is_open_fence: bool
+    cursor: _ParseCursor,
+    lineno: int,
+    raw_line: str,
+    stripped: str,
+    in_fence_or_delim: bool,
+    is_open_fence: bool,
 ) -> None:
     """Routes a single line inside the current ## section."""
     sec = cursor.section
     if sec == "Summary":
         cursor.report.summary_lines.append(raw_line)
-    elif sec == "Principle Scorecard" and not cursor.active_fence:
+    elif sec == "Principle Scorecard" and not in_fence_or_delim:
         row = _parse_scorecard_line(stripped, lineno)
         if row is not None:
             cursor.report.scorecard_rows.append(row)
     elif sec == "View & Boundary Assessment":
         cursor.report.view_lines.append(raw_line)
     elif sec in {"Findings (Ordered by Severity)", "Open Design Questions"}:
-        _handle_item_section_line(cursor, lineno, raw_line, stripped, is_open_fence)
+        _handle_item_section_line(
+            cursor, lineno, raw_line, stripped, in_fence_or_delim, is_open_fence
+        )
     elif sec == "Checked and Found Clean" and stripped and stripped != "None.":
         cursor.report.clean_lines.append((lineno, stripped))
     elif sec == "Recommended Next Steps":
@@ -265,10 +298,15 @@ def _handle_section_body_line(
 
 
 def _handle_item_section_line(
-    cursor: _ParseCursor, lineno: int, raw_line: str, stripped: str, is_open_fence: bool
+    cursor: _ParseCursor,
+    lineno: int,
+    raw_line: str,
+    stripped: str,
+    in_fence_or_delim: bool,
+    is_open_fence: bool,
 ) -> None:
     """Parses ### headings and field bullets in Findings or Open Design Questions."""
-    if not cursor.active_fence and not is_open_fence:
+    if not in_fence_or_delim:
         h3 = _H3_ITEM_RE.match(stripped)
         if h3:
             item = DesignFinding(
@@ -284,7 +322,7 @@ def _handle_item_section_line(
             cursor.current_field = ""
             return
     if cursor.current_item is not None:
-        _append_item_line(cursor, raw_line, stripped, is_open_fence)
+        _append_item_line(cursor, raw_line, stripped, in_fence_or_delim, is_open_fence)
     elif stripped and stripped != "None.":
         cursor.report.unparsed_item_lines.append((lineno, stripped))
 
@@ -296,11 +334,10 @@ def parse_design_review(text: str) -> DesignReviewReport:
     for lineno, raw_line in enumerate(text.splitlines(), start=1):
         stripped = raw_line.strip()
         was_fenced = bool(cursor.active_fence)
-        cursor.active_fence, is_delim = _fence_marker_update(
-            cursor.active_fence, stripped
-        )
-        is_open_fence = is_delim and not was_fenced
-        if not was_fenced and not is_delim:
+        cursor.active_fence, active = update_fence(cursor.active_fence, stripped)
+        in_fence_or_delim = was_fenced or active
+        is_open_fence = not was_fenced and bool(cursor.active_fence)
+        if not in_fence_or_delim:
             h2 = _H2_RE.match(stripped)
             if h2:
                 title = h2.group("title").strip()
@@ -309,8 +346,25 @@ def parse_design_review(text: str) -> DesignReviewReport:
                 cursor.current_item = None
                 cursor.current_field = ""
                 continue
-        _handle_section_body_line(cursor, lineno, raw_line, stripped, is_open_fence)
+        _handle_section_body_line(
+            cursor, lineno, raw_line, stripped, in_fence_or_delim, is_open_fence
+        )
     return report
+
+
+def _to_common_item(df: DesignFinding) -> Item:
+    """Adapts a DesignFinding into a review_lint_common.Item."""
+    fence_meta = {
+        fname: FenceMeta(fenced=count > 0, extra_fences=max(0, count - 1))
+        for fname, count in df.fence_counts.items()
+    }
+    return Item(
+        id=df.finding_id,
+        title=df.claim,
+        fields=df.fields,
+        line=df.lineno,
+        fence_meta=fence_meta,
+    )
 
 
 def _check_verdict_line(
@@ -321,20 +375,20 @@ def _check_verdict_line(
     if not vmatch:
         return [
             Violation(
-                1,
-                "missing-verdict",
-                "Summary lacks a valid 'Verdict:' line.",
-                f"End ## Summary with 'Verdict: <{' | '.join(VALID_VERDICTS)}>'.",
+                rule="missing-verdict",
+                message="Summary lacks a valid 'Verdict:' line.",
+                line=1,
+                fix_hint=f"End ## Summary with 'Verdict: <{' | '.join(VALID_VERDICTS)}>'.",
             )
         ]
     has_blocker = any(f.finding_id.startswith(("C", "H")) for f in findings)
-    if vmatch.group("verdict").lower() == "ready for /plan" and has_blocker:
+    if vmatch.group("verdict").lower() == "ready" and has_blocker:
         return [
             Violation(
-                1,
-                "verdict-contradicts-findings",
-                "Verdict 'Ready for /plan' contradicts critical or high findings.",
-                "Change Verdict to 'Revisions Recommended' or 'Architectural Blockers'.",
+                rule="verdict-contradicts-findings",
+                message="Verdict 'Ready' contradicts critical or high findings.",
+                line=1,
+                fix_hint="Change Verdict to 'Minor Revisions Needed' or 'Critical Blockers'.",
             )
         ]
     return []
@@ -342,34 +396,13 @@ def _check_verdict_line(
 
 def _check_sections(report: DesignReviewReport) -> list[Violation]:
     """Checks required section presence, ordering, and absence of Playbook Feedback."""
-    violations: list[Violation] = []
-    titles = [t for _, t in report.sections_seen]
+    section_map: dict[str, list[tuple[int, str]]] = {}
     for lineno, title in report.sections_seen:
-        if title.lower() == "playbook feedback":
-            violations.append(
-                Violation(
-                    lineno,
-                    "playbook-feedback-leaked",
-                    "Leaked '## Playbook Feedback' section.",
-                    "Remove '## Playbook Feedback' from the synthesized report.",
-                )
-            )
-    filtered = [t for t in titles if t in EXPECTED_SECTIONS]
-    if tuple(filtered) != EXPECTED_SECTIONS:
-        missing = [s for s in EXPECTED_SECTIONS if s not in titles]
-        msg = (
-            f"Missing section(s): {', '.join(missing)}."
-            if missing
-            else f"Sections out of canonical order: {filtered}."
-        )
-        violations.append(
-            Violation(
-                1,
-                "section-order",
-                msg,
-                f"Include exact ## headings in order: {', '.join(EXPECTED_SECTIONS)}.",
-            )
-        )
+        section_map.setdefault(title, []).append((lineno, title))
+    common_parsed = ParsedReport(
+        sections=section_map, findings=[], questions=[], clean_lines=report.clean_lines
+    )
+    violations = check_sections(common_parsed, DESIGN_PROFILE)
     violations.extend(_check_verdict_line(report.summary_lines, report.findings))
     return violations
 
@@ -380,28 +413,28 @@ def _check_scorecard_row(row: PrincipleRow) -> list[Violation]:
     if row.principle_id not in PRINCIPLE_IDS:
         out.append(
             Violation(
-                row.lineno,
-                "scorecard-unknown-principle",
-                f"Unknown principle '{row.principle_id}'.",
-                f"Use one of: {', '.join(PRINCIPLE_IDS)}.",
+                rule="scorecard-unknown-principle",
+                message=f"Unknown principle '{row.principle_id}'.",
+                line=row.lineno,
+                fix_hint=f"Use one of: {', '.join(PRINCIPLE_IDS)}.",
             )
         )
     elif row.score == -1:
         out.append(
             Violation(
-                row.lineno,
-                "scorecard-invalid-score",
-                f"Invalid score cell for '{row.principle_id}'.",
-                "Write an integer 0..10 (e.g. 8/10) or N/A.",
+                rule="scorecard-invalid-score",
+                message=f"Invalid score cell for '{row.principle_id}'.",
+                line=row.lineno,
+                fix_hint="Write an integer 0..10 (e.g. 8/10) or N/A.",
             )
         )
     if not row.rationale.strip():
         out.append(
             Violation(
-                row.lineno,
-                "scorecard-empty-rationale",
-                f"Empty rationale for '{row.principle_id}'.",
-                "Provide a concise rationale in the Assessment column.",
+                rule="scorecard-empty-rationale",
+                message=f"Empty rationale for '{row.principle_id}'.",
+                line=row.lineno,
+                fix_hint="Provide a concise rationale in the Assessment column.",
             )
         )
     return out
@@ -420,10 +453,10 @@ def _check_scorecard_math(
         return []
     return [
         Violation(
-            1,
-            "scorecard-math-mismatch",
-            f"Overall Score {omatch.group('num')}/{omatch.group('den')} does not match scorecard sum {exp_num}/{exp_den}.",
-            f"Set Overall Score to {exp_num}/{exp_den}.",
+            rule="scorecard-math-mismatch",
+            message=f"Overall Score {omatch.group('num')}/{omatch.group('den')} does not match scorecard sum {exp_num}/{exp_den}.",
+            line=1,
+            fix_hint=f"Set Overall Score to {exp_num}/{exp_den}.",
         )
     ]
 
@@ -434,10 +467,10 @@ def _check_scorecard(report: DesignReviewReport) -> list[Violation]:
     seen_ids = set(seen_list)
     violations = [
         Violation(
-            1,
-            "scorecard-missing-principle",
-            f"Scorecard missing principle '{pid}'.",
-            f"Add a row for `{pid}` scored 0..10 or N/A.",
+            rule="scorecard-missing-principle",
+            message=f"Scorecard missing principle '{pid}'.",
+            line=1,
+            fix_hint=f"Add a row for `{pid}` scored 0..10 or N/A.",
         )
         for pid in PRINCIPLE_IDS
         if pid not in seen_ids
@@ -445,10 +478,10 @@ def _check_scorecard(report: DesignReviewReport) -> list[Violation]:
     if len(seen_list) != len(seen_ids):
         violations.append(
             Violation(
-                1,
-                "scorecard-duplicate-principle",
-                "Scorecard contains duplicate principle row(s).",
-                "Include each of the 7 principles at most once.",
+                rule="scorecard-duplicate-principle",
+                message="Scorecard contains duplicate principle row(s).",
+                line=1,
+                fix_hint="Include each of the 7 principles at most once.",
             )
         )
     for row in report.scorecard_rows:
@@ -461,364 +494,70 @@ def _check_scorecard(report: DesignReviewReport) -> list[Violation]:
     if report.scorecard_rows and not applicable:
         violations.append(
             Violation(
-                report.scorecard_rows[0].lineno,
-                "scorecard-all-na",
-                "All principles are marked N/A.",
-                "Score at least one applicable principle 0..10.",
+                rule="scorecard-all-na",
+                message="All principles are marked N/A.",
+                line=report.scorecard_rows[0].lineno,
+                fix_hint="Score at least one applicable principle 0..10.",
             )
         )
     violations.extend(_check_scorecard_math(report.summary_lines, applicable))
     return violations
 
 
-def _extract_tier(evidence_val: str) -> tuple[str, str]:
-    """Splits an Evidence field into (tier, detail)."""
-    raw = evidence_val.strip()
-    for sep in (":", "—", " - "):
-        if sep in raw:
-            head, tail = raw.split(sep, 1)
-            return _strip_ticks(head), tail.strip()
-    return _strip_ticks(raw), ""
-
-
-def _check_finding_sequence(findings: Sequence[DesignFinding]) -> list[Violation]:
-    """Checks severity ordering (C, H, M, L) and 1-based sequential numbering."""
-    violations: list[Violation] = []
-    last_rank = -1
-    counts: dict[str, int] = {"C": 0, "H": 0, "M": 0, "L": 0}
-    for item in findings:
-        prefix = item.finding_id[0]
-        num = int(item.finding_id[1:])
-        rank = SEVERITY_ORDER.get(prefix, 99)
-        if rank < last_rank:
-            violations.append(
-                Violation(
-                    item.lineno,
-                    "finding-order",
-                    f"Finding {item.finding_id} appears out of severity order.",
-                    "Order findings C1.., H1.., M1.., L1..",
-                )
-            )
-        last_rank = max(last_rank, rank)
-        counts[prefix] = counts.get(prefix, 0) + 1
-        if num != counts[prefix]:
-            violations.append(
-                Violation(
-                    item.lineno,
-                    "finding-id-sequence",
-                    f"Expected {prefix}{counts[prefix]}, found {item.finding_id}.",
-                    f"Renumber {prefix} findings sequentially starting at {prefix}1.",
-                )
-            )
-    return violations
-
-
-def _check_single_finding(item: DesignFinding) -> list[Violation]:
-    """Checks metadata, severity caps, and fence rules on one finding."""
-    violations: list[Violation] = []
-    required = (
-        "Target",
-        "Door",
-        "Severity",
-        "Principle",
-        "Evidence",
-        "Body",
-        "Why",
-        "Suggestion",
-    )
-    for req in required:
-        if not item.fields.get(req, "").strip():
-            violations.append(
-                Violation(
-                    item.lineno,
-                    "missing-field",
-                    f"{item.finding_id} is missing required field '{req}'.",
-                    f"Add '- **{req}**: ...' to {item.finding_id}.",
-                )
-            )
-    sev = _strip_ticks(item.fields.get("Severity", "")).lower()
-    exp_sev = ID_TO_SEVERITY.get(item.finding_id[0], "")
-    if sev and sev != exp_sev:
-        violations.append(
-            Violation(
-                item.lineno,
-                "severity-mismatch",
-                f"{item.finding_id} has Severity '{sev}' (expected '{exp_sev}').",
-                f"Set Severity to `{exp_sev}` or rename the heading.",
-            )
-        )
-    door = _strip_ticks(item.fields.get("Door", "")).lower()
-    if door and door not in VALID_DOORS:
-        violations.append(
-            Violation(
-                item.lineno,
-                "invalid-door",
-                f"{item.finding_id} has invalid Door '{door}'.",
-                "Use `one-way` or `two-way`.",
-            )
-        )
-    principle = _strip_ticks(item.fields.get("Principle", ""))
-    if principle and principle not in PRINCIPLE_IDS:
-        violations.append(
-            Violation(
-                item.lineno,
-                "invalid-principle",
-                f"{item.finding_id} names unknown Principle '{principle}'.",
-                f"Use one of: {', '.join(PRINCIPLE_IDS)}.",
-            )
-        )
-    if "Focus" in item.fields and not _FOCUS_RE.match(
-        _strip_ticks(item.fields["Focus"])
-    ):
-        violations.append(
-            Violation(
-                item.lineno,
-                "focus-id-format",
-                f"{item.finding_id} has invalid Focus id.",
-                "Use kebab-case '<playbook-id>' or 'adhoc:<slug>'.",
-            )
-        )
-    violations.extend(_check_evidence_cap(item, exp_sev))
-    if item.fence_counts.get("Suggestion", 0) > 1:
-        violations.append(
-            Violation(
-                item.lineno,
-                "suggestion-single-fence",
-                f"{item.finding_id} Suggestion contains multiple code fences.",
-                "Keep at most one fenced block in Suggestion; move extras to Details.",
-            )
-        )
-    return violations
-
-
-def _check_evidence_cap(item: DesignFinding, severity: str) -> list[Violation]:
-    """Enforces evidence tier validity and severity caps."""
-    ev_raw = item.fields.get("Evidence", "").strip()
-    if not ev_raw:
-        return []
-    tier, detail = _extract_tier(ev_raw)
-    if tier not in VALID_TIERS:
-        return [
-            Violation(
-                item.lineno,
-                "invalid-evidence-tier",
-                f"{item.finding_id} uses unknown tier '{tier}'.",
-                "Use Executed, Read, Fetched, Deduction, or Speculation.",
-            )
-        ]
-    if tier == "Recalled":
-        return [
-            Violation(
-                item.lineno,
-                "recalled-forbidden",
-                f"{item.finding_id} uses forbidden tier 'Recalled'.",
-                "Read the file on disk or downgrade to an Open Design Question.",
-            )
-        ]
-    if not detail:
-        return [
-            Violation(
-                item.lineno,
-                "missing-evidence-detail",
-                f"{item.finding_id} Evidence lacks proof detail.",
-                "Follow the tier with ': <exact quote, path:line, or command output>'.",
-            )
-        ]
-    if severity in {"critical", "high"} and tier == "Speculation":
-        return [
-            Violation(
-                item.lineno,
-                "severity-cap",
-                f"{item.finding_id} ({severity}) cannot rely on Speculation.",
-                "Supply Read/Executed/Deduction proof, cap at medium, or move to Questions.",
-            )
-        ]
-    return []
-
-
-def _strip_fenced_blocks(text: str) -> str:
-    """Removes fenced code blocks before counting prose words and sentences."""
-    out: list[str] = []
-    fence = ""
-    for line in text.splitlines():
-        stripped = line.strip()
-        was_fenced = bool(fence)
-        fence, is_delim = _fence_marker_update(fence, stripped)
-        if not was_fenced and not is_delim:
-            out.append(line)
-    return "\n".join(out).strip()
-
-
-def _check_prose_block(
-    lineno: int, label: str, visible_text: str, details_text: str = ""
-) -> list[Violation]:
-    """Validates prose length and write-prose lexical/syntactic rules."""
-    violations: list[Violation] = []
-    clean_visible = _strip_fenced_blocks(visible_text)
-    if clean_visible:
-        res = analyze_prose(
-            "-",
-            complexity_threshold=MAX_SENTENCE_PCC,
-            engine="stdlib",
-            text=clean_visible,
-        )
-        summary = res.get("summary", {})
-        vdict = res.get("violations", {})
-        words = int(summary.get("total_words", 0))
-        sents = int(summary.get("total_sentences", 0))
-        if words > MAX_VISIBLE_WORDS or sents > MAX_VISIBLE_SENTENCES:
-            violations.append(
-                Violation(
-                    lineno,
-                    "comment-prose-length",
-                    f"{label} visible prose is {words} words / {sents} sentences (max {MAX_VISIBLE_WORDS} words, {MAX_VISIBLE_SENTENCES} sentences).",
-                    "Shorten Body/Why/Suggestion and move deep traces to '- **Details**:'.",
-                )
-            )
-        violations.extend(_collect_prose_violations(lineno, label, vdict))
-    clean_details = _strip_fenced_blocks(details_text)
-    if clean_details and len(clean_details.split()) > MAX_DETAILS_WORDS:
-        violations.append(
-            Violation(
-                lineno,
-                "comment-details-length",
-                f"{label} Details exceeds {MAX_DETAILS_WORDS} words.",
-                f"Trim Details to <= {MAX_DETAILS_WORDS} words.",
-            )
-        )
-    return violations
-
-
-def _collect_prose_violations(
-    lineno: int, label: str, vdict: dict[str, Any]
-) -> list[Violation]:
-    """Extracts sentence length, complexity, and AI-ism violations from analyze_prose."""
-    out: list[Violation] = []
-    long_sents = [
-        s
-        for s in vdict.get("sentences_exceeding_25_words", [])
-        if int(s.get("word_count", 0)) > MAX_SENTENCE_WORDS
-    ]
-    if long_sents:
-        out.append(
-            Violation(
-                lineno,
-                "comment-sentence-length",
-                f"{label} has sentence(s) over {MAX_SENTENCE_WORDS} words.",
-                f"Split sentences so each is <= {MAX_SENTENCE_WORDS} words.",
-            )
-        )
-    if vdict.get("complex_sentences_found"):
-        out.append(
-            Violation(
-                lineno,
-                "comment-sentence-complexity",
-                f"{label} exceeds sentence complexity PCC {MAX_SENTENCE_PCC}.",
-                "Split nested clauses into shorter direct sentences.",
-            )
-        )
-    ai_flags: list[str] = []
-    for key in (
-        "banned_ai_words_found",
-        "banned_ai_phrases_found",
-        "em_dashes_found",
-        "noun_clusters_found",
-    ):
-        if vdict.get(key):
-            ai_flags.append(key)
-    if ai_flags:
-        out.append(
-            Violation(
-                lineno,
-                "comment-ai-ism",
-                f"{label} triggered write-prose rule(s): {', '.join(ai_flags)}.",
-                "Remove banned AI words, em-dashes, and 4+ noun stacks.",
-            )
-        )
-    return out
-
-
-def _check_single_question(idx: int, q: DesignFinding) -> list[Violation]:
-    """Validates one ### Q<n> block in ## Open Design Questions."""
-    violations: list[Violation] = []
-    if q.finding_id != f"Q{idx}":
-        violations.append(
-            Violation(
-                q.lineno,
-                "question-id-sequence",
-                f"Expected Q{idx}, found {q.finding_id}.",
-                "Number questions sequentially Q1..Q3.",
-            )
-        )
-    for req in ("Target", "Evidence", "Why", "To settle"):
-        if not q.fields.get(req, "").strip():
-            violations.append(
-                Violation(
-                    q.lineno,
-                    "missing-question-field",
-                    f"{q.finding_id} lacks '{req}'.",
-                    f"Add '- **{req}**: ...' to {q.finding_id}.",
-                )
-            )
-    tier, detail = _extract_tier(q.fields.get("Evidence", ""))
-    if tier and (tier not in {"Speculation", "Deduction"} or not detail):
-        violations.append(
-            Violation(
-                q.lineno,
-                "question-evidence",
-                f"{q.finding_id} Evidence must be Speculation or Deduction with detail.",
-                "Format as 'Speculation: <what was checked>'.",
-            )
-        )
-    violations.extend(
-        _check_prose_block(
-            q.lineno, q.finding_id, f"{q.claim} {q.fields.get('Why', '')}"
-        )
-    )
-    return violations
-
-
-def _check_clean_bullets(clean_lines: Sequence[tuple[int, str]]) -> list[Violation]:
-    """Validates ## Checked and Found Clean bullets and cap."""
-    violations: list[Violation] = []
-    if len(clean_lines) > 10:
-        violations.append(
-            Violation(
-                clean_lines[10][0],
-                "clean-cap",
-                f"Checked and Found Clean has {len(clean_lines)} items (max 10).",
-                "Cap disproved hypotheses at 10 bullets.",
-            )
-        )
-    for lineno, line in clean_lines:
-        cmatch = _CLEAN_BULLET_RE.match(line)
-        if not cmatch or cmatch.group("tier") not in CLEAN_TIERS:
-            violations.append(
-                Violation(
-                    lineno,
-                    "clean-format",
-                    "Checked and Found Clean bullet lacks a valid proof tier.",
-                    "Format as '- <hypothesis>: `Read`: <exact disproof>'.",
-                )
-            )
-    return violations
-
-
 def _check_questions_and_clean(report: DesignReviewReport) -> list[Violation]:
     """Validates ## Open Design Questions and ## Checked and Found Clean."""
-    violations: list[Violation] = []
-    if len(report.questions) > 3:
-        violations.append(
-            Violation(
-                report.questions[3].lineno,
-                "question-cap",
-                f"Found {len(report.questions)} questions (max 3).",
-                "Keep at most 3 highest-stakes questions.",
-            )
+    q_items = [_to_common_item(q) for q in report.questions]
+    violations = check_questions(
+        q_items,
+        max_count=3,
+        cap_rule="question-cap",
+        field_rule="missing-question-field",
+    )
+    violations.extend(
+        check_id_sequence(
+            q_items, expected_prefix="Q", seq_rule="question-id-sequence"
         )
-    for idx, q in enumerate(report.questions, start=1):
-        violations.extend(_check_single_question(idx, q))
-    violations.extend(_check_clean_bullets(report.clean_lines))
+    )
+    for q in q_items:
+        for req in ("Target", "Evidence", "Why"):
+            if not strip_ticks(q.fields.get(req, "")):
+                violations.append(
+                    Violation(
+                        rule="missing-question-field",
+                        message=f"{q.id} lacks '{req}'.",
+                        line=q.line,
+                        fix_hint=f"Add '- **{req}**: ...' to {q.id}.",
+                    )
+                )
+        ev = q.fields.get("Evidence", "")
+        tier = extract_tier(ev)
+        detail = extract_evidence_detail(ev)
+        if ev.strip() and (tier not in {"Speculation", "Deduction"} or not detail):
+            violations.append(
+                Violation(
+                    rule="question-evidence",
+                    message=f"{q.id} Evidence must be Speculation or Deduction with detail.",
+                    line=q.line,
+                    fix_hint="Format as 'Speculation: <what was checked>'.",
+                )
+            )
+    violations.extend(
+        check_prose(
+            q_items,
+            DESIGN_PROFILE,
+            analyze_prose,
+            prose_builder=lambda item: f"{item.title} {item.fields.get('Why', '')}",
+            check_details=False,
+        )
+    )
+    violations.extend(
+        check_clean_lines(
+            report.clean_lines,
+            max_count=10,
+            cap_rule="clean-cap",
+            tier_rule="clean-format",
+        )
+    )
     return violations
 
 
@@ -832,27 +571,36 @@ def check_design_review(
     for lineno, text in report.unparsed_item_lines:
         violations.append(
             Violation(
-                lineno,
-                "unparsed-item-line",
-                f"Unanchored text in item section: '{text[:50]}'.",
-                "Place every comment under a '### C1/H1/M1/L1/Q1.' heading or write 'None.'.",
+                rule="unparsed-item-line",
+                message=f"Unanchored text in item section: '{text[:50]}'.",
+                line=lineno,
+                fix_hint="Place every comment under a '### C1/H1/M1/L1/Q1.' heading or write 'None.'.",
             )
         )
-    violations.extend(_check_finding_sequence(report.findings))
-    for item in report.findings:
-        violations.extend(_check_single_finding(item))
-        visible = "\n".join(
-            [
-                item.fields.get("Body", ""),
-                item.fields.get("Why", ""),
-                item.fields.get("Suggestion", ""),
-            ]
+    finding_items = [_to_common_item(f) for f in report.findings]
+    violations.extend(
+        check_id_sequence(
+            finding_items,
+            order_rule="finding-order",
+            seq_rule="finding-id-sequence",
         )
-        violations.extend(
-            _check_prose_block(
-                item.lineno, item.finding_id, visible, item.fields.get("Details", "")
-            )
+    )
+    violations.extend(check_required_fields(finding_items, DESIGN_PROFILE))
+    violations.extend(
+        check_severity_matches_id(
+            finding_items, rule="severity-mismatch", require_present=False
         )
+    )
+    violations.extend(
+        check_evidence_caps(
+            finding_items,
+            is_findings=True,
+            require_detail=True,
+            profile=DESIGN_PROFILE,
+        )
+    )
+    violations.extend(check_single_fence_per_field(finding_items))
+    violations.extend(check_prose(finding_items, DESIGN_PROFILE, analyze_prose))
     violations.extend(_check_questions_and_clean(report))
     return violations
 
@@ -893,8 +641,10 @@ def _clean_summary_overview(summary_text: str) -> str:
 
 def _export_finding(item: DesignFinding) -> dict[str, Any]:
     """Serializes one DesignFinding with triage_matrix helper fields."""
-    sev = _strip_ticks(item.fields.get("Severity", "")).lower()
-    tier, detail = _extract_tier(item.fields.get("Evidence", ""))
+    sev = strip_ticks(item.fields.get("Severity", "")).lower()
+    ev_raw = item.fields.get("Evidence", "")
+    tier = extract_tier(ev_raw)
+    detail = extract_evidence_detail(ev_raw)
     icon = (
         "error"
         if sev in {"critical", "high"}
@@ -909,10 +659,10 @@ def _export_finding(item: DesignFinding) -> dict[str, Any]:
         "id": item.finding_id,
         "claim": item.claim,
         "severity": sev,
-        "target": _strip_ticks(item.fields.get("Target", "")),
-        "door": _strip_ticks(item.fields.get("Door", "")).lower(),
-        "principle": _strip_ticks(item.fields.get("Principle", "")),
-        "focus": _strip_ticks(item.fields.get("Focus", "")) or None,
+        "target": strip_ticks(item.fields.get("Target", "")),
+        "door": strip_ticks(item.fields.get("Door", "")).lower(),
+        "principle": strip_ticks(item.fields.get("Principle", "")),
+        "focus": strip_ticks(item.fields.get("Focus", "")) or None,
         "evidence_tier": tier,
         "evidence": detail,
         "body": item.fields.get("Body", ""),
@@ -923,7 +673,7 @@ def _export_finding(item: DesignFinding) -> dict[str, Any]:
             "icon": icon,
             "title": f"{item.finding_id}: {item.claim}",
             "summary": f"{item.fields.get('Body', '')} {item.fields.get('Why', '')}".strip(),
-            "trace": _strip_ticks(item.fields.get("Target", "")),
+            "trace": strip_ticks(item.fields.get("Target", "")),
             "bucket": bucket,
             "note": "",
         },
@@ -960,13 +710,13 @@ def _build_scorecard_payload(rows: Sequence[PrincipleRow]) -> dict[str, Any]:
 
 def _export_question(q: DesignFinding) -> dict[str, Any]:
     """Serializes one Open Design Question entry."""
-    tier, detail = _extract_tier(q.fields.get("Evidence", ""))
+    ev_raw = q.fields.get("Evidence", "")
     return {
         "id": q.finding_id,
         "question": q.claim,
-        "target": _strip_ticks(q.fields.get("Target", "")),
-        "evidence_tier": tier,
-        "evidence": detail,
+        "target": strip_ticks(q.fields.get("Target", "")),
+        "evidence_tier": extract_tier(ev_raw),
+        "evidence": extract_evidence_detail(ev_raw),
         "why": q.fields.get("Why", ""),
         "to_settle": q.fields.get("To settle", ""),
     }
@@ -995,7 +745,7 @@ def export_design_review_json(
     payload: dict[str, Any] = {
         "summary": {
             "overview": _clean_summary_overview(summary_raw),
-            "verdict": vmatch.group("verdict") if vmatch else "Revisions Recommended",
+            "verdict": vmatch.group("verdict") if vmatch else "Minor Revisions Needed",
             "citation_audit": audit,
         },
         "scorecard": _build_scorecard_payload(report.scorecard_rows),

@@ -204,7 +204,10 @@ class TestGitIndexer(unittest.TestCase):
                 # The squash-merge PR (#30) is the commit's own source, so it is skipped.
                 self.assertEqual(
                     [tuple(r) for r in rows],
-                    [("octo-org/gadgets", 4, "commit"), ("octo-org/widgets", 12, "commit")],
+                    [
+                        ("octo-org/gadgets", 4, "commit"),
+                        ("octo-org/widgets", 12, "commit"),
+                    ],
                 )
             finally:
                 store.close()
@@ -646,6 +649,19 @@ class TestGitIndexer(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_python_blob_with_invalid_escape_does_not_emit_syntax_warning(self) -> None:
+        import warnings
+
+        from blob_parsers import extract_content_entities
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", SyntaxWarning)
+            entities = extract_content_entities(
+                "legacy.py", 'def f():\n    return "\\ "\n'
+            )
+        self.assertEqual([e["name"] for e in entities], ["f"])
+        self.assertEqual(caught, [])
 
 
 if __name__ == "__main__":

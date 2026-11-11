@@ -7,9 +7,8 @@ description: >-
   design spec before planning. Use when the user runs /design, asks to design a
   feature, architecture, workflow, or API, wants to brainstorm ideas or explore
   solution approaches, or wants to weigh tradeoffs before committing to a
-  direction. Don't use for formal stakeholder RFCs (use proposal-writer),
-  file-level execution plans (use plan), or read-only impact evaluation of one
-  specific change.
+  direction. Don't use for file-level execution plans (use plan) or read-only
+  impact evaluation of one specific change.
 ---
 
 # Interactive Design and Brainstorming (`design`)
@@ -75,7 +74,7 @@ Once decisions arrive on an architectural or feature session, update the **same*
 2. Collapse rejected candidates into a compact `Alternatives Considered` table (`Option | Why Not Selected | Revisit If`) so `/plan` inherits one clean specification without dead-branch prose.
 3. Move answered questions into `Settled Decisions` with dates and rationale.
 4. Fill in the concrete design pieces needed before planning:
-   - `Data Model & API Contracts` with concrete types, schemas, or signatures checked against [api-review](../api-review/SKILL.md).
+   - `Data Model & API Contracts` with concrete types, schemas, or signatures checked against [canonical_api_design.md](../review-core/references/canonical_api_design.md).
    - `Lifecycle, State & Failure Modes` using `stateDiagram-v2`, `sequenceDiagram`, or `erDiagram` where state or schemas change, plus recovery and rollback behavior.
    - `Rollout, Migration & Expected PR Split` (3 to 6 bullets) and a 3 to 5 bullet `Verification & Benchmark Sketch`.
 5. Run `analyze_prose.py` ([write-prose](../write-prose/SKILL.md)) on the converged artifact and fix any flagged AI-isms, em-dashes, complex sentences, or inline-header list overuse.
@@ -86,6 +85,5 @@ Once decisions arrive on an architectural or feature session, update the **same*
 
 - Use [grill-me](../grill-me/SKILL.md) for targeted alignment interviews on an existing task or mid-flight pivot when a full design exploration artifact is unnecessary.
 - Use [design-review](../design-review/SKILL.md) to run an evidence-capped architectural and tradeoff audit on a converged spec or existing module (`--post-design` runs this automatically after Phase 3 when kept checked).
-- Use [proposal-writer](../proposal-writer/SKILL.md) when writing a formal RFC or stakeholder review document for external human sign-off rather than interactive session design discovery.
 - Use [plan](../plan/SKILL.md) once Phase 3 converges on a direction and you need file-level `[NEW]` / `[MODIFY]` tasks, parallel execution waves, and verification gates.
 - Do not use this workflow when evaluating the read-only blast radius and migration cost of one already-chosen change rather than comparing open design alternatives.

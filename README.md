@@ -26,7 +26,6 @@ npx skills add gspencergoog/skills --skill <skill-name>
 | :--- | :--- |
 | **[agy-debugger](skills/agy-debugger/SKILL.md)** | Tool call auditor and real-time debugger web UI for agent sessions. |
 | **[analyze-github-pr](skills/analyze-github-pr/SKILL.md)** | Fetches and summarizes GitHub PR descriptions, reviews, comments, and CI diagnostics. |
-| **[api-review](skills/api-review/SKILL.md)** | Reviews code against canonical API design principles with concrete rewrites. |
 | **[branch-cleanup](skills/branch-cleanup/SKILL.md)** | Identifies and prunes merged local and remote git branches and worktrees. |
 | **[code-documentation](skills/code-documentation/SKILL.md)** | Writes and audits docstrings and comments across Dart, Python, and TypeScript. |
 | **[code-review](skills/code-review/SKILL.md)** | Multi-pass code review with evidence tiers, severity caps, and focus playbooks. |
@@ -56,7 +55,7 @@ npx skills add gspencergoog/skills --skill <skill-name>
 | **[pr-feedback-handler](skills/pr-feedback-handler/SKILL.md)** | Addresses review feedback on your PRs via interactive dashboard or automated fixes. |
 | **[pr-review](skills/pr-review/SKILL.md)** | End-to-end pull request code reviewer with blind-first intent matching and review dashboard staging. |
 | **[pr-reviewer-recommendation](skills/pr-reviewer-recommendation/SKILL.md)** | Recommends PR reviewers using git blame ownership and historical review participation. |
-| **[proposal-writer](skills/proposal-writer/SKILL.md)** | Drafts formal technical proposals, RFCs, and architecture decision records. |
+| **[review-core](skills/review-core/SKILL.md)** | Shared evidence, delegation, and lint rules behind code-review and design-review. |
 | **[sem-semantic-info](skills/sem-semantic-info/SKILL.md)** | Semantic code search and structural diff tool tracking AST functions, classes, and types. |
 | **[ship-it](skills/ship-it/SKILL.md)** | Pre-review release pipeline covering PR slicing, coverage audits, and review loops. |
 | **[skill-creator](skills/skill-creator/SKILL.md)** | Creates, structures, and lints agent skills against specification standards. |

@@ -21,6 +21,7 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -378,7 +379,7 @@ class PackratService:
         except BudgetDeferred as exc:
             self._note_deferred(worker, report, exc.detail)
             return False, None
-        except GhApiError as exc:
+        except (GhApiError, sqlite3.OperationalError) as exc:
             report.errors.append(f"{worker}: {exc}")
             self.log(f"{worker} failed: {exc}")
             return False, None
@@ -606,21 +607,32 @@ class PackratService:
 
     # ----- housekeeping and the loop -------------------------------------------------
 
-    def _beat(self, now: float) -> None:
+    def _beat(self, now: float, report: TickReport | None = None) -> None:
         """Writes the heartbeat stamped with the later of `now` and the clock.
 
         A tick can take a minute or more (check-run polls, a mirror run), so the
         end-of-tick beat uses the current clock rather than the tick's start time.
         """
-        self.store.write_heartbeat(os.getpid(), SERVICE_VERSION, max(now, self.clock()))
+        try:
+            self.store.write_heartbeat(
+                os.getpid(), SERVICE_VERSION, max(now, self.clock())
+            )
+        except sqlite3.OperationalError as exc:
+            if report is not None:
+                report.errors.append(f"heartbeat: {exc}")
+            self.log(f"heartbeat failed: {exc}")
 
     def _housekeeping(self, now: float, report: TickReport) -> None:
-        self._beat(now)
-        self.store.prune_expired_watches(now)
-        if now >= self._next_prune:
-            self.store.prune(now)
-            report.pruned = True
-            self._next_prune = now + PRUNE_INTERVAL_S
+        self._beat(now, report)
+        try:
+            self.store.prune_expired_watches(now)
+            if now >= self._next_prune:
+                self.store.prune(now)
+                report.pruned = True
+                self._next_prune = now + PRUNE_INTERVAL_S
+        except sqlite3.OperationalError as exc:
+            report.errors.append(f"housekeeping: {exc}")
+            self.log(f"housekeeping failed: {exc}")
 
     def run_once(self, now: float | None = None) -> TickReport:
         """Runs one scheduler tick and reports what it did.
@@ -634,21 +646,25 @@ class PackratService:
         """
         moment = self.clock() if now is None else now
         report = TickReport(at=moment)
-        self._beat(moment)
+        self._beat(moment, report)
         self._reap_child(report)
-        self._drain_requests(moment, report)
-        leases = _leases_by_key(self.store.active_watches(moment))
-        dirty = _Dirty()
-        self._poll_signals(moment, dirty, report)
-        self._poll_checks(leases, moment, dirty, report)
-        self._drain_requests(moment, report)
-        self._run_hot(leases, moment, dirty, report)
-        self._run_viewer(moment, dirty, report)
-        self._run_timeline(moment, report)
-        self._drain_requests(moment, report)
-        self._run_mirror(moment, dirty, report)
-        self._drain_requests(moment, report)
-        self._requeue_failed(moment)
+        try:
+            self._drain_requests(moment, report)
+            leases = _leases_by_key(self.store.active_watches(moment))
+            dirty = _Dirty()
+            self._poll_signals(moment, dirty, report)
+            self._poll_checks(leases, moment, dirty, report)
+            self._drain_requests(moment, report)
+            self._run_hot(leases, moment, dirty, report)
+            self._run_viewer(moment, dirty, report)
+            self._run_timeline(moment, report)
+            self._drain_requests(moment, report)
+            self._run_mirror(moment, dirty, report)
+            self._drain_requests(moment, report)
+            self._requeue_failed(moment)
+        except sqlite3.OperationalError as exc:
+            report.errors.append(f"sqlite: {exc}")
+            self.log(f"sqlite error during tick: {exc}")
         self._maybe_spawn_child(moment, report)
         self._housekeeping(moment, report)
         return report

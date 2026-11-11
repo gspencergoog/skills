@@ -1,6 +1,6 @@
 # Reviewing API Changes
 
-This reference document guides reviewers in evaluating modified and newly introduced public APIs, signatures, and configuration surfaces during a code review. It adapts the core principles from the [Canonical API Design Principles](../../api-review/references/canonical_api_design.md) reference in the `api-review` skill to incremental changesets.
+This reference document guides reviewers in evaluating modified and newly introduced public APIs, signatures, and configuration surfaces during a code review. It adapts the core principles from the [Canonical API Design Principles](../../review-core/references/canonical_api_design.md) reference to incremental changesets.
 
 Under `--panel`, API review belongs to **Lane B** (safety and maintainability), while Lane A verifies that tests adequately cover the public contracts.
 
@@ -41,7 +41,7 @@ While the investigation looks wide, the reported review comments must remain str
 
 ## Canonical Principles to Evaluate
 
-Evaluate added or modified public surfaces against these core principles from [canonical_api_design.md](../../api-review/references/canonical_api_design.md):
+Evaluate added or modified public surfaces against these core principles from [canonical_api_design.md](../../review-core/references/canonical_api_design.md):
 
 ### 1. Contract-First and Information Hiding
 The API must expose capabilities, not internal implementation details or persistence models.

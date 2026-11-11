@@ -19,9 +19,17 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import unquote, urlparse
+
+_CONTEXT_INDEXER_SCRIPTS = (
+    Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
+)
+if str(_CONTEXT_INDEXER_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_CONTEXT_INDEXER_SCRIPTS))
+
+import diff_weight
 
 VALID_MODES = ("design-doc", "code-architecture", "conformance")
 PROSE_SUFFIXES = frozenset({".md", ".mdx", ".rst", ".adoc", ".txt"})
@@ -154,13 +162,25 @@ def _collect_target_files(targets: Sequence[Path]) -> list[Path]:
     return files
 
 
-def _is_test_file(path: Path) -> bool:
-    """Returns whether path follows standard test naming conventions."""
-    stem = path.stem.lower()
-    return stem.startswith("test_") or stem.endswith(("_test", ".test", ".spec"))
+def _rel_posix_path(path: Path, repo_root: Path | None = None) -> str:
+    """Formats path as a root-relative POSIX path for diff_weight helpers."""
+    if repo_root is not None:
+        for candidate, root in (
+            (path, repo_root),
+            (path.resolve(), repo_root.resolve()),
+        ):
+            try:
+                return PurePosixPath(candidate.relative_to(root)).as_posix()
+            except ValueError:
+                continue
+    if not path.is_absolute():
+        return PurePosixPath(path).as_posix()
+    return PurePosixPath(path.name).as_posix()
 
 
-def _count_file_substantive_lines(path: Path) -> float:
+def _count_file_substantive_lines(
+    path: Path, repo_root: Path | None = None
+) -> float:
     """Computes weighted non-blank lines for a single file."""
     try:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -170,16 +190,23 @@ def _count_file_substantive_lines(path: Path) -> float:
         return float(sum(1 for ln in lines if ln.strip()))
     if path.suffix.lower() not in CODE_SUFFIXES:
         return 0.0
-    code_lines = sum(
-        1 for ln in lines if ln.strip() and not ln.lstrip().startswith(("#", "//"))
+    rel_path = _rel_posix_path(path, repo_root)
+    if diff_weight.classify_low_content_path(rel_path) is not None:
+        return 0.0
+    code_lines = sum(1 for ln in lines if diff_weight.is_logic_line(ln))
+    weight = (
+        diff_weight.TEST_LINE_WEIGHT
+        if diff_weight.is_test_path(rel_path)
+        else 1.0
     )
-    weight = 0.25 if _is_test_file(path) else 1.0
     return code_lines * weight
 
 
-def count_substantive_lines(files: Sequence[Path]) -> int:
+def count_substantive_lines(
+    files: Sequence[Path], repo_root: Path | None = None
+) -> int:
     """Returns total rounded substantive lines across files."""
-    return round(sum(_count_file_substantive_lines(f) for f in files))
+    return round(sum(_count_file_substantive_lines(f, repo_root) for f in files))
 
 
 def _has_public_surface_file(files: Sequence[Path]) -> bool:
@@ -489,7 +516,12 @@ def find_python_import_cycles(
     code_files: Sequence[Path], repo_root: Path
 ) -> list[list[str]]:
     """Detects circular import chains among Python files in code_files."""
-    py_files = [f for f in code_files if f.suffix == ".py" and not _is_test_file(f)]
+    py_files = [
+        f
+        for f in code_files
+        if f.suffix == ".py"
+        and not diff_weight.is_test_path(_rel_posix_path(f, repo_root))
+    ]
     if len(py_files) < 2:
         return []
     known: dict[str, str] = {}
@@ -518,7 +550,7 @@ def find_python_import_cycles(
 
 
 def _probe_cognitive_complexity(
-    code_files: Sequence[Path],
+    code_files: Sequence[Path], repo_root: Path | None = None
 ) -> tuple[list[dict[str, Any]], bool]:
     """Runs cognitive_complexity.py when available and returns functions > 15."""
     script = (
@@ -532,7 +564,7 @@ def _probe_cognitive_complexity(
         for f in code_files
         if f.suffix.lower()
         in {".py", ".ts", ".tsx", ".js", ".dart", ".swift", ".kt", ".cc", ".cpp"}
-        and not _is_test_file(f)
+        and not diff_weight.is_test_path(_rel_posix_path(f, repo_root))
     ]
     if not script.is_file() or not supported:
         return [], False
@@ -627,7 +659,7 @@ def collect_code_metrics(code_files: Sequence[Path], repo_root: Path) -> dict[st
     else:
         skipped_probes.append("sem")
 
-    hotspots, cc_ran = _probe_cognitive_complexity(code_files)
+    hotspots, cc_ran = _probe_cognitive_complexity(code_files, repo_root)
     (tools_used if cc_ran else skipped_probes).append("cognitive-complexity")
     packrat_hotspots, user_note, pk_ran = _probe_packrat_hotspots(code_files, repo_root)
     (tools_used if pk_ran else skipped_probes).append("packrat")
@@ -715,7 +747,7 @@ def build_design_context(
         md_files.append(resolved_against)
     code_files = [f for f in all_files if not _is_prose_or_schema(f)]
 
-    subst_lines = count_substantive_lines(all_files)
+    subst_lines = count_substantive_lines(all_files, repo_root)
     combined_text = _read_combined_text([*md_files, *code_files])
     door = classify_door_reversibility(
         combined_text, subst_lines, _has_public_surface_file(all_files)

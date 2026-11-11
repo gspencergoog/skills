@@ -1,6 +1,6 @@
 # Reviewing Pre-Code Design Documents
 
-Use this rubric when `prepare_design_context.py` classifies the target as `mode: "design-doc"` (design specs, RFCs, ADRs, proposals, and JSON Schema contracts). Apply the scoring anchors in [canonical_design_principles.md](canonical_design_principles.md) and the evidence tiers and severity caps in [evidence_and_critique.md](evidence_and_critique.md).
+Use this rubric when `prepare_design_context.py` classifies the target as `mode: "design-doc"` (design specs, RFCs, ADRs, proposals, and JSON Schema contracts). Apply the scoring anchors in [canonical_design_principles.md](canonical_design_principles.md) and the evidence tiers and severity caps in [evidence.md](../../review-core/references/evidence.md) and [evidence_and_critique.md](evidence_and_critique.md).
 
 ## Table of Contents
 

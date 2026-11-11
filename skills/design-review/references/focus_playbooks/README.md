@@ -7,12 +7,13 @@ A focus playbook targets an architectural surface whose failure modes span multi
 - Triage starts from the design target or codebase module, not from this table. Identify the highest-risk cross-cutting mechanism first, then match it to a catalog ID.
 - Prefer a catalog ID over free text when one fits so findings carry consistent `- **Focus**: <id>` metadata across reviews.
 - When a target introduces a domain mechanism not covered below, assign an ad hoc theme (`adhoc:<slug>`) and include an inline playbook block of at most `1 KB` (3 to 4 numbered failure modes with `Look at:` and `Settles it:` instructions plus 2 hypothesis templates) in the Reviewer Brief.
-- Public signature ergonomics remain covered by the core principles and API checks; use a focus playbook when a mechanism needs domain-specific pre-mortem probes.
+- Use [api-surface](api-surface.md) when auditing exported signatures, configuration records, error contracts, or whole-file public APIs against [canonical_api_design.md](../../../review-core/references/canonical_api_design.md).
 
 ## Index
 
 | id | Cues | Lane |
 | :--- | :--- | :--- |
+| [api-surface](api-surface.md) | Exported signatures, configuration records, public error types, pagination, or CLI/RPC contracts | B |
 | [distributed-state-and-consistency](distributed-state-and-consistency.md) | Multi-step state mutations, caches, queues, background workers, retries, dual writes, or concurrent writers | A |
 | [rollout-and-schema-evolution](rollout-and-schema-evolution.md) | Database migrations, JSON/Proto/SQLite schema changes, wire format updates, feature flags, or staged rollouts | A |
 | [module-and-plugin-boundaries](module-and-plugin-boundaries.md) | Package splits, extension hooks, plugin registries, adapter layers, or cross-module dependency restructures | B |

@@ -7,24 +7,41 @@ import pathlib
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
-_WRITE_PROSE_SCRIPTS = (
-    pathlib.Path(__file__).resolve().parents[2] / "write-prose" / "scripts"
-)
-if str(_WRITE_PROSE_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_WRITE_PROSE_SCRIPTS))
+_SKILLS_DIR = pathlib.Path(__file__).resolve().parents[2]
+for _rel_scripts in (("write-prose", "scripts"), ("review-core", "scripts")):
+    _script_dir = str(_SKILLS_DIR.joinpath(*_rel_scripts))
+    if _script_dir not in sys.path:
+        sys.path.insert(0, _script_dir)
 
 from analyze_prose import analyze_prose
-
-VALID_TIERS = ("Executed", "Read", "Fetched", "Deduction", "Speculation", "Recalled")
-CLEAN_TIERS = ("Executed", "Read", "Fetched", "Deduction")
-ID_TO_SEVERITY = {"C": "critical", "H": "high", "M": "medium", "L": "low"}
-CLASS_ORDER = {"C": 0, "H": 1, "M": 2, "L": 3}
-
-MAX_SENTENCE_WORDS = 30
-MAX_SENTENCE_PCC = 5
+from review_lint_common import (
+    CLASS_ORDER,
+    CLEAN_TIERS,
+    ID_TO_SEVERITY,
+    MAX_SENTENCE_PCC,
+    MAX_SENTENCE_WORDS,
+    VALID_TIERS,
+    VALID_VERDICTS,
+    VERDICT_LINE_RE,
+    FenceMeta,
+    ReportProfile,
+    Violation,
+    check_clean_lines,
+    check_evidence_caps,
+    check_id_sequence,
+    check_prose,
+    check_questions,
+    check_required_fields,
+    check_severity_matches_id,
+    check_single_fence_per_field,
+    extract_evidence_detail,
+    extract_tier,
+    strip_ticks,
+    update_fence,
+)
 
 
 @dataclass(frozen=True)
@@ -44,7 +61,7 @@ class CommentCaps:
 # `default` applies to standalone code-review reports. `pr` applies when
 # pr-review posts the comments to GitHub, where the extra detail is folded.
 COMMENT_PROFILES: dict[str, CommentCaps] = {
-    "default": CommentCaps(words=80, sentences=4, details_words=150),
+    "default": CommentCaps(words=120, sentences=6, details_words=150),
     "pr": CommentCaps(words=120, sentences=6, details_words=150),
 }
 
@@ -122,16 +139,6 @@ EMPTY_SECTION_TOKENS = {
     "no issues",
     "no issues.",
 }
-
-
-@dataclass
-class FenceMeta:
-    """How a fenced block under a finding field was written in the report."""
-
-    fenced: bool = False
-    info: str = ""
-    lead_in: str = ""
-    extra_fences: int = 0
 
 
 # Finding fields whose value may be a fenced code block.
@@ -250,46 +257,6 @@ _FIX_HINTS: dict[str, str] = {
 }
 
 
-@dataclass
-class Violation:
-    """A single lint violation with 1-based line number and rule identifier."""
-
-    line: int
-    rule: str
-    message: str
-    fix: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.fix:
-            self.fix = _FIX_HINTS.get(self.rule, "")
-
-
-def _strip_ticks(value: str) -> str:
-    return value.strip().strip("`").strip()
-
-
-def _extract_tier(evidence_value: str) -> str:
-    if not evidence_value:
-        return ""
-    first_part = re.split(
-        r"\s*(?:—|--|-|:)\s*|\s+", evidence_value.strip(), maxsplit=1
-    )[0]
-    cleaned = first_part.strip("`*_ ")
-    for tier in VALID_TIERS:
-        if cleaned.lower() == tier.lower():
-            return tier
-    return ""
-
-
-def _extract_evidence_detail(evidence_value: str) -> str:
-    if not evidence_value:
-        return ""
-    parts = re.split(r"\s*(?:—|--|-|:)\s*", evidence_value.strip(), maxsplit=1)
-    if len(parts) > 1:
-        return parts[1].strip()
-    return ""
-
-
 def _classify_section(title: str) -> str:
     lowered = title.lower()
     if lowered.startswith("summary"):
@@ -307,18 +274,6 @@ def _classify_section(title: str) -> str:
     if lowered.startswith("playbook feedback"):
         return "playbook_feedback"
     return "other"
-
-
-def _update_fence(fence_marker: str, line: str) -> tuple[str, bool]:
-    match = FENCE_RE.match(line)
-    if not match:
-        return fence_marker, bool(fence_marker)
-    token = match.group(1)
-    if not fence_marker:
-        return token, True
-    if token[0] == fence_marker[0] and len(token) >= len(fence_marker):
-        return "", True
-    return fence_marker, True
 
 
 def _record_section_line(
@@ -356,7 +311,7 @@ class _ParserState:
 def _handle_fence_transition(state: _ParserState, raw_line: str) -> bool:
     """Updates fence state and captures fenced field bodies; returns True if line is consumed."""
     old_fence = state.fence_marker
-    state.fence_marker, in_fence = _update_fence(state.fence_marker, raw_line)
+    state.fence_marker, in_fence = update_fence(state.fence_marker, raw_line)
 
     if state.capture_field is not None:
         if old_fence and not state.fence_marker:
@@ -391,6 +346,16 @@ def _handle_fence_transition(state: _ParserState, raw_line: str) -> bool:
     return in_fence
 
 
+def _enter_section(state: _ParserState, title: str, lineno: int) -> None:
+    state.section = _classify_section(title)
+    if state.section == "comments":
+        state.report.review_comments_line = lineno
+    elif state.section == "playbook_feedback":
+        state.report.playbook_feedback_line = lineno
+    state.current = None
+    state.current_field = None
+
+
 def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> None:
     """Processes a single non-fenced markdown line in the review report."""
     field_match = FIELD_RE.match(stripped)
@@ -399,13 +364,7 @@ def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> No
 
     section_match = SECTION_RE.match(stripped)
     if section_match:
-        state.section = _classify_section(section_match.group(1))
-        if state.section == "comments":
-            state.report.review_comments_line = lineno
-        elif state.section == "playbook_feedback":
-            state.report.playbook_feedback_line = lineno
-        state.current = None
-        state.current_field = None
+        _enter_section(state, section_match.group(1), lineno)
         return
 
     heading_match = HEADING_RE.match(stripped)
@@ -433,7 +392,7 @@ def _handle_unquoted_line(state: _ParserState, stripped: str, lineno: int) -> No
         state.current.fields[key] = val
         state.current_field = key
         if key.lower() == "severity":
-            state.current.severity = _strip_ticks(val).lower()
+            state.current.severity = strip_ticks(val).lower()
         return
 
     if state.current is not None and state.current_field in CONTINUED_FIELDS:
@@ -456,239 +415,95 @@ def parse_report(text: str) -> Report:
     return state.report
 
 
+_WHY_PROFILE = ReportProfile(
+    name="code",
+    sections=(),
+    findings_section="",
+    questions_section="",
+    required_fields=("Why",),
+    rule_names={"why-required": "why-required"},
+)
+_FOCUS_PROFILE = ReportProfile(
+    name="code",
+    sections=(),
+    findings_section="",
+    questions_section="",
+    required_fields=(),
+    validators={"Focus": FOCUS_ID_RE},
+    rule_names={"invalid-focus": "focus-id-format"},
+)
+
+
 def _check_unparsed_comments(report: Report) -> list[Violation]:
     norm = report.review_comments_text.strip().lower()
     if not report.findings and norm not in EMPTY_SECTION_TOKENS:
         return [
             Violation(
-                report.review_comments_line,
                 "review-comments-unparsed",
                 "Review Comments has text but no '### <ID>. <claim>' findings were parsed.",
+                report.review_comments_line,
             )
         ]
     return []
 
 
-def _check_sequence_for_group(
-    items: list[Finding], expected_prefix: str | None = None
-) -> list[Violation]:
-    violations: list[Violation] = []
-    counts: dict[str, int] = {}
-    last_order = -1
-
-    for item in items:
-        prefix = item.id[0]
-        number = int(item.id[1:])
-        if expected_prefix and prefix != expected_prefix:
-            violations.append(
-                Violation(
-                    item.line,
-                    "ids-sequential",
-                    f"Expected '{expected_prefix}' ID, got '{item.id}'.",
-                )
-            )
-            continue
-        if not expected_prefix:
-            order = CLASS_ORDER.get(prefix, 99)
-            if order < last_order:
-                violations.append(
-                    Violation(
-                        item.line,
-                        "ids-sequential",
-                        f"Finding '{item.id}' appears out of severity class order (C, H, M, L).",
-                    )
-                )
-            last_order = max(last_order, order)
-
-        expected_num = counts.get(prefix, 0) + 1
-        counts[prefix] = expected_num
-        if number != expected_num:
-            violations.append(
-                Violation(
-                    item.line,
-                    "ids-sequential",
-                    f"Expected '{prefix}{expected_num}', got '{item.id}'.",
-                )
-            )
-    return violations
-
-
 def _check_ids_sequential(report: Report) -> list[Violation]:
-    return _check_sequence_for_group(report.findings) + _check_sequence_for_group(
-        report.questions, "Q"
+    return check_id_sequence(report.findings) + check_id_sequence(
+        report.questions, expected_prefix="Q"
     )
 
 
 def _check_severity_matches_id(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    for item in report.findings:
-        expected = ID_TO_SEVERITY.get(item.id[0])
-        if expected and item.severity != expected:
-            violations.append(
-                Violation(
-                    item.line,
-                    "severity-matches-id",
-                    f"Finding '{item.id}' has severity '{item.severity or 'missing'}', expected '{expected}'.",
-                )
-            )
-    return violations
+    return check_severity_matches_id(report.findings)
 
 
 def _check_evidence_and_caps(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    for item in report.findings + report.questions:
-        ev = item.fields.get("Evidence", "")
-        tier = _extract_tier(ev)
-        if not tier:
-            violations.append(
-                Violation(
-                    item.line,
-                    "evidence-required",
-                    f"'{item.id}' is missing a valid Evidence tier ({', '.join(VALID_TIERS[:-1])}).",
-                )
-            )
-            continue
-        if tier == "Recalled":
-            violations.append(
-                Violation(
-                    item.line,
-                    "evidence-recalled",
-                    f"'{item.id}' uses forbidden tier 'Recalled'.",
-                )
-            )
-        if (
-            item in report.findings
-            and item.severity in ("critical", "high")
-            and tier in ("Speculation", "Recalled")
-        ):
-            violations.append(
-                Violation(
-                    item.line,
-                    "severity-cap",
-                    f"'{item.id}' ({item.severity}) cannot rest on '{tier}' evidence.",
-                )
-            )
-    return violations
+    return check_evidence_caps(report.findings, is_findings=True) + check_evidence_caps(
+        report.questions, is_findings=False
+    )
 
 
 def _check_why_required(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    for item in report.findings + report.questions:
-        why = _strip_ticks(item.fields.get("Why", ""))
-        if not why:
-            violations.append(
-                Violation(
-                    item.line,
-                    "why-required",
-                    f"'{item.id}' is missing a non-empty 'Why' field.",
-                )
-            )
-    return violations
+    return check_required_fields(report.findings + report.questions, _WHY_PROFILE)
 
 
 def _check_questions(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    if len(report.questions) > 3:
-        violations.append(
-            Violation(
-                report.questions[3].line,
-                "question-fields",
-                f"Questions section has {len(report.questions)} entries (maximum is 3).",
-            )
-        )
-    for q in report.questions:
-        if not _strip_ticks(q.fields.get("To settle", "")):
-            violations.append(
-                Violation(
-                    q.line,
-                    "question-fields",
-                    f"Question '{q.id}' is missing a 'To settle' field.",
-                )
-            )
-    return violations
+    return check_questions(report.questions)
 
 
 def _check_clean_section(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    if len(report.clean_lines) > 10:
-        violations.append(
-            Violation(
-                report.clean_lines[10].line,
-                "clean-max-10",
-                f"Checked and Found Clean has {len(report.clean_lines)} lines (maximum is 10).",
-            )
-        )
-    for cl in report.clean_lines:
-        has_tier = any(re.search(rf"\b{tier}\b", cl.text) for tier in CLEAN_TIERS)
-        if not has_tier:
-            violations.append(
-                Violation(
-                    cl.line,
-                    "clean-line-tier",
-                    f"Checked and Found Clean line lacks a valid tier ({', '.join(CLEAN_TIERS)}).",
-                )
-            )
-    return violations
+    return check_clean_lines([(cl.line, cl.text) for cl in report.clean_lines])
 
 
 def _check_verified_removed(report: Report) -> list[Violation]:
     return [
         Violation(
-            line,
             "verified-removed",
             "Deprecated '**Verified**:' field found; use '**Evidence**: `Executed`'.",
+            line,
         )
         for line in report.verified_lines
     ]
 
 
 def _check_focus_field(report: Report) -> list[Violation]:
-    violations: list[Violation] = []
-    for item in report.findings + report.questions:
-        if "Focus" not in item.fields:
-            continue
-        raw_focus = item.fields["Focus"].strip()
-        if not FOCUS_ID_RE.match(raw_focus):
-            violations.append(
-                Violation(
-                    item.line,
-                    "focus-id-format",
-                    f"'{item.id}' has invalid 'Focus' value '{raw_focus}'; "
-                    "expected a single backticked id like `sync-to-async` or `adhoc:<slug>`.",
-                )
-            )
-    return violations
+    return check_required_fields(report.findings + report.questions, _FOCUS_PROFILE)
 
 
 def _check_no_playbook_feedback_section(report: Report) -> list[Violation]:
     if report.playbook_feedback_line:
         return [
             Violation(
-                report.playbook_feedback_line,
                 "playbook-feedback-leaked",
                 "Playbook Feedback section must be stripped before writing review_results.md.",
+                report.playbook_feedback_line,
             )
         ]
     return []
 
 
 def _check_single_fence_per_field(report: Report) -> list[Violation]:
-    """Each fenced field holds one block. A second fence usually means
-    "replace X with Y", and the exporter cannot tell X from Y."""
-    violations: list[Violation] = []
-    for f in report.findings:
-        for field_name, meta in f.fence_meta.items():
-            if meta.extra_fences:
-                violations.append(
-                    Violation(
-                        f.line,
-                        "suggestion-single-fence",
-                        f"'{f.id}' {field_name} has more than one fenced block; "
-                        "keep only the drop-in replacement (move a repro test to "
-                        "'**Repro test**:').",
-                    )
-                )
-    return violations
+    return check_single_fence_per_field(report.findings)
 
 
 def _content_words(text: str) -> set[str]:
@@ -766,147 +581,31 @@ def _extract_finding_comment_prose(f: Finding) -> str:
     return "\n\n".join(parts)
 
 
-def _collect_ai_ism_labels(violations_dict: dict[str, Any]) -> list[str]:
-    """Collects human-readable labels for AI-ism, em-dash, and noun-cluster violations."""
-    labels: list[str] = []
-    for item in violations_dict.get("banned_ai_words_found", []):
-        labels.append(f"banned word '{item['banned_word']}'")
-    for item in violations_dict.get("banned_ai_phrases_found", []):
-        labels.append(f"banned phrase '{item['banned_phrase']}'")
-    if violations_dict.get("em_dashes_found"):
-        labels.append("em-dash '—'")
-    for item in violations_dict.get("noun_clusters_found", []):
-        labels.append(f"noun cluster '{item['cluster']}'")
-    return labels
-
-
-def _analyze_comment_prose(prose: str) -> dict[str, Any] | None:
-    """Returns analyze_prose metrics for `prose`, or None when there is nothing to lint."""
-    if not prose.strip():
-        return None
-    metrics = analyze_prose(
-        "-",
-        complexity_threshold=MAX_SENTENCE_PCC,
-        engine="stdlib",
-        text=prose,
-    )
-    if "error" in metrics:
-        return None
-    return metrics
-
-
-def _prose_quality_violations(
-    item_id: str, line: int, v_dict: dict[str, Any], where: str
-) -> list[Violation]:
-    """Sentence length, sentence complexity, and AI-ism checks shared by all comment prose."""
-    out: list[Violation] = []
-    long_sents = [
-        s
-        for s in v_dict.get("sentences_exceeding_25_words", [])
-        if s["word_count"] > MAX_SENTENCE_WORDS
-    ]
-    if long_sents:
-        longest = max(s["word_count"] for s in long_sents)
-        out.append(
-            Violation(
-                line,
-                "comment-sentence-length",
-                f"'{item_id}' {where} has {len(long_sents)} sentence(s) exceeding "
-                f"{MAX_SENTENCE_WORDS} words (longest: {longest} words).",
-            )
-        )
-
-    complex_sents = v_dict.get("complex_sentences_found", [])
-    if complex_sents:
-        worst = max(s["cognitive_complexity"] for s in complex_sents)
-        out.append(
-            Violation(
-                line,
-                "comment-sentence-complexity",
-                f"'{item_id}' {where} has {len(complex_sents)} sentence(s) with cognitive "
-                f"complexity PCC > {MAX_SENTENCE_PCC} (max PCC: {worst}).",
-            )
-        )
-
-    ai_labels = _collect_ai_ism_labels(v_dict)
-    if ai_labels:
-        out.append(
-            Violation(
-                line,
-                "comment-ai-ism",
-                f"'{item_id}' {where} contains prose violation(s): {', '.join(ai_labels)}.",
-            )
-        )
-    return out
-
-
-def _lint_single_comment_prose(
-    item_id: str,
-    line: int,
-    prose: str,
-    caps: CommentCaps = COMMENT_PROFILES["default"],
-) -> list[Violation]:
-    """Runs write-prose checks on a single finding or question's visible prose."""
-    metrics = _analyze_comment_prose(prose)
-    if metrics is None:
-        return []
-    summary = metrics["summary"]
-    out: list[Violation] = []
-
-    words = summary["total_words"]
-    sentences = summary["total_sentences"]
-    if words > caps.words or sentences > caps.sentences:
-        out.append(
-            Violation(
-                line,
-                "comment-prose-length",
-                f"'{item_id}' comment prose is {words} words / {sentences} sentences "
-                f"(max {caps.words} words, {caps.sentences} sentences).",
-                fix=_prose_length_hint(caps),
-            )
-        )
-    out.extend(
-        _prose_quality_violations(item_id, line, metrics["violations"], "comment")
-    )
-    return out
-
-
-def _lint_details_prose(
-    item_id: str, line: int, details: str, caps: CommentCaps
-) -> list[Violation]:
-    """Runs write-prose checks on a finding's optional Details field."""
-    metrics = _analyze_comment_prose(details)
-    if metrics is None:
-        return []
-    out: list[Violation] = []
-    words = metrics["summary"]["total_words"]
-    if words > caps.details_words:
-        out.append(
-            Violation(
-                line,
-                "comment-details-length",
-                f"'{item_id}' Details is {words} words (max {caps.details_words} words).",
-                fix=_details_length_hint(caps),
-            )
-        )
-    out.extend(
-        _prose_quality_violations(item_id, line, metrics["violations"], "Details")
-    )
-    return out
-
-
 def _check_comment_prose(report: Report, caps: CommentCaps) -> list[Violation]:
     """Runs write-prose checks on each finding and question comment, plus Details."""
-    violations: list[Violation] = []
-    for f in report.findings:
-        prose = _extract_finding_comment_prose(f)
-        violations.extend(_lint_single_comment_prose(f.id, f.line, prose, caps))
-        details = f.fields.get("Details", "").strip()
-        violations.extend(_lint_details_prose(f.id, f.line, details, caps))
-    for q in report.questions:
-        prose = _build_question_prose(q)
-        violations.extend(_lint_single_comment_prose(q.id, q.line, prose, caps))
-    return violations
+    prose_profile = ReportProfile(
+        name="code",
+        sections=(),
+        findings_section="",
+        questions_section="",
+        required_fields=(),
+        max_words=caps.words,
+        max_sentences=caps.sentences,
+        details_words=caps.details_words,
+    )
+    return check_prose(
+        report.findings,
+        prose_profile,
+        analyze_prose,
+        prose_builder=_extract_finding_comment_prose,
+        check_details=True,
+    ) + check_prose(
+        report.questions,
+        prose_profile,
+        analyze_prose,
+        prose_builder=_build_question_prose,
+        check_details=False,
+    )
 
 
 RULES: list[Callable[[Report], list[Violation]]] = [
@@ -924,6 +623,18 @@ RULES: list[Callable[[Report], list[Violation]]] = [
 ]
 
 
+def _attach_fix_hint(v: Violation, caps: CommentCaps) -> Violation:
+    if v.fix_hint:
+        return v
+    if v.rule == "comment-prose-length":
+        hint = _prose_length_hint(caps)
+    elif v.rule == "comment-details-length":
+        hint = _details_length_hint(caps)
+    else:
+        hint = _FIX_HINTS.get(v.rule, "")
+    return replace(v, fix_hint=hint) if hint else v
+
+
 def check_report(report: Report, profile: str = "default") -> list[Violation]:
     """Run all lint rules against a parsed Report.
 
@@ -935,26 +646,23 @@ def check_report(report: Report, profile: str = "default") -> list[Violation]:
             f"Unknown comment profile '{profile}' "
             f"(expected one of: {', '.join(COMMENT_PROFILES)})."
         )
+    caps = COMMENT_PROFILES[profile]
     violations: list[Violation] = []
     for rule_fn in RULES:
         violations.extend(rule_fn(report))
-    violations.extend(_check_comment_prose(report, COMMENT_PROFILES[profile]))
-    return sorted(violations, key=lambda v: (v.line, v.rule))
+    violations.extend(_check_comment_prose(report, caps))
+    with_hints = [_attach_fix_hint(v, caps) for v in violations]
+    return sorted(with_hints, key=lambda v: (v.line, v.rule))
 
 
 def _parse_line_range(line_val: str) -> tuple[int, int]:
-    cleaned = _strip_ticks(line_val)
+    cleaned = strip_ticks(line_val)
     m = re.search(r"(\d+)(?:\s*(?:-|–|—|\.\.)\s*(\d+))?", cleaned)
     if not m:
         return 1, 1
     start = int(m.group(1))
     end = int(m.group(2)) if m.group(2) else start
     return start, end
-
-
-VERDICT_LINE_RE = re.compile(
-    r"\bverdict\b\W*(critical blockers?|minor revisions? needed|ready)\b", re.IGNORECASE
-)
 
 # Process sentences that code-review's Summary carries for the orchestrator
 # (ring classification banner, Pre-Execution Security Gate status, citation
@@ -1193,8 +901,8 @@ def _build_finding_draft_comment(
         repro_md = f"{heading}\n\n{_format_repro_test(repro_meta, repro)}"
     ev = f.fields.get("Evidence", "")
     fold = _build_details_block(
-        _extract_tier(ev),
-        _strip_file_links(_extract_evidence_detail(ev)),
+        extract_tier(ev),
+        _strip_file_links(extract_evidence_detail(ev)),
         _strip_file_links(f.fields.get("Details", "").strip()),
         repro_md,
     )
@@ -1219,12 +927,12 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
     finding_dict: dict[str, Any] = {
         "id": f.id,
         "severity": f.severity or "medium",
-        "file_path": _strip_ticks(f.fields.get("File", "")),
+        "file_path": strip_ticks(f.fields.get("File", "")),
         "line_start": line_start,
         "line_end": line_end,
         "side": "RIGHT",
-        "evidence_tier": _extract_tier(ev),
-        "evidence_detail": _strip_file_links(_extract_evidence_detail(ev)),
+        "evidence_tier": extract_tier(ev),
+        "evidence_detail": _strip_file_links(extract_evidence_detail(ev)),
         "description": desc,
         "body": body,
         "why": why,
@@ -1235,7 +943,7 @@ def _build_finding_dict(f: Finding) -> dict[str, Any]:
     if "Category" in f.fields:
         finding_dict["category"] = f.fields["Category"].strip().lower()
     if "Focus" in f.fields:
-        finding_dict["focus"] = _strip_ticks(f.fields["Focus"]).strip()
+        finding_dict["focus"] = strip_ticks(f.fields["Focus"]).strip()
     if sugg:
         finding_dict["suggestion"] = sugg
     if repro:
@@ -1250,20 +958,20 @@ def _build_question_dict(q: Finding) -> dict[str, Any]:
     why = _strip_file_links(q.fields.get("Why", "").strip())
     to_settle = _strip_file_links(q.fields.get("To settle", "").strip())
     desc = _strip_file_links(q.title or q.fields.get("Body", "").strip())
-    evidence_tier = _extract_tier(ev)
-    evidence_detail = _strip_file_links(_extract_evidence_detail(ev))
+    evidence_tier = extract_tier(ev)
+    evidence_detail = _strip_file_links(extract_evidence_detail(ev))
     prose = _strip_file_links(_build_question_prose(q))
     fold = _build_details_block(evidence_tier, evidence_detail, "", "", to_settle)
     draft = f"{prose}\n\n{fold}" if fold and prose else (prose or fold)
     return {
         "id": q.id,
         "severity": "question",
-        "file_path": _strip_ticks(q.fields.get("File", "")),
+        "file_path": strip_ticks(q.fields.get("File", "")),
         "line_start": line_start,
         "line_end": line_end,
         "side": "RIGHT",
-        "evidence_tier": _extract_tier(ev),
-        "evidence_detail": _strip_file_links(_extract_evidence_detail(ev)),
+        "evidence_tier": extract_tier(ev),
+        "evidence_detail": _strip_file_links(extract_evidence_detail(ev)),
         "description": desc,
         "why": why,
         "to_settle": to_settle,
@@ -1319,7 +1027,7 @@ def main(argv: list[str] | None = None) -> int:
         "--comment-profile",
         choices=sorted(COMMENT_PROFILES),
         default="default",
-        help="Comment prose caps: default (80 words / 4 sentences) or pr (120 / 6).",
+        help="Comment prose caps: default or pr (both 120 words / 6 sentences).",
     )
     parser.add_argument(
         "--export-json", help="Write review_results.json here on success"

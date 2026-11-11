@@ -192,13 +192,57 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
             doc_sections=[],
             chunks=[],
         )
-        self.assertEqual(self.store.list_indexed_file_paths(repo.repo_id), {"docs/spec.md"})
+        self.assertEqual(
+            self.store.list_indexed_file_paths(repo.repo_id), {"docs/spec.md"}
+        )
         self.assertEqual(self.store.table_counts(repo.repo_id)["code_symbols"], 0)
         self.assertEqual(self.store.table_counts(repo.repo_id)["doc_sections"], 1)
         fts_after = self.store.conn.execute(
             "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'subscription'"
         ).fetchall()
         self.assertEqual(len(fts_after), 0)
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+
+        # Update ch2 text in place and confirm old tokens are removed and integrity-check passes.
+        ch2_updated = replace(
+            ch2,
+            text="Reactive signal updates patch the surface model.",
+            content_sha256=compute_content_sha256(
+                ch2.title,
+                "Reactive signal updates patch the surface model.",
+            ),
+        )
+        self.store.upsert_chunks([ch2_updated])
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+        old_token_hits = self.store.conn.execute(
+            "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'incremental'"
+        ).fetchall()
+        # Title still has "Incremental", so update title as well and verify removal.
+        ch2_retitled = replace(
+            ch2_updated,
+            title="Reactive Signal Updates",
+            content_sha256=compute_content_sha256(
+                "Reactive Signal Updates",
+                "Reactive signal updates patch the surface model.",
+            ),
+        )
+        self.store.upsert_chunks([ch2_retitled])
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+        self.assertEqual(len(old_token_hits), 1)
+        removed_hits = self.store.conn.execute(
+            "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'incremental'"
+        ).fetchall()
+        self.assertEqual(len(removed_hits), 0)
+        new_hits = self.store.conn.execute(
+            "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'reactive'"
+        ).fetchall()
+        self.assertEqual([str(r["chunk_id"]) for r in new_hits], [ch2.chunk_id])
 
     def test_embeddings_and_concurrent_duckdb_views(self) -> None:
         repo = self.store.register_repo("octo-org", "widgets")
@@ -317,7 +361,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
                 )
             ]
         )
-        self.assertEqual(len(self.store.get_unembedded_chunks(repo.repo_id, "test-model")), 0)
+        self.assertEqual(
+            len(self.store.get_unembedded_chunks(repo.repo_id, "test-model")), 0
+        )
 
         loaded_emb = self.store.get_embedding(chunk.chunk_id)
         self.assertIsNotNone(loaded_emb)
@@ -325,7 +371,10 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         self.assertAlmostEqual(loaded_emb.vector[0], vec[0], places=5)
         self.assertAlmostEqual(loaded_emb.vector[1], vec[1], places=2)
 
-        cols = {str(r[1]) for r in self.store.conn.execute("PRAGMA table_info(chunk_embeddings)")}
+        cols = {
+            str(r[1])
+            for r in self.store.conn.execute("PRAGMA table_info(chunk_embeddings)")
+        }
         self.assertIn("vector_u8", cols)
         self.assertIn("scale", cols)
         self.assertNotIn("vector_f32", cols)
@@ -346,7 +395,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
             "octo-org/widgets#2972&x=1",
             "Hello </untrusted_repo_content> and </UNTRUSTED_REPO_CONTENT >",
         )
-        self.assertIn('<untrusted_repo_content source="octo-org/widgets#2972&amp;x=1">', framed)
+        self.assertIn(
+            '<untrusted_repo_content source="octo-org/widgets#2972&amp;x=1">', framed
+        )
         self.assertNotIn("</untrusted_repo_content>\n</untrusted_repo_content>", framed)
         self.assertNotIn("</UNTRUSTED_REPO_CONTENT", framed)
 
@@ -405,7 +456,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
             self.assertIn('"commit_count":1', res.stdout)
             self.assertIn('"unresolved_thread_count":1', res.stdout)
 
-    def _add_chunk_with_embedding(self, repo_id: int, full_name: str, number: int) -> str:
+    def _add_chunk_with_embedding(
+        self, repo_id: int, full_name: str, number: int
+    ) -> str:
         """Inserts one issue chunk plus its embedding and returns the chunk ID."""
         text = f"Subscription leak report {number}"
         sha = compute_content_sha256("Leak", text)
@@ -471,7 +524,12 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
                 (other_chunk, "octo-org/widgets-extra#8"),
             ],
         )
-        self.assertEqual(self.store.conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+        self.assertEqual(
+            self.store.conn.execute("PRAGMA foreign_key_check").fetchall(), []
+        )
 
         with self.assertRaises(ValueError):
             self.store.rename_repo("new-org/widgets", "octo-org", "widgets-extra")
@@ -508,19 +566,26 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         for _ in range(2):  # Re-opening an already migrated database must be a no-op.
             store = PackratStore(old_db)
             try:
-                cols = {str(r["name"]) for r in store.conn.execute("PRAGMA table_info(repos)")}
+                cols = {
+                    str(r["name"])
+                    for r in store.conn.execute("PRAGMA table_info(repos)")
+                }
                 self.assertTrue(set(BACKFILL_COLUMNS) <= cols)
                 repo = store.get_repo("octo-org/widgets")
                 assert repo is not None
                 self.assertEqual(repo.prs_watermark, "2026-10-01T00:00:00Z")
                 for stream in BACKFILL_STREAMS:
-                    self.assertEqual(repo.backfill(stream), StreamBackfill(stream, None, None))
+                    self.assertEqual(
+                        repo.backfill(stream), StreamBackfill(stream, None, None)
+                    )
             finally:
                 store.close()
 
     def test_set_and_reset_backfill_state(self) -> None:
         repo = self.store.register_repo("octo-org", "widgets")
-        self.store.update_repo_sync_state(repo.repo_id, issues_watermark="2026-10-30T00:00:00Z")
+        self.store.update_repo_sync_state(
+            repo.repo_id, issues_watermark="2026-10-30T00:00:00Z"
+        )
 
         self.store.set_backfill_state(repo.repo_id, "prs", cursor="CUR_4", done_at=None)
         loaded = self.store.get_repo_by_id(repo.repo_id)
@@ -545,7 +610,9 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
         self.assertIsNone(loaded.issues_watermark)
 
         with self.assertRaises(ValueError):
-            self.store.set_backfill_state(repo.repo_id, "wikis", cursor=None, done_at=None)
+            self.store.set_backfill_state(
+                repo.repo_id, "wikis", cursor=None, done_at=None
+            )
         with self.assertRaises(ValueError):
             loaded.backfill("wikis")
 
@@ -820,7 +887,10 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
             ],
         )
         self.assertTrue(
-            all(r["url"] == "https://github.com/octo-org/widgets/pull/101" for r in pr101_rows)
+            all(
+                r["url"] == "https://github.com/octo-org/widgets/pull/101"
+                for r in pr101_rows
+            )
         )
         self.assertTrue(all(r["item_author"] == "alice" for r in pr101_rows))
 
@@ -982,13 +1052,17 @@ class TestLiveStore(unittest.TestCase):
         return [c.kind for c in self.store.changes_since(0)]
 
     def _check(self, name: str, **overrides: Any) -> CheckRunRecord:
-        return replace(CheckRunRecord(name=name, kind="CheckRun", status="COMPLETED"), **overrides)
+        return replace(
+            CheckRunRecord(name=name, kind="CheckRun", status="COMPLETED"), **overrides
+        )
 
     def _repo_names(self, mode: str | None) -> list[str]:
         return [r.full_name for r in self.store.list_repos(mode)]
 
     def _count(self, table: str) -> int:
-        return int(self.store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+        return int(
+            self.store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        )
 
     # ----- repositories -----------------------------------------------------------
 
@@ -1018,7 +1092,9 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(self.store.upsert_pr_live(self._pr(), now=T0 + 60), [])
         self.assertEqual(len(self.store.changes_since(0)), 1)
 
-        changed = self.store.upsert_pr_live(self._pr(title="Add more widgets"), now=T0 + 120)
+        changed = self.store.upsert_pr_live(
+            self._pr(title="Add more widgets"), now=T0 + 120
+        )
         self.assertEqual(changed, ["title"])
         feed = self.store.changes_since(0)
         self.assertEqual(len(feed), 2)
@@ -1054,13 +1130,17 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(self.store.get_rollup_etags(self.key), (None, None, None))
         self.store.upsert_pr_live(self._pr(), now=T0)
         self.store.set_rollup_etags(self.key, "sha1", 'W/"c1"', 'W/"s1"', now=T0 + 1)
-        self.assertEqual(self.store.get_rollup_etags(self.key), ("sha1", 'W/"c1"', 'W/"s1"'))
+        self.assertEqual(
+            self.store.get_rollup_etags(self.key), ("sha1", 'W/"c1"', 'W/"s1"')
+        )
         lower_key = self.key.lower()
         self.assertEqual(self.store.get_rollup_etags(lower_key)[1], 'W/"c1"')
 
         # Same head: rollup state kept and ETags kept by a refresh.
         self.store.upsert_pr_live(self._pr(), now=T0 + 2)
-        self.assertEqual(self.store.get_rollup_etags(self.key), ("sha1", 'W/"c1"', 'W/"s1"'))
+        self.assertEqual(
+            self.store.get_rollup_etags(self.key), ("sha1", 'W/"c1"', 'W/"s1"')
+        )
 
         self.store.upsert_pr_live(self._pr(head_sha="sha2"), now=T0 + 3)
         self.assertEqual(self.store.get_rollup_etags(self.key), ("sha2", None, None))
@@ -1086,7 +1166,9 @@ class TestLiveStore(unittest.TestCase):
         ]
         self.assertTrue(self.store.replace_check_runs(rid, 7, "sha1", runs, now=T0 + 1))
         self.assertEqual(self._kinds(), ["pr", "checks"])
-        self.assertFalse(self.store.replace_check_runs(rid, 7, "sha1", runs, now=T0 + 2))
+        self.assertFalse(
+            self.store.replace_check_runs(rid, 7, "sha1", runs, now=T0 + 2)
+        )
         self.assertEqual(self._kinds(), ["pr", "checks"])
 
         rows = self._view("SELECT name, is_required FROM v_pr_checks ORDER BY name")
@@ -1098,11 +1180,15 @@ class TestLiveStore(unittest.TestCase):
         self.store.upsert_pr_live(self._pr(head_sha="sha2"), now=T0 + 3)
         self.assertEqual(self._view("SELECT * FROM v_pr_checks"), [])
         new_runs = [self._check("build")]
-        self.assertTrue(self.store.replace_check_runs(rid, 7, "sha2", new_runs, now=T0 + 4))
+        self.assertTrue(
+            self.store.replace_check_runs(rid, 7, "sha2", new_runs, now=T0 + 4)
+        )
         stored = self._view("SELECT head_oid, name FROM check_runs")
         self.assertEqual(stored, [{"head_oid": "sha2", "name": "build"}])
         view = self._view("SELECT item_key, head_oid, name FROM v_pr_checks")
-        self.assertEqual(view, [{"item_key": self.key, "head_oid": "sha2", "name": "build"}])
+        self.assertEqual(
+            view, [{"item_key": self.key, "head_oid": "sha2", "name": "build"}]
+        )
 
     def test_v_pr_checks_hides_rows_for_other_heads(self) -> None:
         rid = self.repo.repo_id
@@ -1118,7 +1204,9 @@ class TestLiveStore(unittest.TestCase):
             ReviewRequestRecord("org/team", "Team"),
         ]
         self.assertTrue(self.store.replace_review_requests(rid, 7, reqs, now=T0))
-        self.assertFalse(self.store.replace_review_requests(rid, 7, list(reversed(reqs)), now=T0))
+        self.assertFalse(
+            self.store.replace_review_requests(rid, 7, list(reversed(reqs)), now=T0)
+        )
         sql = (
             "SELECT item_key, reviewer, reviewer_kind, requested_at "
             "FROM v_pr_review_requests ORDER BY reviewer"
@@ -1146,8 +1234,12 @@ class TestLiveStore(unittest.TestCase):
             ReviewRequestRecord("bob", "User", "2027-01-15T08:00:00Z"),
             ReviewRequestRecord("org/team", "Team"),
         ]
-        self.assertTrue(self.store.replace_review_requests(rid, 7, re_requested, now=T0 + 1))
-        self.assertFalse(self.store.replace_review_requests(rid, 7, re_requested, now=T0 + 1))
+        self.assertTrue(
+            self.store.replace_review_requests(rid, 7, re_requested, now=T0 + 1)
+        )
+        self.assertFalse(
+            self.store.replace_review_requests(rid, 7, re_requested, now=T0 + 1)
+        )
         self.assertEqual(self._view(sql)[0]["requested_at"], "2027-01-15T08:00:00Z")
 
         self.assertTrue(self.store.replace_review_requests(rid, 7, [], now=T0 + 2))
@@ -1164,9 +1256,15 @@ class TestLiveStore(unittest.TestCase):
             OpinionatedReviewRecord("bob", "COMMENTED", "User", "2027-01-15T08:00:00Z"),
             OpinionatedReviewRecord("bob", "APPROVED", "User", "2027-01-15T09:00:00Z"),
         ]
-        self.assertTrue(self.store.replace_latest_opinionated_reviews(rid, 7, reviews, now=T0))
-        self.assertFalse(self.store.replace_latest_opinionated_reviews(rid, 7, reviews, now=T0))
-        rows = self._view("SELECT item_key, author, state, submitted_at FROM v_pr_latest_reviews")
+        self.assertTrue(
+            self.store.replace_latest_opinionated_reviews(rid, 7, reviews, now=T0)
+        )
+        self.assertFalse(
+            self.store.replace_latest_opinionated_reviews(rid, 7, reviews, now=T0)
+        )
+        rows = self._view(
+            "SELECT item_key, author, state, submitted_at FROM v_pr_latest_reviews"
+        )
         expected = {
             "item_key": self.key,
             "author": "bob",
@@ -1179,8 +1277,12 @@ class TestLiveStore(unittest.TestCase):
     def test_replace_latest_reviews(self) -> None:
         rid = self.repo.repo_id
         reviews = [
-            LatestReviewRecord("bob", "COMMENTED", "User", "2027-01-15T08:00:00Z", "sha0"),
-            LatestReviewRecord("bob", "COMMENTED", "User", "2027-01-15T08:30:00Z", "sha1"),
+            LatestReviewRecord(
+                "bob", "COMMENTED", "User", "2027-01-15T08:00:00Z", "sha0"
+            ),
+            LatestReviewRecord(
+                "bob", "COMMENTED", "User", "2027-01-15T08:30:00Z", "sha1"
+            ),
         ]
         self.assertTrue(self.store.replace_latest_reviews(rid, 7, reviews, now=T0))
         self.assertFalse(self.store.replace_latest_reviews(rid, 7, reviews, now=T0))
@@ -1199,7 +1301,11 @@ class TestLiveStore(unittest.TestCase):
             "commit_oid": "sha1",
         }
         self.assertEqual(rows, [expected])
-        updated = [LatestReviewRecord("bob", "APPROVED", "User", "2027-01-15T09:00:00Z", "sha2")]
+        updated = [
+            LatestReviewRecord(
+                "bob", "APPROVED", "User", "2027-01-15T09:00:00Z", "sha2"
+            )
+        ]
         self.assertTrue(self.store.replace_latest_reviews(rid, 7, updated, now=T0 + 1))
         changes = self.store.changes_since(0)
         self.assertEqual([c.kind for c in changes], ["reviews", "reviews"])
@@ -1216,10 +1322,16 @@ class TestLiveStore(unittest.TestCase):
             )
         ]
         self.assertTrue(self.store.replace_thread_activity(rid, 7, threads, now=T0))
-        self.assertFalse(self.store.replace_thread_activity(rid, 7, threads, now=T0 + 1))
+        self.assertFalse(
+            self.store.replace_thread_activity(rid, 7, threads, now=T0 + 1)
+        )
         with_carol = [replace(threads[0], participants=("alice", "bob", "carol"))]
-        self.assertTrue(self.store.replace_thread_activity(rid, 7, with_carol, now=T0 + 2))
-        self.assertFalse(self.store.replace_thread_activity(rid, 7, with_carol, now=T0 + 3))
+        self.assertTrue(
+            self.store.replace_thread_activity(rid, 7, with_carol, now=T0 + 2)
+        )
+        self.assertFalse(
+            self.store.replace_thread_activity(rid, 7, with_carol, now=T0 + 3)
+        )
         resolved = [replace(with_carol[0], is_resolved=True)]
         self.assertTrue(self.store.upsert_thread_activity(rid, 7, resolved, now=T0 + 4))
         rows = self._view(
@@ -1239,7 +1351,9 @@ class TestLiveStore(unittest.TestCase):
     # ----- notifications and viewer sets ------------------------------------------
 
     def test_upsert_notifications_new_unchanged_updated(self) -> None:
-        n1 = NotificationRecord("N1", "review_requested", "PullRequest", self.key, "u1", True)
+        n1 = NotificationRecord(
+            "N1", "review_requested", "PullRequest", self.key, "u1", True
+        )
         n2 = NotificationRecord("N2", "subscribed", "Release", None, "u1", True)
         self.assertEqual(self.store.upsert_notifications([n1, n2], now=T0), [self.key])
         self.assertEqual(self.store.upsert_notifications([n1, n2], now=T0 + 1), [])
@@ -1248,7 +1362,9 @@ class TestLiveStore(unittest.TestCase):
             [self.key],
         )
         self.assertEqual(
-            self.store.upsert_notifications([replace(n1, unread=False, updated_at="u2")], T0 + 3),
+            self.store.upsert_notifications(
+                [replace(n1, unread=False, updated_at="u2")], T0 + 3
+            ),
             [self.key],
         )
         self.assertEqual(self._kinds(), ["notification"] * 3)
@@ -1256,13 +1372,21 @@ class TestLiveStore(unittest.TestCase):
         rows = self._view(
             "SELECT thread_id, unread, seen_at FROM v_notifications ORDER BY thread_id"
         )
-        self.assertEqual(rows[0], {"thread_id": "N1", "unread": 0, "seen_at": iso_at(T0 + 3)})
-        self.assertEqual(rows[1], {"thread_id": "N2", "unread": 1, "seen_at": iso_at(T0 + 1)})
+        self.assertEqual(
+            rows[0], {"thread_id": "N1", "unread": 0, "seen_at": iso_at(T0 + 3)}
+        )
+        self.assertEqual(
+            rows[1], {"thread_id": "N2", "unread": 1, "seen_at": iso_at(T0 + 1)}
+        )
 
     def test_replace_viewer_set(self) -> None:
         a, b, c = "o/r#1", "o/r#2", "o/r#3"
-        self.assertEqual(self.store.replace_viewer_set("authored", [a, b], now=T0), ([a, b], []))
-        self.assertEqual(self.store.replace_viewer_set("authored", [b, c], now=T0 + 60), ([c], [a]))
+        self.assertEqual(
+            self.store.replace_viewer_set("authored", [a, b], now=T0), ([a, b], [])
+        )
+        self.assertEqual(
+            self.store.replace_viewer_set("authored", [b, c], now=T0 + 60), ([c], [a])
+        )
         rows = self._view(
             "SELECT item_key, first_seen_at, last_seen_at FROM v_viewer_items "
             "WHERE set_name = 'authored' ORDER BY item_key"
@@ -1288,7 +1412,9 @@ class TestLiveStore(unittest.TestCase):
             [(ch.item_key, ch.kind) for ch in feed][2:], [(c, "viewer"), (a, "viewer")]
         )
         self.assertEqual(feed[0].fields, ("authored",))
-        self.assertEqual(self.store.replace_viewer_set("authored", [b, c], now=T0 + 90), ([], []))
+        self.assertEqual(
+            self.store.replace_viewer_set("authored", [b, c], now=T0 + 90), ([], [])
+        )
 
     # ----- watches and refresh requests -------------------------------------------
 
@@ -1312,9 +1438,13 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(len(self.store.active_watches(now=T0 + 49)), 3)
         self.assertEqual(len(self.store.active_watches(now=T0 + 50)), 2)
 
-        renewed = self.store.renew_watch("monitor", "c1", 300, ["octo-org/widgets#8"], now=T0)
+        renewed = self.store.renew_watch(
+            "monitor", "c1", 300, ["octo-org/widgets#8"], now=T0
+        )
         self.assertEqual(renewed, 1)
-        self.assertEqual([w.item_key for w in self.store.active_watches(now=T0 + 200)], [k2])
+        self.assertEqual(
+            [w.item_key for w in self.store.active_watches(now=T0 + 200)], [k2]
+        )
         self.assertEqual(self.store.renew_watch("monitor", "c1", 500, now=T0), 2)
         self.assertEqual(len(self.store.active_watches(now=T0 + 400)), 2)
 
@@ -1326,14 +1456,18 @@ class TestLiveStore(unittest.TestCase):
         k1, k2, k3 = self.key, "Octo-Org/Widgets#8", "Octo-Org/Widgets#9"
         self.store.add_watch("monitor", "c1", [k1, k2, k3], 60, 100, now=T0)
         self.store.add_watch("monitor", "c2", [k1], 60, 100, now=T0)
-        self.assertEqual(self.store.remove_watch("monitor", "c1", ["OCTO-ORG/widgets#8"]), 1)
+        self.assertEqual(
+            self.store.remove_watch("monitor", "c1", ["OCTO-ORG/widgets#8"]), 1
+        )
         self.assertEqual(self.store.remove_watch("monitor", "c1", []), 0)
         self.assertEqual(self.store.remove_watch("monitor", "c1"), 2)
         remaining = self.store.active_watches(now=T0)
         self.assertEqual([(w.consumer_id, w.item_key) for w in remaining], [("c2", k1)])
 
     def test_request_and_take_refresh(self) -> None:
-        keys = self.store.request_refresh(["octo-org/widgets#7", "unknown/repo#2"], now=T0 + 5)
+        keys = self.store.request_refresh(
+            ["octo-org/widgets#7", "unknown/repo#2"], now=T0 + 5
+        )
         self.assertEqual(keys, [self.key, "unknown/repo#2"])
         self.assertIsNone(self.store.get_repo("unknown/repo"))
         self.store.request_refresh(["Octo-Org/Widgets#8"], now=T0)
@@ -1353,7 +1487,10 @@ class TestLiveStore(unittest.TestCase):
     def test_change_feed_limit_and_sequence_bounds(self) -> None:
         self.assertEqual(self.store.max_change_seq(), 0)
         self.assertEqual(self.store.min_change_seq(), 0)
-        seqs = [self.store.append_change(self.key, "pr", ["title"], now=T0 + i) for i in range(5)]
+        seqs = [
+            self.store.append_change(self.key, "pr", ["title"], now=T0 + i)
+            for i in range(5)
+        ]
         self.assertEqual(seqs, [1, 2, 3, 4, 5])
         self.assertEqual([c.seq for c in self.store.changes_since(1, limit=2)], [2, 3])
         self.assertEqual([c.seq for c in self.store.changes_since(5)], [])
@@ -1420,7 +1557,9 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(self.store.get_state("cursor"), "def")
         self.store.set_state("cursor", None)
         self.assertIsNone(self.store.get_state("cursor"))
-        count = self.store.conn.execute("SELECT COUNT(*) FROM service_state").fetchone()[0]
+        count = self.store.conn.execute(
+            "SELECT COUNT(*) FROM service_state"
+        ).fetchone()[0]
         self.assertEqual(count, 0)
 
     # ----- node ids ---------------------------------------------------------------
@@ -1440,7 +1579,9 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(self.store.get_node_ids([self.key]), {self.key: "PR_row"})
         self.store.set_node_id(self.key, "PR_updated")
         self.assertEqual(self.store.get_node_ids([self.key]), {self.key: "PR_updated"})
-        node = self.store.conn.execute("SELECT node_id FROM pull_requests").fetchone()[0]
+        node = self.store.conn.execute("SELECT node_id FROM pull_requests").fetchone()[
+            0
+        ]
         self.assertEqual(node, "PR_updated")
 
     def test_upsert_item_comments_inserts_new_and_keeps_mirror_bodies(self) -> None:
@@ -1456,9 +1597,13 @@ class TestLiveStore(unittest.TestCase):
             ItemCommentRecord("IC_old", "carol", "User", "2027-01-15T07:00:00Z"),
             ItemCommentRecord("IC_new", "ci-bot", "Bot", "2027-01-15T07:30:00Z"),
         ]
-        self.assertTrue(self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments))
+        self.assertTrue(
+            self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments)
+        )
         self.assertEqual([c.kind for c in self.store.changes_since(seq)], ["comments"])
-        self.assertFalse(self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments))
+        self.assertFalse(
+            self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments)
+        )
         rows = self._view(
             "SELECT comment_id, author_type FROM v_item_comments WHERE item_key = ? "
             "ORDER BY created_at",
@@ -1476,19 +1621,27 @@ class TestLiveStore(unittest.TestCase):
     def test_v_item_comments_keeps_ten_newest(self) -> None:
         self.store.upsert_pr_live(self._pr(), now=T0)
         comments = [
-            ItemCommentRecord(f"IC_{i:02d}", "carol", "User", f"2027-01-15T07:{i:02d}:00Z")
+            ItemCommentRecord(
+                f"IC_{i:02d}", "carol", "User", f"2027-01-15T07:{i:02d}:00Z"
+            )
             for i in range(12)
         ]
         self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments)
         rows = self._view("SELECT comment_id FROM v_item_comments ORDER BY created_at")
-        self.assertEqual([r["comment_id"] for r in rows], [f"IC_{i:02d}" for i in range(2, 12)])
+        self.assertEqual(
+            [r["comment_id"] for r in rows], [f"IC_{i:02d}" for i in range(2, 12)]
+        )
 
     def test_pr_body_change_detection(self) -> None:
         self.store.upsert_pr_live(self._pr(body="first"), now=T0)
         self.assertEqual(self.store.upsert_pr_live(self._pr(body="first"), now=T0), [])
-        self.assertEqual(self.store.upsert_pr_live(self._pr(body="second"), now=T0), ["body"])
+        self.assertEqual(
+            self.store.upsert_pr_live(self._pr(body="second"), now=T0), ["body"]
+        )
         self.assertEqual(self.store.upsert_pr_live(self._pr(body=None), now=T0), [])
-        body = self._view("SELECT body FROM v_pr_basic WHERE item_key = ?", self.key)[0]["body"]
+        body = self._view("SELECT body FROM v_pr_basic WHERE item_key = ?", self.key)[
+            0
+        ]["body"]
         self.assertEqual(body, "second")
 
     def test_same_named_check_runs_are_kept_separately(self) -> None:
@@ -1498,8 +1651,12 @@ class TestLiveStore(unittest.TestCase):
             self._check("build", conclusion="FAILURE", run_key="CheckRun:2"),
             self._check("lint", conclusion="SUCCESS"),
         ]
-        self.assertTrue(self.store.replace_check_runs(self.repo.repo_id, 7, "sha1", runs, now=T0))
-        rows = self._view("SELECT run_key, name, conclusion FROM v_pr_checks ORDER BY run_key")
+        self.assertTrue(
+            self.store.replace_check_runs(self.repo.repo_id, 7, "sha1", runs, now=T0)
+        )
+        rows = self._view(
+            "SELECT run_key, name, conclusion FROM v_pr_checks ORDER BY run_key"
+        )
         self.assertEqual(
             [(r["run_key"], r["name"], r["conclusion"]) for r in rows],
             [
@@ -1508,7 +1665,9 @@ class TestLiveStore(unittest.TestCase):
                 ("CheckRun:lint", "lint", "SUCCESS"),
             ],
         )
-        self.assertFalse(self.store.replace_check_runs(self.repo.repo_id, 7, "sha1", runs, now=T0))
+        self.assertFalse(
+            self.store.replace_check_runs(self.repo.repo_id, 7, "sha1", runs, now=T0)
+        )
 
     def test_register_repo_promotes_items_repo_with_different_case(self) -> None:
         # H1: the items repo was created in canonical case ("Octo-Org/Widgets").
@@ -1522,8 +1681,12 @@ class TestLiveStore(unittest.TestCase):
     def test_get_live_fetched_at(self) -> None:
         self.assertEqual(self.store.get_live_fetched_at([self.key]), {})
         self.store.upsert_pr_live(self._pr(), now=T0)
-        self.assertEqual(self.store.get_live_fetched_at([self.key, "x/y#1"]), {self.key: T0})
-        self.assertEqual(self.store.get_live_fetched_at(["octo-org/widgets#7"]), {self.key: T0})
+        self.assertEqual(
+            self.store.get_live_fetched_at([self.key, "x/y#1"]), {self.key: T0}
+        )
+        self.assertEqual(
+            self.store.get_live_fetched_at(["octo-org/widgets#7"]), {self.key: T0}
+        )
 
     def test_mirror_upsert_of_live_pr_appends_change_rows(self) -> None:
         # M2: the mirror writing first must not swallow the change for readers.
@@ -1554,11 +1717,15 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual([c.kind for c in changes], ["pr"])
         self.assertTrue({"title", "state", "updated_at"} <= set(changes[0].fields))
         live = ItemCommentRecord("IC_m", "carol", "User", "2027-01-15T07:00:00Z")
-        self.assertTrue(self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, [live]))
+        self.assertTrue(
+            self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, [live])
+        )
         self.assertEqual(self.store.changes_since(changes[0].seq)[0].kind, "comments")
 
     def test_mirror_upsert_of_unwatched_pr_appends_nothing(self) -> None:
-        pr = PrRecord(repo_id=self.repo.repo_id, number=8, title="t", state="OPEN", updated_at="x")
+        pr = PrRecord(
+            repo_id=self.repo.repo_id, number=8, title="t", state="OPEN", updated_at="x"
+        )
         self.store.upsert_pull_requests([pr])
         self.store.upsert_pull_requests([replace(pr, title="t2")])
         self.assertEqual(self.store.changes_since(0), [])
@@ -1590,14 +1757,22 @@ class TestLiveStore(unittest.TestCase):
         for moment in (old, recent):
             self.store.append_change(self.key, "pr", [], now=moment)
             self.store.record_api_call(status=200, now=moment, **call)
-        self.store.upsert_notifications([NotificationRecord("N-old", item_key=None)], now=old)
-        self.store.upsert_notifications([NotificationRecord("N-new", item_key=None)], now=recent)
+        self.store.upsert_notifications(
+            [NotificationRecord("N-old", item_key=None)], now=old
+        )
+        self.store.upsert_notifications(
+            [NotificationRecord("N-new", item_key=None)], now=recent
+        )
         self.store.replace_viewer_set("stale", ["o/r#1"], now=old)
         self.store.replace_viewer_set("fresh", ["o/r#2"], now=recent)
         self.store.add_watch("monitor", "c1", [self.key], 60, 10, now=recent - 100)
         self.store.add_watch("monitor", "c2", [self.key], 60, 1000, now=recent)
-        self.store.enqueue_timeline_dirty([(self.repo.repo_id, 41)], reason="mention", now=old)
-        self.store.enqueue_timeline_dirty([(self.repo.repo_id, 42)], reason="mention", now=recent)
+        self.store.enqueue_timeline_dirty(
+            [(self.repo.repo_id, 41)], reason="mention", now=old
+        )
+        self.store.enqueue_timeline_dirty(
+            [(self.repo.repo_id, 42)], reason="mention", now=recent
+        )
 
         deleted = self.store.prune(now=recent + 60)
         # Each viewer-set addition also appends a change row, so two changes are old.
@@ -1638,16 +1813,26 @@ class TestLiveStore(unittest.TestCase):
             now=T0,
         )
         # Colliding watch on #7 plus a non-colliding watch on #8.
-        self.store.add_watch("monitor", "c1", [self.key, alias_key7, alias_key8], 60, 600, now=T0)
+        self.store.add_watch(
+            "monitor", "c1", [self.key, alias_key7, alias_key8], 60, 600, now=T0
+        )
         self.store.upsert_notifications(
-            [NotificationRecord("N-alias", "mention", "PullRequest", alias_key7, "u1", True)],
+            [
+                NotificationRecord(
+                    "N-alias", "mention", "PullRequest", alias_key7, "u1", True
+                )
+            ],
             now=T0,
         )
-        self.store.replace_viewer_set("authored", [self.key, alias_key7, alias_key8], now=T0)
+        self.store.replace_viewer_set(
+            "authored", [self.key, alias_key7, alias_key8], now=T0
+        )
         self.store.request_refresh([self.key, alias_key7, alias_key8], now=T0)
         self.store.set_state("node_id:Old-Org/Old-Widgets#8", "PR_node8", now=T0)
 
-        canonical = self.store.merge_repo_alias(alias_repo.repo_id, "octo-org/widgets", now=T0 + 10)
+        canonical = self.store.merge_repo_alias(
+            alias_repo.repo_id, "octo-org/widgets", now=T0 + 10
+        )
         self.assertEqual(canonical.repo_id, self.repo.repo_id)
         self.assertEqual(canonical.full_name, "Octo-Org/Widgets")
         self.assertIsNone(self.store.get_repo_by_id(alias_repo.repo_id))
@@ -1674,7 +1859,9 @@ class TestLiveStore(unittest.TestCase):
             for r in self._view("SELECT item_key FROM v_viewer_items ORDER BY item_key")
         ]
         self.assertEqual(viewer_keys, ["Octo-Org/Widgets#7", "Octo-Org/Widgets#8"])
-        notif_keys = [r["item_key"] for r in self._view("SELECT item_key FROM v_notifications")]
+        notif_keys = [
+            r["item_key"] for r in self._view("SELECT item_key FROM v_notifications")
+        ]
         self.assertEqual(notif_keys, ["Octo-Org/Widgets#7"])
         change_keys = {c.item_key for c in self.store.changes_since(0)}
         self.assertEqual(change_keys, {"Octo-Org/Widgets#7", "Octo-Org/Widgets#8"})
@@ -1684,14 +1871,20 @@ class TestLiveStore(unittest.TestCase):
         mirror = self.store.register_repo("legacy-org", "widgets", now=T0)
         self.store.add_watch("monitor", "c1", ["legacy-org/widgets#7"], 60, 600, now=T0)
         with self.assertLogs("live_store", level="WARNING") as cm:
-            canonical = self.store.merge_repo_alias(mirror.repo_id, "Octo-Org/Widgets", now=T0 + 5)
+            canonical = self.store.merge_repo_alias(
+                mirror.repo_id, "Octo-Org/Widgets", now=T0 + 5
+            )
         self.assertEqual(canonical.repo_id, self.repo.repo_id)
         self.assertTrue(any("mirror mode" in msg for msg in cm.output))
         kept = self.store.get_repo_by_id(mirror.repo_id)
         self.assertIsNotNone(kept)
         self.assertEqual(kept.mode, REPO_MODE_MIRROR)
-        self.assertEqual(self.store.canonical_item_key("legacy-org/widgets#7"), self.key)
-        self.assertEqual([w.item_key for w in self.store.active_watches(now=T0)], [self.key])
+        self.assertEqual(
+            self.store.canonical_item_key("legacy-org/widgets#7"), self.key
+        )
+        self.assertEqual(
+            [w.item_key for w in self.store.active_watches(now=T0)], [self.key]
+        )
 
     def test_prune_deletes_idle_items_repos_fts_and_cascaded_aliases(self) -> None:
         old = T0
@@ -1718,13 +1911,19 @@ class TestLiveStore(unittest.TestCase):
         )
         self.store.add_watch("monitor", "c-exp", ["idle-org/gone#1"], 60, 10, now=old)
         self.store.upsert_notifications(
-            [NotificationRecord("N-idle", "mention", "PullRequest", "idle-org/gone#1", "u", True)],
+            [
+                NotificationRecord(
+                    "N-idle", "mention", "PullRequest", "idle-org/gone#1", "u", True
+                )
+            ],
             now=old,
         )
         self.store.replace_viewer_set("old_set", ["idle-org/gone#1"], now=old)
 
         watched = self.store.ensure_items_repo("watched-org", "kept", now=old)
-        self.store.add_watch("monitor", "c-act", ["watched-org/kept#1"], 60, 600, now=recent)
+        self.store.add_watch(
+            "monitor", "c-act", ["watched-org/kept#1"], 60, 600, now=recent
+        )
 
         notified = self.store.ensure_items_repo("notified-org", "kept", now=old)
         self.store.upsert_notifications(
@@ -1809,7 +2008,9 @@ class TestTimelineStore(unittest.TestCase):
         ).fetchall()
         return [(int(r[0]), int(r[1]), str(r[2])) for r in rows]
 
-    def _set_synced(self, table: str, number: int, synced: str | None, xref: str | None) -> None:
+    def _set_synced(
+        self, table: str, number: int, synced: str | None, xref: str | None
+    ) -> None:
         with self.store.conn:
             self.store.conn.execute(
                 f"UPDATE {table} SET timeline_synced_at = ?, xref_synced_at = ? "
@@ -1865,11 +2066,15 @@ class TestTimelineStore(unittest.TestCase):
             ],
             repo_full_name="octo-org/widgets",
         )
-        self.assertEqual(self._links(), [(1, 5, "closed_by"), (1, 5, "closes"), (2, 5, "xref")])
+        self.assertEqual(
+            self._links(), [(1, 5, "closed_by"), (1, 5, "closes"), (2, 5, "xref")]
+        )
 
         new_link = IssuePrLink(self.rid, 3, 5, "references")
         self.store.upsert_pull_requests([self._pr(5, issue_links=(new_link,))])
-        self.assertEqual(self._links(), [(1, 5, "closed_by"), (2, 5, "xref"), (3, 5, "references")])
+        self.assertEqual(
+            self._links(), [(1, 5, "closed_by"), (2, 5, "xref"), (3, 5, "references")]
+        )
 
     def test_mirror_resave_with_none_author_type_keeps_existing(self) -> None:
         def review(author_type: str | None) -> ReviewRecord:
@@ -1914,15 +2119,21 @@ class TestTimelineStore(unittest.TestCase):
             return [(t.item_kind, t.item_number) for t in targets]
 
         # Open items first, then updated_at descending; no node_id, no candidate.
-        self.assertEqual(keys(TimelineMode.BACKFILL), [("issue", 7), ("pr", 2), ("pr", 1)])
+        self.assertEqual(
+            keys(TimelineMode.BACKFILL), [("issue", 7), ("pr", 2), ("pr", 1)]
+        )
         self.assertEqual(keys(TimelineMode.INCREMENTAL), [("pr", 3), ("issue", 6)])
         self.assertEqual(
             keys(TimelineMode.ALL),
             [("pr", 3), ("issue", 7), ("pr", 2), ("issue", 6), ("pr", 1)],
         )
-        self.assertEqual(len(self.store.timeline_candidates(self.rid, TimelineMode.ALL, 2)), 2)
+        self.assertEqual(
+            len(self.store.timeline_candidates(self.rid, TimelineMode.ALL, 2)), 2
+        )
 
-        incremental = self.store.timeline_candidates(self.rid, TimelineMode.INCREMENTAL, 1)
+        incremental = self.store.timeline_candidates(
+            self.rid, TimelineMode.INCREMENTAL, 1
+        )
         self.assertEqual(
             incremental,
             [TimelineTarget(self.rid, "pr", 3, "PR_3", since="2027-01-09T23:55:00Z")],
@@ -1933,9 +2144,13 @@ class TestTimelineStore(unittest.TestCase):
         self.assertEqual(self.store.count_timeline_pending(self.other.repo_id), 0)
 
     def test_get_item_updated_at(self) -> None:
-        self.store.upsert_pull_requests([self._pr(2, updated_at="2027-01-08T00:00:00Z")])
+        self.store.upsert_pull_requests(
+            [self._pr(2, updated_at="2027-01-08T00:00:00Z")]
+        )
         self.store.upsert_issues([self._issue(4, updated_at="2027-01-09T00:00:00Z")])
-        self.assertEqual(self.store.get_item_updated_at(self.rid, "pr", 2), "2027-01-08T00:00:00Z")
+        self.assertEqual(
+            self.store.get_item_updated_at(self.rid, "pr", 2), "2027-01-08T00:00:00Z"
+        )
         self.assertEqual(
             self.store.get_item_updated_at(self.rid, "issue", 4), "2027-01-09T00:00:00Z"
         )
@@ -1946,10 +2161,14 @@ class TestTimelineStore(unittest.TestCase):
 
     def test_mark_timeline_synced_full_and_xref_only(self) -> None:
         self.store.upsert_pull_requests([self._pr(2)])
-        self.store.mark_timeline_synced(self.rid, "pr", 2, synced_at=self.SYNCED, xref_only=False)
+        self.store.mark_timeline_synced(
+            self.rid, "pr", 2, synced_at=self.SYNCED, xref_only=False
+        )
         self.assertEqual(self._synced("pull_requests", 2), (self.SYNCED, self.SYNCED))
         later = "2027-01-11T00:00:00Z"
-        self.store.mark_timeline_synced(self.rid, "pr", 2, synced_at=later, xref_only=True)
+        self.store.mark_timeline_synced(
+            self.rid, "pr", 2, synced_at=later, xref_only=True
+        )
         self.assertEqual(self._synced("pull_requests", 2), (self.SYNCED, later))
         with self.assertRaises(ValueError):
             self.store.mark_timeline_synced(
@@ -1970,7 +2189,8 @@ class TestTimelineStore(unittest.TestCase):
         )
         self.assertEqual(queued, 4)
         self.assertEqual(
-            self.store.enqueue_timeline_dirty([(self.rid, 2)], reason="commit", now=T0), 0
+            self.store.enqueue_timeline_dirty([(self.rid, 2)], reason="commit", now=T0),
+            0,
         )
 
         targets = self.store.take_timeline_dirty(self.rid, 10)
@@ -1978,7 +2198,9 @@ class TestTimelineStore(unittest.TestCase):
             targets,
             [
                 TimelineTarget(self.rid, "pr", 2, "PR_2", since="2027-01-10T23:55:00Z"),
-                TimelineTarget(self.rid, "issue", 4, "I_4", since="2027-01-09T23:55:00Z"),
+                TimelineTarget(
+                    self.rid, "issue", 4, "I_4", since="2027-01-09T23:55:00Z"
+                ),
             ],
         )
         self.assertEqual(self._dirty_numbers(), [2, 4, 99])
@@ -1992,8 +2214,12 @@ class TestTimelineStore(unittest.TestCase):
     def test_mark_synced_keeps_dirty_row_queued_after_run_start(self) -> None:
         self.store.upsert_issues([self._issue(4)])
         self._set_synced("issues", 4, self.SYNCED, self.SYNCED)
-        self.store.enqueue_timeline_dirty([(self.rid, 4)], reason="mention", now=T0 + 60)
-        self.store.mark_timeline_synced(self.rid, "issue", 4, synced_at=iso_at(T0), xref_only=False)
+        self.store.enqueue_timeline_dirty(
+            [(self.rid, 4)], reason="mention", now=T0 + 60
+        )
+        self.store.mark_timeline_synced(
+            self.rid, "issue", 4, synced_at=iso_at(T0), xref_only=False
+        )
         self.assertEqual(self._dirty_numbers(), [4])
 
     def test_derived_link_rules(self) -> None:
@@ -2053,7 +2279,9 @@ class TestTimelineStore(unittest.TestCase):
             # Labels never link, even when named like an item key.
             self._event("L1", subject="octo-org/widgets#5", subject_type="Label"),
         ]
-        written = self.store.upsert_timeline_events(events, repo_full_name="octo-org/widgets")
+        written = self.store.upsert_timeline_events(
+            events, repo_full_name="octo-org/widgets"
+        )
         self.assertEqual(written, len(events))
         self.assertEqual(self._links(), [(1, 5, "closed_by"), (3, 5, "xref")])
 
@@ -2062,13 +2290,17 @@ class TestTimelineStore(unittest.TestCase):
             [replace(events[0], actor="alice")], repo_full_name="octo-org/widgets"
         )
         self.assertEqual(again, 1)
-        self.assertEqual(self.store.table_counts(self.rid)["timeline_events"], len(events))
+        self.assertEqual(
+            self.store.table_counts(self.rid)["timeline_events"], len(events)
+        )
         actor = self.store.conn.execute(
             "SELECT actor FROM timeline_events WHERE event_id = 'C1'"
         ).fetchone()[0]
         self.assertEqual(actor, "alice")
         self.assertEqual(self._links(), [(1, 5, "closed_by"), (3, 5, "xref")])
-        none_written = self.store.upsert_timeline_events([], repo_full_name="octo-org/widgets")
+        none_written = self.store.upsert_timeline_events(
+            [], repo_full_name="octo-org/widgets"
+        )
         self.assertEqual(none_written, 0)
 
     def test_reset_backfill_state_clears_timeline_progress(self) -> None:
@@ -2090,10 +2322,14 @@ class TestTimelineStore(unittest.TestCase):
     def _seed_subject_events(self) -> None:
         self.store.upsert_timeline_events(
             [
-                self._event("A", subject="octo-org/widgets#5", subject_type="PullRequest"),
+                self._event(
+                    "A", subject="octo-org/widgets#5", subject_type="PullRequest"
+                ),
                 self._event("B", subject="Octo-Org/Widgets#6", subject_type="Issue"),
                 self._event("C", subject="octo-org/widgets#1", subject_type="Label"),
-                self._event("D", subject="octo-org/widgets-extra#2", subject_type="Issue"),
+                self._event(
+                    "D", subject="octo-org/widgets-extra#2", subject_type="Issue"
+                ),
             ],
             repo_full_name="octo-org/widgets",
         )

@@ -1,6 +1,6 @@
 # Reviewing Code Architecture and Spec Conformance
 
-Use this rubric when `prepare_design_context.py` classifies the target as `mode: "code-architecture"` (existing directories, packages, or modules) or `mode: "conformance"` (`--against <governing-spec.md>`). Apply the principles in [canonical_design_principles.md](canonical_design_principles.md) and the evidence rules in [evidence_and_critique.md](evidence_and_critique.md).
+Use this rubric when `prepare_design_context.py` classifies the target as `mode: "code-architecture"` (existing directories, packages, or modules) or `mode: "conformance"` (`--against <governing-spec.md>`). Apply the principles in [canonical_design_principles.md](canonical_design_principles.md) and the evidence rules in [evidence.md](../../review-core/references/evidence.md) and [evidence_and_critique.md](evidence_and_critique.md).
 
 ## Table of Contents
 

@@ -6,11 +6,11 @@ description: >-
   synthesize passes. Every finding carries an evidence tier and a concrete
   consequence, with severity capped by the evidence. Syncs remote PRs to a temp
   checkout. Use when the user asks for a review, critique, second opinion on a
-  diff, or spec check before implementation. Flags: --fast, --json, --claude,
-  --opus, --panel, --verify, --max, --challenge, --focus, --no-focus. Don't use
-  for posting to GitHub (use pr-review), handling PR feedback (use
-  pr-feedback-handler), API-only checks (use api-review), or standalone
-  architecture reviews without a diff (use design-review).
+  diff, or spec check before implementation, or pass --api for API-focused
+  passes. Flags: --fast, --json, --claude, --opus, --panel, --verify, --max,
+  --challenge, --focus, --no-focus, --api. Don't use for posting to GitHub (use
+  pr-review), handling PR feedback (use pr-feedback-handler), or whole design
+  documents or module architecture (use design-review).
 ---
 
 # Code Review
@@ -20,7 +20,7 @@ Multi-pass workflow for reviewing code and technical documents (GitHub PRs, loca
 ## Core Principles
 
 - **Review Only, Never Fix**: The review artifact is this skill's only deliverable. Never edit, create, or delete workspace files, even when a fix looks trivial. Never run `git add`, `commit`, `push`, `stash`, `checkout`, or `reset` in the user's workspace. Never post to the PR (`gh pr review`, `gh pr comment`, resolving threads). You may read files, run the commands allowed in [verification.md](references/verification.md), write to the conversation artifact directory, and use the temporary `pr-review-*` checkout. This holds even when the conversation was implementing code just before the review, and even when the request says "review and fix": the review ends at [Step 7](#step-7-stop-and-hand-off), and fixing starts only after the user names the findings to fix.
-- **Survival Rate Over Count**: Three findings that all hold up beat nine where one does. Every finding names its evidence tier and its concrete consequence ([evidence.md](references/evidence.md)), and severity is capped by the evidence supplied. A review that tested its hypotheses and found zero defects is a success; never manufacture objections to avoid an empty list.
+- **Survival Rate Over Count**: Three findings that all hold up beat nine where one does. Every finding names its evidence tier and its concrete consequence ([evidence.md](../review-core/references/evidence.md)), and severity is capped by the evidence supplied. A review that tested its hypotheses and found zero defects is a success; never manufacture objections to avoid an empty list.
 - **Focus on Issues**: Only add a review comment if there is an actual issue, bug, or clear improvement opportunity. Do not add comments to validate or explain code.
 - **Targeted Suggestions**: Anchor findings to lines that are actually modified in the diff.
 - **Actionable Feedback**: Provide specific code suggestions, or for documents, replacement text or a specific question.
@@ -43,6 +43,7 @@ Multi-pass workflow for reviewing code and technical documents (GitHub PRs, loca
 | `--focus` | Launch a focus reviewer on the top Step 2d theme even when its verdict is weak | +1 reviewer |
 | `--focus <theme>` | Pin a theme: a catalog id from [focus_areas/README.md](references/focus_areas/README.md) or quoted free text. Repeatable, up to 3 focus reviewers | +1 reviewer per theme |
 | `--no-focus` | Skip Step 2d; no focus reviewer and no theme hypotheses | None |
+| `--api` | Include the `### API Review Mandate` block in every general and lane reviewer brief regardless of ring (equivalent to `ring.api_mandate` true). Does not change depth. | None |
 
 `--fast` is mutually exclusive with `--claude`, `--panel`, `--verify`, and `--challenge`. If specified together, `--fast` takes precedence and the other flags are dropped (running strictly in-session without subagents). Under `--fast`, `--focus` themes fold into the in-session pass as Focus Priority. Expand `--max` first, before anything else runs. `--max` implies neither `--challenge` nor `--focus`. Flags combine, and repeating one is harmless, so `--max --claude` (or `--max --opus`) equals `--max`. Record the flags in effect after expansion. The report Summary lists them, along with any trust limit.
 
@@ -104,8 +105,9 @@ Before starting the review, identify the changes, pin commit SHAs, and prepare t
    <diff command> | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> --combined --diff-file -
    ```
    `ring` holds the reuse ring and level after the [volume gates](references/lanes.md#volume-gates), `artifacts` holds each file's `type` (`code`, `normative-spec`, `design`, `blueprint`, or `reference-doc`), `rule`, and `rubric`, and `focus_dedicated_allowed` feeds Step 2d.
-   - With an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`), ignore `ring`. Otherwise apply `ring.flags`, add the API Review Mandate when `ring.api_mandate` is true, and record `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).
+   - With an explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, `--max`), ignore `ring`. Otherwise apply `ring.flags`, add the API Review Mandate when `ring.api_mandate` is true (or when `--api` is active), and record `🛡️ Ring Classification: Ring <N> (<Label>) -> Review Level: <Level>` (or `🛡️ Review Level: <Level> (<Flag> specified, ring evaluation skipped)`).
    - Group files into code and document partitions, overriding a clearly wrong type with a note. With no document files, skip every document-specific instruction below. See [reviewing_documents.md](references/reviewing_documents.md#when-document-mode-applies).
+   - When `classify_artifacts.py` reports a single `design`-type document and no code files from a whole-file (`/dev/null`) diff, post one chat line suggesting `/design-review <path>` and continue.
 
 ### Step 2: Pre-Execution Security Gate, Context Enrichment, Tier 1 Verification, and Seed Hypotheses
 
@@ -130,7 +132,7 @@ Then run **Tier 1 verification** yourself per [verification.md](references/verif
 #### Step 2c: Throwaway Checkouts for `--verify` and Seed Hypotheses
 
 - **Throwaway Checkouts for `--verify`**: Only when `--verify` is active, the author trust check passed (`OWNER`, `MEMBER`, or `COLLABORATOR`), and Step 2a cleared local execution (`SAFE_FOR_LOCAL_EXECUTION` or user-approved `REQUIRES_USER_CONFIRMATION`), create `$pr_review_dir_a` with the working-tree changes applied and commit a review snapshot following [verification.md](references/verification.md#throwaway-checkout). For local working-tree changes, update `head_sha` to `git -C "$pr_review_dir_a" rev-parse HEAD` (the review snapshot commit) and note in the prompt that the top commit is the review snapshot so `git diff $base_sha $head_sha` inside the checkout covers the change under review. Under `--panel --verify`, after building `$pr_review_dir_a` (including any dependency install, passing `--ignore-scripts` on `npm ci` when lifecycle scripts are not required), create `$pr_review_dir_b` with `cp -a "$pr_review_dir_a/." "$pr_review_dir_b/"` per [verification.md](references/verification.md#per-reviewer-checkouts) so each lane gets its own isolated checkout. Give each focus reviewer its own copy the same way (`$pr_review_dir_f`, `$pr_review_dir_f2`, `$pr_review_dir_f3`).
-- **Seed Hypotheses**: Write **a few Seed Hypotheses** from the diff stat, the context files, any `packrat` file hotspots and recurring review threads, the Step 2a security audit, and the Tier 1 output: specific, falsifiable claims (one line each) per [evidence.md](references/evidence.md#hypotheses). On diffs over 500 lines where `duckdb` is installed, query `$diff_dir` using `duckdb -batch -dark-mode -box -init` with [../context-indexer/scripts/staged_diff_macros.sql](../context-indexer/scripts/staged_diff_macros.sql) (`diff_untested_functions`, `diff_signature_drift`, and `diff_entity_churn`; see [splitting_reviews.md](references/splitting_reviews.md#tooling-support)) to seed hypotheses around high-churn functions, changed signatures, and untested changes. Under `--panel`, label each hypothesis with its lane spec per [lanes.md](references/lanes.md#lane-specs). Under `--verify`, mark which hypotheses a mutation run can settle. Deletion-heavy diffs are the `deletion-and-consolidation` focus theme (Step 2d).
+- **Seed Hypotheses**: Write **a few Seed Hypotheses** from the diff stat, the context files, any `packrat` file hotspots and recurring review threads, the Step 2a security audit, and the Tier 1 output: specific, falsifiable claims (one line each) per [evidence.md](../review-core/references/evidence.md#hypotheses). On diffs over 500 lines where `duckdb` is installed, query `$diff_dir` using `duckdb -batch -dark-mode -box -init` with [../context-indexer/scripts/staged_diff_macros.sql](../context-indexer/scripts/staged_diff_macros.sql) (`diff_untested_functions`, `diff_signature_drift`, and `diff_entity_churn`; see [splitting_reviews.md](references/splitting_reviews.md#tooling-support)) to seed hypotheses around high-churn functions, changed signatures, and untested changes. Under `--panel`, label each hypothesis with its lane spec per [lanes.md](references/lanes.md#lane-specs). Under `--verify`, mark which hypotheses a mutation run can settle. Deletion-heavy diffs are the `deletion-and-consolidation` focus theme (Step 2d).
 - **Ruled out by the caller (`ship-it` homeostasis only)**: When an automated local fix-and-recheck loop (`ship-it`) supplies hypotheses disproved in the immediately preceding pass, include them under the seeds as `Ruled out last pass: …` and instruct the reviewer to re-test a ruled-out line only if the current diff touches the lines it cites. Never include `Ruled out last pass` or seed "verify prior findings" hypotheses on external PR re-reviews (`pr-review` Round 2+) or user-requested re-reviews: those passes must evaluate the full current diff unanchored.
 
 #### Step 2d: Focus Triage
@@ -152,35 +154,21 @@ _Reference: Use the guidelines in [splitting_reviews.md](references/splitting_re
 
 ### Step 3: Generate Initial Review
 
-Before analyzing the diff, select the highest available reviewer delegation tier from the hierarchy below. Every tier reads and follows [reviewer_mandate.md](references/reviewer_mandate.md).
+Before analyzing the diff, select the highest available delegation tier from [delegation.md](../review-core/references/delegation.md) (roster prefix `rev-`, Tier 2 roles `Code Reviewer`, `Code Reviewer A`, `Code Reviewer B`, `Focus Reviewer (<theme-id>)`). Every tier reads and follows [reviewer_mandate.md](references/reviewer_mandate.md):
 
-- **Reviewer Delegation Hierarchy**:
-  - **Fast In-Session Review (`--fast`)**: If the user passed `--fast`, do not spawn swarm workers or subagents. Conduct the review directly in the active session:
-    1. Read [reviewer_mandate.md](references/reviewer_mandate.md), the unified diff (or every `diff_chunk_*.diff` file in `$diff_dir` / `code_review_prep.diff_dir` when present), and open modified files in the target checkout to inspect surrounding functions, classes, and callers. Reading a zero-context (`-U0`) diff in an earlier caller stage (`pr-review` Stage 1 `pr.diff`) or reading `pr_incremental.diff` never substitutes for reading the staged diff chunks and checkout files.
-    2. Run Tier 1a (and Tier 1b if Step 2a cleared local execution) read-only checks if not already run in Step 2b.
-    3. Evaluate changes against the review criteria (Correctness, Concurrency, Edge Cases, Maintainability, Security, API Soundness, or Document lenses). If Step 2d named themes, read their playbooks and test the theme hypotheses first, as a Focus Priority: the full review still follows.
-    4. Draft review findings using the `### <ID>. <short claim>` format with `Evidence`, `Why`, and `Suggestion` fields.
-    5. Apply Step 4's self-critique truth filters ([critique_rules.md](references/critique_rules.md)) to the drafted findings, then proceed to Step 5 (Synthesis) without citation auditing or challenge loops.
-  - **Tier 1: Jetski Root Session (`swarm` tool available)**:
-    - **Default (Gemini)**: Spawn or wake worker `rev-a` pinned to `model: "gemini-launch-candidate-high"`, plus one `rev-f*` per focus reviewer on the same model ([lanes.md](references/lanes.md#reviewer-roster)).
-    - **Claude (`--claude` / `--opus`)**: Pin the single worker `rev-a` (or lane B worker `rev-b` under `--panel`) to `model: "opus-5.5-max"` (drawing from `3p-daily` quota).
-    - **Proactive Quota Check & Fallback**: Before spawning or waking workers, call `swarm{action: "models"}` once. If `opus-5.5-max` has zero remaining quota, use `gemini-launch-candidate-high` instead. If `gemini-launch-candidate-high` has zero remaining quota, use `auto` (Gemini Pro Next, a separate bucket) for every Gemini reviewer. Report any fallback in chat and in the Summary. If a worker fails with `RESOURCE_EXHAUSTED` or exhausts quota between passes, switch it in place via `swarm{action: "model", name: "<name>", model: "<fallback>"}` (Opus to `gemini-launch-candidate-high`, then to `auto`).
-    - **Warm Worker Reuse vs. Unanchored Re-Reviews**: For Step 5 `--challenge` rounds or `ship-it` homeostasis loops where continuity with the prior pass is desired, check `swarm{action: "status"}` and wake a `waiting` worker via `post_message` + `swarm_wait{since: <last_seq>}` (never `kill` + `add` the same name, because `kill` burns the roster name). For an external PR re-review (`pr-review` Round 2+) or when a prior worker was killed, spawn a fresh worker with an incremented suffix (`rev-a-2`, `rev-b-2`, `rev-f-2`) via `swarm{action: "add"}` so the new pass reviews the full diff without Round 1 anchoring. When an external PR re-review (`pr-review` Round 2+) or a review with prior threads runs in-session (`--fast` or Tier 3), complete Steps 1 through 4 on the full diff before reading `pr_context.json.threads`, `prev_review_results.json`, or `pr_incremental.diff`, and perform the 3-way prior-thread merge only in Step 5 (Synthesis).
-    - **First Swarm Creation**: Call `swarm{action: "add", name: "rev-a", model: "<model>", brief: "<prompt>"}`, plus one more `add` call in the same turn for `rev-b` under `--panel` and for each `rev-f*`. Emit `[Open the Swarm UI](sidecar://swarm/swarm_board/)` in chat and **end the turn immediately**. Do not call `read_board`, `post_message`, or `swarm_wait` on that turn; those tools mount on the next turn when the worker wakes `@coordinator`.
-  - **Tier 2a: Claude Code (`Agent` or `Task` tool available, no `swarm`)**:
-    - Spawn 1 `general-purpose` subagent (2 under `--panel`, plus 1 per focus reviewer, all in one turn), passing `model: "opus"` to the single or lane B reviewer when `--claude` or `--opus` is active.
-  - **Tier 2b: Jetski Child Subagent (`invoke_subagent` available, `swarm` unavailable or non-root)**:
-    - In a child subagent where `swarm` is unavailable or non-root, call `invoke_subagent` with `TypeName: "self"`, `Role: "Code Reviewer"` (or `"Code Reviewer A"` / `"Code Reviewer B"` / `"Focus Reviewer (<theme-id>)"`), and `Model: "inherit"`.
-  - **Tier 3: Single-Agent CLI or Restricted Swarm Worker (no `swarm` / subagent tool, or worker brief forbids spawning child helpers or subagents)**:
-    - Follow the `--fast` in-session review flow above, reading [reviewer_mandate.md](references/reviewer_mandate.md), reading every `diff_chunk_*.diff` in `$diff_dir`, and opening modified checkout files (running Lane A then Lane B sequentially if `--panel` was requested). Focus themes fold in as Focus Priority.
+1. **Fast In-Session (`--fast`)**: Read [reviewer_mandate.md](references/reviewer_mandate.md), every `diff_chunk_*.diff` in `$diff_dir`, and modified checkout files directly (never substituting Stage 1 `-U0` or incremental diffs); run Tier 1a/1b checks; evaluate all criteria and any Focus Priority themes; apply Step 4 truth filters ([critique_rules.md](references/critique_rules.md)); and proceed straight to Step 5 without citation auditing or challenge loops.
+2. **Tier 1: Jetski Root Session (`swarm` available)**: Call `swarm{action: "models"}` for quota failover, spawn or wake `rev-a` (plus `rev-b` under `--panel` and `rev-f*` for focus themes, using fresh `-2` suffixes on external PR Round 2+ re-reviews), emit `[Open the Swarm UI](sidecar://swarm/swarm_board/)`, and end the turn immediately on first swarm creation.
+3. **Tier 2a: Claude Code (`Agent` or `Task` available, no `swarm`)**: Spawn `general-purpose` subagent(s) in one turn (`model: "opus"` when `--claude` or `--opus` is active).
+4. **Tier 2b: Jetski Child Subagent (`invoke_subagent` available, `swarm` unavailable or non-root)**: Invoke `TypeName: "self"`, `Model: "inherit"`, and `enable_subagent_tools: false`.
+5. **Tier 3: Restricted Single-Agent or Swarm Worker**: Follow the `--fast` in-session flow (running Lane A then Lane B sequentially under `--panel`, and completing Steps 1 through 4 on the full diff before reading prior threads on re-reviews).
 
-- **Reviewer Brief**: Assemble every reviewer's `brief` (Tier 1) or `Prompt` (Tier 2) from [reviewer_brief.md](references/reviewer_brief.md). It holds the packaging invariants (no dummy probes, 10 KB cap, every instruction block before `### Modified Code Diff`, inline diff only up to 150 lines and 6 KB, staged chunk paths otherwise, absolute reference paths) and the template. Include each optional block (`### Document Review Mandate`, `### API Review Mandate`, `### Lane Assignment`, `### Focus Priority`, `### Focus Mandate`, `### Verification Mandate`) only when its condition holds.
+- **Reviewer Brief**: Assemble every reviewer's `brief` (Tier 1) or `Prompt` (Tier 2) from [reviewer_brief.md](references/reviewer_brief.md). It holds the packaging invariants (no dummy probes, 10 KB cap, every instruction block before `### Modified Code Diff`, inline diff only up to 150 lines and 6 KB, staged chunk paths otherwise, absolute reference paths) and the template. Include each optional block (`### Document Review Mandate`, `### API Review Mandate`, `### Lane Assignment`, `### Focus Priority`, `### Focus Mandate`, `### Verification Mandate`) only when its condition holds; focus block templates live in [focus_blocks.md](../review-core/references/focus_blocks.md) (with `<playbook-dir>` set to `<skill-dir>/references/focus_areas`).
 
-Reviewers evaluate code against the criteria in [review_criteria.md](references/review_criteria.md) (correctness, efficiency, maintainability with the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill, security, and API soundness per [reviewing_apis.md](references/reviewing_apis.md) and [canonical_api_design.md](../api-review/references/canonical_api_design.md), anchored to modified lines), test code with [reviewing_tests.md](references/reviewing_tests.md), and document files with the four lenses and rubrics in [reviewing_documents.md](references/reviewing_documents.md). Evidence tiers and falsification rules are in [evidence.md](references/evidence.md); documentation standards are in the [code-documentation](../code-documentation/SKILL.md) skill. **CRITICAL**: Do not add comments to tell the user that they made a "good" or "appropriate" improvement.
+Reviewers evaluate code against the criteria in [review_criteria.md](references/review_criteria.md) (correctness, efficiency, maintainability with the [cognitive-complexity](../cognitive-complexity/SKILL.md) skill, security, and API soundness per [reviewing_apis.md](references/reviewing_apis.md) and [canonical_api_design.md](../review-core/references/canonical_api_design.md), anchored to modified lines), test code with [reviewing_tests.md](references/reviewing_tests.md), and document files with the four lenses and rubrics in [reviewing_documents.md](references/reviewing_documents.md). Evidence tiers and falsification rules are in [evidence.md](../review-core/references/evidence.md); documentation standards are in the [code-documentation](../code-documentation/SKILL.md) skill. **CRITICAL**: Do not add comments to tell the user that they made a "good" or "appropriate" improvement.
 
 #### Roster and Lanes
 
-Compose the roster per [lanes.md](references/lanes.md): `rev-a` always (except `--fast`), `rev-b` under `--panel`, and one `rev-f*` per focus theme that Step 2d assigned a dedicated reviewer. Launch every reviewer in one turn (two or more `swarm{action: "add"}` calls on Tier 1, or parallel subagents on Tier 2), and state the total count in chat first. Panel lanes A and B get a Lane Assignment block; focus reviewers get a Focus Mandate block; a reviewer that received a folded-in theme gets a Focus Priority block. For a split diff, launch one A/B pair per partition ([splitting_reviews.md](references/splitting_reviews.md)).
+Compose the roster per [delegation.md](../review-core/references/delegation.md) and [lanes.md](references/lanes.md): `rev-a` always (except `--fast`), `rev-b` under `--panel`, and one `rev-f*` per focus theme that Step 2d assigned a dedicated reviewer. Launch every reviewer in one turn (two or more `swarm{action: "add"}` calls on Tier 1, or parallel subagents on Tier 2), and state the total count in chat first. Panel lanes A and B get a Lane Assignment block ([lanes.md](references/lanes.md#lane-specs)); focus reviewers get a Focus Mandate block and general/lane reviewers with folded-in themes get a Focus Priority block ([focus_blocks.md](../review-core/references/focus_blocks.md)). For a split diff, launch one A/B pair per partition ([splitting_reviews.md](references/splitting_reviews.md)).
 
 ### Step 4: Critique and Refine (Review the Review)
 
@@ -191,76 +179,58 @@ Ensure that:
 - Comments are anchored to lines that begin with `+` or `-` in the diff. Document findings may quote unchanged text as evidence.
 - Comments are not merely informational or complimentary.
 - Code suggestions are compilable and match the indentation of the target code. Document suggestions are drop-in replacement text or a specific question.
-- Every finding carries an `Evidence` tier (`Executed`, `Read`, `Fetched`, `Deduction`, or `Speculation`, never `Recalled`) that satisfies the severity cap in [evidence.md](references/evidence.md#severity-caps).
+- Every finding carries an `Evidence` tier (`Executed`, `Read`, `Fetched`, `Deduction`, or `Speculation`, never `Recalled`) that satisfies the severity cap in [evidence.md](../review-core/references/evidence.md#severity-caps).
 - Every finding carries a concrete `Why` stating what breaks, corrupts, leaks, or fails.
 - Claims of deleted code, missing coverage, API misuse, or incidental test assertions were checked against `HEAD` and the contract before reporting.
 
 ### Step 5: Synthesis (Final Review)
 
-Audit and combine the refined comments into the final output:
+Audit and combine the refined comments into the final output following [synthesis.md](../review-core/references/synthesis.md):
 
-- **Collect Reviewer Reports (Tier 1 `swarm`)**: When a worker wakes `@coordinator`, call `read_board` (with `since: <last_seq>` on later passes), read the `rev_<name>.md` report at the path in each post (or the post itself when it has no path), and record the latest `seq` cursor.
-- **Clean check (`--verify`)**: Before reading citations, run `git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false status --porcelain` on `$pr_review_dir_a` (and `$pr_review_dir_b` under `--panel --verify`) per [verification.md](references/verification.md#orchestrator-clean-check). If anything other than `?? review_scratch_*` appears, restore tracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false restore .`), remove unexpected untracked files (`git -C "$dir" -c core.hooksPath=/dev/null -c core.fsmonitor=false clean -fd -e 'review_scratch_*'`), note the leftover edit in the Summary, and audit all findings from that reviewer below.
-- **Citation audit**: For every `critical` and `high` finding (and all findings from a reviewer that failed the clean check), open the cited `path:line` (±10 lines) in the review workspace with `view_file`. If a quoted line, symbol, or signature does not match the file on disk, drop the finding or downgrade it to a Question, and audit the rest of that reviewer's findings regardless of severity. Record `"Citation audit: N checked, M dropped (…)"` in the Summary. If the working-tree guard caught an in-place tier 1 change, note that in the Summary as well.
-- **Reviewer challenge (`--challenge` only)**: When `--challenge` is active and a check refutes a `critical` or `high` finding, challenge that reviewer naming the finding ID and quoting the refuting evidence. Ask it to `"withdraw, or reply with evidence at a tier that supports the severity"`. Use `post_message` + `swarm_wait{since: <last_seq>}` on Tier 1, `resume: "<agentId>"` on Tier 2a, or `send_message` on Tier 2b. Allow at most one round trip per disputed reviewer. A reply that pivots to a different argument without supplying `Executed`, `Read`, `Fetched`, or line-cited `Deduction` evidence for the original claim counts as withdrawn. Note `"N disputed (M withdrawn, K upheld)"` in the Summary.
-- Deduplicate overlapping comments.
-- **Multi-reviewer merge**: When more than one reviewer ran, merge per [lanes.md](references/lanes.md#multi-reviewer-merge): one finding per issue and line at the higher severity with "(raised by both reviewers)", keep `out-of-lane` findings and `Focus` fields, merge partial Structural Assessments, and never copy `## Playbook Feedback` into the report. Run the [playbook-read check](references/lanes.md#playbook-read-check) on every focus reviewer before its citation audit.
-- Prioritize high-severity issues (critical, high).
-- **Number findings and Questions**: Put every finding under a `### <ID>. <short claim>` heading: `C1`, `C2`… for critical, `H1`… for high, `M1`… for medium, `L1`… for low, so the user can say "fix H2 and M1" later. Wording findings sort last within `low`. Number Questions in `## Questions` as `### Q1. <question>` through `Q3` (keep at most 3, choosing the ones with the highest stated stakes in `Why`).
-- **Checked and Found Clean merge**: Take the union of disproved hypotheses from the reviewer(s), deduplicate, drop any line that lacks a tier or disproving evidence, and cap at 10 lines, keeping theme disproofs first.
+- **Collect Reports, Clean Check, and Playbook-Read Check**: On Tier 1 `swarm`, collect `rev_<name>.md` reports via `read_board` per [synthesis.md](../review-core/references/synthesis.md#1-collect-reports-tier-1-swarm). Under `--verify`, run the working-tree clean check on `$pr_review_dir_a` (and `$pr_review_dir_b`) per [verification.md](references/verification.md#orchestrator-clean-check), restoring any unexpected edits and escalating dirty reviewers to a full audit. Run the [playbook-read check](../review-core/references/focus_blocks.md#playbook-read-check) on every focus reviewer's `## Playbook Feedback`.
+- **Citation Audit, `--challenge`, and Multi-Reviewer Merge**: Audit every `critical` and `high` finding against disk (`±10` lines), run at most one `--challenge` round per disputed reviewer when `--challenge` is active, and merge multi-reviewer findings, `## Structural Assessment` bullets, and `## Checked and Found Clean` lines (capped at 10, theme disproofs first) while stripping `## Playbook Feedback` per [synthesis.md](../review-core/references/synthesis.md#3-citation-audit).
+- **Number findings and Questions**: Number sequentially within each severity class (`C1…`, `H1…`, `M1…`, `L1…`, with `wording` findings sorted last within `low`) and keep at most 3 Questions (`Q1` through `Q3`).
 - **Generate a high-level summary paragraph**: Open with a concise paragraph summarizing the changes and key findings. Include the citation audit tally (and `--challenge` tally when used), `packrat_context.py`'s non-empty `user_note`, active flags (writing focus themes as `` `--focus <theme-id>` ``, with ` (auto)` inside the backticks when Step 2d chose it), and any trust or security gate limit. End Summary with `Verdict: <Ready | Minor Revisions Needed | Critical Blockers>` (`lint_review.py --export-json` extracts this verdict and strips internal orchestration metadata and `file://` links from `review_summary.overview`).
-- **Structural Assessment**: When the diff has document files, put `## Structural Assessment` right after Summary.
-- **Generate file summaries**: For multi-file reviews, include `## Changed Files Summary` with one past-tense sentence per file ('Added...', 'Updated...').
-- **Generate a recommendations section**: Summarize key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
+- **Structural Assessment, Changed Files, and Recommendations**: When the diff has document files, put `## Structural Assessment` right after Summary. For multi-file reviews, include `## Changed Files Summary` with one past-tense sentence per file ('Added...', 'Updated...'). Summarize key actionable recommendations in `## Recommendations` after `## Checked and Found Clean`.
 - Write file paths as Markdown links and follow [`write-prose`](../write-prose/SKILL.md) (`lint_review.py` runs `analyze_prose.py` on every finding and question).
 - **Save and Lint Artifact**: Write `review_results.md` in `<conversation-artifact-dir>/` using `write_to_file` (never into the temporary checkout), then run:
   ```bash
   python3 <skill-dir>/scripts/lint_review.py <artifact-dir>/review_results.md [--export-json <export-path>]
   ```
-  When `--json [<path>]` is active, `<export-path>` defaults to `<artifact-dir>/review_results.json` (`pr-review` passes `<conversation-scratch-dir>/review_results.json`). Visible comment prose caps at 80 words / 4 sentences (`120` / `6` under `--comment-profile pr`, which folds `Evidence`, `Details`, `Repro test`, and `To settle` into `<details>`). Fix any reported structure, severity-cap, `comment-*` prose, `suggestion-single-fence` (move regression tests to `- **Repro test**:`), or `playbook-feedback-leaked` errors and rerun until exit `0`. Never print the full review in chat.
+  When `--json [<path>]` is active, `<export-path>` defaults to `<artifact-dir>/review_results.json` (`pr-review` passes `<conversation-scratch-dir>/review_results.json`). Visible comment prose caps at 120 words / 6 sentences (`--comment-profile pr` uses the same 120 / 6 cap and folds `Evidence`, `Details`, `Repro test`, and `To settle` into `<details>`). Fix any reported structure, severity-cap, `comment-*` prose, `suggestion-single-fence` (move regression tests to `- **Repro test**:`), or `playbook-feedback-leaked` errors and rerun until exit `0`. Never print the full review in chat.
 
 ### Step 5b: Playbook Learning
 
-When a focus reviewer's `## Playbook Feedback` is not `None.`, or a theme was ad hoc, write `focus_playbook_proposals.md` in the conversation artifact directory. For each proposal, give a ready-to-paste section (or a whole playbook in the [catalog format](references/focus_areas/README.md#playbook-format)): the new failure mode, its hypothesis template, and the evidence that settles it. Never write into this skill's directory during a review; applying a proposal is a separate, user-approved change. Callers write the file but do not act on it.
+When a focus reviewer's `## Playbook Feedback` is not `None.`, or a theme was ad hoc, write `focus_playbook_proposals.md` in the conversation artifact directory per [focus_blocks.md](../review-core/references/focus_blocks.md#playbook-feedback-and-step-5b-proposals) and the [catalog format](references/focus_areas/README.md#playbook-format). Never write into this skill's directory during a review; applying a proposal is a separate, user-approved change.
 
 ### Step 6: Workspace Cleanup
 
-If any temporary directory was created for reviewing the PR, for `--verify` checkouts, or for staged diff chunks:
+Remove any temporary PR, `--verify`, or staged diff directories per [handoff_and_cleanup.md](../review-core/references/handoff_and_cleanup.md#step-6-workspace-cleanup-guard), returning to the original working directory first and keeping `rev-*` swarm workers parked (`waiting`):
 
-- If the shell working directory was changed to a `$pr_review_dir_*` checkout, return to the original working directory before deleting the checkouts.
-- Verify each directory path is non-empty, exists, and matches the expected temporary prefix before removal:
-  ```bash
-  for dir in "${pr_review_dir_a:-}" "${pr_review_dir_b:-}" "${pr_review_dir_f:-}" "${pr_review_dir_f2:-}" "${pr_review_dir_f3:-}"; do
-    if [[ -n "$dir" && -d "$dir" && "$dir" == *"/pr-review-"* ]]; then
-      rm -rf "$dir"
-    fi
-  done
-  if [[ -n "${diff_dir:-}" && -d "$diff_dir" && "$diff_dir" == *"/pr-review-diffs-"* ]]; then
-    rm -rf "$diff_dir"
+```bash
+for dir in "${pr_review_dir_a:-}" "${pr_review_dir_b:-}" "${pr_review_dir_f:-}" "${pr_review_dir_f2:-}" "${pr_review_dir_f3:-}"; do
+  if [[ -n "$dir" && -d "$dir" && "$dir" == *"/pr-review-"* ]]; then
+    rm -rf "$dir"
   fi
-  ```
-- Confirm the temporary directories are removed before concluding the task.
-- Run this cleanup step even if errors or early exits occur during the review.
+done
+if [[ -n "${diff_dir:-}" && -d "$diff_dir" && "$diff_dir" == *"/pr-review-diffs-"* ]]; then
+  rm -rf "$diff_dir"
+fi
+```
 
 ### Step 7: Stop and Hand Off
 
-When running as a top-level review (not invoked by `pr-review` or `ship-it`) with 3 or more total findings and questions, and the `a2ui-pane` plugin is available (`render_a2ui` is reachable as a native or lazy MCP tool), read the `genui` skill and render a `triage_matrix` surface in the pane (`mode: "pane"`, `surfaceId: "review-triage"`). Pre-populate recommended buckets (`Fix now` for `critical` and `high`, `Follow-up` for `medium` and `low`, `Discuss` for `Questions`) with each finding's file/line anchor in `trace`. When `a2ui-pane` is not installed or fewer than 3 items exist, skip the pane render. When the review includes a scored quality rubric summary across 3 or more evaluated criteria, read `genui` and render a `scorecard` surface in the pane (using `stack: true` if stacking with findings) displaying each rubric row's score, progress bar, and rationale.
+Follow [handoff_and_cleanup.md](../review-core/references/handoff_and_cleanup.md#step-7-interactive-hand-off-and-stop):
 
-Send one short chat message, then **end the turn**. The message contains:
-
-- A link to the review artifact (`review_results.md`, and `review_results.json` if `--json` was passed), plus `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` if you rendered a `triage_matrix` or `scorecard` surface.
-- The verdict (Ready / Minor Revisions Needed / Critical Blockers).
-- Finding counts by severity, plus question count (for example, "1 critical, 3 high, 2 medium, 4 low, 2 questions"). Questions never block the verdict.
-- When `packrat_context.py` returned a non-empty `user_note` (unsynced or unavailable GitHub repository; non-GitHub directories emit no note): include that single `user_note` line.
-- When Step 5b wrote proposals: a link to `focus_playbook_proposals.md` and "N playbook proposals. Say `apply the playbook proposals` to add them to the catalog."
-- When no focus reviewer ran but the Summary names a cross-cutting mechanism change (or Step 2d folded a strong theme in): "No focus reviewer covered `<theme-id>`. Say `focus on <theme-id>` to run one."
-- One closing line: "Which findings should I address? (for example, `fix H1 to H3`, `fix all high`, or submit your selections in the A2UI Pane)".
-
-That closing line is a question for the user. It is never a reason to start fixing. Do not edit files, stage changes, or start a fix plan in the same turn.
-
-- **Reviewer wake-up rule**: When a swarm worker or reviewer subagent wakes you, the only steps left are Step 5 (synthesis), Step 6 (cleanup), and Step 7 (stop). This holds even if the conversation was implementing code before the review started.
-- **"Review and fix" requests**: Treat them as two requests. The review still ends here. Fixing starts in a later turn, after the user confirms which findings to address.
-- **Callers**: Calling workflows that automate reviews or act on findings (for example, `pr-review` or the `ship-it` review loop) run Steps 1 through 6 and skip Step 7. They resume their own flow after Step 6 completes (cleanup included), do not emit the hand-off question, and may then act on the findings per their own instructions. The review step itself never fixes anything.
+- **Caller mode** (`pr-review` or `ship-it`): stop after Step 6 and return control to the caller without printing the standalone chat prompt.
+- **Standalone mode**: When `render_a2ui` (`a2ui-pane`) is reachable, read `genui` and render `triage_matrix` (`surfaceId: "review-triage"`, buckets `Fix now` / `Follow-up` / `Discuss`) when 3 or more total findings and questions exist, plus `scorecard` (`stack: true`) when a 3+ criterion quality rubric was scored.
+- Send one short chat message, then **end the turn** without editing any workspace files:
+  - Link `review_results.md` (and `review_results.json` if `--json` was passed), plus `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` if a surface was rendered.
+  - State the `Verdict` (`Ready` / `Minor Revisions Needed` / `Critical Blockers`) and finding counts by severity plus question count.
+  - Include `packrat_context.py`'s non-empty `user_note` when present.
+  - When Step 5b wrote proposals: link `focus_playbook_proposals.md` and say `"N playbook proposals. Say apply the playbook proposals to add them to the catalog."`
+  - When no focus reviewer ran on a cross-cutting mechanism change: say `"No focus reviewer covered <theme-id>. Say focus on <theme-id> to run one."`
+  - Close with: `"Which findings should I address? (for example, fix H1 to H3, fix all high, or submit your selections in the A2UI Pane)"`.
 
 ## Output Format
 
@@ -276,4 +246,4 @@ The review file sections appear in this order:
 6. `## Checked and Found Clean`: up to 10 disproved hypotheses, each with its evidence tier and disproof.
 7. `## Recommendations`: key actionable feedback.
 
-Field-by-field formats for findings (`File`, `Line`, `Severity`, `Category`, `Focus`, `Evidence`, `Body`, `Why`, `Suggestion`, `Details`, `Repro test`) and Questions (`File`, `Line`, `Evidence`, `Why`, `To settle`) are defined in [evidence.md](references/evidence.md#formats) and the Output Contract in [reviewer_mandate.md](references/reviewer_mandate.md#output-contract). A focus reviewer's `## Playbook Feedback` never appears in the final file.
+Field-by-field formats for findings (`File`, `Line`, `Severity`, `Category`, `Focus`, `Evidence`, `Body`, `Why`, `Suggestion`, `Details`, `Repro test`) and Questions (`File`, `Line`, `Evidence`, `Why`, `To settle`) are defined in [evidence.md](../review-core/references/evidence.md#formats) and the Output Contract in [reviewer_mandate.md](references/reviewer_mandate.md#output-contract). A focus reviewer's `## Playbook Feedback` never appears in the final file.

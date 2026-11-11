@@ -103,7 +103,10 @@ class TestTimelineAdapters(unittest.TestCase):
         self.items = self.store.ensure_items_repo("octo-org", "gadgets")
         self.budget = RateBudget(self.tmp / RATE_BUDGET_FILENAME)
         self.transport = mock.Mock()
-        self.transport.as_runner.side_effect = lambda worker, priority: (worker, priority)
+        self.transport.as_runner.side_effect = lambda worker, priority: (
+            worker,
+            priority,
+        )
 
     def tearDown(self) -> None:
         self.store.close()
@@ -113,18 +116,23 @@ class TestTimelineAdapters(unittest.TestCase):
         """Runs `MirrorAdapter.sync_mirror` with faked GitHub and timeline syncs."""
         adapter = MirrorAdapter(self.store, self.transport, self.budget)
         with (
-            mock.patch("serve_cli.sync_github_metadata", return_value=gh),
+            mock.patch("serve_cli.sync_github_metadata", return_value=gh) as gh_mock,
             mock.patch("serve_cli.sync_repo_timelines", return_value=timeline) as tl,
         ):
             try:
-                result: Any = adapter.sync_mirror([self.mirror.repo_id, self.items.repo_id])
+                result: Any = adapter.sync_mirror(
+                    [self.mirror.repo_id, self.items.repo_id]
+                )
             except (BudgetDeferred, GhApiError) as exc:
                 result = exc
+        self.assertEqual(gh_mock.call_args.kwargs.get("backfill_max_pages"), 0)
         return result, tl
 
     def test_mirror_run_adds_incremental_timeline_pass(self) -> None:
         gh = SyncStats(repo_full_name="octo-org/widgets")
-        result, tl = self._mirror_sync(gh, TimelineStats(items_synced=3, graphql_cost=2))
+        result, tl = self._mirror_sync(
+            gh, TimelineStats(items_synced=3, graphql_cost=2)
+        )
         self.assertEqual([s.timeline.items_synced for s in result], [3])
         tl.assert_called_once()
         kwargs = tl.call_args.kwargs
@@ -136,7 +144,9 @@ class TestTimelineAdapters(unittest.TestCase):
 
     def test_deferred_mirror_timeline_raises_budget_deferred(self) -> None:
         gh = SyncStats(repo_full_name="octo-org/widgets")
-        deferred = TimelineStats(deferred=True, errors=["timeline: rate_limited: slow down"])
+        deferred = TimelineStats(
+            deferred=True, errors=["timeline: rate_limited: slow down"]
+        )
         result, _ = self._mirror_sync(gh, deferred)
         self.assertIsInstance(result, BudgetDeferred)
         self.assertIn("timeline", str(result))
@@ -145,7 +155,9 @@ class TestTimelineAdapters(unittest.TestCase):
 
     def test_failed_mirror_timeline_raises_api_error(self) -> None:
         gh = SyncStats(repo_full_name="octo-org/widgets")
-        result, _ = self._mirror_sync(gh, TimelineStats(errors=["timeline: http_error: 502"]))
+        result, _ = self._mirror_sync(
+            gh, TimelineStats(errors=["timeline: http_error: 502"])
+        )
         self.assertIsInstance(result, GhApiError)
 
     def test_mirror_skips_timeline_after_keyring_lock(self) -> None:
@@ -171,7 +183,9 @@ class TestTimelineAdapters(unittest.TestCase):
         ) as tl:
             results = adapter.sync_items_timelines()
         self.assertEqual([r.items_synced for r in results], [1])
-        self.assertEqual([c.args[1].full_name for c in tl.call_args_list], ["octo-org/gadgets"])
+        self.assertEqual(
+            [c.args[1].full_name for c in tl.call_args_list], ["octo-org/gadgets"]
+        )
         kwargs = tl.call_args.kwargs
         self.assertEqual(kwargs["mode"], TimelineMode.ALL)
         self.assertFalse(kwargs["drain_xrefs"])
@@ -226,7 +240,9 @@ class TestTimelineAdapters(unittest.TestCase):
         report = service.run_once()
         self.assertTrue(report.timeline_ran)
         self.assertEqual(report.errors, [])
-        self.assertTrue(any("PR_5" in call for call in runner.summary()), runner.summary())
+        self.assertTrue(
+            any("PR_5" in call for call in runner.summary()), runner.summary()
+        )
         synced = self.store.conn.execute(
             "SELECT number, timeline_synced_at FROM pull_requests ORDER BY number"
         ).fetchall()

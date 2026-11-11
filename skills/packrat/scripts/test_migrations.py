@@ -112,14 +112,20 @@ class TestMigrations(unittest.TestCase):
     def test_fresh_db_reaches_latest_version_with_views(self) -> None:
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+            self.assertEqual(
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            )
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
-            stored = store.conn.execute("SELECT views_sha256 FROM views_meta").fetchone()[0]
+            stored = store.conn.execute(
+                "SELECT views_sha256 FROM views_meta"
+            ).fetchone()[0]
             self.assertEqual(stored, views_sha256())
             for view in READER_VIEWS:
                 store.conn.execute(f"SELECT * FROM {view}").fetchall()
-            health = store.conn.execute("SELECT beat_age_s, pid FROM v_service_health").fetchall()
+            health = store.conn.execute(
+                "SELECT beat_age_s, pid FROM v_service_health"
+            ).fetchall()
             self.assertEqual([tuple(r) for r in health], [(None, None)])
         finally:
             store.close()
@@ -128,17 +134,25 @@ class TestMigrations(unittest.TestCase):
         _build_pre_migration_db(self.db_path)
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9])
+            self.assertEqual(
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+            )
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
             self.assertEqual(repo.mode, "mirror")
             self.assertEqual(store.table_counts()["pull_requests"], 1)
-            self.assertEqual(store.get_state(f"{REFETCH_OPEN_PRS_KEY_PREFIX}{repo.repo_id}"), "1")
+            self.assertEqual(
+                store.get_state(f"{REFETCH_OPEN_PRS_KEY_PREFIX}{repo.repo_id}"), "1"
+            )
             row = store.conn.execute(
                 "SELECT item_key, title, is_cross_repository, repo_mode FROM v_pr_basic"
             ).fetchone()
-            self.assertEqual(tuple(row), ("octo-org/widgets#7", "Add focus ring", None, "mirror"))
-            self.assertEqual(store.conn.execute("SELECT COUNT(*) FROM v_pr_live").fetchone()[0], 0)
+            self.assertEqual(
+                tuple(row), ("octo-org/widgets#7", "Add focus ring", None, "mirror")
+            )
+            self.assertEqual(
+                store.conn.execute("SELECT COUNT(*) FROM v_pr_live").fetchone()[0], 0
+            )
             issue = store.conn.execute(
                 "SELECT item_key, title, state, assignees_json FROM v_issue_basic"
             ).fetchone()
@@ -179,7 +193,9 @@ class TestMigrations(unittest.TestCase):
         conn = sqlite3.connect(str(self.db_path))
         try:
             calls: list[int] = []
-            self.assertFalse(db_migrations._run_migration(conn, 2, lambda _c: calls.append(2)))
+            self.assertFalse(
+                db_migrations._run_migration(conn, 2, lambda _c: calls.append(2))
+            )
             self.assertEqual(calls, [])
             self.assertFalse(conn.in_transaction)
         finally:
@@ -217,7 +233,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9, 10, 11])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -265,7 +281,10 @@ class TestMigrations(unittest.TestCase):
                 "'PR #2', 'sha2', 'text', 'now')"
             )
             orig_vec = l2_normalize(
-                [0.8 if i == 0 else -0.4 if i == 1 else 0.1 for i in range(EMBEDDING_DIM)]
+                [
+                    0.8 if i == 0 else -0.4 if i == 1 else 0.1
+                    for i in range(EMBEDDING_DIM)
+                ]
             )
             conn.execute(
                 """
@@ -286,7 +305,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9])
+            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9, 10, 11])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -309,7 +328,7 @@ class TestMigrations(unittest.TestCase):
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
             for version, migrate in db_migrations.MIGRATIONS[:5]:
                 db_migrations._run_migration(conn, version, migrate)
-            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9])
+            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9, 10, 11])
             conn.execute(
                 "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
                 "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -329,7 +348,7 @@ class TestMigrations(unittest.TestCase):
             conn.close()
 
     def test_migration_0007_adds_timeline_tables_columns_and_indexes(self) -> None:
-        self.assertEqual(LATEST_SCHEMA_VERSION, 9)
+        self.assertEqual(LATEST_SCHEMA_VERSION, 11)
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
@@ -341,11 +360,13 @@ class TestMigrations(unittest.TestCase):
             )
             conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [7, 8, 9])
-            self.assertEqual(read_schema_version(conn), 9)
+            self.assertEqual(apply_migrations(conn), [7, 8, 9, 10, 11])
+            self.assertEqual(read_schema_version(conn), 11)
             tables = {
                 str(r[0])
-                for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
             }
             self.assertLessEqual({"timeline_events", "timeline_dirty"}, tables)
             for table in ("pull_requests", "issues"):
@@ -355,7 +376,9 @@ class TestMigrations(unittest.TestCase):
                 )
             indexes = {
                 str(r[0])
-                for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
             }
             self.assertLessEqual(
                 {
@@ -385,7 +408,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0007_timeline_events(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 9)
+            self.assertEqual(read_schema_version(conn), 11)
 
             conn.execute(
                 "INSERT INTO timeline_events (event_id, repo_id, item_kind, item_number, "
@@ -402,7 +425,9 @@ class TestMigrations(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_migration_0008_backfills_latest_reviews_from_opinionated_reviews(self) -> None:
+    def test_migration_0008_backfills_latest_reviews_from_opinionated_reviews(
+        self,
+    ) -> None:
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
@@ -419,7 +444,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'bob', 'User', 'CHANGES_REQUESTED', '2026-10-27T20:00:00Z')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [8, 9])
+            self.assertEqual(apply_migrations(conn), [8, 9, 10, 11])
             rows = conn.execute(
                 "SELECT item_key, author, author_type, state, submitted_at, commit_oid "
                 "FROM v_pr_latest_author_reviews"
@@ -440,7 +465,9 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0008_latest_reviews(conn)
             conn.execute("COMMIT")
-            self.assertEqual(conn.execute("SELECT COUNT(*) FROM latest_reviews").fetchone()[0], 1)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM latest_reviews").fetchone()[0], 1
+            )
         finally:
             conn.close()
 
@@ -466,8 +493,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [9])
-            self.assertEqual(read_schema_version(conn), 9)
+            self.assertEqual(apply_migrations(conn), [9, 10, 11])
+            self.assertEqual(read_schema_version(conn), 11)
             thread_rows = conn.execute(
                 "SELECT item_key, thread_id, participants_json FROM v_pr_threads"
             ).fetchall()
@@ -480,7 +507,122 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0009_review_turn_signals(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 9)
+            self.assertEqual(read_schema_version(conn), 11)
+        finally:
+            conn.close()
+
+    def test_migration_0010_aligns_chunks_fts_rowids_and_adds_file_index(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:9]:
+                db_migrations._run_migration(conn, version, migrate)
+            conn.execute("DROP TABLE chunks_fts")
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                  chunk_id UNINDEXED,
+                  source_kind UNINDEXED,
+                  source_ref UNINDEXED,
+                  title,
+                  text,
+                  tokenize='porter unicode61'
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('acme', 'widget', 'acme/widget', 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO chunks (rowid, chunk_id, repo_id, source_kind, source_ref, "
+                "file_path, title, content_sha256, text, updated_at) "
+                "VALUES (5, 'c5', 1, 'code_symbol', 'src/a.py#L1-L2', 'src/a.py', "
+                "'fn a', 'sha5', 'def a(): pass', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO chunks_fts (rowid, chunk_id, source_kind, source_ref, title, text) "
+                "VALUES (99, 'c5', 'code_symbol', 'src/a.py#L1-L2', 'fn a', 'def a(): pass')"
+            )
+            conn.commit()
+
+            self.assertEqual(apply_migrations(conn), [10, 11])
+            self.assertEqual(read_schema_version(conn), 11)
+            fts_rows = conn.execute("SELECT rowid, chunk_id FROM chunks_fts").fetchall()
+            self.assertEqual(fts_rows, [(5, "c5")])
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+            indexes = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'index'"
+                )
+            }
+            self.assertIn("idx_chunks_repo_file", indexes)
+        finally:
+            conn.close()
+
+    def test_migration_0011_converts_chunks_fts_to_external_content(self) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:9]:
+                db_migrations._run_migration(conn, version, migrate)
+            conn.execute("DROP TABLE chunks_fts")
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                  chunk_id UNINDEXED,
+                  source_kind UNINDEXED,
+                  source_ref UNINDEXED,
+                  title,
+                  text,
+                  tokenize='porter unicode61'
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('acme', 'widget', 'acme/widget', 'now', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO chunks (rowid, chunk_id, repo_id, source_kind, source_ref, "
+                "file_path, title, content_sha256, text, updated_at) "
+                "VALUES (5, 'c5', 1, 'code_symbol', 'src/a.py#L1-L2', 'src/a.py', "
+                "'fn alpha', 'sha5', 'def alpha_unique_symbol(): pass', 'now')"
+            )
+            conn.execute(
+                "INSERT INTO chunks_fts (rowid, chunk_id, source_kind, source_ref, title, text) "
+                "VALUES (5, 'c5', 'code_symbol', 'src/a.py#L1-L2', 'fn alpha', "
+                "'def alpha_unique_symbol(): pass')"
+            )
+            conn.commit()
+            db_migrations._run_migration(
+                conn, 10, db_migrations.migrate_0010_fts_rowid_and_file_index
+            )
+
+            before_tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertIn("chunks_fts_content", before_tables)
+
+            self.assertEqual(apply_migrations(conn), [11])
+            self.assertEqual(read_schema_version(conn), 11)
+            after_tables = {
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            self.assertNotIn("chunks_fts_content", after_tables)
+            conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
+            hits = conn.execute(
+                "SELECT c.chunk_id FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid "
+                "WHERE chunks_fts MATCH 'alpha_unique_symbol'"
+            ).fetchall()
+            self.assertEqual(hits, [("c5",)])
         finally:
             conn.close()
 
@@ -490,7 +632,9 @@ class TestMigrations(unittest.TestCase):
         try:
             names = {
                 r[0]
-                for r in store.conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+                for r in store.conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                )
             }
             self.assertTrue({"idx_prs_live", "idx_changes_at"} <= names)
             plan = " ".join(
@@ -506,7 +650,9 @@ class TestMigrations(unittest.TestCase):
     def test_newer_schema_version_is_refused(self) -> None:
         PackratStore(self.db_path).close()
         conn = sqlite3.connect(str(self.db_path))
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'later')")
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (99, 'later')"
+        )
         conn.commit()
         conn.close()
         with self.assertRaises(SchemaTooNewError):

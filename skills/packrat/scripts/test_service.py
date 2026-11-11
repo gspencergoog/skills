@@ -569,6 +569,23 @@ class TestTimelineWorker(ServiceHarness):
         self.assertFalse(report.timeline_ran)
         self.assertNotIn("timeline", report.deferred)
 
+    def test_sqlite_operational_error_on_heartbeat_is_logged_not_raised(self) -> None:
+        import sqlite3
+        from unittest import mock
+
+        svc = self.make()
+        with mock.patch.object(
+            self.store,
+            "write_heartbeat",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            report = svc.run_once(T0)
+        self.assertTrue(
+            any(
+                err.startswith("heartbeat: database is locked") for err in report.errors
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

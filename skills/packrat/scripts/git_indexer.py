@@ -771,6 +771,8 @@ def sync_git_codebase(
             symbols=symbols,
             doc_sections=sections,
             chunks=file_chunks,
+            reporter=reporter,
+            repo_label=repo.full_name,
         )
 
     store.update_repo_sync_state(repo.repo_id, last_indexed_sha=target_sha)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import re
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -329,7 +330,9 @@ def _extract_py_entities(
 ) -> list[dict[str, Any]]:
     """Extracts Python class, method, and function spans using stdlib ast."""
     try:
-        tree = ast.parse(content)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(content, filename=file_path or "<unknown>")
     except SyntaxError:
         return []
 

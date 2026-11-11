@@ -54,7 +54,7 @@ Identify potential vulnerabilities.
 
 ### 6. API Soundness (lane B)
 
-If changes alter public APIs, exported signatures, or configuration surfaces, evaluate them against [reviewing_apis.md](./reviewing_apis.md) and the canonical principles in [canonical_api_design.md](../../api-review/references/canonical_api_design.md):
+If changes alter public APIs, exported signatures, or configuration surfaces, evaluate them against [reviewing_apis.md](./reviewing_apis.md) and the canonical principles in [canonical_api_design.md](../../review-core/references/canonical_api_design.md):
 
 - **Contract Integrity**: Ensure interfaces expose capabilities rather than internal implementation details or storage models.
 - **Minimal Surface Area (KISS/YAGNI)**: Avoid speculative parameters or over-generalized helper abstractions.
@@ -66,7 +66,7 @@ If changes alter public APIs, exported signatures, or configuration surfaces, ev
 
 ## Severity Levels
 
-Use these severity levels to categorize your findings. Severity follows the consequence in `Why` and is capped by the evidence tier in [evidence.md](evidence.md#severity-caps). Document files use the more specific scale in [reviewing_documents.md](reviewing_documents.md#severity).
+Use these severity levels to categorize your findings. Severity follows the consequence in `Why` and is capped by the evidence tier in [evidence.md](../../review-core/references/evidence.md#severity-caps). Document files use the more specific scale in [reviewing_documents.md](reviewing_documents.md#severity).
 
 - **critical**: Must be addressed immediately. Could lead to serious consequences for correctness, security, or performance. Requires `Executed`, `Read`, `Fetched`, or a line-cited `Deduction`.
 - **high**: Should be addressed soon. Likely to cause problems in the future. Requires `Executed`, `Read`, `Fetched`, or a line-cited `Deduction`.

@@ -185,7 +185,7 @@ Note the leftover edit in the review Summary, and run Step 5's citation audit ac
 
 ## Evidence Format
 
-Every finding carries an `Evidence` field whose first token is its tier from [evidence.md](evidence.md#tiers). For a command run in tier 1 or tier 2:
+Every finding carries an `Evidence` field whose first token is its tier from [evidence.md](../../review-core/references/evidence.md#tiers). For a command run in tier 1 or tier 2:
 
 ```markdown
 - **Evidence**: `Executed` — `<command>` — <trimmed output, at most 15 lines>

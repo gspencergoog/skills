@@ -1,6 +1,6 @@
 # Reviewer Brief
 
-This reference holds the brief that the [`code-review`](../SKILL.md) orchestrator sends to every reviewer in Step 3: the packaging rules first, then the template. The roster, lane blocks, and focus blocks it refers to are in [lanes.md](lanes.md).
+This reference holds the brief that the [`code-review`](../SKILL.md) orchestrator sends to every reviewer in Step 3: the packaging rules first, then the template. The roster, lane blocks, and focus blocks it refers to are in [lanes.md](lanes.md), [delegation.md](../../review-core/references/delegation.md), and [focus_blocks.md](../../review-core/references/focus_blocks.md).
 
 ## Packaging Rules (Strict Invariants)
 
@@ -12,7 +12,7 @@ This reference holds the brief that the [`code-review`](../SKILL.md) orchestrato
   - For small diffs ($\le 150$ lines and $\le 6\text{ KB}$), embed the unified diff inline at the bottom of the prompt under `### Modified Code Diff`.
   - For larger diffs (> 150 lines or > 6 KB), do **not** paste the raw diff inline. List the `diff_chunk_XX.diff` paths and covered files from `stage_diffs.py --grouped` under `### Modified Code Diff`, and instruct the reviewer to read each chunk with `view_file`.
 - **Explicit Workspace & Context Paths**: Specify the root directory of the workspace (`$pr_review_dir_a`, `$pr_review_dir_b`, or worktree path). List the context files from Step 2 (imports, interfaces, tests, linked documents) so the reviewer can read them via `view_file`.
-- **Absolute Reference Paths**: Give reference and rubric files as absolute paths under this skill's directory, so the reviewer can open them.
+- **Absolute Reference Paths**: Give reference and rubric files as absolute paths under this skill's directory (and `<skills-dir>/review-core/references/evidence.md`), so the reviewer can open them.
 - **Mixed Diffs**: Use one prompt per reviewer. Put the code mandate first, then the Document Review Mandate. The document mandate adds to the code review and replaces none of it: code files get the same depth as in a code-only review.
 - **Large Diffs**: For diffs over 500 lines or 10 files, pass the grouped `diff_chunk_XX.diff` files from `stage_diffs.py --grouped` or split across reviewer lanes ([splitting_reviews.md](splitting_reviews.md)).
 
@@ -21,7 +21,7 @@ This reference holds the brief that the [`code-review`](../SKILL.md) orchestrato
 Pass this payload as `brief` in `swarm{action: "add"}` (or `post_message` when waking a worker) on Tier 1. On Tier 2, pass it as `Prompt` in `Agent`/`Task` or `invoke_subagent`, including each optional block only when its condition holds:
 
 `````markdown
-Please conduct a deep review of PR #<number> (<title>) following the `code-review` skill criteria. Read `<skill-dir>/references/reviewer_mandate.md` and `<skill-dir>/references/evidence.md` first and apply their evidence tiers, severity caps, and falsification pass.
+Please conduct a deep review of PR #<number> (<title>) following the `code-review` skill criteria. Read `<skill-dir>/references/reviewer_mandate.md` and `<skills-dir>/review-core/references/evidence.md` first and apply their evidence tiers, severity caps, and falsification pass.
 
 Do not modify, create, or delete any file in the workspace, and do not run git or gh commands that change state. Your only write is the review report. Do not spawn subagents and never call `swarm` to add helpers (your `<swarm_worker>` helper-spawning instructions do not apply to this review). Under `--panel`, do not call `read_board` during your initial review pass.
 
@@ -62,7 +62,7 @@ These files are documents. Review them for structure, correctness, completeness,
 - Every document finding has a `Category`, a `Why`, and an `Evidence` field (`Read` or `Fetched`) quoting the text (both sides for an inconsistency). Findings without quoted evidence are dropped.
 - Run the downstream impact pass (at most 10 files outside this diff) and fill in the `## Structural Assessment` section. Each lens verdict names what you checked; a bare "no issues" is not a verdict.
 
-### API Review Mandate  (include only when diff modifies public APIs, signatures, endpoints, or configuration surfaces, or when `ring.api_mandate` is true)
+### API Review Mandate  (include only when diff modifies public APIs, signatures, endpoints, or configuration surfaces, when `ring.api_mandate` is true, or when `--api` is active)
 These code changes modify public API surfaces, signatures, exported symbols, endpoints, or configuration options.
 - Read `<skill-dir>/references/reviewing_apis.md` first.
 - Apply the Dual-Scope Model: inspect sibling methods and call sites for context, but report only findings anchored to modified lines (+/-).
@@ -73,10 +73,10 @@ These code changes modify public API surfaces, signatures, exported symbols, end
 <lane A or lane B block>
 
 ### Focus Priority  (include only for a general or lane reviewer when Step 2d folded a theme into this brief)
-<Focus Priority block from lanes.md, filled in; or its inline `#### Ad hoc playbook` variant>
+<Focus Priority block from [focus_blocks.md](../../review-core/references/focus_blocks.md#focus-priority-block), filled in; or its inline `#### Ad hoc playbook` variant>
 
 ### Focus Mandate  (include only for a focus reviewer `rev-f*`; never together with Focus Priority)
-<Focus Mandate block from lanes.md, filled in; or its inline `#### Ad hoc playbook` variant>
+<Focus Mandate block from [focus_blocks.md](../../review-core/references/focus_blocks.md#focus-mandate-block), filled in; or its inline `#### Ad hoc playbook` variant>
 
 ### Verification Mandate  (include only under --verify for a trusted change that passed the Step 2a Security Gate)
 - Your checkout: `<pr_review_dir_a or pr_review_dir_b>`. This checkout is reserved for you alone. Run tier 2 commands only there.
@@ -113,7 +113,7 @@ Put every finding under a `### <ID>. <short claim>` heading (`C1…`, `H1…`, `
 - **Focus**: `<theme-id>` (focus reviewers only)
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or line-cited trace>
 - **Body**: `<1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>`
-- **Why**: `<1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences standalone, or <= 120 words and <= 6 sentences under `pr-review`)>`
+- **Why**: `<1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 120 words and <= 6 sentences)>`
 - **Suggestion**: (Optional drop-in code snippet, replacement text, or specific question. One fenced block at most; the exporter posts it as a committable GitHub suggestion unless the fence is ```` ```diff ```` or ```` ```patch ````. Never put a test or example here.)
 - **Details**: (Optional, up to 150 words, may continue on indented lines. Root-cause trace, affected callers, or rejected alternatives. Exported inside a collapsed `<details>` block, so keep Body and Why self-contained.)
 - **Repro test**: (Optional, `--verify` only. The scratch test that reproduces the defect, in one fenced block. It is posted as a plain code block, never as a committable suggestion.)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +19,7 @@ from gh_transport import (
     _split_http_response,
     run_gh_command,
 )
+from mentions import RepoResolver, caching_resolver, extract_item_mentions
 from models import (
     BACKFILL_STREAMS,
     CommentRecord,
@@ -34,12 +36,19 @@ from models import (
     compute_content_sha256,
     utc_now_iso,
 )
-from mentions import RepoResolver, caching_resolver, extract_item_mentions
 from progress import NULL_REPORTER, ProgressReporter
 from rate_budget import Priority, RateBudget
 
 SAFETY_SWEEP_INTERVAL_SEC = 600
-PAGE_SIZE_LADDER = (25, 12, 5)
+PAGE_SIZE_LADDER: tuple[int, ...] = (25, 12, 5, 2, 1)
+ADAPTIVE_PAGE_COOLDOWN = 20
+BACKOFF_DELAYS_S: tuple[float, ...] = (1.0, 3.0, 9.0)
+_TRANSPORT_ERROR_MARKERS: tuple[str, ...] = (
+    "tls handshake timeout",
+    "error connecting to",
+    "connection reset",
+    "eof",
+)
 
 _CLOSING_ISSUE_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b",
@@ -869,6 +878,7 @@ class PageFetchOutcome:
     connection: dict[str, Any] | None
     error_kind: str | None = None
     error_detail: str | None = None
+    used_page_size: int = PAGE_SIZE_LADDER[0]
 
 
 @dataclass(frozen=True)
@@ -975,6 +985,17 @@ def _probe_timeout_auth(
     return last_kind, last_detail, False
 
 
+def _is_live_gh_runner(runner: GhRunner) -> bool:
+    """Returns True when `runner` invokes the live `gh` CLI subprocess."""
+    return runner is run_gh_command or bool(getattr(runner, "_uses_gh_cli", False))
+
+
+def _is_transport_error(detail: str) -> bool:
+    """Returns True when `detail` indicates a transient client-side transport failure."""
+    lowered = detail.lower()
+    return any(marker in lowered for marker in _TRANSPORT_ERROR_MARKERS)
+
+
 def _fetch_graphql_page_with_halving(
     owner: str,
     name: str,
@@ -988,16 +1009,29 @@ def _fetch_graphql_page_with_halving(
     stream: str = "",
     auth_probe: AuthProbeFn | None = None,
     budget: RateBudget | None = None,
+    max_page_size: int = PAGE_SIZE_LADDER[0],
+    sleep_fn: Callable[[float], None] | None = None,
 ) -> PageFetchOutcome:
-    """Executes a GraphQL page query, halving pageSize (25 -> 12 -> 5) on 5xx/timeouts.
+    """Executes a GraphQL page query, stepping down pageSize (25 -> 12 -> 5 -> 2 -> 1) on 5xx/timeouts.
 
     Each response's `X-RateLimit-*` headers are recorded in `budget`. A
     rate-limited response ends the attempt at once instead of retrying at a
     smaller page size against an exhausted budget.
     """
+    resolved_sleep: Callable[[float], None]
+    if sleep_fn is not None:
+        resolved_sleep = sleep_fn
+    elif _is_live_gh_runner(runner):
+        resolved_sleep = time.sleep
+    else:
+        resolved_sleep = lambda _s: None
+
+    ladder = tuple(s for s in PAGE_SIZE_LADDER if s <= max_page_size) or (
+        PAGE_SIZE_LADDER[-1],
+    )
     last_kind = "http_error"
     last_detail = "GraphQL page fetch failed"
-    for idx, page_size in enumerate(PAGE_SIZE_LADDER):
+    for idx, page_size in enumerate(ladder):
         args = _build_graphql_args(owner, name, query, page_size, cursor)
         res = runner(args, 25)
         headers, body = _split_gh_include_output(res.stdout)
@@ -1006,21 +1040,42 @@ def _fetch_graphql_page_with_halving(
         if res.returncode == 0:
             conn = _extract_graphql_connection(body, field_name)
             if conn is not None:
-                return PageFetchOutcome(connection=conn)
+                return PageFetchOutcome(connection=conn, used_page_size=page_size)
         raw_kind, raw_detail = _classify_gh_failure(res, body)
         last_kind, last_detail, abort = _probe_timeout_auth(
             raw_kind, raw_detail, auth_probe
         )
         if abort or last_kind == "rate_limited":
             break
-        if idx + 1 < len(PAGE_SIZE_LADDER):
-            next_size = PAGE_SIZE_LADDER[idx + 1]
+        if _is_transport_error(last_detail):
+            resolved_sleep(BACKOFF_DELAYS_S[0])
+            res = runner(args, 25)
+            headers, body = _split_gh_include_output(res.stdout)
+            if budget is not None:
+                budget.record(headers, worker="sync")
+            if res.returncode == 0:
+                conn = _extract_graphql_connection(body, field_name)
+                if conn is not None:
+                    return PageFetchOutcome(connection=conn, used_page_size=page_size)
+            raw_kind, raw_detail = _classify_gh_failure(res, body)
+            last_kind, last_detail, abort = _probe_timeout_auth(
+                raw_kind, raw_detail, auth_probe
+            )
+            if abort or last_kind == "rate_limited":
+                break
+        if idx + 1 < len(ladder):
+            next_size = ladder[idx + 1]
             reporter.warn(
                 repo_full_name,
                 f"github {stream}: page request failed at pageSize={page_size} ({last_detail}); retrying at pageSize={next_size}",
             )
+            delay = BACKOFF_DELAYS_S[min(idx, len(BACKOFF_DELAYS_S) - 1)]
+            resolved_sleep(delay)
     return PageFetchOutcome(
-        connection=None, error_kind=last_kind, error_detail=last_detail
+        connection=None,
+        error_kind=last_kind,
+        error_detail=last_detail,
+        used_page_size=ladder[-1],
     )
 
 
@@ -1196,6 +1251,8 @@ def _walk_pages(
     """
     walk = PageWalk()
     cursor = start_cursor
+    current_max_page_size = PAGE_SIZE_LADDER[0]
+    cooldown_remaining = 0
     while walk.pages < max_pages:
         if budget is not None and not budget.allows("graphql", priority):
             walk.deferred = True
@@ -1214,12 +1271,27 @@ def _walk_pages(
             stream=spec.stream,
             auth_probe=auth_probe,
             budget=budget,
+            max_page_size=current_max_page_size,
         )
         if outcome.connection is None:
             walk.failed = True
             walk.error_kind = outcome.error_kind
             walk.error_detail = outcome.error_detail
             return walk
+        if outcome.used_page_size < current_max_page_size:
+            current_max_page_size = outcome.used_page_size
+            cooldown_remaining = ADAPTIVE_PAGE_COOLDOWN
+        elif current_max_page_size < PAGE_SIZE_LADDER[0]:
+            if cooldown_remaining > 1:
+                cooldown_remaining -= 1
+            else:
+                curr_idx = PAGE_SIZE_LADDER.index(current_max_page_size)
+                current_max_page_size = PAGE_SIZE_LADDER[max(0, curr_idx - 1)]
+                cooldown_remaining = (
+                    ADAPTIVE_PAGE_COOLDOWN
+                    if current_max_page_size < PAGE_SIZE_LADDER[0]
+                    else 0
+                )
         nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = (
             _extract_page_metadata(
                 outcome.connection, stop_watermark, walk.newest_updated
@@ -1265,9 +1337,7 @@ def _thread_reply_bodies(comments_json: str) -> list[str]:
         return []
     if not isinstance(nodes, list):
         return []
-    return [
-        str(n.get("body") or "") for n in nodes if isinstance(n, dict)
-    ]
+    return [str(n.get("body") or "") for n in nodes if isinstance(n, dict)]
 
 
 def _pr_mention_texts(pr: PrRecord) -> Iterator[str]:
@@ -1531,6 +1601,9 @@ def _sync_stream(
             store, repo, spec, max_pages=max_pages, **walk_args
         ).error_kind
     if state.cursor is None or getattr(repo, f"{spec.stream}_watermark") is None:
+        if backfill_max_pages <= 0:
+            stats.backfill_incomplete.append(spec.stream)
+            return None
         return _run_backfill_walk(
             store,
             repo,
@@ -1542,7 +1615,11 @@ def _sync_stream(
     inc_walk = _run_incremental_walk(
         store, repo, spec, max_pages=max_pages, **walk_args
     )
-    if inc_walk.error_kind in ("keyring_locked", "auth_error", *_DEFERRING_ERROR_KINDS):
+    if backfill_max_pages <= 0 or inc_walk.error_kind in (
+        "keyring_locked",
+        "auth_error",
+        *_DEFERRING_ERROR_KINDS,
+    ):
         stats.backfill_incomplete.append(spec.stream)
         return inc_walk.error_kind
     return _run_backfill_walk(
@@ -1716,7 +1793,7 @@ def _resolve_auth_probe(
     """Defaults auth_probe to probe_gh_auth when using a live gh CLI runner."""
     if auth_probe is not None:
         return auth_probe
-    if runner is run_gh_command or getattr(runner, "_uses_gh_cli", False):
+    if _is_live_gh_runner(runner):
         return probe_gh_auth
     return None
 

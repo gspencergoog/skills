@@ -207,6 +207,40 @@ class PrepareDesignContextTests(unittest.TestCase):
             rc_bad_args = pdc.main([])
             self.assertEqual(rc_bad_args, 2)
 
+    def test_count_substantive_lines_diff_weight_rules(self) -> None:
+        """Pins substantive line weights for tests, lockfiles, yaml, schemas, and Markdown."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tests_dir = root / "tests"
+            tests_dir.mkdir()
+            test_file = tests_dir / "test_x.py"
+            test_file.write_text(
+                "# comment line\n"
+                "import os\n\n"
+                + "".join(f"x_{i} = {i}\n" for i in range(8)),
+                encoding="utf-8",
+            )
+            lockfile = root / "package-lock.json"
+            lockfile.write_text('{"name": "pkg", "lockfileVersion": 3}\n', encoding="utf-8")
+            yaml_file = root / "config.yaml"
+            yaml_file.write_text("key: value\nother: 2\n", encoding="utf-8")
+            schema_file = root / "contract.schema.json"
+            schema_file.write_text(
+                "\n".join(f'  "field_{i}": "string"' for i in range(10)) + "\n\n",
+                encoding="utf-8",
+            )
+            md_file = root / "notes.md"
+            md_file.write_text(
+                "# Heading\n\n- bullet one\n- bullet two\n\nParagraph text.\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(pdc.count_substantive_lines([test_file], root), 2)
+            self.assertEqual(pdc.count_substantive_lines([lockfile], root), 0)
+            self.assertEqual(pdc.count_substantive_lines([yaml_file], root), 0)
+            self.assertEqual(pdc.count_substantive_lines([schema_file], root), 10)
+            self.assertEqual(pdc.count_substantive_lines([md_file], root), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

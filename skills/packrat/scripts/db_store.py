@@ -132,7 +132,9 @@ TIMELINE_SINCE_OVERLAP_S = 300
 
 _ITEM_TABLES: dict[str, str] = {"pr": "pull_requests", "issue": "issues"}
 _SUBJECT_ITEM_KINDS: dict[str, str] = {"Issue": "issue", "PullRequest": "pr"}
-_XREF_EVENT_TYPES = frozenset({"CrossReferencedEvent", "ConnectedEvent", "DisconnectedEvent"})
+_XREF_EVENT_TYPES = frozenset(
+    {"CrossReferencedEvent", "ConnectedEvent", "DisconnectedEvent"}
+)
 _CLOSED_BY_LINK, _XREF_LINK = TIMELINE_LINK_TYPES
 _TIMELINE_LINK_MARKS = ", ".join("?" for _ in TIMELINE_LINK_TYPES)
 
@@ -326,7 +328,7 @@ class PackratStore(LiveStoreMixin):
         with self.conn:
             # FTS5 virtual tables do not participate in foreign key cascades.
             self.conn.execute(
-                "DELETE FROM chunks_fts WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE repo_id = ?)",
+                "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE repo_id = ?)",
                 (repo.repo_id,),
             )
             self.conn.execute("DELETE FROM repos WHERE repo_id = ?", (repo.repo_id,))
@@ -394,23 +396,6 @@ class PackratStore(LiveStoreMixin):
             self.conn.execute(
                 f"UPDATE chunk_embeddings SET chunk_id = ? || substr(chunk_id, ?) WHERE chunk_id IN ({repo_chunk_ids})",
                 (new_full_name, start, repo.repo_id),
-            )
-            self.conn.execute(
-                f"""
-                UPDATE chunks_fts SET
-                  chunk_id = ? || substr(chunk_id, ?),
-                  source_ref = CASE WHEN substr(source_ref, 1, ?) = ? THEN ? || substr(source_ref, ?) ELSE source_ref END
-                WHERE chunk_id IN ({repo_chunk_ids})
-                """,
-                (
-                    new_full_name,
-                    start,
-                    len(old_prefix),
-                    old_prefix,
-                    new_full_name,
-                    start,
-                    repo.repo_id,
-                ),
             )
             for column in ("chunk_id", "source_ref"):
                 self.conn.execute(
@@ -1290,6 +1275,103 @@ class PackratStore(LiveStoreMixin):
         ).fetchall()
         return {str(r["file_path"]) for r in rows if r["file_path"]}
 
+    _FILE_BATCH_SIZE = 400
+    _WRITE_BATCH_SIZE = 1000
+
+    def _delete_code_index_for_paths_in_tx(
+        self, repo_id: int, paths: Sequence[str]
+    ) -> None:
+        """Deletes symbols, doc sections, chunks, and FTS5 rows for a batch of file paths."""
+        if not paths:
+            return
+        marks = ", ".join("?" for _ in paths)
+        params = (repo_id, *paths)
+        self.conn.execute(
+            f"DELETE FROM code_symbols WHERE repo_id = ? AND file_path IN ({marks})",
+            params,
+        )
+        self.conn.execute(
+            f"DELETE FROM doc_sections WHERE repo_id = ? AND file_path IN ({marks})",
+            params,
+        )
+        self.conn.execute(
+            f"""
+            DELETE FROM chunks_fts WHERE rowid IN (
+                SELECT rowid FROM chunks
+                WHERE repo_id = ? AND file_path IN ({marks})
+                  AND source_kind IN ('code_symbol', 'doc_section')
+            )
+            """,
+            params,
+        )
+        self.conn.execute(
+            f"""
+            DELETE FROM chunks
+            WHERE repo_id = ? AND file_path IN ({marks})
+              AND source_kind IN ('code_symbol', 'doc_section')
+            """,
+            params,
+        )
+
+    def _insert_code_symbols_in_tx(self, symbols: Sequence[CodeSymbolRecord]) -> None:
+        """Inserts or replaces a batch of CodeSymbolRecords inside a transaction."""
+        if not symbols:
+            return
+        self.conn.executemany(
+            """
+            INSERT OR REPLACE INTO code_symbols (
+              repo_id, file_path, symbol_name, kind,
+              line_start, line_end, signature, docstring, sha
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    s.repo_id,
+                    s.file_path,
+                    s.symbol_name,
+                    s.kind,
+                    s.line_start,
+                    s.line_end,
+                    s.signature,
+                    s.docstring,
+                    s.sha,
+                )
+                for s in symbols
+            ],
+        )
+
+    def _insert_doc_sections_in_tx(
+        self, doc_sections: Sequence[DocSectionRecord]
+    ) -> None:
+        """Inserts or replaces a batch of DocSectionRecords inside a transaction."""
+        if not doc_sections:
+            return
+        self.conn.executemany(
+            """
+            INSERT OR REPLACE INTO doc_sections (
+              repo_id, file_path, section_id, level, heading, breadcrumb,
+              anchor_slug, line_start, line_end, subtree_line_end, content, sha
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    d.repo_id,
+                    d.file_path,
+                    d.section_id,
+                    d.level,
+                    d.heading,
+                    d.breadcrumb,
+                    d.anchor_slug,
+                    d.line_start,
+                    d.line_end,
+                    d.subtree_line_end,
+                    d.content,
+                    d.sha,
+                )
+                for d in doc_sections
+            ],
+        )
+
     def replace_code_index_for_files(
         self,
         repo_id: int,
@@ -1300,92 +1382,66 @@ class PackratStore(LiveStoreMixin):
         chunks: Sequence[TextChunk],
         *,
         now: float | None = None,
+        reporter: Any = None,
+        repo_label: str = "",
     ) -> None:
         """Replaces code symbols, doc sections, and chunks for changed or deleted files."""
         affected = list(dict.fromkeys([*changed_paths, *deleted_paths]))
-        with self.conn:
-            if affected:
-                marks = ", ".join("?" for _ in affected)
-                params = (repo_id, *affected)
-                self.conn.execute(
-                    f"DELETE FROM code_symbols WHERE repo_id = ? AND file_path IN ({marks})",
-                    params,
-                )
-                self.conn.execute(
-                    f"DELETE FROM doc_sections WHERE repo_id = ? AND file_path IN ({marks})",
-                    params,
-                )
-                self.conn.execute(
-                    f"""
-                    DELETE FROM chunks_fts WHERE chunk_id IN (
-                        SELECT chunk_id FROM chunks
-                        WHERE repo_id = ? AND file_path IN ({marks})
-                          AND source_kind IN ('code_symbol', 'doc_section')
-                    )
-                    """,
-                    params,
-                )
-                self.conn.execute(
-                    f"""
-                    DELETE FROM chunks
-                    WHERE repo_id = ? AND file_path IN ({marks})
-                      AND source_kind IN ('code_symbol', 'doc_section')
-                    """,
-                    params,
+        if (
+            len(affected) <= self._FILE_BATCH_SIZE
+            and len(symbols) <= self._WRITE_BATCH_SIZE
+            and len(doc_sections) <= self._WRITE_BATCH_SIZE
+            and len(chunks) <= self._WRITE_BATCH_SIZE
+        ):
+            with self.conn:
+                self._delete_code_index_for_paths_in_tx(repo_id, affected)
+                self._insert_code_symbols_in_tx(symbols)
+                self._insert_doc_sections_in_tx(doc_sections)
+                self._upsert_chunks_in_tx(chunks, now=now)
+                if affected and not chunks:
+                    self._bump_vector_cache_seq_in_tx(now)
+            return
+
+        total_chunks = len(chunks)
+        report_progress = (
+            reporter is not None and total_chunks >= self._WRITE_BATCH_SIZE
+        )
+        if report_progress:
+            reporter.start_phase(
+                repo_label or f"repo:{repo_id}", "git index", total=total_chunks
+            )
+
+        for start in range(0, len(affected), self._FILE_BATCH_SIZE):
+            batch_paths = affected[start : start + self._FILE_BATCH_SIZE]
+            with self.conn:
+                self._delete_code_index_for_paths_in_tx(repo_id, batch_paths)
+                if not chunks and start + self._FILE_BATCH_SIZE >= len(affected):
+                    self._bump_vector_cache_seq_in_tx(now)
+
+        for start in range(0, len(symbols), self._WRITE_BATCH_SIZE):
+            with self.conn:
+                self._insert_code_symbols_in_tx(
+                    symbols[start : start + self._WRITE_BATCH_SIZE]
                 )
 
-            if symbols:
-                self.conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO code_symbols (
-                      repo_id, file_path, symbol_name, kind,
-                      line_start, line_end, signature, docstring, sha
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            s.repo_id,
-                            s.file_path,
-                            s.symbol_name,
-                            s.kind,
-                            s.line_start,
-                            s.line_end,
-                            s.signature,
-                            s.docstring,
-                            s.sha,
-                        )
-                        for s in symbols
-                    ],
+        for start in range(0, len(doc_sections), self._WRITE_BATCH_SIZE):
+            with self.conn:
+                self._insert_doc_sections_in_tx(
+                    doc_sections[start : start + self._WRITE_BATCH_SIZE]
                 )
-            if doc_sections:
-                self.conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO doc_sections (
-                      repo_id, file_path, section_id, level, heading, breadcrumb,
-                      anchor_slug, line_start, line_end, subtree_line_end, content, sha
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            d.repo_id,
-                            d.file_path,
-                            d.section_id,
-                            d.level,
-                            d.heading,
-                            d.breadcrumb,
-                            d.anchor_slug,
-                            d.line_start,
-                            d.line_end,
-                            d.subtree_line_end,
-                            d.content,
-                            d.sha,
-                        )
-                        for d in doc_sections
-                    ],
+
+        for start in range(0, total_chunks, self._WRITE_BATCH_SIZE):
+            batch_chunks = chunks[start : start + self._WRITE_BATCH_SIZE]
+            with self.conn:
+                self._upsert_chunks_in_tx(batch_chunks, now=now)
+            if report_progress:
+                done = min(total_chunks, start + len(batch_chunks))
+                reporter.advance(
+                    done, total_chunks, detail=batch_chunks[-1].file_path or ""
                 )
-            self._upsert_chunks_in_tx(chunks, now=now)
-            if affected and not chunks:
-                self._bump_vector_cache_seq_in_tx(now)
+
+        if report_progress:
+            reporter.finish_phase()
 
     def upsert_chunks(
         self, chunks: Sequence[TextChunk], *, now: float | None = None
@@ -1393,33 +1449,29 @@ class PackratStore(LiveStoreMixin):
         """Upserts searchable text chunks and synchronizes the FTS5 index."""
         if not chunks:
             return
-        with self.conn:
-            self._upsert_chunks_in_tx(chunks, now=now)
+        for start in range(0, len(chunks), self._WRITE_BATCH_SIZE):
+            with self.conn:
+                self._upsert_chunks_in_tx(
+                    chunks[start : start + self._WRITE_BATCH_SIZE], now=now
+                )
 
-    def _upsert_chunks_in_tx(
-        self, chunks: Sequence[TextChunk], *, now: float | None = None
-    ) -> None:
-        """Upserts chunks and keeps chunks_fts synchronized inside a transaction."""
-        if not chunks:
-            return
-        now_iso = iso_at(now)
-        for ch in chunks:
-            ts = ch.updated_at or now_iso
-            self.conn.execute(
+    def _upsert_single_chunk_in_tx(self, ch: TextChunk, now_iso: str) -> None:
+        """Upserts one chunk and updates `chunks_fts` by `rowid` when FTS columns change."""
+        ts = ch.updated_at or now_iso
+        existing = self.conn.execute(
+            """
+            SELECT rowid, title, content_sha256, text
+            FROM chunks WHERE chunk_id = ?
+            """,
+            (ch.chunk_id,),
+        ).fetchone()
+        if existing is None:
+            cur = self.conn.execute(
                 """
                 INSERT INTO chunks (
                   chunk_id, repo_id, source_kind, source_ref, file_path,
                   item_number, title, content_sha256, is_untrusted, text, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(chunk_id) DO UPDATE SET
-                  source_ref = excluded.source_ref,
-                  file_path = excluded.file_path,
-                  item_number = excluded.item_number,
-                  title = excluded.title,
-                  content_sha256 = excluded.content_sha256,
-                  is_untrusted = excluded.is_untrusted,
-                  text = excluded.text,
-                  updated_at = excluded.updated_at
                 """,
                 (
                     ch.chunk_id,
@@ -1435,16 +1487,67 @@ class PackratStore(LiveStoreMixin):
                     ts,
                 ),
             )
-            self.conn.execute(
-                "DELETE FROM chunks_fts WHERE chunk_id = ?", (ch.chunk_id,)
-            )
+            rowid = int(cur.lastrowid)
             self.conn.execute(
                 """
-                INSERT INTO chunks_fts (chunk_id, source_kind, source_ref, title, text)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO chunks_fts (rowid, chunk_id, source_kind, source_ref, title, text)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (ch.chunk_id, ch.source_kind, ch.source_ref, ch.title, ch.text),
+                (rowid, ch.chunk_id, ch.source_kind, ch.source_ref, ch.title, ch.text),
             )
+            return
+
+        rowid = int(existing["rowid"])
+        fts_changed = (
+            existing["content_sha256"] != ch.content_sha256
+            or existing["title"] != ch.title
+            or existing["text"] != ch.text
+        )
+        if fts_changed:
+            self.conn.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
+        self.conn.execute(
+            """
+            UPDATE chunks SET
+              source_ref = ?,
+              file_path = ?,
+              item_number = ?,
+              title = ?,
+              content_sha256 = ?,
+              is_untrusted = ?,
+              text = ?,
+              updated_at = ?
+            WHERE rowid = ?
+            """,
+            (
+                ch.source_ref,
+                ch.file_path,
+                ch.item_number,
+                ch.title,
+                ch.content_sha256,
+                1 if ch.is_untrusted else 0,
+                ch.text,
+                ts,
+                rowid,
+            ),
+        )
+        if fts_changed:
+            self.conn.execute(
+                """
+                INSERT INTO chunks_fts (rowid, chunk_id, source_kind, source_ref, title, text)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (rowid, ch.chunk_id, ch.source_kind, ch.source_ref, ch.title, ch.text),
+            )
+
+    def _upsert_chunks_in_tx(
+        self, chunks: Sequence[TextChunk], *, now: float | None = None
+    ) -> None:
+        """Upserts chunks and keeps chunks_fts synchronized inside a transaction."""
+        if not chunks:
+            return
+        now_iso = iso_at(now)
+        for ch in chunks:
+            self._upsert_single_chunk_in_tx(ch, now_iso)
         self._bump_vector_cache_seq_in_tx(now)
 
     def get_unembedded_chunks(

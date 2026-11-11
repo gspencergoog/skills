@@ -295,6 +295,7 @@ metadata:
   category: dev
 allowed-tools:
   - Bash
+disable-slash-command: true
 ---
 # Body
 """

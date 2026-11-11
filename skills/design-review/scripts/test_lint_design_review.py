@@ -19,7 +19,7 @@ VALID_REPORT_WITH_NA = """# Design Review: Store v2
 Reviewed the [store_v2.md](file:///tmp/store_v2.md) specification against repository contracts.
 Citation audit: 2 checked, 0 dropped.
 Overall Score: 49/60
-Verdict: Revisions Recommended
+Verdict: Minor Revisions Needed
 
 ## Principle Scorecard
 | Principle | Score | Assessment |
@@ -94,7 +94,7 @@ class LintDesignReviewTests(unittest.TestCase):
             out_json = Path(tmp) / "design_review_results.json"
             payload = ldr.export_design_review_json(parsed, out_json)
             self.assertTrue(out_json.is_file())
-            self.assertEqual(payload["summary"]["verdict"], "Revisions Recommended")
+            self.assertEqual(payload["summary"]["verdict"], "Minor Revisions Needed")
             self.assertEqual(
                 payload["summary"]["citation_audit"], {"checked": 2, "dropped": 0}
             )
@@ -150,7 +150,7 @@ class LintDesignReviewTests(unittest.TestCase):
         """Flags leaked Playbook Feedback, contradictory verdict, duplicate row, and bad IDs."""
         bad_struct = (
             VALID_REPORT_WITH_NA.replace(
-                "Verdict: Revisions Recommended", "Verdict: Ready for /plan"
+                "Verdict: Minor Revisions Needed", "Verdict: Ready"
             )
             .replace(
                 "| Ergonomics & Coherence (`ergonomics-coherence`) | 10/10 | Diagrams and type signatures match on disk. |",

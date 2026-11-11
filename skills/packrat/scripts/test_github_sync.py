@@ -12,11 +12,14 @@ from unittest.mock import patch
 
 from db_store import PackratStore
 from github_sync import (
+    ADAPTIVE_PAGE_COOLDOWN,
     OPEN_PRS_QUERY,
+    PAGE_SIZE_LADDER,
     PRS_DELTA_QUERY,
     GhAuthProbe,
     GhCommandResult,
     _classify_gh_failure,
+    _fetch_graphql_page_with_halving,
     _parse_pr_node,
     _persist_discussions,
     _persist_issues,
@@ -1046,6 +1049,211 @@ class TestGhAuthProbeAndCircuitBreaker(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_page_ladder_steps_down_to_two_and_one_with_backoff(self) -> None:
+        recorded_sizes: list[str] = []
+        sleeps: list[float] = []
+
+        def runner(args: Sequence[str], _timeout: int) -> GhCommandResult:
+            size_arg = next((a for a in args if a.startswith("pageSize=")), "")
+            recorded_sizes.append(size_arg)
+            if size_arg != "pageSize=1":
+                return GhCommandResult(1, "", "gh: HTTP 502")
+            payload = {
+                "data": {
+                    "repository": {
+                        "pullRequests": {
+                            "totalCount": 1,
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [
+                                _pr_node(99, head_owner="octo-org", cross_repo=False)
+                            ],
+                        }
+                    }
+                }
+            }
+            return GhCommandResult(0, json.dumps(payload), "")
+
+        outcome = _fetch_graphql_page_with_halving(
+            "octo-org",
+            "widgets",
+            PRS_DELTA_QUERY,
+            "pullRequests",
+            None,
+            runner,
+            sleep_fn=sleeps.append,
+        )
+        self.assertIsNotNone(outcome.connection)
+        self.assertEqual(outcome.used_page_size, 1)
+        self.assertEqual(
+            recorded_sizes,
+            ["pageSize=25", "pageSize=12", "pageSize=5", "pageSize=2", "pageSize=1"],
+        )
+        self.assertEqual(sleeps, [1.0, 3.0, 9.0, 9.0])
+
+    def test_transport_error_retries_once_at_same_page_size(self) -> None:
+        recorded_sizes: list[str] = []
+        sleeps: list[float] = []
+        attempts = 0
+
+        def runner(args: Sequence[str], _timeout: int) -> GhCommandResult:
+            nonlocal attempts
+            attempts += 1
+            size_arg = next((a for a in args if a.startswith("pageSize=")), "")
+            recorded_sizes.append(size_arg)
+            if attempts == 1:
+                return GhCommandResult(
+                    1,
+                    "",
+                    'Post "https://api.github.com/graphql": net/http: TLS handshake timeout',
+                )
+            payload = {
+                "data": {
+                    "repository": {
+                        "issues": {
+                            "totalCount": 1,
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [],
+                        }
+                    }
+                }
+            }
+            return GhCommandResult(0, json.dumps(payload), "")
+
+        outcome = _fetch_graphql_page_with_halving(
+            "octo-org",
+            "widgets",
+            PRS_DELTA_QUERY,
+            "issues",
+            None,
+            runner,
+            sleep_fn=sleeps.append,
+        )
+        self.assertIsNotNone(outcome.connection)
+        self.assertEqual(outcome.used_page_size, 25)
+        self.assertEqual(recorded_sizes, ["pageSize=25", "pageSize=25"])
+        self.assertEqual(sleeps, [1.0])
+
+    def test_adaptive_page_size_holds_cooldown_before_stepping_up(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                page_first_sizes: list[str] = []
+                total_pages = ADAPTIVE_PAGE_COOLDOWN + 2
+
+                def runner(args: Sequence[str], _timeout: int) -> GhCommandResult:
+                    cmd = " ".join(args)
+                    if "/events" in cmd:
+                        return GhCommandResult(
+                            0, 'HTTP/2.0 200 OK\r\nETag: "e1"\r\n\r\n[]', ""
+                        )
+                    if "issues(first:" not in cmd:
+                        empty = {
+                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            "nodes": [],
+                        }
+                        return GhCommandResult(
+                            0,
+                            json.dumps(
+                                {
+                                    "data": {
+                                        "repository": {
+                                            "pullRequests": empty,
+                                            "discussions": empty,
+                                        }
+                                    }
+                                }
+                            ),
+                            "",
+                        )
+                    size_arg = next((a for a in args if a.startswith("pageSize=")), "")
+                    cursor = next(
+                        (a.split("=", 1)[1] for a in args if a.startswith("cursor=")),
+                        None,
+                    )
+                    page_idx = 0 if cursor is None else int(cursor[1:])
+                    if page_idx == 0 and size_arg in (
+                        "pageSize=25",
+                        "pageSize=12",
+                        "pageSize=5",
+                    ):
+                        return GhCommandResult(1, "", "gh: HTTP 502")
+                    page_first_sizes.append(size_arg)
+                    has_next = page_idx + 1 < total_pages
+                    next_cursor = f"C{page_idx + 1}" if has_next else None
+                    node = {
+                        "id": f"I_{100 - page_idx}",
+                        "number": 100 - page_idx,
+                        "title": f"Issue {100 - page_idx}",
+                        "state": "OPEN",
+                        "updatedAt": f"2026-10-{(30 - (page_idx % 28)):02d}T00:00:00Z",
+                    }
+                    payload = {
+                        "data": {
+                            "repository": {
+                                "issues": {
+                                    "totalCount": total_pages,
+                                    "pageInfo": {
+                                        "hasNextPage": has_next,
+                                        "endCursor": next_cursor,
+                                    },
+                                    "nodes": [node],
+                                }
+                            }
+                        }
+                    }
+                    return GhCommandResult(0, json.dumps(payload), "")
+
+                stats = sync_github_metadata(store, repo, runner=runner)
+                self.assertEqual(stats.errors, [])
+                self.assertEqual(stats.issues_upserted, total_pages)
+                # Page 0 succeeded at pageSize=2, then 20 cooldown pages ran at pageSize=2,
+                # and the following page stepped back up one rung to pageSize=5.
+                self.assertEqual(
+                    page_first_sizes,
+                    ["pageSize=2"] * (1 + ADAPTIVE_PAGE_COOLDOWN) + ["pageSize=5"],
+                )
+            finally:
+                store.close()
+
+    def test_backfill_max_pages_zero_skips_backfill_walk_and_marks_incomplete(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                inner = PagedIssuesRunner(THREE_ISSUE_PAGES)
+                stats = sync_github_metadata(
+                    store, repo, runner=inner, backfill_max_pages=0
+                )
+                self.assertEqual(inner.issue_cursors, [])
+                self.assertEqual(
+                    stats.backfill_incomplete, ["issues", "prs", "discussions"]
+                )
+                # When backfill is in progress (cursor + watermark present), backfill_max_pages=0
+                # runs only the incremental delta walk and skips resuming from cursor C1.
+                store.update_repo_sync_state(
+                    repo.repo_id, issues_watermark="2026-10-29T00:00:00Z"
+                )
+                store.set_backfill_state(
+                    repo.repo_id, "issues", cursor="C1", done_at=None
+                )
+                reloaded = store.get_repo_by_id(repo.repo_id)
+                assert reloaded is not None
+                inner2 = PagedIssuesRunner(THREE_ISSUE_PAGES)
+                stats2 = sync_github_metadata(
+                    store,
+                    reloaded,
+                    runner=inner2,
+                    backfill_max_pages=0,
+                    skip_events_poll=True,
+                )
+                self.assertEqual(inner2.issue_cursors, [None])
+                self.assertIn("issues", stats2.backfill_incomplete)
+            finally:
+                store.close()
+
 
 def _rate_header_block(status: str, remaining: int, resource: str = "graphql") -> str:
     """Builds a `gh api -i` header block with `X-RateLimit-*` headers for one response."""
@@ -1480,7 +1688,7 @@ class TestOpenPrRefetch(unittest.TestCase):
         runner = OpenPrsRunner("error")
         stats = sync_github_metadata(self.store, self._reload(), runner=runner)
 
-        self.assertEqual(len(runner.open_cursors), 3)  # page-size halving 25 -> 12 -> 5
+        self.assertEqual(len(runner.open_cursors), len(PAGE_SIZE_LADDER))
         self.assertEqual(stats.deferred_streams, [])
         self.assertEqual(len(stats.errors), 1)
         self.assertIn("github open_prs sync failed", stats.errors[0])
@@ -1706,7 +1914,11 @@ class TestMentionQueueing(unittest.TestCase):
             "comments": {
                 "nodes": [
                     {"id": "C1", "body": "Looks odd.", "author": {"login": "bob"}},
-                    {"id": "C2", "body": "Tracked in #31", "author": {"login": "alice"}},
+                    {
+                        "id": "C2",
+                        "body": "Tracked in #31",
+                        "author": {"login": "alice"},
+                    },
                 ]
             },
         }
@@ -1717,7 +1929,9 @@ class TestMentionQueueing(unittest.TestCase):
     def test_review_and_comment_bodies_are_queued(self) -> None:
         node = self._mention_pr(
             "Body",
-            reviews={"nodes": [{"id": "R1", "state": "COMMENTED", "body": "dup of #41"}]},
+            reviews={
+                "nodes": [{"id": "R1", "state": "COMMENTED", "body": "dup of #41"}]
+            },
             comments={"nodes": [{"id": "IC1", "body": "also #42"}]},
         )
         _persist_prs(self.store, self.repo, [node], self.stats)

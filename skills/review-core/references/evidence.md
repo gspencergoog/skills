@@ -36,7 +36,7 @@ Question exists so a reviewer never has to inflate a hunch into a `high` or `cri
 
 ## Hypotheses
 
-Before reading the diff line by line, work from explicit, falsifiable hypotheses. The orchestrator seeds a few hypotheses in the prompt; add up to 5 of your own before investigating in detail.
+Before reading the target line by line, work from explicit, falsifiable hypotheses. The orchestrator seeds a few hypotheses in the prompt; add up to 5 of your own before investigating in detail.
 
 Each hypothesis is a specific claim that a file read or command can confirm or disprove:
 
@@ -47,18 +47,18 @@ Each hypothesis is a specific claim that a file read or command can confirm or d
 
 Not a hypothesis: "the error handling could be better." Nothing falsifies that, so investigating it produces opinion rather than findings.
 
-Theme hypotheses instantiated from a focus playbook ([focus_areas/README.md](focus_areas/README.md)) are seeded hypotheses like any other: report each one as confirmed, disproved, or unresolved.
+Theme hypotheses instantiated from a focus catalog ([code-review focus_areas](../../code-review/references/focus_areas/README.md) or [design-review focus_playbooks](../../design-review/references/focus_playbooks/README.md)) are seeded hypotheses like any other: report each one as confirmed, disproved, or unresolved.
 
 Report the outcome of every seeded and self-added hypothesis:
 
-- **Confirmed** → a finding in `## Review Comments`.
+- **Confirmed** → a finding in the findings section.
 - **Disproved** → a one-line entry in `## Checked and Found Clean`, naming the tier and the disproving evidence.
-- **Unresolved** → a Question in `## Questions` (up to 3 total), naming the check that would settle it.
+- **Unresolved** → a Question (`Q1…`, up to 3 total), naming the check that would settle it.
 - If you skip a seeded hypothesis, state that you skipped it and why. Never drop an assigned hypothesis silently.
 
 ## Investigate the Tree, Not the Diff
 
-The diff is a pointer to where to look, not the state of the codebase. Before filing any finding that depends on surrounding code, check the tree at `HEAD` (within a read budget of at most 25 files outside the diff chunks and the listed context files):
+A diff or isolated spec is a pointer to where to look, not the state of the codebase. Before filing any finding that depends on surrounding code, check the tree at `HEAD` (within a read budget of at most 25 files outside the staged chunks and listed context files):
 
 - **Removal claims**: A deletion hunk does not mean the code or coverage is gone; it may have moved. Search `HEAD` with `rg` before claiming a symbol, call, or test was removed.
 - **API misuse claims**: Read the target function's signature, declaration, and docstring before claiming a caller passes the wrong type, order, or semantics.
@@ -78,10 +78,10 @@ Before writing up any surviving finding, try to disprove it using the cheapest c
 
 Four falsification techniques cover most code findings:
 
-- **Mutation testing** (under `--verify` in your own reserved checkout; mental trace otherwise): when claiming a test is tautological or misses a bug in changed code, apply one small mutation (invert a condition, remove a guard, return a constant, or revert the fix hunk) and run the targeted test; see [verification.md](verification.md#mutation-testing). If the test fails, the behavior is already guarded—revert and drop the finding. If the test still passes, revert and report the gap at `Executed`.
+- **Mutation testing** (under `--verify` in your own reserved checkout; mental trace otherwise): when claiming a test is tautological or misses a bug in changed code, apply one small mutation (invert a condition, remove a guard, return a constant, or revert the fix hunk) and run the targeted test; see [verification.md](../../code-review/references/verification.md#mutation-testing). If the test fails, the behavior is already guarded—revert and drop the finding. If the test still passes, revert and report the gap at `Executed`.
 - **Call-site audit**: search all invocations with `rg` across the repository to verify whether callers actually reach the path or pass the construct in practice.
 - **Dependency contract inspection**: open the actual source definitions, headers, or type declarations of dependencies on disk (or fetch the official reference page) rather than assuming behavior from memory.
-- **Execution-graph query**: for questions about build ordering, task dependencies, or lifecycle hooks, run the toolchain's dry-run or task-graph query (`--dry-run`, `make -n`, `bazel query`, `gradle tasks`) rather than guessing from config files. These read-only queries belong to tier 1 in [verification.md](verification.md#tiers).
+- **Execution-graph query**: for questions about build ordering, task dependencies, or lifecycle hooks, run the toolchain's dry-run or task-graph query (`--dry-run`, `make -n`, `bazel query`, `gradle tasks`) rather than guessing from config files. These read-only queries belong to tier 1 in [verification.md](../../code-review/references/verification.md#tiers).
 
 Drop any candidate finding that fails the falsification pass, or downgrade it to match the surviving evidence.
 
@@ -100,7 +100,9 @@ Watch for and eliminate these eight failure modes during self-critique:
 
 ## Formats
 
-Every finding in `## Review Comments` uses a `### <ID>. <short claim>` heading (`C1…`, `H1…`, `M1…`, `L1…` after synthesis; reviewers may use provisional IDs or severity labels before Step 5 numbers them) and these fields:
+Every finding uses a `### <ID>. <short claim>` heading (`C1…`, `H1…`, `M1…`, `L1…` after synthesis; reviewers may use provisional IDs or severity labels before Step 5 numbers them). Visible comment prose (`Body` + `Why` + unfenced `Suggestion`) is capped at **120 words and 6 sentences** (every sentence $\le 30$ words, cognitive complexity $\text{PCC} \le 5$, zero banned AI words or em-dashes). Supporting traces up to 150 words go in `Details`.
+
+### Code Review Finding Layout
 
 ```markdown
 ### H1. <short claim>
@@ -108,26 +110,47 @@ Every finding in `## Review Comments` uses a `### <ID>. <short claim>` heading (
 - **Line**: `<line number in the new file on a changed line>`
 - **Severity**: `critical | high | medium | low`
 - **Category**: `<document category>` (document files only)
-- **Focus**: `<theme-id>` (focus reviewers only; see [lanes.md](lanes.md#focus-mandate-block))
+- **Focus**: `<theme-id>` (focus reviewers only; see [focus_blocks.md](focus_blocks.md#focus-mandate-block))
 - **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or a line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>
-- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined comment prose <= 80 words and <= 4 sentences standalone, or <= 120 words and <= 6 sentences under `pr-review`)>
+- **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined visible prose <= 120 words and <= 6 sentences)>
 - **Suggestion**: <smallest compilable fix, replacement text, or specific question>
-- **Details**: <optional, up to 150 words, may continue on indented lines: root-cause trace, affected callers, or alternatives you rejected. Exported inside a collapsed `<details>` block with the Evidence detail and repro test, and never counted toward the visible comment caps>
+- **Details**: <optional, up to 150 words, may continue on indented lines: root-cause trace, affected callers, or alternatives you rejected. Exported inside a collapsed `<details>` block and never counted toward the visible comment caps>
 ```
 
-Every entry in `## Questions` (at most 3 per review) uses `### Q1. <claim phrased as a question>`:
+### Design Review Finding Layout
+
+```markdown
+### H1. <short architectural claim>
+- **Target**: `path/to/file:42` (or `path/to/spec.md:88 (## Data Model)`)
+- **Door**: `one-way | two-way`
+- **Severity**: `critical | high | medium | low`
+- **Principle**: `<one of the 7 canonical principle IDs>`
+- **Focus**: `<playbook-id>` (optional; include when a focus playbook applies)
+- **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>`: <command output, exact quote with path:line, or line-cited trace>
+- **Body**: <1 to 3 concise sentences stating the structural flaw without restating the spec>
+- **Why**: <1 concise sentence naming what breaks, drifts, or amplifies change if built as-is (combined visible prose <= 120 words and <= 6 sentences)>
+- **Suggestion**: <concrete counter-design, replacement text, or fitness test with at most one code fence>
+- **Details**: <optional root-cause trace or rejected alternatives, <= 150 words>
+```
+
+### Questions (`Q1…`, at most 3 per review)
+
+Use `File` + `Line` for `code-review`, or `Target` for `design-review`:
 
 ```markdown
 ### Q1. <claim phrased as a question>
 - **File**: `path/to/file`
 - **Line**: `<line number in the new file>`
+  (or `- **Target**: \`path/to/file:15\`` in design-review)
 - **Evidence**: `<Speculation | Deduction>` — <what was checked and where the trace stopped>
 - **Why**: <1 short sentence (<= 30 words): if true, what breaks and what severity (`critical | high | medium`) it would carry>
 - **To settle**: <the exact file, symbol, or command that answers the question>
 ```
 
-Every line in `## Checked and Found Clean` (at most 10 lines per review) pairs a disproved hypothesis with its tier and disproving evidence:
+### Checked and Found Clean (at most 10 lines per review)
+
+Every line pairs a disproved hypothesis with its tier and disproving evidence:
 
 ```markdown
 - <hypothesis>: `<Executed | Read | Fetched | Deduction>` — <command output or path:line quote that disproved it>

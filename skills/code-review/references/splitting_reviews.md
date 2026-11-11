@@ -37,7 +37,7 @@ When a component split and `--panel` both apply, each partition gets an A/B pair
 
 #### By Theme (focus reviewers)
 
-A focus reviewer splits by mechanism instead: it reads the whole diff through one cross-cutting theme ([lanes.md](lanes.md#focus-blocks)). When a large diff carries three strong themes in different components, consider a component split where each partition carries its own theme, so each focus reviewer reads only the chunks where its mechanism lives.
+A focus reviewer splits by mechanism instead: it reads the whole diff through one cross-cutting theme ([focus_blocks.md](../../review-core/references/focus_blocks.md)). When a large diff carries three strong themes in different components, consider a component split where each partition carries its own theme, so each focus reviewer reads only the chunks where its mechanism lives.
 
 ### 4. Deletion-Heavy Diffs
 

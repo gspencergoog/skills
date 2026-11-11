@@ -237,6 +237,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_repo_kind ON chunks(repo_id, source_kind);
+CREATE INDEX IF NOT EXISTS idx_chunks_repo_file ON chunks(repo_id, file_path);
 CREATE INDEX IF NOT EXISTS idx_chunks_sha ON chunks(content_sha256);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
@@ -245,6 +246,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
   source_ref UNINDEXED,
   title,
   text,
+  content='chunks',
+  content_rowid='rowid',
   tokenize='porter unicode61'
 );
 
