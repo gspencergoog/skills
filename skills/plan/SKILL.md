@@ -84,6 +84,7 @@ Draft the plan according to the chosen template and write it using `write_file` 
   - `/run-workflow` (`parallel()` / `pipeline()`) when tracks follow a uniform per-shard recipe across many files or modules.
   - Single-agent sequential execution when the plan touches 1 to 2 files or has a strictly linear dependency chain.
   - Reserve `invoke_subagent` strictly for single-shot, isolated tasks (such as a single read-only reviewer when swarm is not active).
+- When the work spans several areas (for example a spec, a core library, and several clients), write one plan document per area and a short master index that links them and gives the order in which the PRs land. One long plan dilutes attention on each area. With `/swarm`, give each area plan to a fresh worker, use one reviewer that reads all of the plans for conflicts between them, and have the coordinator write the index. Organize each area plan by PR.
 - Format every planned file entry as a task list item without heading hashes (never write `- [ ] #### ...`):
   - `- [ ] [NEW] [basename](file:///absolute/path/to/file)`
   - `- [ ] [MODIFY] [basename](file:///absolute/path/to/file)`

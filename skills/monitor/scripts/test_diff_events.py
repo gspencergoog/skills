@@ -51,6 +51,8 @@ class TestDiffEvents(unittest.TestCase):
         self.assertTrue(all(e.actionable for e in events))
         thread_ev = next(e for e in events if e.kind == "human_threads")
         self.assertEqual(thread_ev.detail["thread_ids"], ["t_bot", "t_human"])
+        self.assertEqual(thread_ev.detail["bot_thread_ids"], ["t_bot"])
+        self.assertEqual(thread_ev.detail["human_thread_ids"], ["t_human"])
 
     def test_start_transitions_produce_no_events_and_completion_fires(self) -> None:
         ctx = DiffContext(viewer="alice")
@@ -142,7 +144,11 @@ class TestDiffEvents(unittest.TestCase):
             last_comment_at="2026-10-27T21:15:00Z",
         )
         s3 = make_snapshot(threads=[t1_bot])
-        self.assertEqual([e.kind for e in diff_snapshots(s1, s3, ctx)], ["human_threads"])
+        evs_bot = diff_snapshots(s1, s3, ctx)
+        self.assertEqual([e.kind for e in evs_bot], ["human_threads"])
+        self.assertEqual(evs_bot[0].detail["bot_thread_ids"], ["t1"])
+        self.assertEqual(evs_bot[0].detail["human_thread_ids"], [])
+        self.assertIn("bot review comment thread(s)", evs_bot[0].summary)
 
         # Viewer's own reply -> does not fire.
         t1_self = make_thread(

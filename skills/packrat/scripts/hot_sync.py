@@ -11,7 +11,7 @@ number-independent fields live in one shared fragment.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -483,9 +483,14 @@ def parse_latest_reviews(conn: Any) -> list[LatestReviewRecord]:
     return list(by_author.values())
 
 
+def _parse_check_contexts(contexts: Any) -> list[CheckRunRecord]:
+    """Parses all check-run and status-context nodes from a `contexts` connection."""
+    return [c for c in map(parse_check_context, _nodes(contexts)) if c is not None]
+
+
 def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     """Parses one aliased PR node (first pages of threads and contexts) into a snapshot."""
-    contexts = _nodes(_dict(_rollup(node).get("contexts")))
+    contexts = _dict(_rollup(node).get("contexts"))
     raw_repo = _dict(node.get("repository")).get("nameWithOwner")
     repo_full_name = (
         str(raw_repo) if isinstance(raw_repo, str) and "/" in raw_repo else None
@@ -502,7 +507,7 @@ def parse_hot_node(repo_id: int, node: dict[str, Any]) -> HotPrSnapshot:
     ]
     return HotPrSnapshot(
         record=parse_pr_live(repo_id, node),
-        checks=[c for c in map(parse_check_context, contexts) if c is not None],
+        checks=_parse_check_contexts(contexts),
         review_requests=_parse_review_requests(node),
         reviews=reviews,
         latest_reviews=parse_latest_reviews(node.get("reviews")),
@@ -603,6 +608,7 @@ class HotRefresher:
         self.batch_size = max(1, batch_size)
         self.worker = worker
         self.priority = priority
+        self._node_ids: dict[str, str] = {}
 
     def _query(self, query: str) -> dict[str, Any]:
         """Runs `query` through the transport and returns its `data` object."""
@@ -616,17 +622,33 @@ class HotRefresher:
 
         Keys whose PR does not exist (or is not visible) are left out.
         """
-        known = self.store.get_node_ids(keys)
-        missing = [k for k in dict.fromkeys(keys) if k not in known]
+        unique = list(dict.fromkeys(keys))
+        known: dict[str, str] = {
+            k: self._node_ids[k] for k in unique if k in self._node_ids
+        }
+        uncached = [k for k in unique if k not in known]
+        if uncached:
+            db_known = self.store.get_node_ids(uncached)
+            known.update(db_known)
+            self._node_ids.update(db_known)
+        missing = [k for k in uncached if k not in known]
         for start in range(0, len(missing), NODE_ID_BATCH_SIZE):
             chunk = missing[start : start + NODE_ID_BATCH_SIZE]
-            data = self._query(build_node_id_query(chunk))
-            for i, key in enumerate(chunk):
-                node_id = _dict(_dict(data.get(f"k{i}")).get("pullRequest")).get("id")
-                if node_id:
-                    self.store.set_node_id(key, str(node_id))
-                    known[key] = str(node_id)
+            self._fetch_missing_node_ids(chunk, known)
         return known
+
+    def _fetch_missing_node_ids(
+        self, chunk: Sequence[str], known: dict[str, str]
+    ) -> None:
+        """Queries GraphQL for one chunk of missing PR node IDs and caches them."""
+        data = self._query(build_node_id_query(chunk))
+        for i, key in enumerate(chunk):
+            node_id = _dict(_dict(data.get(f"k{i}")).get("pullRequest")).get("id")
+            if node_id:
+                nid = str(node_id)
+                self.store.set_node_id(key, nid)
+                known[key] = nid
+                self._node_ids[key] = nid
 
     def _extra_threads(
         self, node_id: str, after: str | None
@@ -700,20 +722,30 @@ class HotRefresher:
             rec.repo_id, rec.number, snap.latest_reviews
         )
         changed |= self._write_threads(rec.repo_id, rec.number, snap.threads)
-        changed |= self.store.upsert_item_comments(
-            rec.repo_id, "pr", rec.number, snap.comments
-        )
+        if snap.comments:
+            changed |= self.store.upsert_item_comments(
+                rec.repo_id, "pr", rec.number, snap.comments
+            )
         return changed
 
-    def _stored_repo_for_node(
+    def _get_or_ensure_repo(self, owner: str, name: str) -> Any:
+        """Returns an existing repo via `get_repo` or registers an `items` repo."""
+        get_repo = getattr(self.store, "get_repo", None)
+        if get_repo is not None:
+            existing = get_repo(f"{owner}/{name}")
+            if existing is not None:
+                return existing
+        return self.store.ensure_items_repo(owner, name)
+
+    def _find_or_ensure_node_repo(
         self, node: dict[str, Any], repo_name: str, requested_key: str | None
     ) -> Any:
-        """Finds the stored repository for `node` or `requested_key`."""
+        """Looks up a repo by `node_id` on mismatch, falling back to `ensure_items_repo`."""
         find_by_node = getattr(self.store, "find_repo_by_node_id", None)
         node_id = node.get("id")
         if find_by_node is not None and isinstance(node_id, str) and node_id:
             prior = find_by_node(node_id)
-            if prior is not None and prior.full_name.lower() != repo_name.lower():
+            if prior is not None:
                 return prior
         if requested_key is not None:
             req_owner, req_name, _ = parse_item_key(requested_key)
@@ -721,29 +753,139 @@ class HotRefresher:
         owner, name = repo_name.split("/", 1)
         return self.store.ensure_items_repo(owner, name)
 
+    def _stored_repo_for_node(
+        self,
+        node: dict[str, Any],
+        repo_name: str,
+        requested_key: str | None,
+        repo_cache: dict[str, Any] | None = None,
+    ) -> Any:
+        """Finds the stored repository for `node` or `requested_key`."""
+        cache_key = repo_name.lower()
+        if repo_cache is not None and cache_key in repo_cache:
+            return repo_cache[cache_key]
+        if requested_key is not None:
+            req_owner, req_name, _ = parse_item_key(requested_key)
+            if f"{req_owner}/{req_name}".lower() == cache_key:
+                repo = self._get_or_ensure_repo(req_owner, req_name)
+                if repo_cache is not None:
+                    repo_cache[cache_key] = repo
+                return repo
+        repo = self._find_or_ensure_node_repo(node, repo_name, requested_key)
+        if repo_cache is not None and repo.full_name.lower() == cache_key:
+            repo_cache[cache_key] = repo
+        return repo
+
     def _resolve_node_repo(
-        self, node: dict[str, Any], repo_name: str, requested_key: str | None
+        self,
+        node: dict[str, Any],
+        repo_name: str,
+        requested_key: str | None,
+        repo_cache: dict[str, Any] | None = None,
     ) -> Any:
         """Resolves the canonical repository for `repo_name`, merging an alias when needed."""
-        stored = self._stored_repo_for_node(node, repo_name, requested_key)
+        stored = self._stored_repo_for_node(node, repo_name, requested_key, repo_cache)
         merge_fn = getattr(self.store, "merge_repo_alias", None)
         if merge_fn is not None and stored.full_name.lower() != repo_name.lower():
-            return merge_fn(stored.repo_id, repo_name)
+            merged = merge_fn(stored.repo_id, repo_name)
+            if repo_cache is not None:
+                repo_cache[repo_name.lower()] = merged
+            return merged
         return stored
 
+    def _apply_rollup_only(
+        self,
+        rec: PrLiveRecord,
+        node: dict[str, Any],
+        fp: tuple[str | None, str | None, str | None, int | None],
+        canon_key: str,
+        unchanged_keys: list[str],
+    ) -> str | None:
+        """Handles a PR whose `(updated_at, head_sha)` matches `fp` (only rollup/checks may differ)."""
+        contexts = _dict(_rollup(node).get("contexts"))
+        after_ctx = _page_info(contexts)
+        if (rec.rollup_state, rec.rollup_total) == (fp[2], fp[3]):
+            unchanged_keys.append(canon_key)
+            if after_ctx is None and rec.head_sha:
+                checks = _parse_check_contexts(contexts)
+                if self.store.replace_check_runs(
+                    rec.repo_id, rec.number, rec.head_sha, checks
+                ):
+                    return canon_key
+            return None
+        checks = _parse_check_contexts(contexts)
+        node_id = str(node.get("id") or "")
+        checks.extend(self._extra_contexts(node_id, rec.number, after_ctx))
+        changed = bool(self.store.upsert_pr_live(rec))
+        if rec.head_sha:
+            changed |= self.store.replace_check_runs(
+                rec.repo_id, rec.number, rec.head_sha, checks
+            )
+        return canon_key if changed else None
+
     def _apply_node(
-        self, node: dict[str, Any], requested_key: str | None = None
+        self,
+        node: dict[str, Any],
+        requested_key: str | None = None,
+        *,
+        fingerprints: Mapping[
+            str, tuple[str | None, str | None, str | None, int | None]
+        ]
+        | None = None,
+        unchanged_keys: list[str] | None = None,
+        repo_cache: dict[str, Any] | None = None,
     ) -> str | None:
         """Parses, completes, and stores one PR node; returns its key when it changed."""
         repo_name = str(_dict(node.get("repository")).get("nameWithOwner") or "")
         if "/" not in repo_name or node.get("number") is None:
             return None
-        repo = self._resolve_node_repo(node, repo_name, requested_key)
+        repo = self._resolve_node_repo(node, repo_name, requested_key, repo_cache)
+        rec = parse_pr_live(repo.repo_id, node)
+        canon_key = format_item_key(repo.owner, repo.name, rec.number)
+        if isinstance(rec.node_id, str) and rec.node_id:
+            self._node_ids[canon_key] = rec.node_id
+        fp = fingerprints.get(canon_key) if fingerprints else None
+        if (
+            fp is not None
+            and unchanged_keys is not None
+            and (rec.updated_at, rec.head_sha) == (fp[0], fp[1])
+        ):
+            return self._apply_rollup_only(rec, node, fp, canon_key, unchanged_keys)
         snap = parse_hot_node(repo.repo_id, node)
         self._complete(snap, node)
         if not self._write(snap):
             return None
-        return format_item_key(repo.owner, repo.name, snap.record.number)
+        return canon_key
+
+    def _split_refresh_batch(
+        self,
+        targets: Sequence[tuple[str, int]],
+        requested_keys: Sequence[str] | None,
+    ) -> list[str]:
+        """Splits a failed batch in half and refreshes each sub-batch."""
+        mid = len(targets) // 2
+        left_keys = requested_keys[:mid] if requested_keys is not None else None
+        right_keys = requested_keys[mid:] if requested_keys is not None else None
+        return self._refresh_batch(targets[:mid], left_keys) + self._refresh_batch(
+            targets[mid:], right_keys
+        )
+
+    def _batch_fingerprints(
+        self, requested_keys: Sequence[str] | None
+    ) -> dict[str, tuple[str | None, str | None, str | None, int | None]]:
+        """Returns stored live PR fingerprints for `requested_keys` when supported by the store."""
+        if not requested_keys:
+            return {}
+        get_fp = getattr(self.store, "get_live_pr_fingerprints", None)
+        return get_fp(requested_keys) if get_fp is not None else {}
+
+    def _touch_unchanged(self, unchanged_keys: Sequence[str]) -> None:
+        """Stamps `live_fetched_at` for PRs whose live payload did not change."""
+        if not unchanged_keys:
+            return
+        touch_fn = getattr(self.store, "touch_live_fetched_at", None)
+        if touch_fn is not None:
+            touch_fn(unchanged_keys)
 
     def _refresh_batch(
         self,
@@ -756,24 +898,30 @@ class HotRefresher:
         except GhApiError as exc:
             if len(targets) <= 1 or exc.status in (401, 403):
                 raise
-            mid = len(targets) // 2
-            left_keys = requested_keys[:mid] if requested_keys is not None else None
-            right_keys = requested_keys[mid:] if requested_keys is not None else None
-            return self._refresh_batch(targets[:mid], left_keys) + self._refresh_batch(
-                targets[mid:], right_keys
-            )
+            return self._split_refresh_batch(targets, requested_keys)
+        fingerprints = self._batch_fingerprints(requested_keys)
+        unchanged_keys: list[str] = []
+        repo_cache: dict[str, Any] = {}
         changed: list[str] = []
         for i in range(len(targets)):
             node = data.get(f"pr{i}")
-            if isinstance(node, dict):
-                req_key = (
-                    requested_keys[i]
-                    if requested_keys is not None and i < len(requested_keys)
-                    else None
-                )
-                key = self._apply_node(node, req_key)
-                if key:
-                    changed.append(key)
+            if not isinstance(node, dict):
+                continue
+            req_key = (
+                requested_keys[i]
+                if requested_keys is not None and i < len(requested_keys)
+                else None
+            )
+            key = self._apply_node(
+                node,
+                req_key,
+                fingerprints=fingerprints,
+                unchanged_keys=unchanged_keys,
+                repo_cache=repo_cache,
+            )
+            if key:
+                changed.append(key)
+        self._touch_unchanged(unchanged_keys)
         return changed
 
     def refresh_hot(self, keys: Sequence[str]) -> list[str]:

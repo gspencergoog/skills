@@ -106,6 +106,8 @@ class _FakeLaunchctl:
                 if argv[1] in self.loaded
                 else CmdResult(113, "", "")
             )
+        if argv[:2] == ("kickstart", "-k"):
+            return CmdResult(0, "", "")
         return CmdResult(1, "", f"unexpected: {argv}")
 
 
@@ -623,6 +625,100 @@ class ServeModeTests(unittest.TestCase):
         self.assertEqual(ctl.loaded, set())
         self.assertFalse(Path(timer_plist).exists())
         self.assertFalse(Path(serve_plist).exists())
+
+    def test_systemd_restarts_active_service_when_heartbeat_version_is_stale(
+        self,
+    ) -> None:
+        from db_store import PackratStore
+        from service import format_service_version
+
+        ctl = _FakeSystemctl()
+        self.assertEqual(self._systemd(ctl).action, "enabled")
+
+        store = PackratStore(self.db_path)
+        try:
+            store.write_heartbeat(pid=1234, version="packrat-serve/2+000000000000")
+        finally:
+            store.close()
+
+        status_stale = get_auto_sync_status(
+            db_path=self.db_path,
+            systemd_dir=self.systemd_dir,
+            backend="systemd-user",
+            runner=ctl,
+        )
+        self.assertTrue(status_stale.code_stale)
+        self.assertEqual(status_stale.expected_version, format_service_version())
+
+        ctl.calls.clear()
+        st_restarted = self._systemd(ctl)
+        self.assertEqual(st_restarted.action, "updated")
+        self.assertIn(("restart", SERVE_SERVICE_NAME), ctl.calls)
+
+        store = PackratStore(self.db_path)
+        try:
+            store.write_heartbeat(pid=1234, version=format_service_version())
+        finally:
+            store.close()
+
+        status_fresh = get_auto_sync_status(
+            db_path=self.db_path,
+            systemd_dir=self.systemd_dir,
+            backend="systemd-user",
+            runner=ctl,
+        )
+        self.assertFalse(status_fresh.code_stale)
+
+        ctl.calls.clear()
+        st_noop = self._systemd(ctl)
+        self.assertEqual(st_noop.action, "already_enabled")
+        self.assertNotIn(("restart", SERVE_SERVICE_NAME), ctl.calls)
+
+    def test_launchd_restarts_active_service_when_heartbeat_version_is_stale(
+        self,
+    ) -> None:
+        from db_store import PackratStore
+        from service import format_service_version
+
+        ctl = _FakeLaunchctl()
+        self.assertEqual(self._launchd(ctl).action, "enabled")
+
+        store = PackratStore(self.db_path)
+        try:
+            store.write_heartbeat(pid=1234, version="packrat-serve/1")
+        finally:
+            store.close()
+
+        status_stale = get_auto_sync_status(
+            db_path=self.db_path,
+            launchd_dir=self.launchd_dir,
+            backend="launchd",
+            runner=ctl,
+        )
+        self.assertTrue(status_stale.code_stale)
+        self.assertEqual(status_stale.expected_version, format_service_version())
+
+        ctl.calls.clear()
+        st_restarted = self._launchd(ctl)
+        self.assertEqual(st_restarted.action, "updated")
+        self.assertIn(
+            ("kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_SERVE_LABEL}"),
+            ctl.calls,
+        )
+
+        store = PackratStore(self.db_path)
+        try:
+            store.write_heartbeat(pid=1234, version=format_service_version())
+        finally:
+            store.close()
+
+        ctl.calls.clear()
+        st_noop = self._launchd(ctl)
+        self.assertEqual(st_noop.action, "already_enabled")
+        self.assertNotIn(
+            ("kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_SERVE_LABEL}"),
+            ctl.calls,
+        )
 
 
 if __name__ == "__main__":

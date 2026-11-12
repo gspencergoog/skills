@@ -442,3 +442,14 @@ ______________________________________________________________________
      ```
 5. **CI Monitoring in Agent Sessions**:
    - Never repeatedly invoke `gh pr checks` in synchronous polling loops. Run `gh pr checks <PR> --watch --fail-fast` as a background task so the process blocks until completion or failure and notifies reactively upon exit.
+
+## Search Qualifier Pitfall: Repeated Qualifiers Are OR
+
+Repeating one search qualifier matches either value, not both. `involves:alice involves:bob` returns every PR that involves Alice or Bob. Two different qualifiers do combine as AND:
+
+```bash
+# PRs that Alice wrote and Bob reviewed
+gh pr list --state all --author alice --search "reviewed-by:bob"
+```
+
+To find threads where two people both took part in any role, search for one of them (`involves:alice`), fetch the author, comments, and reviews of each result, and filter for the other person locally. Split the search by `updated:` date ranges to stay under the 1000-result cap.

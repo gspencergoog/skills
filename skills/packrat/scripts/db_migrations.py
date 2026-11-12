@@ -11,24 +11,43 @@ statements held by read-only readers.
 from __future__ import annotations
 
 import hashlib
+import json
+import re
 import sqlite3
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 try:
     from .db_schema import BACKFILL_COLUMN_DECLS, SCHEMA_SQL
-    from .models import quantize_u8_vector, unpack_f32_vector
+    from .models import (
+        REPO_MODE_ITEMS,
+        iso_at,
+        parse_item_key,
+        quantize_u8_vector,
+        unpack_f32_vector,
+    )
 except ImportError:
     from db_schema import BACKFILL_COLUMN_DECLS, SCHEMA_SQL  # type: ignore[no-redef]
-    from models import quantize_u8_vector, unpack_f32_vector  # type: ignore[no-redef]
+    from models import (  # type: ignore[no-redef]
+        REPO_MODE_ITEMS,
+        iso_at,
+        parse_item_key,
+        quantize_u8_vector,
+        unpack_f32_vector,
+    )
 
 VIEWS_SQL_PATH = Path(__file__).resolve().parent / "views.sql"
+_VIEWS_VERSION_RE = re.compile(r"^\s*--\s*packrat-views-version:\s*([0-9]+)\s*$")
+_VIEWS_FILE_CACHE: dict[Path, tuple[int, int, int, str]] = {}
 
 CONNECTION_PRAGMAS = """
 PRAGMA journal_mode = WAL;
 PRAGMA synchronous = NORMAL;
 PRAGMA foreign_keys = ON;
 PRAGMA busy_timeout = 5000;
+PRAGMA journal_size_limit = 67108864;
+PRAGMA temp_store = MEMORY;
+PRAGMA cache_size = -16000;
 """
 
 LIVE_GITHUB_SQL = """
@@ -527,6 +546,287 @@ def migrate_0011_external_content_chunks_fts(conn: sqlite3.Connection) -> None:
         conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
 
 
+V12_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("repos", "commits_backfill_cursor", "TEXT"),
+    ("repos", "commits_backfill_done_at", "TEXT"),
+    ("code_symbols", "blob_oid", "TEXT"),
+    ("doc_sections", "blob_oid", "TEXT"),
+    ("review_threads", "participants_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("service_heartbeat", "last_ok_at", "TEXT"),
+    ("service_heartbeat", "consecutive_failed_ticks", "INTEGER NOT NULL DEFAULT 0"),
+    ("views_meta", "views_version", "INTEGER NOT NULL DEFAULT 1"),
+)
+
+V12_INDEXES_AND_TABLES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_prs_node_id ON pull_requests(node_id) WHERE node_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_issues_node_id ON issues(node_id) WHERE node_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS indexed_files (
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  blob_oid TEXT NOT NULL,
+  sha TEXT NOT NULL,
+  PRIMARY KEY (repo_id, file_path)
+);
+"""
+
+
+def _login_from_comment_entry(entry: object) -> str | None:
+    """Extracts a trimmed author login from one serialized review-thread comment object."""
+    if not isinstance(entry, dict):
+        return None
+    author = entry.get("author")
+    login = author.get("login") if isinstance(author, dict) else author
+    if isinstance(login, str) and login.strip():
+        return login.strip()
+    return None
+
+
+def _parse_comment_entries(comments_json: object) -> list[object]:
+    """Parses `comments_json` as a JSON list, returning `[]` on invalid or empty input."""
+    if not isinstance(comments_json, str) or not comments_json.strip():
+        return []
+    try:
+        parsed = json.loads(comments_json)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _extract_thread_participants(reviewer: object, comments_json: object) -> str:
+    """Extracts a sorted JSON login list from a review thread's reviewer and comments_json."""
+    logins: set[str] = set()
+    if isinstance(reviewer, str) and reviewer.strip():
+        logins.add(reviewer.strip())
+    for entry in _parse_comment_entries(comments_json):
+        login = _login_from_comment_entry(entry)
+        if login is not None:
+            logins.add(login)
+    return json.dumps(sorted(logins))
+
+
+def _backfill_review_thread_participants(conn: sqlite3.Connection) -> None:
+    """Populates `review_threads.participants_json` for pre-v12 rows."""
+    rows = conn.execute(
+        """
+        SELECT thread_id, reviewer, comments_json FROM review_threads
+        WHERE participants_json = '[]'
+          AND ((reviewer IS NOT NULL AND reviewer <> '') OR comments_json <> '[]')
+        """
+    ).fetchall()
+    if not rows:
+        return
+    updates = [
+        (_extract_thread_participants(r[1], r[2]), str(r[0]))
+        for r in rows
+    ]
+    conn.executemany(
+        "UPDATE review_threads SET participants_json = ? WHERE thread_id = ?",
+        updates,
+    )
+
+
+def migrate_0012_utc_indexes_and_health(conn: sqlite3.Connection) -> None:
+    """Normalizes UTC commit dates, adds node_id indexes, indexed_files, and health columns."""
+    _add_missing_columns(conn, V12_COLUMNS)
+    _execute_script(conn, V12_INDEXES_AND_TABLES_SQL)
+    utc_glob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z"
+    conn.execute(
+        f"""
+        UPDATE commits
+        SET committed_at = COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', committed_at), committed_at)
+        WHERE committed_at NOT GLOB '{utc_glob}'
+        """
+    )
+    conn.execute(
+        f"""
+        UPDATE chunks
+        SET updated_at = COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', updated_at), updated_at)
+        WHERE source_kind = 'commit' AND updated_at <> '' AND updated_at NOT GLOB '{utc_glob}'
+        """
+    )
+    _backfill_review_thread_participants(conn)
+    conn.execute(
+        """
+        DELETE FROM check_runs
+        WHERE EXISTS (
+          SELECT 1 FROM pull_requests p
+          WHERE p.repo_id = check_runs.repo_id
+            AND p.number = check_runs.pr_number
+            AND p.head_sha IS NOT NULL
+            AND p.head_sha <> check_runs.head_oid
+        )
+        """
+    )
+
+
+V13_TABLES_DDL = """
+DROP TABLE IF EXISTS watches_v13;
+CREATE TABLE watches_v13 (
+  consumer TEXT NOT NULL,
+  consumer_id TEXT NOT NULL,
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  item_number INTEGER NOT NULL,
+  freshness_s INTEGER NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  PRIMARY KEY (consumer, consumer_id, repo_id, item_number)
+);
+DROP TABLE IF EXISTS viewer_sets_v13;
+CREATE TABLE viewer_sets_v13 (
+  set_name TEXT NOT NULL,
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  item_number INTEGER NOT NULL,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (set_name, repo_id, item_number)
+);
+DROP TABLE IF EXISTS refresh_requests_v13;
+CREATE TABLE refresh_requests_v13 (
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  item_number INTEGER NOT NULL,
+  requested_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, item_number)
+);
+"""
+
+
+def _resolve_migration_repo_id(
+    conn: sqlite3.Connection,
+    owner: str,
+    name: str,
+    cache: dict[str, int],
+    now_iso: str,
+) -> int:
+    """Resolves or inserts an `items`-mode repository during Migration 13."""
+    full_name = f"{owner}/{name}"
+    key = full_name.lower()
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    alias_row = conn.execute(
+        """
+        SELECT r.repo_id FROM repo_aliases a
+        JOIN repos r ON r.repo_id = a.repo_id
+        WHERE a.alias_full_name = ?
+        """,
+        (full_name,),
+    ).fetchone()
+    if alias_row is not None:
+        repo_id = int(alias_row[0])
+        cache[key] = repo_id
+        return repo_id
+    repo_row = conn.execute(
+        "SELECT repo_id FROM repos WHERE lower(full_name) = lower(?)",
+        (full_name,),
+    ).fetchone()
+    if repo_row is not None:
+        repo_id = int(repo_row[0])
+        cache[key] = repo_id
+        return repo_id
+    cur = conn.execute(
+        """
+        INSERT INTO repos (owner, name, full_name, created_at, updated_at, mode)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (owner, name, full_name, now_iso, now_iso, REPO_MODE_ITEMS),
+    )
+    repo_id = int(cur.lastrowid or 0)
+    cache[key] = repo_id
+    return repo_id
+
+
+def _parse_migration_item_key(
+    conn: sqlite3.Connection,
+    raw_key: object,
+    cache: dict[str, int],
+    now_iso: str,
+) -> tuple[int, int] | None:
+    """Maps an `owner/name#number` key to `(repo_id, item_number)`, or None if malformed."""
+    if not isinstance(raw_key, str):
+        return None
+    try:
+        owner, name, number = parse_item_key(raw_key)
+    except ValueError:
+        return None
+    return _resolve_migration_repo_id(conn, owner, name, cache, now_iso), number
+
+
+def migrate_0013_normalize_live_state_keys(conn: sqlite3.Connection) -> None:
+    """Normalizes `watches`, `viewer_sets`, and `refresh_requests` to `(repo_id, item_number)`."""
+    if "repo_id" in _table_columns(conn, "watches"):
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watches_repo_item ON watches(repo_id, item_number)"
+        )
+        return
+    now_iso = iso_at()
+    cache: dict[str, int] = {}
+    watch_rows = conn.execute(
+        "SELECT consumer, consumer_id, item_key, freshness_s, lease_expires_at FROM watches"
+    ).fetchall()
+    viewer_rows = conn.execute(
+        "SELECT set_name, item_key, first_seen_at, last_seen_at FROM viewer_sets"
+    ).fetchall()
+    refresh_rows = conn.execute(
+        "SELECT item_key, requested_at FROM refresh_requests"
+    ).fetchall()
+
+    _execute_script(conn, V13_TABLES_DDL)
+    for row in watch_rows:
+        parsed = _parse_migration_item_key(conn, row[2], cache, now_iso)
+        if parsed is not None:
+            conn.execute(
+                """
+                INSERT INTO watches_v13 (
+                  consumer, consumer_id, repo_id, item_number, freshness_s, lease_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(consumer, consumer_id, repo_id, item_number) DO UPDATE SET
+                  freshness_s = MIN(watches_v13.freshness_s, excluded.freshness_s),
+                  lease_expires_at = MAX(watches_v13.lease_expires_at, excluded.lease_expires_at)
+                """,
+                (str(row[0]), str(row[1]), parsed[0], parsed[1], int(row[3]), str(row[4])),
+            )
+    for row in viewer_rows:
+        parsed = _parse_migration_item_key(conn, row[1], cache, now_iso)
+        if parsed is not None:
+            conn.execute(
+                """
+                INSERT INTO viewer_sets_v13 (
+                  set_name, repo_id, item_number, first_seen_at, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(set_name, repo_id, item_number) DO UPDATE SET
+                  first_seen_at = MIN(viewer_sets_v13.first_seen_at, excluded.first_seen_at),
+                  last_seen_at = MAX(viewer_sets_v13.last_seen_at, excluded.last_seen_at)
+                """,
+                (str(row[0]), parsed[0], parsed[1], str(row[2]), str(row[3])),
+            )
+    for row in refresh_rows:
+        parsed = _parse_migration_item_key(conn, row[0], cache, now_iso)
+        if parsed is not None:
+            conn.execute(
+                """
+                INSERT INTO refresh_requests_v13 (repo_id, item_number, requested_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(repo_id, item_number) DO UPDATE SET
+                  requested_at = MIN(refresh_requests_v13.requested_at, excluded.requested_at)
+                """,
+                (parsed[0], parsed[1], str(row[1])),
+            )
+
+    conn.execute("DROP VIEW IF EXISTS v_watches")
+    conn.execute("DROP VIEW IF EXISTS v_viewer_items")
+    conn.execute("DROP VIEW IF EXISTS v_service_health")
+    conn.execute("DROP TABLE watches")
+    conn.execute("ALTER TABLE watches_v13 RENAME TO watches")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_watches_repo_item ON watches(repo_id, item_number)"
+    )
+    conn.execute("DROP TABLE viewer_sets")
+    conn.execute("ALTER TABLE viewer_sets_v13 RENAME TO viewer_sets")
+    conn.execute("DROP TABLE refresh_requests")
+    conn.execute("ALTER TABLE refresh_requests_v13 RENAME TO refresh_requests")
+
+
 Migration = Callable[[sqlite3.Connection], None]
 
 MIGRATIONS: tuple[tuple[int, Migration], ...] = (
@@ -541,6 +841,8 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (9, migrate_0009_review_turn_signals),
     (10, migrate_0010_fts_rowid_and_file_index),
     (11, migrate_0011_external_content_chunks_fts),
+    (12, migrate_0012_utc_indexes_and_health),
+    (13, migrate_0013_normalize_live_state_keys),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -557,20 +859,56 @@ def read_schema_version(conn: sqlite3.Connection) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
+def _views_file_meta(path: Path = VIEWS_SQL_PATH) -> tuple[int, str]:
+    """Returns memoized `(views_version, sha256)` keyed by `(resolved_path, mtime_ns, size)`."""
+    resolved = path.resolve()
+    st = resolved.stat()
+    cached = _VIEWS_FILE_CACHE.get(resolved)
+    if cached is not None and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2], cached[3]
+    raw = resolved.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    version = 1
+    for line in raw.decode("utf-8", errors="replace").splitlines()[:20]:
+        match = _VIEWS_VERSION_RE.match(line)
+        if match is not None:
+            version = int(match.group(1))
+            break
+    _VIEWS_FILE_CACHE[resolved] = (st.st_mtime_ns, st.st_size, version, digest)
+    return version, digest
+
+
+def read_views_version(path: Path = VIEWS_SQL_PATH) -> int:
+    """Returns the monotonic `-- packrat-views-version:` integer declared in `path`."""
+    return _views_file_meta(path)[0]
+
+
 def views_sha256(path: Path = VIEWS_SQL_PATH) -> str:
     """Returns the SHA-256 hex digest of the reader views script."""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return _views_file_meta(path)[1]
 
 
-def _stored_views_sha256(conn: sqlite3.Connection) -> str | None:
-    """Returns the views hash recorded in `views_meta`, or None before migration 2."""
+def _stored_views_meta(conn: sqlite3.Connection) -> tuple[str | None, int]:
+    """Returns `(views_sha256, views_version)` from `views_meta`, or `(None, 0)` before v2."""
     exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'views_meta'"
     ).fetchone()
     if exists is None:
-        return None
+        return None, 0
+    if "views_version" in _table_columns(conn, "views_meta"):
+        row = conn.execute(
+            "SELECT views_sha256, views_version FROM views_meta WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            return None, 0
+        return str(row[0]), int(row[1] if row[1] is not None else 1)
     row = conn.execute("SELECT views_sha256 FROM views_meta WHERE id = 1").fetchone()
-    return str(row[0]) if row else None
+    return (str(row[0]), 1) if row else (None, 0)
+
+
+def read_stored_views_version(conn: sqlite3.Connection) -> int:
+    """Returns the `views_version` recorded in `views_meta`, or 0 when unset."""
+    return _stored_views_meta(conn)[1]
 
 
 def _run_migration(conn: sqlite3.Connection, version: int, migrate: Migration) -> bool:
@@ -602,15 +940,22 @@ def _run_migration(conn: sqlite3.Connection, version: int, migrate: Migration) -
 
 
 def refresh_views(conn: sqlite3.Connection, path: Path = VIEWS_SQL_PATH) -> None:
-    """Recreates every reader view from `path` and records its hash, in one transaction."""
-    digest = views_sha256(path)
+    """Recreates every reader view from `path` and records its version and hash."""
+    version, digest = _views_file_meta(path)
     conn.execute("BEGIN IMMEDIATE")
     try:
         _execute_script(conn, path.read_text(encoding="utf-8"))
-        conn.execute(
-            "INSERT OR REPLACE INTO views_meta (id, views_sha256) VALUES (1, ?)",
-            (digest,),
-        )
+        if "views_version" in _table_columns(conn, "views_meta"):
+            conn.execute(
+                "INSERT OR REPLACE INTO views_meta (id, views_sha256, views_version) "
+                "VALUES (1, ?, ?)",
+                (digest, version),
+            )
+        else:
+            conn.execute(
+                "INSERT OR REPLACE INTO views_meta (id, views_sha256) VALUES (1, ?)",
+                (digest,),
+            )
         conn.execute("COMMIT")
     except BaseException:
         conn.execute("ROLLBACK")
@@ -644,6 +989,8 @@ def apply_migrations(
         for version, migrate in MIGRATIONS
         if version > current and _run_migration(conn, version, migrate)
     ]
-    if applied or _stored_views_sha256(conn) != views_sha256(views_path):
+    stored_sha, stored_version = _stored_views_meta(conn)
+    file_version, file_sha = _views_file_meta(views_path)
+    if applied or (stored_sha != file_sha and file_version >= stored_version):
         refresh_views(conn, views_path)
     return applied

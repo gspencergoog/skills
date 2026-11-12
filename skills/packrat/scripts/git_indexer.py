@@ -12,7 +12,7 @@ import re
 import shlex
 import subprocess
 import urllib.parse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 try:
@@ -37,10 +37,14 @@ from models import (
     SyncStats,
     TextChunk,
     compute_content_sha256,
+    normalize_utc_iso,
     utc_now_iso,
 )
 from progress import NULL_REPORTER, ProgressReporter
 from sync_runtime import run_bounded_subprocess
+
+MAX_INDEXED_BLOB_BYTES = 2 * 1024 * 1024
+_BLOB_BATCH_SIZE = 250
 
 CODE_EXTENSIONS: frozenset[str] = frozenset(
     {
@@ -298,26 +302,102 @@ def _commit_exists(repo_dir: Path, sha: str | None) -> bool:
     return res.returncode == 0 and res.stdout.strip() == "commit"
 
 
-def _parse_diff_tree_line(line: str, modified: set[str], deleted: set[str]) -> None:
-    """Parses one `git diff-tree --name-status` line into modified and deleted sets."""
-    parts = line.split("\t")
-    if len(parts) < 2:
+def _ls_tree_blobs(repo_dir: Path, sha: str) -> dict[str, str]:
+    """Returns `{file_path: blob_oid}` for all indexable blobs at `sha` via `git ls-tree`."""
+    res = run_git_command(repo_dir, ["ls-tree", "-r", "-z", sha], timeout=30)
+    if res.returncode != 0:
+        return {}
+    blobs: dict[str, str] = {}
+    for entry in res.stdout.split("\x00"):
+        if "\t" not in entry:
+            continue
+        meta, file_path = entry.split("\t", 1)
+        parts = meta.split()
+        if len(parts) >= 3 and parts[1] == "blob" and _is_indexable_path(file_path):
+            blobs[file_path] = parts[2]
+    return blobs
+
+
+def _record_diff_tree_entry(
+    status: str,
+    new_mode: str,
+    new_oid: str,
+    first_path: str,
+    second_path: str | None,
+    modified: dict[str, str],
+    deleted: set[str],
+) -> None:
+    """Records one parsed `git diff-tree` entry into `modified` (`path -> oid`) and `deleted`."""
+    if second_path is not None:
+        if status.startswith("R") and _is_indexable_path(first_path):
+            deleted.add(first_path)
+        if new_mode != "160000" and _is_indexable_path(second_path):
+            modified[second_path] = new_oid
         return
-    status = parts[0].strip()
-    if status.startswith("R") and len(parts) >= 3:
-        old_p, new_p = parts[1].strip(), parts[2].strip()
-        if _is_indexable_path(old_p):
-            deleted.add(old_p)
-        if _is_indexable_path(new_p):
-            modified.add(new_p)
-        return
-    path_str = parts[1].strip()
-    if not _is_indexable_path(path_str):
+    if not _is_indexable_path(first_path):
         return
     if status.startswith("D"):
-        deleted.add(path_str)
-    else:
-        modified.add(path_str)
+        deleted.add(first_path)
+    elif new_mode != "160000":
+        modified[first_path] = new_oid
+
+
+def _diff_tree_blobs(
+    repo_dir: Path, old_sha: str, new_sha: str
+) -> tuple[dict[str, str], set[str]]:
+    """Returns `(modified_blob_oids, deleted_paths)` between `old_sha` and `new_sha`."""
+    res = run_git_command(
+        repo_dir,
+        ["diff-tree", "-r", "-z", "--no-commit-id", "-M", old_sha, new_sha],
+        timeout=30,
+    )
+    if res.returncode != 0:
+        return {}, set()
+    tokens = [t for t in res.stdout.split("\x00") if t]
+    modified: dict[str, str] = {}
+    deleted: set[str] = set()
+    idx = 0
+    while idx < len(tokens):
+        parts = tokens[idx].lstrip(":").split()
+        idx += 1
+        if len(parts) < 5 or idx >= len(tokens):
+            break
+        new_mode, new_oid, status = parts[1], parts[3], parts[4]
+        has_two_paths = status.startswith(("R", "C"))
+        if has_two_paths and idx + 1 >= len(tokens):
+            break
+        first_p = tokens[idx]
+        second_p = tokens[idx + 1] if has_two_paths else None
+        idx += 2 if has_two_paths else 1
+        _record_diff_tree_entry(
+            status, new_mode, new_oid, first_p, second_p, modified, deleted
+        )
+    deleted -= set(modified)
+    return modified, deleted
+
+
+def _collect_changed_files(
+    repo_dir: Path,
+    old_sha: str | None,
+    new_sha: str,
+    *,
+    force: bool = False,
+    ancestor_exists: bool | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...], dict[str, str], bool]:
+    """Collects `(modified_paths, deleted_paths, blob_oids, is_full_tree)` for a commit range."""
+    if not force and old_sha == new_sha:
+        return (), (), {}, False
+    has_ancestor = bool(old_sha) and (
+        ancestor_exists
+        if ancestor_exists is not None
+        else _commit_exists(repo_dir, old_sha)
+    )
+    if force or not has_ancestor:
+        blobs = _ls_tree_blobs(repo_dir, new_sha)
+        return tuple(sorted(blobs)), (), blobs, True
+    assert old_sha is not None
+    modified, deleted = _diff_tree_blobs(repo_dir, old_sha, new_sha)
+    return tuple(sorted(modified)), tuple(sorted(deleted)), modified, False
 
 
 def list_changed_files(
@@ -325,40 +405,18 @@ def list_changed_files(
     old_sha: str | None,
     new_sha: str,
     force: bool = False,
+    *,
+    ancestor_exists: bool | None = None,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Lists indexable (modified_or_added, deleted) files between old_sha and new_sha."""
-    if not force and old_sha == new_sha:
-        return (), ()
-
-    if force or not _commit_exists(repo_dir, old_sha):
-        res = run_git_command(
-            repo_dir, ["ls-tree", "-r", "--name-only", new_sha], timeout=30
-        )
-        if res.returncode != 0:
-            return (), ()
-        all_files = sorted(
-            line.strip()
-            for line in res.stdout.splitlines()
-            if line.strip() and _is_indexable_path(line.strip())
-        )
-        return tuple(all_files), ()
-
-    assert old_sha is not None
-    res = run_git_command(
+    modified, deleted, _, _ = _collect_changed_files(
         repo_dir,
-        ["diff-tree", "-r", "--no-commit-id", "--name-status", "-M", old_sha, new_sha],
-        timeout=30,
+        old_sha,
+        new_sha,
+        force=force,
+        ancestor_exists=ancestor_exists,
     )
-    if res.returncode != 0:
-        return (), ()
-
-    modified: set[str] = set()
-    deleted: set[str] = set()
-    for line in res.stdout.splitlines():
-        if line.strip():
-            _parse_diff_tree_line(line, modified, deleted)
-    deleted -= modified
-    return tuple(sorted(modified)), tuple(sorted(deleted))
+    return modified, deleted
 
 
 _NUMSTAT_BRACE_RENAME_RE = re.compile(r"^(.*?)\{(.*?) => (.*?)\}(.*)$")
@@ -436,13 +494,14 @@ def _parse_single_commit_block(
     file_lines = [ln for ln in files_part.splitlines() if ln.strip()]
     files = _parse_numstat_lines(repo.repo_id, sha, file_lines)
     full_msg = f"{subject}\n\n{body}".strip() if body else subject
+    normalized_ts = normalize_utc_iso(committed_at) or utc_now_iso()
 
     commit = CommitRecord(
         repo_id=repo.repo_id,
         sha=sha,
         author_name=author_name or None,
         author_email=author_email or None,
-        committed_at=committed_at or utc_now_iso(),
+        committed_at=normalized_ts,
         title=subject,
         message=full_msg,
         pr_number=pr_number,
@@ -464,43 +523,18 @@ def _parse_single_commit_block(
         content_sha256=compute_content_sha256(subject, chunk_text),
         is_untrusted=False,
         item_number=pr_number,
-        updated_at=committed_at or utc_now_iso(),
+        updated_at=normalized_ts,
     )
     return commit, chunk
 
 
-def index_commits(
-    repo_dir: Path,
-    repo: RepoConfig,
-    old_sha: str | None,
-    new_sha: str,
-    max_commits: int = 300,
+def _parse_commit_log_output(
+    repo: RepoConfig, raw_output: str
 ) -> tuple[list[CommitRecord], list[TextChunk]]:
-    """Extracts CommitRecord and TextChunk entries between old_sha and new_sha."""
-    if old_sha == new_sha:
-        return [], []
-    range_arg = (
-        f"{old_sha}..{new_sha}" if _commit_exists(repo_dir, old_sha) else new_sha
-    )
-    fmt = "__COMMIT__%x00%H%x00%an%x00%ae%x00%cI%x00%s%x00%b%x00__FILES__"
-    res = run_git_command(
-        repo_dir,
-        [
-            "log",
-            "--no-merges",
-            f"-n{max_commits}",
-            f"--pretty=format:{fmt}",
-            "--numstat",
-            range_arg,
-        ],
-        timeout=30,
-    )
-    if res.returncode != 0 or not res.stdout.strip():
-        return [], []
-
+    """Splits formatted `git log` stdout into CommitRecord and TextChunk lists."""
     commits: list[CommitRecord] = []
     chunks: list[TextChunk] = []
-    for raw_block in res.stdout.split("__COMMIT__\x00"):
+    for raw_block in raw_output.split("__COMMIT__\x00"):
         if not raw_block.strip():
             continue
         parsed = _parse_single_commit_block(repo, raw_block)
@@ -510,14 +544,157 @@ def index_commits(
     return commits, chunks
 
 
+def _index_commits_window(
+    repo_dir: Path,
+    repo: RepoConfig,
+    stop_sha: str | None,
+    tip_sha: str,
+    max_commits: int = 300,
+    *,
+    ancestor_exists: bool | None = None,
+) -> tuple[list[CommitRecord], list[TextChunk], str | None]:
+    """Indexes up to `max_commits` from `tip_sha` down to `stop_sha` and returns any next cursor."""
+    if max_commits <= 0 or stop_sha == tip_sha:
+        return [], [], None
+    has_stop = bool(stop_sha) and (
+        ancestor_exists
+        if ancestor_exists is not None
+        else _commit_exists(repo_dir, stop_sha)
+    )
+    range_arg = f"{stop_sha}..{tip_sha}" if has_stop else tip_sha
+    fmt = "__COMMIT__%x00%H%x00%an%x00%ae%x00%cI%x00%s%x00%b%x00__FILES__"
+    res = run_git_command(
+        repo_dir,
+        [
+            "log",
+            "--no-merges",
+            f"-n{max_commits + 1}",
+            f"--pretty=format:{fmt}",
+            "--numstat",
+            range_arg,
+        ],
+        timeout=30,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return [], [], None
+
+    commits, chunks = _parse_commit_log_output(repo, res.stdout)
+    if len(commits) > max_commits:
+        next_sha = commits[max_commits].sha
+        next_cursor = f"{stop_sha}..{next_sha}" if has_stop else next_sha
+        return commits[:max_commits], chunks[:max_commits], next_cursor
+    return commits, chunks, None
+
+
+def index_commits(
+    repo_dir: Path,
+    repo: RepoConfig,
+    old_sha: str | None,
+    new_sha: str,
+    max_commits: int = 300,
+    *,
+    ancestor_exists: bool | None = None,
+) -> tuple[list[CommitRecord], list[TextChunk]]:
+    """Extracts CommitRecord and TextChunk entries between old_sha and new_sha."""
+    commits, chunks, _ = _index_commits_window(
+        repo_dir,
+        repo,
+        old_sha,
+        new_sha,
+        max_commits=max_commits,
+        ancestor_exists=ancestor_exists,
+    )
+    return commits, chunks
+
+
+def _is_indexable_blob_payload(
+    obj_type: str, raw: bytes, size: int, max_blob_bytes: int
+) -> bool:
+    """Returns True when a `cat-file --batch` object is a valid non-binary text blob within size limits."""
+    return (
+        obj_type == "blob"
+        and len(raw) == size
+        and size <= max_blob_bytes
+        and b"\x00" not in raw[:4096]
+    )
+
+
+def _parse_cat_file_stream(
+    out: bytes,
+    requested_paths: Sequence[str],
+    resolved_oids: dict[str, str] | None = None,
+    max_blob_bytes: int = MAX_INDEXED_BLOB_BYTES,
+) -> dict[str, str]:
+    """Parses `git cat-file --batch` stdout into `{file_path: decoded_text}`."""
+    pos = 0
+    blobs: dict[str, str] = {}
+    for file_path in requested_paths:
+        nl = out.find(b"\n", pos)
+        if nl < 0:
+            break
+        header_line = out[pos:nl].decode("utf-8", errors="replace")
+        pos = nl + 1
+        if header_line.endswith(" missing"):
+            continue
+        parts = header_line.split()
+        if len(parts) < 3 or not parts[2].isdigit():
+            break
+        blob_oid, obj_type, size = parts[0], parts[1], int(parts[2])
+        raw = out[pos : pos + size]
+        pos += size + 1
+        if _is_indexable_blob_payload(obj_type, raw, size, max_blob_bytes):
+            blobs[file_path] = raw.decode("utf-8", errors="replace")
+            if resolved_oids is not None:
+                resolved_oids.setdefault(file_path, blob_oid)
+    return blobs
+
+
+def _read_blobs_at_sha(
+    repo_dir: Path,
+    sha: str,
+    file_paths: Sequence[str],
+    blob_oids: Mapping[str, str] | None = None,
+    resolved_oids: dict[str, str] | None = None,
+    max_blob_bytes: int = MAX_INDEXED_BLOB_BYTES,
+) -> dict[str, str]:
+    """Reads multiple `<sha>:<file_path>` blobs in a single `git cat-file --batch` subprocess."""
+    valid_paths = [p for p in file_paths if "\n" not in p and "\r" not in p]
+    if not valid_paths:
+        return {}
+    oid_map = blob_oids or {}
+    specs = "".join(f"{oid_map.get(p) or f'{sha}:{p}'}\n" for p in valid_paths).encode(
+        "utf-8"
+    )
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GCM_INTERACTIVE": "never",
+        "PAGER": "cat",
+    }
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "--no-pager", "cat-file", "--batch"],
+            input=specs,
+            capture_output=True,
+            timeout=max(30, len(valid_paths) // 20),
+            check=False,
+            env=env,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if proc.returncode != 0:
+        return {}
+    return _parse_cat_file_stream(
+        proc.stdout,
+        valid_paths,
+        resolved_oids=resolved_oids,
+        max_blob_bytes=max_blob_bytes,
+    )
+
+
 def _read_blob_at_sha(repo_dir: Path, sha: str, file_path: str) -> str | None:
     """Reads `<sha>:<file_path>` from git object storage without touching worktree files."""
-    res = run_git_command(repo_dir, ["show", f"{sha}:{file_path}"], timeout=15)
-    if res.returncode != 0:
-        return None
-    if "\x00" in res.stdout[:4096]:
-        return None
-    return res.stdout
+    return _read_blobs_at_sha(repo_dir, sha, (file_path,)).get(file_path)
 
 
 def _extract_markdown_sections_from_blob(
@@ -525,6 +702,7 @@ def _extract_markdown_sections_from_blob(
     sha: str,
     file_path: str,
     blob_text: str,
+    blob_oid: str = "",
 ) -> tuple[list[DocSectionRecord], list[TextChunk]]:
     """Parses Markdown sections in memory using blob_parsers."""
     raw_lines = blob_text.splitlines()
@@ -537,9 +715,7 @@ def _extract_markdown_sections_from_blob(
         l_start = int(sec["line_start"])
         l_end = int(sec["line_end"])
         sub_end = int(sec["subtree_line_end"])
-        body_text = "\n".join(
-            raw_lines[max(0, l_start - 1) : min(len(raw_lines), l_end)]
-        ).strip()
+        body_text = str(sec["content"]).strip()
         heading = str(sec["heading"])
         breadcrumb = str(sec["breadcrumb"])
         sec_id = int(sec["section_id"])
@@ -557,6 +733,7 @@ def _extract_markdown_sections_from_blob(
                 subtree_line_end=sub_end,
                 content=body_text[:4000],
                 sha=sha,
+                blob_oid=blob_oid,
             )
         )
         if body_text:
@@ -583,6 +760,7 @@ def _extract_code_symbols_from_blob(
     sha: str,
     file_path: str,
     blob_text: str,
+    blob_oid: str = "",
 ) -> tuple[list[CodeSymbolRecord], list[TextChunk]]:
     """Extracts AST symbol spans in memory using blob_parsers."""
     entities = extract_content_entities(file_path, blob_text)
@@ -617,6 +795,7 @@ def _extract_code_symbols_from_blob(
                 signature=signature,
                 docstring="",
                 sha=sha,
+                blob_oid=blob_oid,
             )
         )
         c_title = f"{kind} {sym_name} in {file_path}"
@@ -645,53 +824,53 @@ def index_files_at_sha(
     modified_files: Sequence[str],
     *,
     reporter: ProgressReporter = NULL_REPORTER,
+    blob_oids: Mapping[str, str] | None = None,
 ) -> tuple[list[CodeSymbolRecord], list[DocSectionRecord], list[TextChunk]]:
     """Extracts symbols, Markdown sections, and chunks for modified_files at target_sha."""
     all_symbols: list[CodeSymbolRecord] = []
     all_sections: list[DocSectionRecord] = []
     all_chunks: list[TextChunk] = []
     total_files = len(modified_files)
+    resolved_oids: dict[str, str] = dict(blob_oids) if blob_oids else {}
     reporter.start_phase(repo.full_name, "git files", total=total_files)
 
-    for idx, file_path in enumerate(modified_files, start=1):
-        blob = _read_blob_at_sha(repo_dir, target_sha, file_path)
-        if not blob:
+    for start in range(0, total_files, _BLOB_BATCH_SIZE):
+        batch_paths = modified_files[start : start + _BLOB_BATCH_SIZE]
+        blobs = _read_blobs_at_sha(
+            repo_dir,
+            target_sha,
+            batch_paths,
+            blob_oids=resolved_oids,
+            resolved_oids=resolved_oids,
+        )
+        for offset, file_path in enumerate(batch_paths, start=1):
+            idx = start + offset
+            blob = blobs.get(file_path)
+            if not blob:
+                reporter.advance(idx, total_files, detail=file_path)
+                continue
+            file_oid = resolved_oids.get(file_path, "")
+            ext = Path(file_path).suffix.lower()
+            if ext in MARKDOWN_EXTENSIONS:
+                secs, chs = _extract_markdown_sections_from_blob(
+                    repo, target_sha, file_path, blob, blob_oid=file_oid
+                )
+                all_sections.extend(secs)
+                all_chunks.extend(chs)
+            elif ext in CODE_EXTENSIONS:
+                syms, chs = _extract_code_symbols_from_blob(
+                    repo, target_sha, file_path, blob, blob_oid=file_oid
+                )
+                all_symbols.extend(syms)
+                all_chunks.extend(chs)
             reporter.advance(idx, total_files, detail=file_path)
-            continue
-        ext = Path(file_path).suffix.lower()
-        if ext in MARKDOWN_EXTENSIONS:
-            secs, chs = _extract_markdown_sections_from_blob(
-                repo, target_sha, file_path, blob
-            )
-            all_sections.extend(secs)
-            all_chunks.extend(chs)
-        elif ext in CODE_EXTENSIONS:
-            syms, chs = _extract_code_symbols_from_blob(
-                repo, target_sha, file_path, blob
-            )
-            all_symbols.extend(syms)
-            all_chunks.extend(chs)
-        reporter.advance(idx, total_files, detail=file_path)
     reporter.finish_phase()
     return all_symbols, all_sections, all_chunks
 
 
 def _list_indexed_file_paths(store: PackratStore, repo_id: int) -> set[str]:
     """Returns all file paths with indexed symbols, doc sections, or file chunks."""
-    if hasattr(store, "list_indexed_file_paths"):
-        return set(store.list_indexed_file_paths(repo_id))
-    rows = store.conn.execute(
-        """
-        SELECT file_path FROM code_symbols WHERE repo_id = ?
-        UNION
-        SELECT file_path FROM doc_sections WHERE repo_id = ?
-        UNION
-        SELECT file_path FROM chunks
-        WHERE repo_id = ? AND source_kind IN ('code_symbol', 'doc_section') AND file_path IS NOT NULL
-        """,
-        (repo_id, repo_id, repo_id),
-    ).fetchall()
-    return {str(r["file_path"]) for r in rows if r["file_path"]}
+    return set(store.list_indexed_file_paths(repo_id))
 
 
 def _enqueue_commit_mentions(
@@ -704,14 +883,197 @@ def _enqueue_commit_mentions(
     subject) is skipped, since merging already refreshes that PR's timeline.
     """
     resolve = caching_resolver(store.get_repo)
+    all_targets: set[tuple[int, int]] = set()
     for commit in commits:
-        targets = extract_item_mentions(commit.message, repo, resolve)
-        if not targets:
-            continue
-        source = (
-            (repo.repo_id, commit.pr_number) if commit.pr_number is not None else None
+        targets = set(extract_item_mentions(commit.message, repo, resolve))
+        if commit.pr_number is not None:
+            targets.discard((repo.repo_id, commit.pr_number))
+        all_targets |= targets
+    if all_targets:
+        store.enqueue_timeline_dirty(all_targets, reason="commit")
+
+
+def _parse_commits_cursor(cursor: str) -> tuple[str | None, str]:
+    """Splits a `commits_backfill_cursor` (`<stop_sha>..<tip_sha>` or `<tip_sha>`)."""
+    if ".." in cursor:
+        stop_sha, tip_sha = cursor.split("..", 1)
+        return (stop_sha or None), tip_sha
+    return None, cursor
+
+
+def _merge_cursor_with_prior(delta_cursor: str, prior_cursor: str | None) -> str:
+    """Preserves the older floor when a new commit delta is truncated above a pending backfill."""
+    if not prior_cursor:
+        return delta_cursor
+    prior_stop, _ = _parse_commits_cursor(prior_cursor)
+    _, delta_next = _parse_commits_cursor(delta_cursor)
+    return f"{prior_stop}..{delta_next}" if prior_stop else delta_next
+
+
+def _collect_commits_for_phase(
+    repo_dir: Path,
+    repo: RepoConfig,
+    old_sha: str | None,
+    target_sha: str,
+    *,
+    has_new_head: bool,
+    ancestor_exists: bool,
+    prior_cursor: str | None,
+    max_commits: int,
+) -> tuple[list[CommitRecord], list[TextChunk], str | None]:
+    """Collects commits from a new HEAD delta and/or pending backfill cursor."""
+    if not has_new_head:
+        if prior_cursor is None:
+            return [], [], None
+        c_stop, c_tip = _parse_commits_cursor(prior_cursor)
+        return _index_commits_window(
+            repo_dir, repo, c_stop, c_tip, max_commits=max_commits
         )
-        store.enqueue_timeline_dirty(targets, reason="commit", source=source)
+
+    commits, chunks, delta_cursor = _index_commits_window(
+        repo_dir,
+        repo,
+        old_sha,
+        target_sha,
+        max_commits=max_commits,
+        ancestor_exists=ancestor_exists,
+    )
+    if delta_cursor is not None:
+        return commits, chunks, _merge_cursor_with_prior(delta_cursor, prior_cursor)
+    if prior_cursor is None:
+        return commits, chunks, None
+
+    remaining = max_commits - len(commits)
+    if remaining <= 0:
+        return commits, chunks, prior_cursor
+    c_stop, c_tip = _parse_commits_cursor(prior_cursor)
+    more_c, more_ch, next_cursor = _index_commits_window(
+        repo_dir, repo, c_stop, c_tip, max_commits=remaining
+    )
+    commits.extend(more_c)
+    chunks.extend(more_ch)
+    return commits, chunks, next_cursor
+
+
+def _sync_commits_phase(
+    store: PackratStore,
+    repo_dir: Path,
+    repo: RepoConfig,
+    old_sha: str | None,
+    target_sha: str,
+    *,
+    force: bool,
+    ancestor_exists: bool,
+    max_commits: int,
+    stats: SyncStats,
+) -> tuple[list[CommitRecord], list[TextChunk]]:
+    """Indexes new commits and drains any pending `commits_backfill_cursor` within `max_commits`."""
+    prior_cursor = (
+        None if force or not ancestor_exists else repo.commits_backfill_cursor
+    )
+    has_new_head = force or old_sha != target_sha
+    commits, chunks, next_cursor = _collect_commits_for_phase(
+        repo_dir,
+        repo,
+        old_sha,
+        target_sha,
+        has_new_head=has_new_head,
+        ancestor_exists=ancestor_exists,
+        prior_cursor=prior_cursor,
+        max_commits=max_commits,
+    )
+    if commits:
+        store.upsert_commits(commits)
+        store.upsert_chunks(chunks)
+        _enqueue_commit_mentions(store, repo, commits)
+
+    if next_cursor is not None:
+        store.set_commits_backfill_state(repo.repo_id, cursor=next_cursor, done_at=None)
+        if "commits" not in stats.backfill_incomplete:
+            stats.backfill_incomplete.append("commits")
+    elif (
+        force
+        or repo.commits_backfill_cursor is not None
+        or repo.commits_backfill_done_at is None
+    ):
+        store.set_commits_backfill_state(
+            repo.repo_id, cursor=None, done_at=utc_now_iso()
+        )
+    return commits, chunks
+
+
+def _filter_unchanged_blob_paths(
+    store: PackratStore,
+    repo_id: int,
+    tree_modified: tuple[str, ...],
+    blob_oids: Mapping[str, str],
+    *,
+    force: bool,
+) -> tuple[str, ...]:
+    """Filters out paths whose git `blob_oid` already matches `indexed_files`."""
+    if force or not tree_modified:
+        return tree_modified
+    stored_oids = store.get_indexed_blob_oids(repo_id)
+    return tuple(
+        p
+        for p in tree_modified
+        if not (blob_oids.get(p) and stored_oids.get(p) == blob_oids.get(p))
+    )
+
+
+def _sync_files_phase(
+    store: PackratStore,
+    repo_dir: Path,
+    repo: RepoConfig,
+    old_sha: str | None,
+    target_sha: str,
+    *,
+    force: bool,
+    ancestor_exists: bool,
+    reporter: ProgressReporter,
+) -> tuple[list[CodeSymbolRecord], list[DocSectionRecord], list[TextChunk]]:
+    """Diffs tree blobs, skips unchanged `blob_oid`s, and updates the code/doc index."""
+    tree_modified, deleted_files, blob_oids, is_full_tree = _collect_changed_files(
+        repo_dir,
+        old_sha,
+        target_sha,
+        force=force,
+        ancestor_exists=ancestor_exists,
+    )
+    if is_full_tree:
+        extra_deleted = _list_indexed_file_paths(store, repo.repo_id) - set(
+            tree_modified
+        )
+        deleted_files = tuple(sorted(set(deleted_files) | extra_deleted))
+
+    modified_files = _filter_unchanged_blob_paths(
+        store, repo.repo_id, tree_modified, blob_oids, force=force
+    )
+    symbols, sections, file_chunks = index_files_at_sha(
+        repo_dir,
+        repo,
+        target_sha,
+        modified_files,
+        reporter=reporter,
+        blob_oids=blob_oids,
+    )
+    if modified_files or deleted_files:
+        store.replace_code_index_for_files(
+            repo_id=repo.repo_id,
+            changed_paths=modified_files,
+            deleted_paths=deleted_files,
+            symbols=symbols,
+            doc_sections=sections,
+            chunks=file_chunks,
+            reporter=reporter,
+            repo_label=repo.full_name,
+        )
+    indexed_rows = [
+        (p, blob_oids[p], target_sha) for p in tree_modified if blob_oids.get(p)
+    ]
+    if indexed_rows:
+        store.upsert_indexed_files(repo.repo_id, indexed_rows)
+    return symbols, sections, file_chunks
 
 
 def sync_git_codebase(
@@ -740,42 +1102,47 @@ def sync_git_codebase(
     stats.indexed_ref = ref_name
     stats.indexed_sha = target_sha
 
-    old_sha = None if force else repo.last_indexed_sha
-    if old_sha == target_sha and not force:
+    if (
+        not force
+        and repo.last_indexed_sha == target_sha
+        and not repo.commits_backfill_cursor
+    ):
         return stats
 
-    commits, commit_chunks = index_commits(
-        repo_dir, repo, old_sha, target_sha, max_commits=max_commits
+    raw_old_sha = None if force else repo.last_indexed_sha
+    ancestor_exists = bool(
+        raw_old_sha
+        and (raw_old_sha == target_sha or _commit_exists(repo_dir, raw_old_sha))
     )
-    if commits:
-        store.upsert_commits(commits)
-        store.upsert_chunks(commit_chunks)
-        _enqueue_commit_mentions(store, repo, commits)
+    old_sha = raw_old_sha if ancestor_exists else None
 
-    modified_files, deleted_files = list_changed_files(
-        repo_dir, old_sha, target_sha, force=force
+    commits, commit_chunks = _sync_commits_phase(
+        store,
+        repo_dir,
+        repo,
+        old_sha,
+        target_sha,
+        force=force,
+        ancestor_exists=ancestor_exists,
+        max_commits=max_commits,
+        stats=stats,
     )
-    if (force or not _commit_exists(repo_dir, old_sha)) and modified_files:
-        extra_deleted = _list_indexed_file_paths(store, repo.repo_id) - set(
-            modified_files
-        )
-        deleted_files = tuple(sorted(set(deleted_files) | extra_deleted))
-    symbols, sections, file_chunks = index_files_at_sha(
-        repo_dir, repo, target_sha, modified_files, reporter=reporter
-    )
-    if modified_files or deleted_files:
-        store.replace_code_index_for_files(
-            repo_id=repo.repo_id,
-            changed_paths=modified_files,
-            deleted_paths=deleted_files,
-            symbols=symbols,
-            doc_sections=sections,
-            chunks=file_chunks,
+
+    if force or old_sha != target_sha:
+        symbols, sections, file_chunks = _sync_files_phase(
+            store,
+            repo_dir,
+            repo,
+            old_sha,
+            target_sha,
+            force=force,
+            ancestor_exists=ancestor_exists,
             reporter=reporter,
-            repo_label=repo.full_name,
         )
+        store.update_repo_sync_state(repo.repo_id, last_indexed_sha=target_sha)
+    else:
+        symbols, sections, file_chunks = [], [], []
 
-    store.update_repo_sync_state(repo.repo_id, last_indexed_sha=target_sha)
     stats.commits_upserted = len(commits)
     stats.symbols_upserted = len(symbols)
     stats.doc_sections_upserted = len(sections)

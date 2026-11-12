@@ -13,6 +13,7 @@ from typing import Any
 from db_migrations import REFETCH_OPEN_PRS_KEY_PREFIX
 from db_store import PackratStore
 from gh_transport import (
+    BudgetDeferred,
     GhCommandResult,
     GhRunner,
     _is_rate_limited,
@@ -58,6 +59,7 @@ _REF_ISSUE_RE = re.compile(r"(?:^|[\s(])#(\d+)\b")
 
 ISSUES_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     issues(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       totalCount
@@ -165,13 +167,14 @@ _PR_NODE_FIELDS = """\
           }
         }
 """
-"""Pull request node selection shared by `PRS_DELTA_QUERY` and `OPEN_PRS_QUERY`."""
+"""Pull request node selection for `PRS_DELTA_QUERY`."""
 
 
 def _pr_connection_query(connection_args: str) -> str:
     """Builds a repository `pullRequests(...)` page query with `_PR_NODE_FIELDS`."""
     return (
         "query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {\n"
+        "  rateLimit { cost }\n"
         "  repository(owner: $owner, name: $name) {\n"
         f"    pullRequests({connection_args}) {{\n"
         "      totalCount\n"
@@ -189,13 +192,27 @@ PRS_DELTA_QUERY = _pr_connection_query(
     "first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}"
 )
 
-OPEN_PRS_QUERY = _pr_connection_query(
-    "states: OPEN, first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}"
-)
+OPEN_PRS_QUERY = """
+query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
+  rateLimit { cost }
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      totalCount
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        number
+        isCrossRepository
+        headRepositoryOwner { login }
+      }
+    }
+  }
+}
+"""
 """Pages every open pull request, for the one-time fork-field refetch."""
 
 DISCUSSIONS_DELTA_QUERY = """
 query($owner: String!, $name: String!, $pageSize: Int!, $cursor: String) {
+  rateLimit { cost }
   repository(owner: $owner, name: $name) {
     discussions(first: $pageSize, after: $cursor, orderBy: {field: UPDATED_AT, direction: DESC}) {
       totalCount
@@ -349,6 +366,26 @@ def needs_safety_sweep(
     return (now_epoch - last_epoch) >= sweep_interval_sec
 
 
+def _is_not_modified_response(status_code: int, res: GhCommandResult) -> bool:
+    """Returns True when the HTTP status or output indicates 304 Not Modified."""
+    return (
+        status_code == 304
+        or "304 Not Modified" in res.stdout
+        or "304 Not Modified" in res.stderr
+    )
+
+
+def _parse_events_json(body: str) -> tuple[dict[str, Any], ...]:
+    """Parses the /events JSON array body, returning () on empty or invalid JSON."""
+    if not body.strip():
+        return ()
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return ()
+    return tuple(parsed) if isinstance(parsed, list) else ()
+
+
 def poll_repo_events(
     repo: RepoConfig,
     runner: GhRunner = run_gh_command,
@@ -376,9 +413,20 @@ def poll_repo_events(
     if repo.events_last_modified:
         args.extend(["-H", f"If-Modified-Since: {repo.events_last_modified}"])
 
-    res = runner(args, 15)
+    try:
+        res = runner(args, 15)
+    except BudgetDeferred as exc:
+        return EventsPollResult(
+            status_code=0,
+            not_modified=False,
+            etag=repo.events_etag,
+            last_modified=repo.events_last_modified,
+            poll_interval_sec=repo.poll_interval_sec,
+            error=exc.detail,
+            rate_limited=True,
+        )
     status_code, headers, body = _split_http_response(res.stdout)
-    if budget is not None:
+    if budget is not None and not bool(getattr(runner, "is_budgeted_runner", False)):
         budget.record(headers, worker="sync")
     etag = headers.get("etag") or repo.events_etag
     last_mod = headers.get("last-modified") or repo.events_last_modified
@@ -386,11 +434,7 @@ def poll_repo_events(
         headers.get("x-poll-interval", str(repo.poll_interval_sec or 60))
     )
 
-    if (
-        status_code == 304
-        or "304 Not Modified" in res.stdout
-        or "304 Not Modified" in res.stderr
-    ):
+    if _is_not_modified_response(status_code, res):
         return EventsPollResult(
             status_code=304,
             not_modified=True,
@@ -411,19 +455,13 @@ def poll_repo_events(
             rate_limited=_is_rate_limited(f"{res.stderr}\n{body}"),
         )
 
-    try:
-        parsed = json.loads(body) if body.strip() else []
-        events = tuple(parsed) if isinstance(parsed, list) else ()
-    except json.JSONDecodeError:
-        events = ()
-
     return EventsPollResult(
         status_code=status_code,
         not_modified=False,
         etag=etag,
         last_modified=last_mod,
         poll_interval_sec=poll_interval,
-        events=events,
+        events=_parse_events_json(body),
     )
 
 
@@ -601,6 +639,10 @@ def _parse_single_review_thread(
     thread_id = str(th["id"])
     c_nodes = _connection_nodes(th, "comments")
     first = c_nodes[0] if c_nodes else {}
+    reviewer = _login(first)
+    participants = sorted(
+        {login for login in (reviewer, *(_login(c) for c in c_nodes)) if login}
+    )
     combined_body = "\n---\n".join(
         f"{_login(c) or 'reviewer'}: {c.get('body') or ''}".strip()
         for c in c_nodes
@@ -618,12 +660,13 @@ def _parse_single_review_thread(
         start_line=th.get("startLine"),
         is_resolved=bool(th.get("isResolved")),
         is_outdated=bool(th.get("isOutdated")),
-        reviewer=_login(first),
+        reviewer=reviewer,
         author_association=first.get("authorAssociation"),
         created_at=first.get("createdAt"),
         updated_at=t_updated,
         body=combined_body,
         comments_json=json.dumps(c_nodes),
+        participants_json=json.dumps(participants),
     )
     if not combined_body:
         return record, None
@@ -996,6 +1039,45 @@ def _is_transport_error(detail: str) -> bool:
     return any(marker in lowered for marker in _TRANSPORT_ERROR_MARKERS)
 
 
+def _resolve_sleep_fn(
+    runner: GhRunner,
+    sleep_fn: Callable[[float], None] | None,
+) -> Callable[[float], None]:
+    """Returns the backoff sleep function for GraphQL page retries."""
+    if sleep_fn is not None:
+        return sleep_fn
+    if _is_live_gh_runner(runner):
+        return time.sleep
+    return lambda _s: None
+
+
+def _attempt_graphql_page(
+    args: Sequence[str],
+    field_name: str,
+    runner: GhRunner,
+    budget: RateBudget | None,
+    auth_probe: AuthProbeFn | None,
+) -> tuple[dict[str, Any] | None, str, str, bool]:
+    """Runs one GraphQL page request and returns (connection, error_kind, error_detail, abort)."""
+    is_budgeted = bool(getattr(runner, "is_budgeted_runner", False))
+    try:
+        res = runner(args, 25)
+    except BudgetDeferred as exc:
+        return None, DEFERRED_RATE_LIMIT, exc.detail, True
+    if res.error_kind == DEFERRED_RATE_LIMIT:
+        return None, DEFERRED_RATE_LIMIT, _first_gh_detail(res, "rate budget low"), True
+    headers, body = _split_gh_include_output(res.stdout)
+    if budget is not None and not is_budgeted:
+        budget.record(headers, worker="sync")
+    if res.returncode == 0:
+        conn = _extract_graphql_connection(body, field_name)
+        if conn is not None:
+            return conn, "", "", False
+    raw_kind, raw_detail = _classify_gh_failure(res, body)
+    kind, detail, abort = _probe_timeout_auth(raw_kind, raw_detail, auth_probe)
+    return None, kind, detail, abort or kind == "rate_limited"
+
+
 def _fetch_graphql_page_with_halving(
     owner: str,
     name: str,
@@ -1018,14 +1100,7 @@ def _fetch_graphql_page_with_halving(
     rate-limited response ends the attempt at once instead of retrying at a
     smaller page size against an exhausted budget.
     """
-    resolved_sleep: Callable[[float], None]
-    if sleep_fn is not None:
-        resolved_sleep = sleep_fn
-    elif _is_live_gh_runner(runner):
-        resolved_sleep = time.sleep
-    else:
-        resolved_sleep = lambda _s: None
-
+    resolved_sleep = _resolve_sleep_fn(runner, sleep_fn)
     ladder = tuple(s for s in PAGE_SIZE_LADDER if s <= max_page_size) or (
         PAGE_SIZE_LADDER[-1],
     )
@@ -1033,44 +1108,24 @@ def _fetch_graphql_page_with_halving(
     last_detail = "GraphQL page fetch failed"
     for idx, page_size in enumerate(ladder):
         args = _build_graphql_args(owner, name, query, page_size, cursor)
-        res = runner(args, 25)
-        headers, body = _split_gh_include_output(res.stdout)
-        if budget is not None:
-            budget.record(headers, worker="sync")
-        if res.returncode == 0:
-            conn = _extract_graphql_connection(body, field_name)
-            if conn is not None:
-                return PageFetchOutcome(connection=conn, used_page_size=page_size)
-        raw_kind, raw_detail = _classify_gh_failure(res, body)
-        last_kind, last_detail, abort = _probe_timeout_auth(
-            raw_kind, raw_detail, auth_probe
+        conn, last_kind, last_detail, abort = _attempt_graphql_page(
+            args, field_name, runner, budget, auth_probe
         )
-        if abort or last_kind == "rate_limited":
-            break
-        if _is_transport_error(last_detail):
+        if conn is None and not abort and _is_transport_error(last_detail):
             resolved_sleep(BACKOFF_DELAYS_S[0])
-            res = runner(args, 25)
-            headers, body = _split_gh_include_output(res.stdout)
-            if budget is not None:
-                budget.record(headers, worker="sync")
-            if res.returncode == 0:
-                conn = _extract_graphql_connection(body, field_name)
-                if conn is not None:
-                    return PageFetchOutcome(connection=conn, used_page_size=page_size)
-            raw_kind, raw_detail = _classify_gh_failure(res, body)
-            last_kind, last_detail, abort = _probe_timeout_auth(
-                raw_kind, raw_detail, auth_probe
+            conn, last_kind, last_detail, abort = _attempt_graphql_page(
+                args, field_name, runner, budget, auth_probe
             )
-            if abort or last_kind == "rate_limited":
-                break
-        if idx + 1 < len(ladder):
-            next_size = ladder[idx + 1]
-            reporter.warn(
-                repo_full_name,
-                f"github {stream}: page request failed at pageSize={page_size} ({last_detail}); retrying at pageSize={next_size}",
-            )
-            delay = BACKOFF_DELAYS_S[min(idx, len(BACKOFF_DELAYS_S) - 1)]
-            resolved_sleep(delay)
+        if conn is not None:
+            return PageFetchOutcome(connection=conn, used_page_size=page_size)
+        if abort or idx + 1 >= len(ladder):
+            break
+        next_size = ladder[idx + 1]
+        reporter.warn(
+            repo_full_name,
+            f"github {stream}: page request failed at pageSize={page_size} ({last_detail}); retrying at pageSize={next_size}",
+        )
+        resolved_sleep(BACKOFF_DELAYS_S[min(idx, len(BACKOFF_DELAYS_S) - 1)])
     return PageFetchOutcome(
         connection=None,
         error_kind=last_kind,
@@ -1125,6 +1180,7 @@ class PageWalk:
     items_fetched: int = 0
     total_count: int | None = None
     newest_updated: str | None = None
+    end_cursor: str | None = None
     reached_end: bool = False
     failed: bool = False
     deferred: bool = False
@@ -1228,6 +1284,69 @@ def _classify_page_end(
     return end_cursor, reached_end, bad_cursor
 
 
+def _next_adaptive_page_size(
+    current_max: int,
+    used_page_size: int,
+    cooldown_remaining: int,
+) -> tuple[int, int]:
+    """Updates (current_max_page_size, cooldown_remaining) after a successful page fetch."""
+    if used_page_size < current_max:
+        return used_page_size, ADAPTIVE_PAGE_COOLDOWN
+    if current_max >= PAGE_SIZE_LADDER[0]:
+        return current_max, cooldown_remaining
+    if cooldown_remaining > 1:
+        return current_max, cooldown_remaining - 1
+    curr_idx = PAGE_SIZE_LADDER.index(current_max)
+    next_max = PAGE_SIZE_LADDER[max(0, curr_idx - 1)]
+    next_cooldown = ADAPTIVE_PAGE_COOLDOWN if next_max < PAGE_SIZE_LADDER[0] else 0
+    return next_max, next_cooldown
+
+
+def _apply_walk_outcome(walk: PageWalk, outcome: PageFetchOutcome) -> bool:
+    """Applies a failed or deferred PageFetchOutcome to `walk`; returns True when failed/deferred."""
+    if outcome.connection is not None:
+        return False
+    if outcome.error_kind == DEFERRED_RATE_LIMIT:
+        walk.deferred = True
+    else:
+        walk.failed = True
+    walk.error_kind = outcome.error_kind
+    walk.error_detail = outcome.error_detail
+    return True
+
+
+def _consume_fetched_page(
+    walk: PageWalk,
+    conn: dict[str, Any],
+    cursor: str | None,
+    stop_watermark: str | None,
+    on_page: PageHandler,
+) -> tuple[str | None, bool, bool]:
+    """Updates `walk` for a fetched page, invokes `on_page`, and returns (end_cursor, reached_end, bad_cursor)."""
+    nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = (
+        _extract_page_metadata(conn, stop_watermark, walk.newest_updated)
+    )
+    if total_count is not None:
+        walk.total_count = total_count
+    end_cursor, reached_end, bad_cursor = _classify_page_end(
+        conn, cursor, reached_wm or not nodes
+    )
+    next_cursor = cursor if bad_cursor else end_cursor
+    walk.end_cursor = next_cursor
+    walk.pages += 1
+    walk.items_fetched += len(accepted)
+    on_page(
+        PageBatch(
+            nodes=accepted,
+            cursor=next_cursor,
+            items_fetched=walk.items_fetched,
+            total_count=walk.total_count,
+            oldest_date=oldest_date,
+        )
+    )
+    return end_cursor, reached_end, bad_cursor
+
+
 def _walk_pages(
     repo: RepoConfig,
     spec: StreamSpec,
@@ -1249,12 +1368,17 @@ def _walk_pages(
     missing or repeated endCursor (which would otherwise loop forever), or
     when `budget` denies the next page at `priority` (marked `deferred`).
     """
-    walk = PageWalk()
+    walk = PageWalk(end_cursor=start_cursor)
     cursor = start_cursor
     current_max_page_size = PAGE_SIZE_LADDER[0]
     cooldown_remaining = 0
+    is_budgeted = bool(getattr(runner, "is_budgeted_runner", False))
     while walk.pages < max_pages:
-        if budget is not None and not budget.allows("graphql", priority):
+        if (
+            budget is not None
+            and not is_budgeted
+            and not budget.allows("graphql", priority)
+        ):
             walk.deferred = True
             walk.error_kind = DEFERRED_RATE_LIMIT
             walk.error_detail = f"graphql budget below the {priority.name} threshold"
@@ -1273,45 +1397,14 @@ def _walk_pages(
             budget=budget,
             max_page_size=current_max_page_size,
         )
-        if outcome.connection is None:
-            walk.failed = True
-            walk.error_kind = outcome.error_kind
-            walk.error_detail = outcome.error_detail
+        if _apply_walk_outcome(walk, outcome):
             return walk
-        if outcome.used_page_size < current_max_page_size:
-            current_max_page_size = outcome.used_page_size
-            cooldown_remaining = ADAPTIVE_PAGE_COOLDOWN
-        elif current_max_page_size < PAGE_SIZE_LADDER[0]:
-            if cooldown_remaining > 1:
-                cooldown_remaining -= 1
-            else:
-                curr_idx = PAGE_SIZE_LADDER.index(current_max_page_size)
-                current_max_page_size = PAGE_SIZE_LADDER[max(0, curr_idx - 1)]
-                cooldown_remaining = (
-                    ADAPTIVE_PAGE_COOLDOWN
-                    if current_max_page_size < PAGE_SIZE_LADDER[0]
-                    else 0
-                )
-        nodes, accepted, walk.newest_updated, reached_wm, total_count, oldest_date = (
-            _extract_page_metadata(
-                outcome.connection, stop_watermark, walk.newest_updated
-            )
+        assert outcome.connection is not None
+        current_max_page_size, cooldown_remaining = _next_adaptive_page_size(
+            current_max_page_size, outcome.used_page_size, cooldown_remaining
         )
-        if total_count is not None:
-            walk.total_count = total_count
-        end_cursor, reached_end, bad_cursor = _classify_page_end(
-            outcome.connection, cursor, reached_wm or not nodes
-        )
-        walk.pages += 1
-        walk.items_fetched += len(accepted)
-        on_page(
-            PageBatch(
-                nodes=accepted,
-                cursor=cursor if bad_cursor else end_cursor,
-                items_fetched=walk.items_fetched,
-                total_count=walk.total_count,
-                oldest_date=oldest_date,
-            )
+        end_cursor, reached_end, bad_cursor = _consume_fetched_page(
+            walk, outcome.connection, cursor, stop_watermark, on_page
         )
         if reached_end:
             walk.reached_end = True
@@ -1348,8 +1441,10 @@ def _pr_mention_texts(pr: PrRecord) -> Iterator[str]:
     for review in pr.reviews:
         yield review.body
     for thread in pr.review_threads:
-        yield thread.body
-        yield from _thread_reply_bodies(thread.comments_json)
+        if thread.body:
+            yield thread.body
+        elif thread.comments_json not in ("", "[]"):
+            yield from _thread_reply_bodies(thread.comments_json)
 
 
 def _enqueue_mentions(
@@ -1361,14 +1456,15 @@ def _enqueue_mentions(
     GraphQL query caps (comments, reviews, and review threads) are not seen.
     """
     resolve: RepoResolver = caching_resolver(store.get_repo)
+    page_targets: set[tuple[int, int]] = set()
     for number, texts in sources:
-        targets: set[tuple[int, int]] = set()
+        item_targets: set[tuple[int, int]] = set()
         for text in texts:
-            targets |= extract_item_mentions(text, repo, resolve)
-        if targets:
-            store.enqueue_timeline_dirty(
-                targets, reason="mention", source=(repo.repo_id, number)
-            )
+            item_targets |= extract_item_mentions(text, repo, resolve)
+        item_targets.discard((repo.repo_id, number))
+        page_targets |= item_targets
+    if page_targets:
+        store.enqueue_timeline_dirty(page_targets, reason="mention")
 
 
 def _persist_issues(
@@ -1452,6 +1548,94 @@ def _store_watermark(
     store.update_repo_sync_state(repo.repo_id, **{f"{stream}_watermark": value})
 
 
+def _mark_backfill_incomplete(stats: SyncStats, stream: str) -> None:
+    """Appends `stream` to `stats.backfill_incomplete` once."""
+    if stream not in stats.backfill_incomplete:
+        stats.backfill_incomplete.append(stream)
+
+
+def _has_pending_gap(store: PackratStore, repo_id: int) -> bool:
+    """Returns True when any stream has a pending incremental gap cursor."""
+    get_gap = getattr(store, "get_gap_state", None)
+    if get_gap is None:
+        return False
+    return any(get_gap(repo_id, s)[0] is not None for s in BACKFILL_STREAMS)
+
+
+def _is_backfill_or_gap_pending(store: PackratStore, repo: RepoConfig) -> bool:
+    """Returns True when any stream has unfinished backfill or a pending incremental gap."""
+    if not all(repo.backfill(s).complete for s in BACKFILL_STREAMS):
+        return True
+    return _has_pending_gap(store, repo.repo_id)
+
+
+def _resume_incremental_gap(
+    store: PackratStore,
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    gap_cursor: str,
+    gap_floor: str | None,
+    remaining_pages: int,
+    runner: GhRunner,
+    on_page: PageHandler,
+    stats: SyncStats,
+    reporter: ProgressReporter,
+    auth_probe: AuthProbeFn | None,
+    budget: RateBudget | None,
+) -> PageWalk | None:
+    """Resumes a pending incremental gap walk from `gap_cursor` down to `gap_floor`."""
+    set_gap = getattr(store, "set_gap_state", None)
+    if remaining_pages <= 0:
+        _mark_backfill_incomplete(stats, spec.stream)
+        return None
+    gap_walk = _walk_pages(
+        repo,
+        spec,
+        start_cursor=gap_cursor,
+        stop_watermark=gap_floor,
+        max_pages=remaining_pages,
+        runner=runner,
+        on_page=on_page,
+        reporter=reporter,
+        auth_probe=auth_probe,
+        budget=budget,
+        priority=Priority.MIRROR,
+    )
+    _record_walk_failure(gap_walk, repo.full_name, spec.stream, stats, reporter)
+    if gap_walk.reached_end:
+        if set_gap is not None:
+            set_gap(repo.repo_id, spec.stream, cursor=None, floor=None)
+        return gap_walk
+    if not gap_walk.failed and gap_walk.end_cursor and set_gap is not None:
+        set_gap(repo.repo_id, spec.stream, cursor=gap_walk.end_cursor, floor=gap_floor)
+    _mark_backfill_incomplete(stats, spec.stream)
+    return gap_walk
+
+
+def _save_truncated_gap(
+    store: PackratStore,
+    repo: RepoConfig,
+    spec: StreamSpec,
+    *,
+    watermark: str | None,
+    newest_updated: str | None,
+    end_cursor: str,
+    gap_cursor: str | None,
+    gap_floor: str | None,
+    stats: SyncStats,
+) -> None:
+    """Advances the watermark and saves gap state after a truncated or deferred walk."""
+    _store_watermark(
+        store, repo, spec.stream, _max_timestamp(watermark, newest_updated)
+    )
+    effective_floor = gap_floor if gap_cursor is not None else watermark
+    set_gap = getattr(store, "set_gap_state", None)
+    if set_gap is not None:
+        set_gap(repo.repo_id, spec.stream, cursor=end_cursor, floor=effective_floor)
+    _mark_backfill_incomplete(stats, spec.stream)
+
+
 def _run_incremental_walk(
     store: PackratStore,
     repo: RepoConfig,
@@ -1466,10 +1650,16 @@ def _run_incremental_walk(
 ) -> PageWalk:
     """Fetches items updated since the stream's watermark at `MIRROR` priority.
 
-    The watermark only advances when the walk reaches it (or the last page), so a
-    walk cut short by max_pages or an error never leaves a gap behind it.
+    When a walk is cut short by `max_pages` or a mid-walk budget deferral
+    after fetching at least one page, the watermark advances to the newest
+    fetched item and `(end_cursor, old_watermark)` is persisted in gap state
+    so the next sync resumes bridging the gap without refetching top pages.
     """
     watermark = getattr(repo, f"{spec.stream}_watermark")
+    get_gap = getattr(store, "get_gap_state", None)
+    gap_cursor, gap_floor = (
+        get_gap(repo.repo_id, spec.stream) if get_gap is not None else (None, None)
+    )
     wm_short = str(watermark)[:10] if watermark else "start"
     reporter.start_phase(repo.full_name, f"github {spec.stream}", total=None)
 
@@ -1495,12 +1685,43 @@ def _run_incremental_walk(
         budget=budget,
         priority=Priority.MIRROR,
     )
-    reporter.finish_phase()
     _record_walk_failure(walk, repo.full_name, spec.stream, stats, reporter)
     if walk.reached_end:
         _store_watermark(
             store, repo, spec.stream, _max_timestamp(watermark, walk.newest_updated)
         )
+        if gap_cursor is not None:
+            gap_walk = _resume_incremental_gap(
+                store,
+                repo,
+                spec,
+                gap_cursor=gap_cursor,
+                gap_floor=gap_floor,
+                remaining_pages=max_pages - walk.pages,
+                runner=runner,
+                on_page=on_page,
+                stats=stats,
+                reporter=reporter,
+                auth_probe=auth_probe,
+                budget=budget,
+            )
+            if gap_walk is not None and not gap_walk.reached_end:
+                walk = gap_walk
+    elif not walk.failed and walk.end_cursor:
+        _save_truncated_gap(
+            store,
+            repo,
+            spec,
+            watermark=watermark,
+            newest_updated=walk.newest_updated,
+            end_cursor=walk.end_cursor,
+            gap_cursor=gap_cursor,
+            gap_floor=gap_floor,
+            stats=stats,
+        )
+    elif gap_cursor is not None:
+        _mark_backfill_incomplete(stats, spec.stream)
+    reporter.finish_phase()
     return walk
 
 
@@ -1632,7 +1853,33 @@ def _sync_stream(
     ).error_kind
 
 
-OPEN_PRS_SPEC = StreamSpec("open_prs", OPEN_PRS_QUERY, "pullRequests", _persist_prs)
+def _persist_open_pr_forks(
+    store: PackratStore, repo: RepoConfig, nodes: list[dict[str, Any]], stats: SyncStats
+) -> None:
+    """Updates fork-owner columns on stored open pull requests without rewriting children."""
+    if not nodes:
+        return
+    rows: list[tuple[int, str | None, bool | None]] = []
+    for node in nodes:
+        cross_repo = node.get("isCrossRepository")
+        rows.append(
+            (
+                int(node["number"]),
+                _login(node, "headRepositoryOwner"),
+                cross_repo if isinstance(cross_repo, bool) else None,
+            )
+        )
+    update_fn = getattr(store, "update_pr_fork_owners", None)
+    if update_fn is not None:
+        update_fn(repo.repo_id, rows)
+        stats.prs_upserted += len(rows)
+        return
+    _persist_prs(store, repo, nodes, stats)
+
+
+OPEN_PRS_SPEC = StreamSpec(
+    "open_prs", OPEN_PRS_QUERY, "pullRequests", _persist_open_pr_forks
+)
 """One-time walk over every open PR that fills fork fields added after the PRs were stored."""
 
 
@@ -1813,13 +2060,17 @@ def _skipped_events_poll(repo: RepoConfig) -> EventsPollResult:
 
 
 def _defer_events_poll(
-    repo: RepoConfig, budget: RateBudget | None
+    repo: RepoConfig, budget: RateBudget | None, runner: GhRunner | None = None
 ) -> EventsPollResult | None:
     """Returns a synthetic rate-limited poll result when the core budget is too low.
 
     Returns None when the poll may proceed.
     """
-    if budget is None or budget.allows("core", Priority.MIRROR):
+    if (
+        budget is None
+        or bool(getattr(runner, "is_budgeted_runner", False))
+        or budget.allows("core", Priority.MIRROR)
+    ):
         return None
     return EventsPollResult(
         status_code=0,
@@ -1898,7 +2149,7 @@ def sync_github_metadata(
     stats = SyncStats(repo_full_name=repo.full_name)
     now_iso = utc_now_iso()
     poll = _skipped_events_poll(repo) if skip_events_poll else None
-    poll = poll or _defer_events_poll(repo, budget)
+    poll = poll or _defer_events_poll(repo, budget, runner)
     poll = poll or poll_repo_events(repo, runner=runner, budget=budget)
     if poll.error:
         _record_poll_failure(stats, repo, poll, reporter)
@@ -1918,7 +2169,7 @@ def sync_github_metadata(
         budget=budget,
     )
     sweep_due = needs_safety_sweep(repo, now_iso=now_iso)
-    backfill_pending = not all(repo.backfill(s).complete for s in BACKFILL_STREAMS)
+    backfill_pending = _is_backfill_or_gap_pending(store, repo)
     if poll.not_modified and not force and not sweep_due and not backfill_pending:
         stats.events_not_modified = True
         store.update_repo_sync_state(

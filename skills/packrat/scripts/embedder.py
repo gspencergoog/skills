@@ -9,13 +9,14 @@ FLOAT32 vectors:
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import urllib.request
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -984,24 +985,49 @@ class Embedder(Protocol):
         ...
 
 
-def ensure_onnx_deps() -> bool:
-    """Ensures onnxruntime, tokenizers, and numpy are importable via uv cache if needed."""
+_ONNX_DEPS_CACHE: bool | None = None
+_ONNX_DEPS_PROBED: bool = False
+_ONNX_DEPS_AVAILABLE: bool = False
+
+
+def reset_onnx_deps_cache() -> None:
+    """Resets the memoized `ensure_onnx_deps()` probe result for testing."""
+    global _ONNX_DEPS_CACHE, _ONNX_DEPS_PROBED, _ONNX_DEPS_AVAILABLE
+    _ONNX_DEPS_CACHE = None
+    _ONNX_DEPS_PROBED = False
+    _ONNX_DEPS_AVAILABLE = False
+
+
+def _set_onnx_deps_cache(available: bool) -> bool:
+    """Records and returns the memoized `ensure_onnx_deps()` result."""
+    global _ONNX_DEPS_CACHE, _ONNX_DEPS_PROBED, _ONNX_DEPS_AVAILABLE
+    _ONNX_DEPS_CACHE = available
+    _ONNX_DEPS_PROBED = True
+    _ONNX_DEPS_AVAILABLE = available
+    return available
+
+
+def _can_import_onnx_deps() -> bool:
+    """Returns True when numpy, onnxruntime, and tokenizers are importable."""
     try:
-        import numpy
-        import onnxruntime
-        import tokenizers
+        return all(
+            importlib.util.find_spec(mod) is not None
+            for mod in ("numpy", "onnxruntime", "tokenizers")
+        )
+    except (ImportError, ValueError):
+        return False
 
-        return True
-    except ImportError:
-        pass
 
-    uv_bin = str(Path.home() / ".local" / "bin" / "uv")
-    if not Path(uv_bin).exists():
-        found = shutil.which("uv")
-        if not found:
-            return False
-        uv_bin = found
+def _resolve_uv_binary() -> str | None:
+    """Locates the `uv` binary in `~/.local/bin/uv` or on `PATH`."""
+    uv_bin = Path.home() / ".local" / "bin" / "uv"
+    if uv_bin.exists():
+        return str(uv_bin)
+    return shutil.which("uv")
 
+
+def _probe_uv_onnx_paths(uv_bin: str) -> list[str]:
+    """Probes the offline `uv` cache for site-packages containing ONNX runtime dependencies."""
     probe_code = (
         "import json, sys, numpy, onnxruntime, tokenizers; "
         "print(json.dumps([p for p in sys.path if 'uv/archive-v0' in p or 'site-packages' in p]))"
@@ -1030,23 +1056,39 @@ def ensure_onnx_deps() -> bool:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return False
-
+        return []
     if proc.returncode != 0 or not proc.stdout.strip():
-        return False
-
+        return []
     try:
-        paths = json.loads(proc.stdout.strip().splitlines()[-1])
-        for p in reversed(paths):
-            if p not in sys.path:
-                sys.path.insert(0, p)
-        import numpy  # noqa: F401
-        import onnxruntime  # noqa: F401
-        import tokenizers  # noqa: F401
+        parsed = json.loads(proc.stdout.strip().splitlines()[-1])
+    except ValueError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(p) for p in parsed if isinstance(p, str)]
 
-        return True
-    except (ImportError, OSError, ValueError):
-        return False
+
+def ensure_onnx_deps() -> bool:
+    """Ensures onnxruntime, tokenizers, and numpy are importable via uv cache if needed."""
+    if _ONNX_DEPS_CACHE is not None:
+        return _ONNX_DEPS_CACHE
+    if _ONNX_DEPS_PROBED:
+        return _ONNX_DEPS_AVAILABLE
+    if _can_import_onnx_deps():
+        return _set_onnx_deps_cache(True)
+
+    uv_bin = _resolve_uv_binary()
+    if not uv_bin:
+        return _set_onnx_deps_cache(False)
+
+    paths = _probe_uv_onnx_paths(uv_bin)
+    if not paths:
+        return _set_onnx_deps_cache(False)
+
+    for p in reversed(paths):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    return _set_onnx_deps_cache(_can_import_onnx_deps())
 
 
 _ensure_onnx_deps = ensure_onnx_deps
@@ -1086,6 +1128,7 @@ _SUFFIX_RULES: tuple[tuple[str, int, str, bool], ...] = (
 )
 
 
+@functools.lru_cache(maxsize=16384)
 def _stem_token(word: str) -> str:
     """Applies lightweight morphological suffix stripping matching inflight's embedder."""
     if len(word) <= 3:
@@ -1099,17 +1142,30 @@ def _stem_token(word: str) -> str:
     return word
 
 
+_CLUSTER_STEM_PAIRS: tuple[tuple[tuple[str, str], ...], ...] = tuple(
+    tuple((kw, _stem_token(kw)) for kw in cluster) for cluster in CONCEPT_CLUSTERS
+)
+
+_FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_URL_RE = re.compile(r"https?://\S+")
+_CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
+_PATH_PUNCT_RE = re.compile(r"[/\\.\-:]+")
+_NON_IDENT_RE = re.compile(r"[^a-zA-Z0-9_\s]")
+_CODE_TOKEN_RE = re.compile(r"[_0-9]")
+
+
 def _strip_markdown(text: str) -> str:
     """Strips Markdown formatting while retaining code identifiers."""
     cleaned = text
     for pattern, replacement in CANONICAL_PHRASES:
         cleaned = pattern.sub(replacement, cleaned)
-    cleaned = re.sub(r"```[\s\S]*?```", " ", cleaned)
-    cleaned = re.sub(r"`([^`]+)`", r" \1 ", cleaned)
-    cleaned = re.sub(r"https?://\S+", " ", cleaned)
-    cleaned = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", cleaned)
-    cleaned = re.sub(r"[/\\.\-:]+", " ", cleaned)
-    cleaned = re.sub(r"[^a-zA-Z0-9_\s]", " ", cleaned)
+    cleaned = _FENCED_CODE_RE.sub(" ", cleaned)
+    cleaned = _INLINE_CODE_RE.sub(r" \1 ", cleaned)
+    cleaned = _URL_RE.sub(" ", cleaned)
+    cleaned = _CAMEL_BOUNDARY_RE.sub(r"\1 \2", cleaned)
+    cleaned = _PATH_PUNCT_RE.sub(" ", cleaned)
+    cleaned = _NON_IDENT_RE.sub(" ", cleaned)
     return cleaned.lower()
 
 
@@ -1128,33 +1184,55 @@ def _tokenize(text: str) -> list[str]:
 
 def _apply_concept_clusters(token_set: set[str], vec: list[float]) -> None:
     """Populates the first 30 semantic concept dimensions."""
-    for c_idx, cluster in enumerate(CONCEPT_CLUSTERS):
-        matches = sum(
-            1 for kw in cluster if kw in token_set or _stem_token(kw) in token_set
-        )
+    for c_idx, pairs in enumerate(_CLUSTER_STEM_PAIRS):
+        matches = sum(1 for kw, stem in pairs if kw in token_set or stem in token_set)
         if matches > 0:
             vec[c_idx] += 2.8 + min(matches - 1, 3) * 0.6
+
+
+@functools.lru_cache(maxsize=16384)
+def _unigram_delta(tok: str) -> tuple[int, float]:
+    """Computes the hashed feature index and signed weight delta for a unigram token."""
+    weight = 2.2 if _CODE_TOKEN_RE.search(tok) else 1.6
+    key = f"u:{tok}"
+    idx = CONCEPT_DIM + (_fnv1a(key) % HASH_DIM)
+    return idx, _hash_sign(key) * weight
+
+
+@functools.lru_cache(maxsize=16384)
+def _bigram_delta(tok: str, next_tok: str) -> tuple[int, float]:
+    """Computes the hashed feature index and signed weight delta for an adjacent token pair."""
+    bigram = f"b:{tok}_{next_tok}"
+    b_idx = CONCEPT_DIM + (_fnv1a(bigram) % HASH_DIM)
+    return b_idx, _hash_sign(bigram) * 1.2
+
+
+@functools.lru_cache(maxsize=16384)
+def _char_ngram_deltas(tok: str) -> tuple[tuple[int, float], ...]:
+    """Computes ordered `(index, signed_weight)` deltas for a token's 3-grams and 4-grams."""
+    deltas: list[tuple[int, float]] = []
+    for j in range(len(tok) - 2):
+        trigram = f"c3:{tok[j : j + 3]}"
+        c_idx = CONCEPT_DIM + (_fnv1a(trigram) % HASH_DIM)
+        deltas.append((c_idx, _hash_sign(trigram) * 0.25))
+    for j in range(len(tok) - 3):
+        quadgram = f"c4:{tok[j : j + 4]}"
+        c4_idx = CONCEPT_DIM + (_fnv1a(quadgram) % HASH_DIM)
+        deltas.append((c4_idx, _hash_sign(quadgram) * 0.25))
+    return tuple(deltas)
 
 
 def _apply_hashed_features(tokens: list[str], vec: list[float]) -> None:
     """Populates hashed unigram, bigram, and char n-gram features into indices 30..383."""
     for i, tok in enumerate(tokens):
-        weight = 2.2 if re.search(r"[_0-9]", tok) else 1.6
-        idx = CONCEPT_DIM + (_fnv1a(f"u:{tok}") % HASH_DIM)
-        vec[idx] += _hash_sign(f"u:{tok}") * weight
+        idx, delta = _unigram_delta(tok)
+        vec[idx] += delta
         if i + 1 < len(tokens):
-            bigram = f"b:{tok}_{tokens[i + 1]}"
-            b_idx = CONCEPT_DIM + (_fnv1a(bigram) % HASH_DIM)
-            vec[b_idx] += _hash_sign(bigram) * 1.2
+            b_idx, b_delta = _bigram_delta(tok, tokens[i + 1])
+            vec[b_idx] += b_delta
         if len(tok) >= 4:
-            for j in range(len(tok) - 2):
-                trigram = f"c3:{tok[j : j + 3]}"
-                c_idx = CONCEPT_DIM + (_fnv1a(trigram) % HASH_DIM)
-                vec[c_idx] += _hash_sign(trigram) * 0.25
-            for j in range(len(tok) - 3):
-                quadgram = f"c4:{tok[j : j + 4]}"
-                c4_idx = CONCEPT_DIM + (_fnv1a(quadgram) % HASH_DIM)
-                vec[c4_idx] += _hash_sign(quadgram) * 0.25
+            for c_idx, c_delta in _char_ngram_deltas(tok):
+                vec[c_idx] += c_delta
 
 
 def embed_text_deterministic(text: str) -> list[float]:
@@ -1225,6 +1303,8 @@ def _find_onnx_model_files(model_dir: Path) -> tuple[Path, Path] | None:
 
 def _download_url_to_path(url: str, dest: Path, timeout: float = 30.0) -> None:
     """Downloads `url` to `dest` with an explicit socket timeout."""
+    import urllib.request
+
     with (
         urllib.request.urlopen(url, timeout=timeout) as resp,
         dest.open("wb") as out_f,
@@ -1324,8 +1404,8 @@ class OnnxArcticEmbedder:
         cls_vecs = hidden[:, 0, :]
         norms = np.linalg.norm(cls_vecs, axis=1, keepdims=True)
         norms = np.where(norms == 0, 1.0, norms)
-        normalized = cls_vecs / norms
-        return [row.astype(float).tolist() for row in normalized]
+        normalized = (cls_vecs / norms).astype(np.float32, copy=False)
+        return normalized.tolist()
 
     def embed_chunks(self, chunks: Sequence[TextChunk]) -> list[list[float]]:
         """Computes 384-dim embeddings for structured chunks."""
@@ -1337,6 +1417,24 @@ class OnnxArcticEmbedder:
         return vecs[0] if vecs else [0.0] * EMBEDDING_DIM
 
 
+def get_default_embedder_model_id(
+    model_dir: Path = DEFAULT_MODEL_DIR,
+    prefer_onnx: bool = True,
+    allow_download: bool = False,
+    *,
+    reporter: ProgressReporter = NULL_REPORTER,
+) -> str:
+    """Resolves the active embedder model_id without constructing an ONNX InferenceSession."""
+    if prefer_onnx and ensure_onnx_deps():
+        if _find_onnx_model_files(model_dir) is None and allow_download:
+            ensure_onnx_model(
+                model_dir=model_dir, allow_download=True, reporter=reporter
+            )
+        if _find_onnx_model_files(model_dir) is not None:
+            return ARCTIC_MODEL_ID
+    return DETERMINISTIC_MODEL_ID
+
+
 def get_default_embedder(
     model_dir: Path = DEFAULT_MODEL_DIR,
     prefer_onnx: bool = True,
@@ -1345,20 +1443,20 @@ def get_default_embedder(
     reporter: ProgressReporter = NULL_REPORTER,
 ) -> Embedder:
     """Returns OnnxArcticEmbedder when model files and runtime exist, else DeterministicHashEmbedder."""
-    if prefer_onnx and ensure_onnx_deps():
-        if _find_onnx_model_files(model_dir) is None and allow_download:
-            ensure_onnx_model(
-                model_dir=model_dir, allow_download=True, reporter=reporter
+    model_id = get_default_embedder_model_id(
+        model_dir=model_dir,
+        prefer_onnx=prefer_onnx,
+        allow_download=allow_download,
+        reporter=reporter,
+    )
+    if model_id == ARCTIC_MODEL_ID:
+        try:
+            return OnnxArcticEmbedder(model_dir=model_dir)
+        except Exception as exc:  # noqa: BLE001
+            reporter.warn(
+                "packrat",
+                f"ONNX runtime init failed ({exc}); using {DETERMINISTIC_MODEL_ID}",
             )
-        if _find_onnx_model_files(model_dir) is not None:
-            try:
-                return OnnxArcticEmbedder(model_dir=model_dir)
-            except Exception as exc:  # noqa: BLE001
-                reporter.warn(
-                    "packrat",
-                    f"ONNX runtime init failed ({exc}); using {DETERMINISTIC_MODEL_ID}",
-                )
-                return DeterministicHashEmbedder()
     return DeterministicHashEmbedder()
 
 
@@ -1371,42 +1469,212 @@ def _format_chunk_for_embedding(chunk: TextChunk) -> str:
     return f"{header}\n\n{chunk.text}"
 
 
+EMBEDDING_PAGE_SIZE = 2048
+
+
+def _fetch_unembedded_page(
+    store: PackratStore,
+    repo_id: int | None,
+    model_id: str,
+    *,
+    limit: int,
+    after_chunk_id: str | None,
+) -> tuple[list[TextChunk], bool]:
+    """Fetches one keyset page of unembedded chunks, falling back if `store` lacks paging args."""
+    try:
+        return (
+            store.get_unembedded_chunks(
+                repo_id,
+                model_id,
+                limit=limit,
+                after_chunk_id=after_chunk_id,
+            ),
+            True,
+        )
+    except TypeError:
+        if after_chunk_id is not None:
+            return [], False
+        return store.get_unembedded_chunks(repo_id, model_id), False
+
+
+def _next_unembedded_page_if_needed(
+    store: PackratStore,
+    repo_id: int | None,
+    model_id: str,
+    *,
+    current_page_len: int,
+    page_size: int,
+    supports_paging: bool,
+    last_chunk_id: str,
+) -> tuple[list[TextChunk], bool]:
+    """Fetches the next keyset page when the current page filled `page_size`."""
+    if not supports_paging or current_page_len < page_size:
+        return [], supports_paging
+    return _fetch_unembedded_page(
+        store,
+        repo_id,
+        model_id,
+        limit=page_size,
+        after_chunk_id=last_chunk_id,
+    )
+
+
+def _embed_chunk_batch(
+    embedder: Embedder, batch: Sequence[TextChunk]
+) -> list[list[float]]:
+    """Embeds a batch of chunks via `embed_chunks` (or `embed_documents` on test doubles)."""
+    embed_chunks_fn = getattr(embedder, "embed_chunks", None)
+    if callable(embed_chunks_fn):
+        return embed_chunks_fn(batch)
+    embed_docs_fn = getattr(embedder, "embed_documents", None)
+    if callable(embed_docs_fn):
+        return embed_docs_fn(batch)
+    raise AttributeError("Embedder must provide embed_chunks or embed_documents")
+
+
+def _build_embedding_records(
+    batch: Sequence[TextChunk],
+    vectors: Sequence[Sequence[float]],
+    model_id: str,
+    now_iso: str,
+) -> list[StoredEmbeddingRecord]:
+    """Builds `StoredEmbeddingRecord` rows for an embedded chunk batch."""
+    return [
+        StoredEmbeddingRecord(
+            chunk_id=ch.chunk_id,
+            model_id=model_id,
+            content_sha256=ch.content_sha256,
+            vector=tuple(vec),
+            updated_at=now_iso,
+        )
+        for ch, vec in zip(batch, vectors)
+    ]
+
+
+def _upsert_embedding_batch(
+    store: PackratStore,
+    records: Sequence[StoredEmbeddingRecord],
+    *,
+    allow_seq_bump: bool,
+) -> None:
+    """Persists a batch of embeddings, passing `allow_seq_bump` when supported by `store`."""
+    try:
+        store.upsert_embeddings(records, allow_seq_bump=allow_seq_bump)
+    except TypeError:
+        store.upsert_embeddings(records)
+
+
+def _resolve_active_embedder_and_first_page(
+    store: PackratStore,
+    repo_id: int | None,
+    embedder: Embedder | None,
+    *,
+    page_size: int,
+    model_dir: Path,
+    allow_download: bool,
+    reporter: ProgressReporter,
+) -> tuple[Embedder | None, list[TextChunk], bool]:
+    """Resolves the target model ID, fetches page 1, and constructs the embedder lazily if needed."""
+    target_model_id = (
+        embedder.model_id
+        if embedder is not None
+        else get_default_embedder_model_id(
+            model_dir=model_dir,
+            allow_download=allow_download,
+            reporter=reporter,
+        )
+    )
+    first_page, supports_paging = _fetch_unembedded_page(
+        store,
+        repo_id,
+        target_model_id,
+        limit=page_size,
+        after_chunk_id=None,
+    )
+    if not first_page:
+        return None, [], supports_paging
+    active_embedder = embedder or get_default_embedder(
+        model_dir=model_dir,
+        allow_download=allow_download,
+        reporter=reporter,
+    )
+    if active_embedder.model_id != target_model_id:
+        first_page, supports_paging = _fetch_unembedded_page(
+            store,
+            repo_id,
+            active_embedder.model_id,
+            limit=page_size,
+            after_chunk_id=None,
+        )
+        if not first_page:
+            return None, [], supports_paging
+    return active_embedder, first_page, supports_paging
+
+
 def sync_repo_embeddings(
     store: PackratStore,
     repo_id: int | None,
     embedder: Embedder | None = None,
     batch_size: int = 64,
     *,
+    page_size: int = EMBEDDING_PAGE_SIZE,
+    model_dir: Path = DEFAULT_MODEL_DIR,
+    allow_download: bool = False,
     reporter: ProgressReporter = NULL_REPORTER,
     repo_label: str = "packrat",
 ) -> int:
     """Incremental embedding sync: embeds only chunks whose content_sha256 has changed."""
-    active_embedder = embedder or get_default_embedder(reporter=reporter)
-    pending = store.get_unembedded_chunks(repo_id, active_embedder.model_id)
-    if not pending:
+    effective_batch_size = max(1, int(batch_size))
+    effective_page_size = max(1, int(page_size))
+    active_embedder, current_page, supports_paging = (
+        _resolve_active_embedder_and_first_page(
+            store,
+            repo_id,
+            embedder,
+            page_size=effective_page_size,
+            model_dir=model_dir,
+            allow_download=allow_download,
+            reporter=reporter,
+        )
+    )
+    if active_embedder is None or not current_page:
         return 0
 
     now = utc_now_iso()
-    total_pending = len(pending)
+    total_pending = len(current_page)
     total_embedded = 0
     reporter.start_phase(
-        repo_label, f"embeddings ({active_embedder.model_id})", total=total_pending
+        repo_label,
+        f"embeddings ({active_embedder.model_id})",
+        total=total_pending,
     )
-    for start in range(0, total_pending, batch_size):
-        batch = pending[start : start + batch_size]
-        vectors = active_embedder.embed_chunks(batch)
-        records = [
-            StoredEmbeddingRecord(
-                chunk_id=ch.chunk_id,
-                model_id=active_embedder.model_id,
-                content_sha256=ch.content_sha256,
-                vector=tuple(vec),
-                updated_at=now,
+    while current_page:
+        page_len = len(current_page)
+        last_chunk_id = max(ch.chunk_id for ch in current_page)
+        current_page.sort(key=lambda ch: len(ch.title) + len(ch.text))
+        next_page: list[TextChunk] = []
+        for start in range(0, page_len, effective_batch_size):
+            batch = current_page[start : start + effective_batch_size]
+            is_last_batch_in_page = start + effective_batch_size >= page_len
+            if is_last_batch_in_page:
+                next_page, supports_paging = _next_unembedded_page_if_needed(
+                    store,
+                    repo_id,
+                    active_embedder.model_id,
+                    current_page_len=page_len,
+                    page_size=effective_page_size,
+                    supports_paging=supports_paging,
+                    last_chunk_id=last_chunk_id,
+                )
+                total_pending += len(next_page)
+            vectors = _embed_chunk_batch(active_embedder, batch)
+            records = _build_embedding_records(
+                batch, vectors, active_embedder.model_id, now
             )
-            for ch, vec in zip(batch, vectors)
-        ]
-        store.upsert_embeddings(records)
-        total_embedded += len(records)
-        reporter.advance(total_embedded, total_pending)
+            is_final_batch = is_last_batch_in_page and not next_page
+            _upsert_embedding_batch(store, records, allow_seq_bump=is_final_batch)
+            total_embedded += len(records)
+            reporter.advance(total_embedded, total_pending)
+        current_page = next_page
     reporter.finish_phase()
     return total_embedded

@@ -9,6 +9,8 @@ database directly: they lease items with `watch`, follow the change feed with
 from __future__ import annotations
 
 import argparse
+import contextlib
+import importlib
 import json
 import sys
 import threading
@@ -18,19 +20,59 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from db_store import PackratStore
-from gh_transport import BudgetDeferred, GhApiError, GhTransport
-from github_sync import GhCommandResult, sync_github_metadata
-from hot_sync import HotRefresher
-from models import REPO_MODE_ITEMS, RepoConfig, SyncStats, TimelineMode, TimelineStats
+from gh_transport import (
+    BudgetDeferred,
+    GhApiError,
+    GhCommandResult,
+    GhTransport,
+    run_gh_command,
+)
+from models import (
+    REPO_MODE_ITEMS,
+    RepoConfig,
+    SyncStats,
+    TimelineMode,
+    TimelineStats,
+    parse_item_key,
+)
 from rate_budget import RATE_BUDGET_FILENAME, Priority, RateBudget
-from service import PackratService, TickReport
-from signals import SignalPoller
 from sync_runtime import acquire_serve_lock
-from timeline_sync import sync_repo_timelines
-from viewer_sync import ViewerSync
+
+if TYPE_CHECKING:
+    from service import PackratService, TickReport
+
+_LAZY_ATTRS: dict[str, tuple[str, str]] = {
+    "HotRefresher": ("hot_sync", "HotRefresher"),
+    "PackratService": ("service", "PackratService"),
+    "SignalPoller": ("signals", "SignalPoller"),
+    "TickReport": ("service", "TickReport"),
+    "ViewerSync": ("viewer_sync", "ViewerSync"),
+    "format_service_version": ("service", "format_service_version"),
+    "sync_github_metadata": ("github_sync", "sync_github_metadata"),
+    "sync_repo_timelines": ("timeline_sync", "sync_repo_timelines"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily imports worker classes and sync functions on first access (PEP 562)."""
+    target = _LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    mod_name, attr_name = target
+    value = getattr(importlib.import_module(mod_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+def _lazy(name: str) -> Any:
+    """Resolves a lazy module attribute through `globals()` or `__getattr__`."""
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
+
 
 EXIT_SERVE_LOCKED = 4
 """Exit status of `packrat serve` when another service holds `serve.lock`."""
@@ -124,14 +166,21 @@ _DRY_RUN_WRITES: dict[str, Callable[..., Any]] = {
     "prune_expired_watches": _returns(0),
     "request_refresh": _echo_keys,
     "set_state": _returns(None),
+    "set_gap_state": _returns(None),
+    "set_commits_backfill_state": _returns(None),
     "set_rollup_etags": _returns(None),
     "set_node_id": _returns(None),
     "append_change": _returns(0),
     "upsert_pr_live": _returns([]),
+    "update_pr_fork_owners": _returns(0),
+    "upsert_indexed_files": _returns(None),
     "upsert_timeline_events": _returns(0),
     "take_timeline_dirty": _returns([]),
     "enqueue_timeline_dirty": _returns(0),
     "mark_timeline_synced": _returns(None),
+    "mark_timelines_synced": _returns(None),
+    "touch_live_fetched_at": _returns(None),
+    "wal_checkpoint_truncate": _returns((0, 0, 0)),
     "upsert_notifications": _returns([]),
     "upsert_thread_activity": _returns(False),
     "replace_thread_activity": _returns(False),
@@ -151,6 +200,7 @@ _WRITE_PREFIXES = (
     "add_",
     "append_",
     "delete_",
+    "mark_",
     "prune",
     "record_",
     "remove_",
@@ -160,8 +210,10 @@ _WRITE_PREFIXES = (
     "reset_",
     "set_",
     "take_",
+    "touch_",
     "update_",
     "upsert_",
+    "wal_",
     "write_",
 )
 """Name prefixes of store writes; unlisted writes with these prefixes return None."""
@@ -171,10 +223,20 @@ _DRY_RUN_READS: frozenset[str] = frozenset(
         "find_repo_by_node_id",
         "get_node_ids",
         "get_live_fetched_at",
+        "get_live_pr_fingerprints",
         "get_pr_head_sha",
         "get_rollup_etags",
         "get_state",
+        "get_gap_state",
+        "get_indexed_blob_oids",
+        "has_any_chunks",
+        "query_fts_candidates",
+        "read_all_embeddings_for_mmap",
+        "resolve_filtered_chunk_ids",
+        "stream_filtered_embeddings",
         "read_heartbeat",
+        "read_schema_and_views_version",
+        "read_snapshot",
         "active_watches",
         "changes_since",
         "max_change_seq",
@@ -221,12 +283,7 @@ class DryRunStore:
 
     def take_refresh_requests(self) -> list[str]:
         """Returns the queued refresh requests without removing them."""
-        if hasattr(self._store, "peek_refresh_requests"):
-            return list(self._store.peek_refresh_requests())
-        rows = self._store.conn.execute(
-            "SELECT item_key FROM refresh_requests ORDER BY requested_at, item_key"
-        ).fetchall()
-        return [str(r["item_key"]) for r in rows]
+        return list(self._store.peek_refresh_requests())
 
     def ensure_items_repo(self, owner: str, name: str) -> RepoConfig:
         """Returns the registered repository, or an unsaved `items` placeholder."""
@@ -291,6 +348,12 @@ class MirrorAdapter:
         self.runner = transport.as_runner("mirror", Priority.MIRROR)
         self.budget = budget
 
+    def _effective_budget(self) -> RateBudget | None:
+        """Returns None when `self.runner` already gates and records the rate budget."""
+        return (
+            None if getattr(self.runner, "is_budgeted_runner", False) else self.budget
+        )
+
     def sync_mirror(self, repo_ids: Collection[int]) -> list[SyncStats]:
         """Syncs each `mirror`-mode repository in `repo_ids`.
 
@@ -304,17 +367,19 @@ class MirrorAdapter:
             GhApiError: At least one run recorded an error (and none deferred).
         """
         results: list[SyncStats] = []
+        sync_gh = _lazy("sync_github_metadata")
+        effective_budget = self._effective_budget()
         for repo_id in sorted(repo_ids):
             repo = self.store.get_repo_by_id(repo_id)
             if repo is None or not repo.is_mirror:
                 continue
-            stats = sync_github_metadata(
+            stats = sync_gh(
                 self.store,
                 repo,
                 max_pages=MIRROR_MAX_PAGES,
                 backfill_max_pages=0,
                 runner=self.runner,
-                budget=self.budget,
+                budget=effective_budget,
                 skip_events_poll=True,
             )
             if not github_sync_stopped(stats):
@@ -325,12 +390,13 @@ class MirrorAdapter:
 
     def _sync_timeline(self, repo: RepoConfig) -> TimelineStats:
         """Runs the incremental timeline pass and xref drain for one mirror repository."""
-        return sync_repo_timelines(
+        sync_tl = _lazy("sync_repo_timelines")
+        return sync_tl(
             self.store,
             repo,
             mode=TimelineMode.INCREMENTAL,
             runner=self.runner,
-            budget=self.budget,
+            budget=self._effective_budget(),
             max_batches=MIRROR_TIMELINE_MAX_BATCHES,
             drain_xrefs=True,
             priority=Priority.MIRROR,
@@ -354,6 +420,12 @@ class TimelineAdapter:
         self.runner = transport.as_runner("timeline", Priority.VIEWER)
         self.budget = budget
 
+    def _effective_budget(self) -> RateBudget | None:
+        """Returns None when `self.runner` already gates and records the rate budget."""
+        return (
+            None if getattr(self.runner, "is_budgeted_runner", False) else self.budget
+        )
+
     def sync_items_timelines(self) -> list[TimelineStats]:
         """Runs one bounded timeline pass for each `items`-mode repository.
 
@@ -364,13 +436,15 @@ class TimelineAdapter:
             GhApiError: At least one run recorded an error (and none deferred).
         """
         results: list[TimelineStats] = []
+        sync_tl = _lazy("sync_repo_timelines")
+        effective_budget = self._effective_budget()
         for repo in self.store.list_repos(REPO_MODE_ITEMS):
-            stats = sync_repo_timelines(
+            stats = sync_tl(
                 self.store,
                 repo,
                 mode=TimelineMode.ALL,
                 runner=self.runner,
-                budget=self.budget,
+                budget=effective_budget,
                 max_batches=ITEMS_TIMELINE_MAX_BATCHES,
                 drain_xrefs=False,
                 priority=Priority.VIEWER,
@@ -437,11 +511,11 @@ def build_service(
     """
     budget = RateBudget(db_path.parent / RATE_BUDGET_FILENAME)
     transport = GhTransport(budget, store, runner=runner)
-    hot = HotRefresher(transport, store)
-    viewer = ViewerSync(transport, store, hot)
-    return PackratService(
+    hot = _lazy("HotRefresher")(transport, store)
+    viewer = _lazy("ViewerSync")(transport, store, hot)
+    return _lazy("PackratService")(
         store,
-        SignalPoller(transport, store),
+        _lazy("SignalPoller")(transport, store),
         hot,
         viewer,
         MirrorAdapter(store, transport, budget),
@@ -496,12 +570,52 @@ def cmd_serve(args: argparse.Namespace, db_path: Path) -> int:
             store.close()
 
 
+def _probe_watch_repo(store: PackratStore, owner: str, name: str) -> None:
+    """Probes `GET /repos/{owner}/{name}` at `HOT` priority before creating an `items` repo."""
+    full_name = f"{owner}/{name}"
+    budget = RateBudget(store.db_path.parent / RATE_BUDGET_FILENAME)
+    transport = GhTransport(budget, store, runner=run_gh_command)
+    try:
+        transport.rest_get(f"repos/{full_name}", worker="watch", priority=Priority.HOT)
+    except GhApiError as exc:
+        if exc.status == 404:
+            raise ValueError(
+                f"Repository '{full_name}' was not found on GitHub (HTTP 404)."
+            ) from exc
+        sys.stderr.write(
+            f"Warning: could not verify {full_name} on GitHub ({exc}); registering offline.\n"
+        )
+    except BudgetDeferred as exc:
+        sys.stderr.write(
+            f"Warning: could not verify {full_name} on GitHub ({exc}); registering offline.\n"
+        )
+    store.ensure_items_repo(owner, name)
+    sys.stderr.write(f"registered {full_name} (items)\n")
+
+
+def _validate_unregistered_watch_repos(
+    store: PackratStore, items: Sequence[str]
+) -> None:
+    """Validates and registers any unknown `<owner>/<name>` repositories referenced in `items`."""
+    seen: set[str] = set()
+    for item in items:
+        owner, name, _ = parse_item_key(item)
+        full_name = f"{owner}/{name}"
+        lowered = full_name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        if store.get_repo(full_name) is None:
+            _probe_watch_repo(store, owner, name)
+
+
 def cmd_watch(args: argparse.Namespace, store: PackratStore) -> int:
     """Handles `packrat watch add|renew|remove`."""
     items = list(args.items or [])
     if args.watch_action == "add":
         if not items:
             raise ValueError("watch add needs at least one ITEM (owner/name#number).")
+        _validate_unregistered_watch_repos(store, items)
         keys = store.add_watch(args.consumer, args.id, items, args.freshness, args.ttl)
         result: dict[str, Any] = {
             "leased": keys,
@@ -529,10 +643,13 @@ def changes_payload(
     oldest retained row (or newer than anything ever written), so the reader
     must take a full snapshot.
     """
-    max_seq = store.max_change_seq()
-    if since < store.min_change_seq() or since > max_seq:
-        return {"reset": True, "seq": max_seq}
-    rows = store.changes_since(since, limit)
+    snap_fn = getattr(store, "read_snapshot", None)
+    ctx = snap_fn() if callable(snap_fn) else contextlib.nullcontext()
+    with ctx:
+        max_seq = store.max_change_seq()
+        if since < store.min_change_seq() or since > max_seq:
+            return {"reset": True, "seq": max_seq}
+        rows = store.changes_since(since, limit)
     if not rows:
         return None
     return {"seq": rows[-1].seq, "changes": [asdict(r) for r in rows]}
@@ -578,25 +695,53 @@ def service_status(store: PackratStore, now: float | None = None) -> dict[str, A
     moment = time.time() if now is None else now
     beat = store.read_heartbeat()
     leases = Counter(w.consumer for w in store.active_watches(moment))
+    expected_version = _lazy("format_service_version")()
+    version = beat.version if beat else None
+    code_stale = bool(version and version != expected_version)
     return {
         "pid": beat.pid if beat else None,
         "started_at": beat.started_at if beat else None,
         "beat_at": beat.beat_at if beat else None,
         "beat_age_s": _beat_age_s(beat.beat_at if beat else None, moment),
-        "version": beat.version if beat else None,
+        "version": version,
+        "expected_version": expected_version,
+        "code_stale": code_stale,
+        "last_ok_at": beat.last_ok_at if beat else None,
+        "consecutive_failed_ticks": (beat.consecutive_failed_ticks if beat else 0),
         "leases_by_consumer": dict(sorted(leases.items())),
     }
 
 
+def _service_health_state(age: int, failed_ticks: int) -> str:
+    """Classifies service health from heartbeat age and consecutive failed ticks."""
+    if age > 180:
+        return "stale"
+    if failed_ticks >= 3:
+        return "degraded"
+    return "running"
+
+
 def format_service_status(service: dict[str, Any]) -> str:
-    """Formats `service_status()` as one line of `packrat status` text."""
+    """Formats `service_status()` as one or two lines of `packrat status` text."""
     leases = service.get("leases_by_consumer") or {}
     lease_text = ", ".join(f"{k}={v}" for k, v in leases.items()) or "none"
     age = service.get("beat_age_s")
     if age is None:
         return f"Service: never ran; leases: {lease_text}"
-    state = "running" if age <= 180 else "stale"
-    return f"Service: {state} (pid={service.get('pid')}, heartbeat {age}s ago); leases: {lease_text}"
+    failed = int(service.get("consecutive_failed_ticks") or 0)
+    state = _service_health_state(int(age), failed)
+    details = [f"pid={service.get('pid')}", f"heartbeat {age}s ago"]
+    if service.get("last_ok_at"):
+        details.append(f"last_ok_at={service['last_ok_at']}")
+    if failed:
+        details.append(f"consecutive_failed_ticks={failed}")
+    line = f"Service: {state} ({', '.join(details)}); leases: {lease_text}"
+    if service.get("code_stale"):
+        line += (
+            f"\n  Warning: service is running stale code ({service.get('version')}); "
+            "run `packrat auto-sync on` to restart onto the current checkout."
+        )
+    return line
 
 
 def _int_at_least(minimum: int) -> Callable[[str], int]:

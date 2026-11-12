@@ -17,9 +17,9 @@ I'll happily take PRs, but it might take me a long time to review them, if I get
 To install any skill individually:
 
 ```bash
-dart run skills@ add /usr/local/google/home/gspencer/code/skills --skill <skill-name>
+dart run skills@ add gspencergoog/skills --skill <skill-name>
 # or
-npx skills add /usr/local/google/home/gspencer/code/skills --skill <skill-name>
+npx skills add gspencergoog/skills --skill <skill-name>
 ```
 
 | Skill | Description |

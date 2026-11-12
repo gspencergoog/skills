@@ -33,7 +33,7 @@ from typing import Any, Protocol
 from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError
 from hot_sync import item_comments_from_graphql
-from models import IssueRecord, ItemCommentRecord, format_item_key
+from models import IssueRecord, ItemCommentRecord, RepoConfig, format_item_key
 from rate_budget import Priority
 
 LOGGER = logging.getLogger(__name__)
@@ -46,6 +46,9 @@ SEARCH_PAGE_SIZE = 20
 
 MIN_PAGE_SIZE = 5
 """Smallest page size tried after halving on server errors."""
+
+PAGE_RECOVERY_COOLDOWN = 1
+"""Clean search pages required after a 5xx step-down before doubling `_page_size`."""
 
 MAX_SEARCH_PAGES = 25
 """Upper bound on search pages per refresh, matching `inflight`."""
@@ -254,6 +257,8 @@ class ViewerSync:
         self._clock = clock
         self._initial_page_size = page_size
         self._page_size = page_size
+        self._clean_pages = 0
+        self._repo_cache: dict[str, RepoConfig] = {}
 
     def refresh_viewer(
         self, lookback_days: int = 7, now: float | None = None
@@ -276,14 +281,23 @@ class ViewerSync:
             GhApiError: A search failed even at the smallest page size.
         """
         moment = self._clock() if now is None else now
+        self._repo_cache = {}
         result = self._search_all(search_strings(lookback_days, moment))
         if result.viewer_login:
             self._store.set_state(
                 VIEWER_LOGIN_STATE_KEY, result.viewer_login, now=moment
             )
-        authored_keys, authored_open = self._pr_keys(result.nodes["authored"])
-        review_keys, review_open = self._pr_keys(result.nodes["reviewRequested"])
-        reviewed_keys, reviewed_open = self._pr_keys(result.nodes["reviewed"])
+        pending_node_ids: dict[str, str] = {}
+        authored_keys, authored_open = self._pr_keys(
+            result.nodes["authored"], pending_node_ids
+        )
+        review_keys, review_open = self._pr_keys(
+            result.nodes["reviewRequested"], pending_node_ids
+        )
+        reviewed_keys, reviewed_open = self._pr_keys(
+            result.nodes["reviewed"], pending_node_ids
+        )
+        self._sync_pr_node_ids(pending_node_ids)
         open_prs: set[str] = set()
         open_prs.update(authored_open)
         open_prs.update(review_open)
@@ -312,6 +326,7 @@ class ViewerSync:
     def _search_all(self, strings: Mapping[str, str]) -> _SearchResult:
         """Pages every search until none has a next page, or the page cap is hit."""
         self._page_size = self._initial_page_size
+        self._clean_pages = 0
         result = _SearchResult()
         for _ in range(MAX_SEARCH_PAGES):
             result.absorb(self._search_page(strings, result.cursors, result.active))
@@ -319,6 +334,15 @@ class ViewerSync:
                 return result
         LOGGER.warning("viewer search stopped at the %d-page cap", MAX_SEARCH_PAGES)
         return result
+
+    def _record_clean_page(self) -> None:
+        """Doubles `_page_size` back toward `_initial_page_size` after clean recovery pages."""
+        if self._page_size >= self._initial_page_size:
+            return
+        self._clean_pages += 1
+        if self._clean_pages >= PAGE_RECOVERY_COOLDOWN:
+            self._page_size = min(self._initial_page_size, self._page_size * 2)
+            self._clean_pages = 0
 
     def _search_page(
         self,
@@ -344,16 +368,44 @@ class ViewerSync:
                 if exc.status < 500 or self._page_size <= MIN_PAGE_SIZE:
                     raise
                 self._page_size = max(MIN_PAGE_SIZE, self._page_size // 2)
+                self._clean_pages = 0
                 LOGGER.info(
                     "viewer search failed (%s); retrying with first=%d",
                     exc,
                     self._page_size,
                 )
                 continue
+            self._record_clean_page()
             data = payload.get("data")
             return data if isinstance(data, dict) else {}
 
     # ----- results ----------------------------------------------------------------
+
+    def _cache_repo(self, full_name: str, config: RepoConfig) -> RepoConfig:
+        """Stores `config` in `_repo_cache` under both `full_name` and `config.full_name`."""
+        self._repo_cache[full_name.lower()] = config
+        self._repo_cache[config.full_name.lower()] = config
+        return config
+
+    def _resolve_repo_for_node(self, full_name: str, node_id: object) -> RepoConfig:
+        """Resolves or registers the repository for `full_name`, consulting `_repo_cache` and `get_repo` before `find_repo_by_node_id`."""
+        cache_key = full_name.lower()
+        cached = self._repo_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        existing = self._store.get_repo(full_name)
+        if existing is not None:
+            return self._cache_repo(full_name, existing)
+        if isinstance(node_id, str) and node_id:
+            prior = self._store.find_repo_by_node_id(node_id)
+            if prior is not None and prior.full_name.lower() != cache_key:
+                merged = self._store.merge_repo_alias(prior.repo_id, full_name)
+                return self._cache_repo(full_name, merged)
+        owner, name = full_name.split("/", 1)
+        config = self._store.ensure_items_repo(owner, name)
+        if config.full_name.lower() != cache_key:
+            config = self._store.merge_repo_alias(config.repo_id, full_name)
+        return self._cache_repo(full_name, config)
 
     def _node_key(self, node: Mapping[str, Any]) -> tuple[int, str] | None:
         """Returns `(repo_id, canonical_key)` for a search node, registering its repo."""
@@ -366,24 +418,29 @@ class ViewerSync:
             or not isinstance(number, int)
         ):
             return None
-        node_id = node.get("id")
-        if isinstance(node_id, str) and node_id:
-            prior = self._store.find_repo_by_node_id(node_id)
-            if prior is not None and prior.full_name.lower() != full_name.lower():
-                config = self._store.merge_repo_alias(prior.repo_id, full_name)
-                return config.repo_id, format_item_key(
-                    config.owner, config.name, number
-                )
-        owner, name = full_name.split("/", 1)
-        config = self._store.ensure_items_repo(owner, name)
-        if config.full_name.lower() != full_name.lower():
-            config = self._store.merge_repo_alias(config.repo_id, full_name)
+        config = self._resolve_repo_for_node(full_name, node.get("id"))
         return config.repo_id, format_item_key(config.owner, config.name, number)
 
-    def _pr_keys(self, nodes: Iterable[Mapping[str, Any]]) -> tuple[set[str], set[str]]:
-        """Resolves PR search nodes to `(keys, page_open_prs)` and remembers their node ids."""
+    def _sync_pr_node_ids(self, pending_node_ids: Mapping[str, str]) -> None:
+        """Persists PR GraphQL node IDs that are missing or differ from stored values."""
+        if not pending_node_ids:
+            return
+        existing = self._store.get_node_ids(list(pending_node_ids))
+        for key, node_id in pending_node_ids.items():
+            if existing.get(key) != node_id:
+                self._store.set_node_id(key, node_id)
+
+    def _pr_keys(
+        self,
+        nodes: Iterable[Mapping[str, Any]],
+        pending_node_ids: dict[str, str] | None = None,
+    ) -> tuple[set[str], set[str]]:
+        """Resolves PR search nodes to `(keys, page_open_prs)` and collects their node ids."""
         keys: set[str] = set()
         page_open_prs: set[str] = set()
+        local_node_ids: dict[str, str] = (
+            pending_node_ids if pending_node_ids is not None else {}
+        )
         for node in nodes:
             resolved = self._node_key(node)
             if resolved is None:
@@ -393,7 +450,9 @@ class ViewerSync:
                 page_open_prs.add(resolved[1])
             node_id = node.get("id")
             if isinstance(node_id, str) and node_id:
-                self._store.set_node_id(resolved[1], node_id)
+                local_node_ids[resolved[1]] = node_id
+        if pending_node_ids is None:
+            self._sync_pr_node_ids(local_node_ids)
         return keys, page_open_prs
 
     def _store_issues(self, nodes: Iterable[Mapping[str, Any]]) -> set[str]:

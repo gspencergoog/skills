@@ -8,13 +8,16 @@ import time
 import unittest
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from unittest import mock
 
+import signals
 from db_store import PackratStore
 from gh_transport import GhTransport, RateLimited
 from github_sync import GhCommandResult
 from models import PrRecord, WatchLease
 from rate_budget import RATE_BUDGET_FILENAME, RateBudget
 from signals import (
+    EVENTS_LAST_ID_KEY_PREFIX,
     EVENTS_STATE_KEY_PREFIX,
     NOTIFICATIONS_CURSOR_KEY,
     DirtySet,
@@ -267,7 +270,38 @@ class TestPollNotifications(_SignalsTestCase):
         count = self.store.conn.execute(
             "SELECT COUNT(*) FROM notifications"
         ).fetchone()[0]
-        self.assertEqual(count, 7)
+        self.assertEqual(count, 6)
+
+    def test_notification_pages_decoded_once_and_filtered_by_cursor(self) -> None:
+        self.store.set_state(NOTIFICATIONS_CURSOR_KEY, CURSOR)
+        page1 = [
+            _notification("n1", "octo-org/widgets", 1, "2026-11-03T13:00:00Z"),
+        ]
+        page2 = [
+            _notification("n2", "octo-org/widgets", 2, "2026-11-03T12:00:00Z"),
+            _notification("old1", "octo-org/widgets", 3, "2026-11-03T11:59:59Z"),
+        ]
+        link2 = 'Link: <https://api.github.com/notifications?per_page=50&all=true&page=2>; rel="next"'
+        runner = RoutingRunner(
+            {
+                "page=2": [_ok(_http("200 OK", json.dumps(page2)))],
+                "notifications": [
+                    _ok(_http("200 OK", json.dumps(page1), headers=[link2]))
+                ],
+            }
+        )
+        with mock.patch(
+            "signals._decode_list", wraps=signals._decode_list
+        ) as decode_spy:
+            self.poller(runner).poll_notifications(NOW)
+            self.assertEqual(decode_spy.call_count, 2)
+        stored_ids = [
+            r[0]
+            for r in self.store.conn.execute(
+                "SELECT thread_id FROM notifications ORDER BY thread_id"
+            ).fetchall()
+        ]
+        self.assertEqual(stored_ids, ["n1", "n2"])
 
     def test_rate_limited_page_keeps_cursor_and_raises(self) -> None:
         self.store.set_state(NOTIFICATIONS_CURSOR_KEY, CURSOR)
@@ -355,6 +389,64 @@ class TestPollRepoEvents(_SignalsTestCase):
         self.assertTrue(dirty.is_empty())
         self.assertEqual(runner.calls, [])
         self.assertEqual(self.api_call_workers(), [])
+
+    def test_last_event_id_stops_rescanning_old_events_for_leased_prs(self) -> None:
+        (leased5,) = self.lease("octo-org/widgets#5")
+        poll1_events = [
+            {
+                "id": "100",
+                "type": "PullRequestEvent",
+                "payload": {"number": 5, "pull_request": {"number": 5}},
+            }
+        ]
+        poll2_events = [
+            {
+                "id": "101",
+                "type": "PullRequestEvent",
+                "payload": {"number": 99, "pull_request": {"number": 99}},
+            },
+            {
+                "id": "100",
+                "type": "PullRequestEvent",
+                "payload": {"number": 5, "pull_request": {"number": 5}},
+            },
+        ]
+        runner = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(poll1_events),
+                            headers=['ETag: "sig-1"', "X-Poll-Interval: 60"],
+                        )
+                    ),
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(poll2_events),
+                            headers=['ETag: "sig-2"', "X-Poll-Interval: 60"],
+                        )
+                    ),
+                ]
+            }
+        )
+        poller = self.poller(runner)
+
+        dirty1 = poller.poll_repo_events(NOW)
+        self.assertEqual(dirty1.hot, {leased5})
+        self.assertEqual(
+            self.store.get_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}"),
+            "100",
+        )
+
+        dirty2 = poller.poll_repo_events(NOW + 61)
+        self.assertEqual(dirty2.mirror_repos, {self.repo.repo_id})
+        self.assertEqual(dirty2.hot, set())
+        self.assertEqual(
+            self.store.get_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}"),
+            "101",
+        )
 
 
 class TestPollCheckRuns(_SignalsTestCase):
@@ -502,6 +594,30 @@ class TestPollCheckRuns(_SignalsTestCase):
         later = poller.poll_check_runs([], NOW + 1)
         self.assertEqual(later.hot, {self.key})
         self.assertNotIn(key6, later.hot)
+
+    def test_304_check_poll_skips_rollup_write_and_canonicalizes_once(self) -> None:
+        self.store.set_rollup_etags(self.key, "sha1", '"c1"', '"s1"', now=NOW)
+        runner = RoutingRunner(
+            {
+                "check-runs": [_not_modified('ETag: "c1"')],
+                "/status": [_not_modified('ETag: "s1"')],
+            }
+        )
+        poller = self.poller(runner)
+        with (
+            mock.patch.object(
+                self.store, "set_rollup_etags", wraps=self.store.set_rollup_etags
+            ) as set_spy,
+            mock.patch.object(
+                self.store,
+                "canonical_item_key",
+                wraps=self.store.canonical_item_key,
+            ) as canon_spy,
+        ):
+            dirty = poller.poll_check_runs(self.leases(), NOW)
+            self.assertTrue(dirty.is_empty())
+            self.assertEqual(set_spy.call_count, 0)
+            self.assertEqual(canon_spy.call_count, 1)
 
 
 if __name__ == "__main__":

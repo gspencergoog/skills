@@ -9,6 +9,7 @@ import unittest
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError, RateLimited
@@ -378,10 +379,13 @@ class TestViewerSync(unittest.TestCase):
         self.store.register_repo("Octo-Org", "Widgets")
         sync, _ = self._sync(
             _page(
-                authored=[_pr("octo-org/widgets", 5)], issues=[_issue("octo-org/widgets", 6)]
+                authored=[_pr("octo-org/widgets", 5)],
+                issues=[_issue("octo-org/widgets", 6)],
             )
         )
-        self.assertEqual(sync.refresh_viewer(), ["Octo-Org/Widgets#5", "Octo-Org/Widgets#6"])
+        self.assertEqual(
+            sync.refresh_viewer(), ["Octo-Org/Widgets#5", "Octo-Org/Widgets#6"]
+        )
         self.assertEqual(
             [r.full_name for r in self.store.list_repos()], ["Octo-Org/Widgets"]
         )
@@ -559,6 +563,43 @@ class TestViewerSync(unittest.TestCase):
             {"authored": ["octo-org/widgets#1"], "issues": ["octo-org/widgets#30"]},
         )
         self.assertEqual(self._leases(T0 + 60), ["octo-org/widgets#1"])
+
+    def test_unchanged_second_refresh_skips_set_node_id_and_repo_node_scans(
+        self,
+    ) -> None:
+        sync, _ = self._sync(self._first_page(), self._first_page())
+        sync.refresh_viewer(now=T0)
+        with (
+            mock.patch.object(
+                self.store, "set_node_id", wraps=self.store.set_node_id
+            ) as set_node_spy,
+            mock.patch.object(
+                self.store,
+                "find_repo_by_node_id",
+                wraps=self.store.find_repo_by_node_id,
+            ) as find_node_spy,
+            mock.patch.object(
+                self.store,
+                "ensure_items_repo",
+                wraps=self.store.ensure_items_repo,
+            ) as ensure_repo_spy,
+        ):
+            self.assertEqual(sync.refresh_viewer(now=T0 + 60), [])
+            self.assertEqual(set_node_spy.call_count, 0)
+            self.assertEqual(find_node_spy.call_count, 0)
+            self.assertEqual(ensure_repo_spy.call_count, 0)
+
+    def test_page_size_recovers_after_transient_502_across_clean_pages(self) -> None:
+        sync, transport = self._sync(
+            GhApiError(502, "Bad Gateway"),
+            GhApiError(502, "Bad Gateway"),
+            _page(authored=[_pr("me/app", 1)], cursors={"authored": "c1"}),
+            _page(authored=[_pr("me/app", 2)], cursors={"authored": "c2"}),
+            _page(authored=[_pr("me/app", 3)]),
+        )
+        self.assertEqual(sync.refresh_viewer(), ["me/app#1", "me/app#2", "me/app#3"])
+        sizes = [c["variables"]["first"] for c in transport.calls]
+        self.assertEqual(sizes, [20, 10, 5, 10, 20])
 
 
 if __name__ == "__main__":

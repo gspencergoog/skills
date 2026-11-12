@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import sqlite3
 import struct
@@ -15,7 +17,14 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from db_store import BACKFILL_COLUMNS, PackratStore, render_init_sql
+from db_migrations import LATEST_SCHEMA_VERSION
+from db_store import (
+    BACKFILL_COLUMNS,
+    ExportIntegrityError,
+    PackratStore,
+    _compact_and_verify_export_conn,
+    render_init_sql,
+)
 from models import (
     BACKFILL_STREAMS,
     EMBEDDING_DIM,
@@ -30,6 +39,7 @@ from models import (
     CommitRecord,
     DiscussionRecord,
     DocSectionRecord,
+    ExportSummary,
     IssuePrLink,
     IssueRecord,
     ItemCommentRecord,
@@ -39,9 +49,11 @@ from models import (
     PrFileRecord,
     PrLiveRecord,
     PrRecord,
+    RepoConfig,
     ReviewRecord,
     ReviewRequestRecord,
     ReviewThreadRecord,
+    SearchFilters,
     StoredEmbeddingRecord,
     StreamBackfill,
     SyncStats,
@@ -507,7 +519,7 @@ class TestWave1StoreAndDuckDb(unittest.TestCase):
 
         self.assertEqual(renamed.repo_id, repo.repo_id)
         self.assertEqual(renamed.full_name, "new-org/widgets")
-        self.assertIsNone(self.store.get_repo("octo-org/widgets"))
+        self.assertEqual(self.store.get_repo("octo-org/widgets"), renamed)
         self.assertIsNone(renamed.events_etag)
         self.assertEqual(renamed.issues_watermark, "2026-10-30T00:00:00Z")
         self.assertIsNotNone(self.store.get_embedding("new-org/widgets#issue:7"))
@@ -1469,7 +1481,9 @@ class TestLiveStore(unittest.TestCase):
             ["octo-org/widgets#7", "unknown/repo#2"], now=T0 + 5
         )
         self.assertEqual(keys, [self.key, "unknown/repo#2"])
-        self.assertIsNone(self.store.get_repo("unknown/repo"))
+        unknown_repo = self.store.get_repo("unknown/repo")
+        assert unknown_repo is not None
+        self.assertEqual(unknown_repo.mode, "items")
         self.store.request_refresh(["Octo-Org/Widgets#8"], now=T0)
         self.assertEqual(
             self.store.peek_refresh_requests(),
@@ -2071,7 +2085,9 @@ class TestTimelineStore(unittest.TestCase):
         )
 
         new_link = IssuePrLink(self.rid, 3, 5, "references")
-        self.store.upsert_pull_requests([self._pr(5, issue_links=(new_link,))])
+        self.store.upsert_pull_requests(
+            [self._pr(5, updated_at="2027-01-06T00:00:00Z", issue_links=(new_link,))]
+        )
         self.assertEqual(
             self._links(), [(1, 5, "closed_by"), (2, 5, "xref"), (3, 5, "references")]
         )
@@ -2089,9 +2105,13 @@ class TestTimelineStore(unittest.TestCase):
 
         self.store.upsert_pull_requests([self._pr(5, reviews=(review("Bot"),))])
         self.assertEqual(stored(), "Bot")
-        self.store.upsert_pull_requests([self._pr(5, reviews=(review(None),))])
+        self.store.upsert_pull_requests(
+            [self._pr(5, updated_at="2027-01-06T00:00:00Z", reviews=(review(None),))]
+        )
         self.assertEqual(stored(), "Bot")
-        self.store.upsert_pull_requests([self._pr(5, reviews=(review("User"),))])
+        self.store.upsert_pull_requests(
+            [self._pr(5, updated_at="2027-01-07T00:00:00Z", reviews=(review("User"),))]
+        )
         self.assertEqual(stored(), "User")
 
     def test_timeline_candidates_per_mode_and_since_offset(self) -> None:
@@ -2379,6 +2399,1439 @@ class TestTimelineStore(unittest.TestCase):
         self.assertTrue(self.store.remove_repo("octo-org/widgets"))
         totals = self.store.table_counts()
         self.assertEqual((totals["timeline_events"], totals["timeline_dirty"]), (1, 0))
+
+
+class TestWave2Track2AStoreEnhancements(unittest.TestCase):
+    """Covers Wave 2 Track 2A identity single-writer, embedding preservation, and batching."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="packrat-w2-"))
+        self.store = PackratStore(self.tmp_dir / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets", now=T0)
+        self.other = self.store.register_repo("octo-org", "widgets-extra", now=T0)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_busy_timeout_pragma_is_5000ms(self) -> None:
+        timeout_ms = self.store.conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        self.assertEqual(timeout_ms, 5000)
+
+    def test_rename_repo_records_alias_and_rewrites_live_state(self) -> None:
+        key = "octo-org/widgets#7"
+        other_key = "octo-org/widgets-extra#7"
+        self.store.add_watch("monitor", "c1", [key, other_key], 60, 600, now=T0)
+        self.store.replace_viewer_set("authored", [key, other_key], now=T0)
+        self.store.request_refresh([key, other_key], now=T0)
+        self.store.upsert_notifications(
+            [
+                NotificationRecord("N1", "mention", "PullRequest", key, "u1", True),
+                NotificationRecord(
+                    "N2", "mention", "PullRequest", other_key, "u2", True
+                ),
+            ],
+            now=T0,
+        )
+        self.store.set_state(f"node_id:{key}", "PR_node7", now=T0)
+        self.store.set_state(f"node_id:{other_key}", "PR_extra7", now=T0)
+
+        renamed = self.store.rename_repo("octo-org/widgets", "new-org", "widgets")
+        self.assertEqual(renamed.full_name, "new-org/widgets")
+        # Alias table resolves old name to renamed repo
+        self.assertEqual(self.store.get_repo("octo-org/widgets"), renamed)
+        self.assertEqual(
+            self.store.canonical_item_key("octo-org/widgets#7"), "new-org/widgets#7"
+        )
+        self.assertEqual(
+            [w.item_key for w in self.store.active_watches(now=T0)],
+            ["new-org/widgets#7", other_key],
+        )
+        self.assertEqual(
+            self.store.peek_refresh_requests(), ["new-org/widgets#7", other_key]
+        )
+        notifs = {
+            r["thread_id"]: r["item_key"]
+            for r in self.store.conn.execute(
+                "SELECT thread_id, item_key FROM notifications"
+            ).fetchall()
+        }
+        self.assertEqual(notifs, {"N1": "new-org/widgets#7", "N2": other_key})
+        changes = {c.item_key for c in self.store.changes_since(0)}
+        self.assertEqual(changes, {"new-org/widgets#7", other_key})
+        self.assertIsNone(self.store.get_state(f"node_id:{key}"))
+        self.assertEqual(self.store.get_state("node_id:new-org/widgets#7"), "PR_node7")
+        self.assertEqual(self.store.get_state(f"node_id:{other_key}"), "PR_extra7")
+
+    def test_remove_repo_deletes_live_logs_and_node_id_state(self) -> None:
+        key = "octo-org/widgets#7"
+        other_key = "octo-org/widgets-extra#7"
+        self.store.append_change(key, "pr", ["title"], now=T0)
+        self.store.append_change(other_key, "pr", ["title"], now=T0)
+        self.store.upsert_notifications(
+            [
+                NotificationRecord("N1", "mention", "PullRequest", key, "u1", True),
+                NotificationRecord(
+                    "N2", "mention", "PullRequest", other_key, "u2", True
+                ),
+            ],
+            now=T0,
+        )
+        self.store.set_state(f"node_id:{key}", "PR_node7", now=T0)
+        self.store.set_state(f"node_id:{other_key}", "PR_extra7", now=T0)
+
+        self.assertTrue(self.store.remove_repo("octo-org/widgets"))
+        self.assertEqual({c.item_key for c in self.store.changes_since(0)}, {other_key})
+        notifs = [
+            r["item_key"]
+            for r in self.store.conn.execute(
+                "SELECT item_key FROM notifications"
+            ).fetchall()
+        ]
+        self.assertEqual(notifs, [other_key])
+        self.assertIsNone(self.store.get_state(f"node_id:{key}"))
+        self.assertEqual(self.store.get_state(f"node_id:{other_key}"), "PR_extra7")
+
+    def test_mirror_pr_monotonic_guard_and_skeleton_promotion_and_noop_skip(
+        self,
+    ) -> None:
+        live_pr = PrLiveRecord(
+            repo_id=self.repo.repo_id,
+            number=10,
+            title="Live Title",
+            state="OPEN",
+            updated_at="2027-01-15T10:00:00Z",
+            node_id="PR_10",
+            author="alice",
+            head_sha="sha-live",
+            rollup_state="SUCCESS",
+            rollup_total=4,
+        )
+        self.store.upsert_pr_live(live_pr, now=T0)
+        seq_after_live = self.store.max_change_seq()
+
+        # 1. Stale mirror write must not regress live PR row or append a change row.
+        stale_mirror = PrRecord(
+            repo_id=self.repo.repo_id,
+            number=10,
+            title="Stale Mirror Title",
+            state="OPEN",
+            updated_at="2027-01-15T09:00:00Z",
+            node_id="PR_10",
+            author="alice",
+            head_sha="sha-old",
+            body="Stale body",
+            files=(PrFileRecord(self.repo.repo_id, 10, "stale.py", "MODIFIED", 1, 1),),
+        )
+        self.store.upsert_pull_requests([stale_mirror])
+        self.assertEqual(self.store.max_change_seq(), seq_after_live)
+        row = self.store.conn.execute(
+            "SELECT title, head_sha, body, live_fetched_at FROM pull_requests "
+            "WHERE repo_id = ? AND number = 10",
+            (self.repo.repo_id,),
+        ).fetchone()
+        self.assertEqual(row["title"], "Live Title")
+        self.assertEqual(row["head_sha"], "sha-live")
+        self.assertEqual(row["body"], "")
+        self.assertIsNotNone(row["live_fetched_at"])
+        pr_files_count = self.store.conn.execute(
+            "SELECT COUNT(*) FROM pr_files WHERE repo_id = ?",
+            (self.repo.repo_id,),
+        ).fetchone()[0]
+        self.assertEqual(pr_files_count, 0)
+
+        # 2. Promoting a live PR row with identical updated_at and head_sha writes body and child tables.
+        promoting_mirror = PrRecord(
+            repo_id=self.repo.repo_id,
+            number=10,
+            title="Live Title",
+            state="OPEN",
+            updated_at="2027-01-15T10:00:00Z",
+            node_id="PR_10",
+            author="alice",
+            head_sha="sha-live",
+            body="Full mirror body",
+            files=(PrFileRecord(self.repo.repo_id, 10, "app.py", "MODIFIED", 5, 2),),
+            reviews=(
+                ReviewRecord(self.repo.repo_id, "R_10", 10, "APPROVED", author="bob"),
+            ),
+        )
+        self.store.upsert_pull_requests([promoting_mirror])
+        row = self.store.conn.execute(
+            "SELECT body, live_fetched_at FROM pull_requests WHERE repo_id = ? AND number = 10",
+            (self.repo.repo_id,),
+        ).fetchone()
+        self.assertEqual(row["body"], "Full mirror body")
+        self.assertIsNone(row["live_fetched_at"])
+        pr_files_count = self.store.conn.execute(
+            "SELECT COUNT(*) FROM pr_files WHERE repo_id = ?",
+            (self.repo.repo_id,),
+        ).fetchone()[0]
+        reviews_count = self.store.conn.execute(
+            "SELECT COUNT(*) FROM reviews WHERE repo_id = ?",
+            (self.repo.repo_id,),
+        ).fetchone()[0]
+        self.assertEqual(pr_files_count, 1)
+        self.assertEqual(reviews_count, 1)
+
+        # 3. Re-upserting an unchanged mirror PR skips child table DELETE/INSERT statements.
+        traced_sql: list[str] = []
+        self.store.conn.set_trace_callback(traced_sql.append)
+        try:
+            self.store.upsert_pull_requests([promoting_mirror])
+        finally:
+            self.store.conn.set_trace_callback(None)
+        self.assertFalse(
+            any("DELETE FROM pr_files" in s for s in traced_sql),
+            f"Expected no child table deletes on unchanged PR, got: {traced_sql}",
+        )
+
+    def test_replace_code_index_for_files_preserves_unchanged_symbol_embeddings(
+        self,
+    ) -> None:
+        sym_keep = CodeSymbolRecord(
+            repo_id=self.repo.repo_id,
+            file_path="src/lib.py",
+            symbol_name="keep_fn",
+            kind="function",
+            line_start=1,
+            line_end=3,
+            signature="def keep_fn():",
+            sha="head1",
+        )
+        sym_drop = CodeSymbolRecord(
+            repo_id=self.repo.repo_id,
+            file_path="src/lib.py",
+            symbol_name="drop_fn",
+            kind="function",
+            line_start=5,
+            line_end=7,
+            signature="def drop_fn():",
+            sha="head1",
+        )
+        ch_keep = TextChunk(
+            chunk_id="octo-org/widgets#code_symbol:src/lib.py:keep_fn:1",
+            repo_id=self.repo.repo_id,
+            source_kind="code_symbol",
+            source_ref="octo-org/widgets:src/lib.py#L1-L3",
+            file_path="src/lib.py",
+            title="function keep_fn in src/lib.py",
+            text="def keep_fn():\n    return 1",
+            content_sha256="sha-keep",
+        )
+        ch_drop = TextChunk(
+            chunk_id="octo-org/widgets#code_symbol:src/lib.py:drop_fn:5",
+            repo_id=self.repo.repo_id,
+            source_kind="code_symbol",
+            source_ref="octo-org/widgets:src/lib.py#L5-L7",
+            file_path="src/lib.py",
+            title="function drop_fn in src/lib.py",
+            text="def drop_fn():\n    return 2",
+            content_sha256="sha-drop",
+        )
+        self.store.replace_code_index_for_files(
+            self.repo.repo_id,
+            changed_paths=["src/lib.py"],
+            deleted_paths=[],
+            symbols=[sym_keep, sym_drop],
+            doc_sections=[],
+            chunks=[ch_keep, ch_drop],
+        )
+        vec = tuple(1.0 / (EMBEDDING_DIM**0.5) for _ in range(EMBEDDING_DIM))
+        self.store.upsert_embeddings(
+            [
+                StoredEmbeddingRecord(
+                    chunk_id=ch_keep.chunk_id,
+                    model_id="test-model",
+                    content_sha256="sha-keep",
+                    vector=vec,
+                ),
+                StoredEmbeddingRecord(
+                    chunk_id=ch_drop.chunk_id,
+                    model_id="test-model",
+                    content_sha256="sha-drop",
+                    vector=vec,
+                ),
+            ]
+        )
+
+        # Edit src/lib.py so keep_fn survives with identical chunk_id and drop_fn is removed.
+        self.store.replace_code_index_for_files(
+            self.repo.repo_id,
+            changed_paths=["src/lib.py"],
+            deleted_paths=[],
+            symbols=[sym_keep],
+            doc_sections=[],
+            chunks=[ch_keep],
+        )
+        self.assertIsNotNone(self.store.get_embedding(ch_keep.chunk_id))
+        self.assertIsNone(self.store.get_embedding(ch_drop.chunk_id))
+        self.assertEqual(
+            self.store.get_unembedded_chunks(self.repo.repo_id, "test-model"), []
+        )
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+
+    def test_upsert_chunks_batches_select_and_skips_unchanged_and_metadata_fts(
+        self,
+    ) -> None:
+        c1 = TextChunk(
+            chunk_id="octo-org/widgets#issue:1",
+            repo_id=self.repo.repo_id,
+            source_kind="issue",
+            source_ref="octo-org/widgets#1",
+            item_number=1,
+            title="Issue 1",
+            text="Alpha beta",
+            content_sha256="sha-1",
+            updated_at="2027-01-01T00:00:00Z",
+        )
+        self.store.upsert_chunks([c1], now=T0)
+        seq1 = self.store.get_state("vector_cache_seq")
+
+        # 1. Identical re-upsert performs no FTS writes and does not bump vector_cache_seq.
+        traced: list[str] = []
+        self.store.conn.set_trace_callback(traced.append)
+        try:
+            self.store.upsert_chunks([c1], now=T0 + 10)
+        finally:
+            self.store.conn.set_trace_callback(None)
+        self.assertEqual(self.store.get_state("vector_cache_seq"), seq1)
+        self.assertFalse(
+            any("chunks_fts" in s or "UPDATE chunks" in s for s in traced),
+            f"Expected zero writes for unchanged chunk, got: {traced}",
+        )
+
+        # 2. Metadata-only change (updated_at) updates chunks without touching chunks_fts or vector_cache_seq.
+        c1_meta = replace(c1, updated_at="2027-01-02T00:00:00Z")
+        traced.clear()
+        self.store.conn.set_trace_callback(traced.append)
+        try:
+            self.store.upsert_chunks([c1_meta], now=T0 + 20)
+        finally:
+            self.store.conn.set_trace_callback(None)
+        self.assertEqual(self.store.get_state("vector_cache_seq"), seq1)
+        self.assertTrue(any("UPDATE chunks" in s for s in traced))
+        self.assertFalse(any("chunks_fts" in s for s in traced))
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+
+        # 3. Searchable text change updates chunks_fts, bumps vector_cache_seq, and passes integrity-check.
+        c1_text = replace(c1_meta, text="Gamma delta", content_sha256="sha-2")
+        self.store.upsert_chunks([c1_text], now=T0 + 30)
+        self.assertNotEqual(self.store.get_state("vector_cache_seq"), seq1)
+        self.store.conn.execute(
+            "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+        )
+        hits = self.store.query_fts_candidates("Gamma", SearchFilters(), 10)
+        self.assertEqual([cid for cid, _ in hits], [c1.chunk_id])
+
+    def test_vector_cache_watermark_ignores_items_repos_and_avoids_table_scans(
+        self,
+    ) -> None:
+        wm_before = self.store.vector_cache_watermark()
+        self.store.ensure_items_repo("hot-org", "ephemeral", now=T0)
+        self.assertEqual(self.store.vector_cache_watermark(), wm_before)
+
+        for sql in (
+            "SELECT (SELECT MAX(rowid) FROM chunk_embeddings), (SELECT MIN(rowid) FROM chunk_embeddings)",
+            "SELECT (SELECT MAX(rowid) FROM chunks), (SELECT MIN(rowid) FROM chunks)",
+        ):
+            plan = " ".join(
+                str(r["detail"])
+                for r in self.store.conn.execute(f"EXPLAIN QUERY PLAN {sql}").fetchall()
+            )
+            self.assertNotIn("SCAN chunk_embeddings", plan)
+            self.assertNotIn("SCAN chunks", plan)
+
+    def test_prune_deletes_superseded_check_runs_and_live_queries_use_indexes(
+        self,
+    ) -> None:
+        self.store.upsert_pr_live(
+            PrLiveRecord(
+                repo_id=self.repo.repo_id,
+                number=7,
+                title="PR 7",
+                state="OPEN",
+                updated_at="2027-01-15T08:00:00Z",
+                node_id="PR_7",
+                author="alice",
+                head_sha="sha-old",
+            ),
+            now=T0,
+        )
+        self.store.replace_check_runs(
+            self.repo.repo_id,
+            7,
+            "sha-old",
+            [CheckRunRecord(name="ci", kind="CheckRun", status="COMPLETED")],
+            now=T0,
+        )
+        # Advance PR head_sha and insert a stale check_runs row for a different head_oid
+        self.store.conn.execute(
+            "UPDATE pull_requests SET head_sha = 'sha-new' WHERE repo_id = ? AND number = 7",
+            (self.repo.repo_id,),
+        )
+        self.store.conn.execute(
+            "INSERT INTO check_runs (repo_id, pr_number, head_oid, run_key, name, kind) "
+            "VALUES (?, 7, 'sha-new', 'CheckRun:ci', 'ci', 'CheckRun')",
+            (self.repo.repo_id,),
+        )
+        self.store.conn.commit()
+        self.store.prune(now=T0 + 60)
+        heads = [
+            r["head_oid"]
+            for r in self.store.conn.execute(
+                "SELECT head_oid FROM check_runs WHERE repo_id = ? AND pr_number = 7",
+                (self.repo.repo_id,),
+            ).fetchall()
+        ]
+        self.assertEqual(heads, ["sha-new"])
+
+        # Empty take_refresh_requests and unchanged upsert_item_comments issue zero write statements.
+        comments = [ItemCommentRecord("IC_1", "alice", "User", "2027-01-15T08:00:00Z")]
+        self.assertFalse(
+            self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, [])
+        )
+        self.assertTrue(
+            self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments)
+        )
+        traced: list[str] = []
+        self.store.conn.set_trace_callback(traced.append)
+        try:
+            self.assertEqual(self.store.take_refresh_requests(), [])
+            self.assertFalse(
+                self.store.upsert_item_comments(self.repo.repo_id, "pr", 7, comments)
+            )
+            self.assertEqual(self.store.upsert_notifications([]), [])
+        finally:
+            self.store.conn.set_trace_callback(None)
+        self.assertFalse(
+            any(
+                s.lstrip().upper().startswith(("BEGIN", "INSERT", "UPDATE", "DELETE"))
+                for s in traced
+            ),
+            f"Expected zero write transactions on no-op live calls, got: {traced}",
+        )
+
+
+_EXPORT_REPO_ID_TABLES: tuple[str, ...] = (
+    "issues",
+    "pull_requests",
+    "pr_files",
+    "reviews",
+    "review_threads",
+    "comments",
+    "discussions",
+    "issue_pr_links",
+    "commits",
+    "commit_files",
+    "code_symbols",
+    "doc_sections",
+    "indexed_files",
+    "chunks",
+    "repo_aliases",
+    "timeline_events",
+    "timeline_dirty",
+    "pr_rollup",
+    "check_runs",
+    "review_requests",
+    "latest_opinionated_reviews",
+    "latest_reviews",
+    "thread_activity",
+)
+
+_EXPORT_LIVE_PR_TABLES: tuple[str, ...] = (
+    "pr_rollup",
+    "check_runs",
+    "review_requests",
+    "latest_opinionated_reviews",
+    "latest_reviews",
+    "thread_activity",
+)
+
+_EXPORT_PERSONAL_TABLES: tuple[str, ...] = (
+    "notifications",
+    "viewer_sets",
+    "watches",
+    "refresh_requests",
+    "changes",
+    "api_calls",
+    "service_heartbeat",
+)
+
+
+def _expected_export_state_keys(kept_repo_ids: Sequence[int]) -> set[str]:
+    """Returns the exact `service_state` key set expected on an exported snapshot."""
+    keys = {"vector_cache_seq"}
+    for rid in kept_repo_ids:
+        keys.update(
+            {
+                f"signals_events:{rid}",
+                f"events_last_id:{rid}",
+                f"refetch_open_prs:{rid}",
+                f"gap_cursor:{rid}:prs",
+                f"gap_floor:{rid}:prs",
+                f"gap_cursor:{rid}:issues",
+                f"gap_floor:{rid}:issues",
+            }
+        )
+    return keys
+
+
+def _distinct_repo_ids_by_table(conn: sqlite3.Connection) -> dict[str, set[int]]:
+    """Maps each `repo_id`-keyed child table to the distinct `repo_id` values stored."""
+    return {
+        tbl: {int(r[0]) for r in conn.execute(f"SELECT DISTINCT repo_id FROM {tbl}")}
+        for tbl in _EXPORT_REPO_ID_TABLES
+    }
+
+
+def _personal_table_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Returns row counts for every personal and runtime table."""
+    return {
+        tbl: int(conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0])
+        for tbl in _EXPORT_PERSONAL_TABLES
+    }
+
+
+def _unit_vector_for_repo(repo_id: int) -> tuple[float, ...]:
+    """Builds a deterministic L2-normalized 384-float test vector for `repo_id`."""
+    coords = [0.25] + [0.0] * (EMBEDDING_DIM - 1)
+    coords[repo_id % EMBEDDING_DIM] = 1.0
+    return l2_normalize(coords)
+
+
+class TestExportDatabase(unittest.TestCase):
+    """Tests `PackratStore.export_database` scrubbing, compaction, and guardrails."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = Path(tempfile.mkdtemp(prefix="packrat-export-"))
+        self.db_path = self.tmp_dir / "repos.sqlite"
+        self.store = PackratStore(self.db_path)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed_repo_mirror_artifacts(self, repo: RepoConfig, token: str) -> None:
+        """Populates mirror, code-index, FTS5, embedding, timeline, and alias rows."""
+        rid = repo.repo_id
+        slug = repo.full_name
+        self.store.upsert_issues(
+            [
+                IssueRecord(
+                    repo_id=rid,
+                    number=1,
+                    node_id=f"I_{rid}_1",
+                    title=f"Issue for {token}",
+                    state="OPEN",
+                    updated_at="2027-01-10T10:00:00Z",
+                    author="alice",
+                    body=f"Issue body mentioning {token}",
+                )
+            ]
+        )
+        self.store.upsert_pull_requests(
+            [
+                PrRecord(
+                    repo_id=rid,
+                    number=2,
+                    node_id=f"PR_{rid}_2",
+                    title=f"PR for {token}",
+                    state="OPEN",
+                    updated_at="2027-01-10T11:00:00Z",
+                    author="bob",
+                    head_sha=f"headsha{rid}",
+                    body=f"Closes #1 for {token}",
+                    files=(
+                        PrFileRecord(
+                            repo_id=rid,
+                            pr_number=2,
+                            file_path="src/mod.py",
+                            additions=10,
+                            deletions=2,
+                        ),
+                    ),
+                    reviews=(
+                        ReviewRecord(
+                            repo_id=rid,
+                            review_id=f"REV_{rid}_2",
+                            pr_number=2,
+                            state="APPROVED",
+                            author="carol",
+                            submitted_at="2027-01-10T11:30:00Z",
+                        ),
+                    ),
+                    review_threads=(
+                        ReviewThreadRecord(
+                            thread_id=f"RT_{rid}_2",
+                            repo_id=rid,
+                            pr_number=2,
+                            file_path="src/mod.py",
+                            line=12,
+                            reviewer="carol",
+                            body="Looks solid.",
+                        ),
+                    ),
+                    comments=(
+                        CommentRecord(
+                            repo_id=rid,
+                            comment_id=f"CM_{rid}_2",
+                            parent_kind="pr",
+                            parent_number=2,
+                            author="carol",
+                            body="Ship it.",
+                        ),
+                    ),
+                    issue_links=(
+                        IssuePrLink(
+                            repo_id=rid,
+                            issue_number=1,
+                            pr_number=2,
+                            link_type="closes",
+                        ),
+                    ),
+                )
+            ]
+        )
+        self.store.upsert_discussions(
+            [
+                DiscussionRecord(
+                    repo_id=rid,
+                    number=3,
+                    node_id=f"D_{rid}_3",
+                    category="General",
+                    author="alice",
+                    title=f"Discussion for {token}",
+                    body=f"Design notes for {token}",
+                    updated_at="2027-01-10T12:00:00Z",
+                )
+            ]
+        )
+        self.store.upsert_timeline_events(
+            [
+                TimelineEventRecord(
+                    event_id=f"TE_{rid}_1",
+                    repo_id=rid,
+                    item_kind="pr",
+                    item_number=2,
+                    event_type="ReadyForReviewEvent",
+                    created_at="2027-01-10T11:15:00Z",
+                    actor="bob",
+                    actor_type="User",
+                )
+            ],
+            repo_full_name=slug,
+        )
+        self.store.enqueue_timeline_dirty([(rid, 1)], reason="mention", now=T0)
+        self.store.upsert_commits(
+            [
+                CommitRecord(
+                    repo_id=rid,
+                    sha=f"commitsha{rid}",
+                    committed_at="2027-01-10T11:20:00Z",
+                    title=f"Implement {token} (#2)",
+                    author_name="Bob",
+                    author_email="bob@example.com",
+                    pr_number=2,
+                    files=(
+                        CommitFileRecord(
+                            repo_id=rid,
+                            sha=f"commitsha{rid}",
+                            file_path="src/mod.py",
+                            additions=10,
+                            deletions=2,
+                        ),
+                    ),
+                )
+            ]
+        )
+        sym_title = f"function handle_{token}"
+        sym_text = f"def handle_{token}(): return '{token} sharedexporttoken'"
+        sym_sha = compute_content_sha256(sym_title, sym_text)
+        sym_chunk = TextChunk(
+            chunk_id=f"{slug}#code_symbol:src/mod.py:handle_{token}:1",
+            repo_id=rid,
+            source_kind="code_symbol",
+            source_ref=f"{slug}:src/mod.py#L1-L4",
+            file_path="src/mod.py",
+            title=sym_title,
+            text=sym_text,
+            content_sha256=sym_sha,
+            is_untrusted=False,
+        )
+        pr_title = f"PR for {token}"
+        pr_text = f"Pull request summary for {token} sharedexporttoken"
+        pr_sha = compute_content_sha256(pr_title, pr_text)
+        pr_chunk = TextChunk(
+            chunk_id=f"{slug}#pr:2",
+            repo_id=rid,
+            source_kind="pr",
+            source_ref=f"{slug}#2",
+            item_number=2,
+            title=pr_title,
+            text=pr_text,
+            content_sha256=pr_sha,
+            is_untrusted=True,
+        )
+        self.store.replace_code_index_for_files(
+            repo_id=rid,
+            changed_paths=["src/mod.py", "docs/guide.md"],
+            deleted_paths=[],
+            symbols=[
+                CodeSymbolRecord(
+                    repo_id=rid,
+                    file_path="src/mod.py",
+                    symbol_name=f"handle_{token}",
+                    kind="function",
+                    line_start=1,
+                    line_end=4,
+                    signature=f"def handle_{token}() -> str",
+                    sha=f"commitsha{rid}",
+                    blob_oid=f"blobsym{rid}",
+                )
+            ],
+            doc_sections=[
+                DocSectionRecord(
+                    repo_id=rid,
+                    file_path="docs/guide.md",
+                    section_id=1,
+                    level=1,
+                    heading=f"Guide {token}",
+                    breadcrumb=f"Guide {token}",
+                    anchor_slug=f"guide-{token}",
+                    line_start=1,
+                    line_end=8,
+                    subtree_line_end=8,
+                    content=f"Documentation for {token}.",
+                    sha=f"commitsha{rid}",
+                    blob_oid=f"blobdoc{rid}",
+                )
+            ],
+            chunks=[sym_chunk],
+            now=T0,
+        )
+        self.store.upsert_chunks([pr_chunk], now=T0)
+        self.store.upsert_indexed_files(
+            rid,
+            [
+                ("src/mod.py", f"blobsym{rid}", f"commitsha{rid}"),
+                ("docs/guide.md", f"blobdoc{rid}", f"commitsha{rid}"),
+            ],
+        )
+        vec = _unit_vector_for_repo(rid)
+        self.store.upsert_embeddings(
+            [
+                StoredEmbeddingRecord(
+                    chunk_id=sym_chunk.chunk_id,
+                    model_id="test-model",
+                    content_sha256=sym_sha,
+                    vector=vec,
+                ),
+                StoredEmbeddingRecord(
+                    chunk_id=pr_chunk.chunk_id,
+                    model_id="test-model",
+                    content_sha256=pr_sha,
+                    vector=vec,
+                ),
+            ],
+            now=T0,
+        )
+        with self.store.conn:
+            self.store.conn.execute(
+                "INSERT INTO repo_aliases (alias_full_name, repo_id, created_at) "
+                "VALUES (?, ?, ?)",
+                (f"legacy-{slug}", rid, iso_at(T0)),
+            )
+
+    def _seed_repo_live_and_sync_state(self, repo: RepoConfig, token: str) -> None:
+        """Populates live PR status tables and per-repository `service_state` keys."""
+        rid = repo.repo_id
+        self.store.upsert_pr_live(
+            PrLiveRecord(
+                repo_id=rid,
+                number=2,
+                title=f"PR for {token}",
+                state="OPEN",
+                updated_at="2027-01-10T11:45:00Z",
+                node_id=f"PR_{rid}_2",
+                author="bob",
+                head_sha=f"headsha{rid}",
+                rollup_state="SUCCESS",
+                rollup_total=2,
+            ),
+            now=T0,
+        )
+        self.store.replace_check_runs(
+            rid,
+            2,
+            f"headsha{rid}",
+            [
+                CheckRunRecord(
+                    name="unit-tests",
+                    kind="CheckRun",
+                    status="COMPLETED",
+                    conclusion="SUCCESS",
+                    run_key=f"CheckRun:{rid}01",
+                )
+            ],
+            now=T0,
+        )
+        self.store.replace_review_requests(
+            rid,
+            2,
+            [
+                ReviewRequestRecord(
+                    reviewer="dave",
+                    reviewer_kind="User",
+                    requested_at="2027-01-10T11:40:00Z",
+                )
+            ],
+            now=T0,
+        )
+        self.store.replace_latest_opinionated_reviews(
+            rid,
+            2,
+            [
+                OpinionatedReviewRecord(
+                    author="carol",
+                    state="APPROVED",
+                    author_type="User",
+                    submitted_at="2027-01-10T11:30:00Z",
+                )
+            ],
+            now=T0,
+        )
+        self.store.replace_latest_reviews(
+            rid,
+            2,
+            [
+                LatestReviewRecord(
+                    author="carol",
+                    state="APPROVED",
+                    author_type="User",
+                    submitted_at="2027-01-10T11:30:00Z",
+                    commit_oid=f"headsha{rid}",
+                )
+            ],
+            now=T0,
+        )
+        self.store.replace_thread_activity(
+            rid,
+            2,
+            [
+                ThreadActivityRecord(
+                    thread_id=f"RT_{rid}_2",
+                    is_resolved=False,
+                    is_outdated=False,
+                    last_author="carol",
+                    last_author_type="User",
+                    last_at="2027-01-10T11:35:00Z",
+                    participants=("bob", "carol"),
+                )
+            ],
+            now=T0,
+        )
+        self.store.set_state(f"signals_events:{rid}", f'"etag-{rid}"', now=T0)
+        self.store.set_state(f"events_last_id:{rid}", f"900{rid}", now=T0)
+        self.store.set_state(f"refetch_open_prs:{rid}", "0", now=T0)
+        self.store.set_gap_state(
+            rid,
+            "prs",
+            cursor=f"GAP_CUR_PRS_{rid}",
+            floor="2027-01-01T00:00:00Z",
+            now=T0,
+        )
+        self.store.set_gap_state(
+            rid,
+            "issues",
+            cursor=f"GAP_CUR_ISSUES_{rid}",
+            floor="2027-01-02T00:00:00Z",
+            now=T0,
+        )
+
+    def _seed_personal_and_session_state(self, slugs: Sequence[str]) -> None:
+        """Populates all 7 personal/runtime tables and personal `service_state` keys."""
+        self.store.upsert_notifications(
+            [
+                NotificationRecord(
+                    thread_id=f"NT_{idx}",
+                    reason="review_requested",
+                    subject_type="PullRequest",
+                    item_key=f"{slug}#2",
+                    updated_at="2027-01-10T12:00:00Z",
+                    unread=True,
+                )
+                for idx, slug in enumerate(slugs, start=1)
+            ],
+            now=T0,
+        )
+        self.store.replace_viewer_set(
+            "authored", [f"{slug}#2" for slug in slugs], now=T0
+        )
+        self.store.replace_viewer_set(
+            "review_requested", [f"{slug}#1" for slug in slugs], now=T0
+        )
+        self.store.add_watch(
+            "monitor",
+            "conv-1",
+            [f"{slug}#2" for slug in slugs],
+            freshness_s=30,
+            ttl_s=600,
+            now=T0,
+        )
+        self.store.request_refresh([f"{slug}#2" for slug in slugs], now=T0)
+        self.store.append_change(f"{slugs[0]}#2", "pr", ["title"], now=T0)
+        for idx in range(30):
+            self.store.record_api_call(
+                worker="hot",
+                resource=f"graphql:pr_batch:{idx}:{'x' * 240}",
+                cost=1,
+                remaining=4999 - idx,
+                reset_at=int(T0) + 3600,
+                status=200,
+                now=T0 + idx,
+            )
+        self.store.write_heartbeat(
+            pid=42424,
+            version="abc123",
+            now=T0,
+            last_ok_at=iso_at(T0),
+            consecutive_failed_ticks=0,
+        )
+        self.store.set_state("viewer_login", "sender-octocat", now=T0)
+        self.store.set_state(
+            "notifications_last_modified",
+            "Wed, 11 Nov 2026 20:00:00 GMT",
+            now=T0,
+        )
+        for slug in slugs:
+            self.store.set_state(f"node_id:{slug}#999", f"NODE_{slug}", now=T0)
+        self.store.set_state("signals_events:9999", '"etag-orphan"', now=T0)
+        self.store.set_state("gap_cursor:9999:prs", "ORPHAN_CUR", now=T0)
+        self.store.set_state("ephemeral_session_token", "local-only", now=T0)
+
+    def _seed_four_repo_fixture(
+        self,
+    ) -> tuple[RepoConfig, RepoConfig, RepoConfig, RepoConfig]:
+        """Seeds 2 `mirror` repos, 2 `items` repos, child rows, and personal state."""
+        m1 = self.store.register_repo(
+            "octo-org", "widgets", local_path="/tmp/octo-widgets", now=T0
+        )
+        m2 = self.store.register_repo(
+            "octo-org", "gadgets", local_path="/tmp/octo-gadgets", now=T0
+        )
+        i1 = self.store.ensure_items_repo("items-org", "alpha", now=T0)
+        i2 = self.store.ensure_items_repo("items-org", "beta", now=T0)
+        pairs = (
+            (m1, "widgetsunique"),
+            (m2, "gadgetsunique"),
+            (i1, "alphaunique"),
+            (i2, "betaunique"),
+        )
+        for repo, token in pairs:
+            self._seed_repo_mirror_artifacts(repo, token)
+            self._seed_repo_live_and_sync_state(repo, token)
+        self._seed_personal_and_session_state([repo.full_name for repo, _ in pairs])
+        return m1, m2, i1, i2
+
+    def _assert_exported_sqlite_invariants(
+        self,
+        dest: Path,
+        expected_repos: Sequence[RepoConfig],
+    ) -> dict[str, str]:
+        """Verifies raw SQLite file mode, compaction, cascades, and scrubbed tables."""
+        for suffix in ("-wal", "-shm", "-journal", f".tmp.{os.getpid()}"):
+            self.assertFalse(Path(f"{dest}{suffix}").exists())
+
+        expected_ids = [r.repo_id for r in expected_repos]
+        expected_id_set = set(expected_ids)
+        expected_prefixes = tuple(f"{r.full_name}#" for r in expected_repos)
+
+        with contextlib.closing(sqlite3.connect(str(dest))) as conn:
+            journal_mode = str(
+                conn.execute("PRAGMA journal_mode").fetchone()[0]
+            ).lower()
+            freelist_count = int(conn.execute("PRAGMA freelist_count").fetchone()[0])
+            self.assertEqual(journal_mode, "delete")
+            self.assertEqual(freelist_count, 0)
+            self.assertEqual(conn.execute("PRAGMA foreign_key_check").fetchall(), [])
+            conn.execute(
+                "INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)"
+            )
+
+            repo_rows = conn.execute(
+                "SELECT repo_id, full_name, mode, local_path FROM repos ORDER BY repo_id"
+            ).fetchall()
+            expected_repo_rows = [
+                (r.repo_id, r.full_name, "mirror", None)
+                for r in sorted(expected_repos, key=lambda item: item.repo_id)
+            ]
+            self.assertEqual(repo_rows, expected_repo_rows)
+
+            changes_seq_rows = conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'changes'"
+            ).fetchall()
+            self.assertEqual(changes_seq_rows, [])
+
+            self.assertEqual(
+                _personal_table_counts(conn),
+                {tbl: 0 for tbl in _EXPORT_PERSONAL_TABLES},
+            )
+            self.assertEqual(
+                _distinct_repo_ids_by_table(conn),
+                {tbl: expected_id_set for tbl in _EXPORT_REPO_ID_TABLES},
+            )
+
+            emb_ids = [
+                str(r[0])
+                for r in conn.execute(
+                    "SELECT chunk_id FROM chunk_embeddings ORDER BY chunk_id"
+                )
+            ]
+            self.assertEqual(len(emb_ids), 2 * len(expected_repos))
+            self.assertTrue(all(cid.startswith(expected_prefixes) for cid in emb_ids))
+            orphan_embs = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM chunk_embeddings "
+                    "WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)"
+                ).fetchone()[0]
+            )
+            self.assertEqual(orphan_embs, 0)
+
+            state_map = {
+                str(r[0]): str(r[1])
+                for r in conn.execute("SELECT key, value FROM service_state")
+            }
+            self.assertEqual(set(state_map), _expected_export_state_keys(expected_ids))
+            return state_map
+
+    def test_full_export_scrubs_personal_and_items_state_and_compacts(self) -> None:
+        """Verifies full export across 2 mirror and 2 items repos and compaction invariants."""
+        m1, m2, i1, i2 = self._seed_four_repo_fixture()
+        all_ids = {m1.repo_id, m2.repo_id, i1.repo_id, i2.repo_id}
+        self.assertEqual(
+            _distinct_repo_ids_by_table(self.store.conn),
+            {tbl: all_ids for tbl in _EXPORT_REPO_ID_TABLES},
+        )
+        self.assertTrue(
+            all(count > 0 for count in _personal_table_counts(self.store.conn).values())
+        )
+        self.assertGreater(self.store.max_change_seq(), 0)
+
+        source_seq_before = self.store.get_state("vector_cache_seq")
+        self.assertIsNotNone(source_seq_before)
+        assert source_seq_before is not None
+        self.store.wal_checkpoint_truncate()
+
+        dest = self.tmp_dir / "exports" / "portable.sqlite"
+        phases: list[str] = []
+        summary = self.store.export_database(
+            dest, on_progress=phases.append, now=T0 + 500
+        )
+
+        self.assertEqual(phases, ["backup", "scrub", "vacuum", "verify"])
+        self.assertIsInstance(summary, ExportSummary)
+        self.assertEqual(summary.source_db_path, str(self.db_path.resolve()))
+        self.assertEqual(summary.dest_db_path, str(dest.resolve()))
+        self.assertEqual(summary.schema_version, LATEST_SCHEMA_VERSION)
+        self.assertEqual(
+            summary.exported_repos, ("octo-org/widgets", "octo-org/gadgets")
+        )
+        self.assertEqual(summary.removed_items_repos, 2)
+        self.assertEqual(summary.removed_mirror_repos, 0)
+        self.assertEqual(summary.chunks_remaining, 4)
+        self.assertEqual(summary.embeddings_remaining, 4)
+        self.assertGreater(summary.dest_bytes, 0)
+        self.assertGreater(summary.source_bytes, summary.dest_bytes)
+        self.assertGreaterEqual(summary.duration_sec, 0.0)
+
+        state_map = self._assert_exported_sqlite_invariants(dest, [m1, m2])
+        self.assertEqual(state_map["vector_cache_seq"], str(int(source_seq_before) + 1))
+
+        # Source database remains untouched after export.
+        self.assertEqual(self.store.get_state("vector_cache_seq"), source_seq_before)
+        self.assertEqual(self.store.get_state("viewer_login"), "sender-octocat")
+        self.assertGreater(self.store.max_change_seq(), 0)
+        widgets_src = self.store.get_repo("octo-org/widgets")
+        assert widgets_src is not None
+        self.assertEqual(widgets_src.local_path, "/tmp/octo-widgets")
+        self.assertEqual(len(self.store.list_repos()), 4)
+
+    def test_filtered_export_cascades_child_tables_and_preserves_fts_and_live_pr(
+        self,
+    ) -> None:
+        """Verifies single-repo export cascades excluded repos and retains BM25 and live PR rows."""
+        m1, _m2, _i1, _i2 = self._seed_four_repo_fixture()
+        dest = self.tmp_dir / "widgets_only.sqlite"
+        summary = self.store.export_database(dest, repo_ids=[m1.repo_id], now=T0 + 600)
+
+        self.assertEqual(summary.exported_repos, ("octo-org/widgets",))
+        self.assertEqual(summary.removed_items_repos, 2)
+        self.assertEqual(summary.removed_mirror_repos, 1)
+        self.assertEqual(summary.chunks_remaining, 2)
+        self.assertEqual(summary.embeddings_remaining, 2)
+
+        self._assert_exported_sqlite_invariants(dest, [m1])
+
+        exported_store = PackratStore(dest)
+        try:
+            widgets_hits = [
+                cid
+                for cid, _ in exported_store.query_fts_candidates(
+                    "widgetsunique", SearchFilters(), 10
+                )
+            ]
+            shared_hits = [
+                cid
+                for cid, _ in exported_store.query_fts_candidates(
+                    "sharedexporttoken", SearchFilters(), 10
+                )
+            ]
+            self.assertEqual(len(widgets_hits), 2)
+            self.assertEqual(set(widgets_hits), set(shared_hits))
+            for excluded_token in ("gadgetsunique", "alphaunique", "betaunique"):
+                self.assertEqual(
+                    exported_store.query_fts_candidates(
+                        excluded_token, SearchFilters(), 10
+                    ),
+                    [],
+                )
+
+            for live_tbl in _EXPORT_LIVE_PR_TABLES:
+                cnt = int(
+                    exported_store.conn.execute(
+                        f"SELECT COUNT(*) FROM {live_tbl} WHERE repo_id = ?",
+                        (m1.repo_id,),
+                    ).fetchone()[0]
+                )
+                self.assertEqual(cnt, 1, f"Expected 1 row in {live_tbl}")
+
+            live_prs = exported_store.conn.execute(
+                "SELECT item_key, rollup_state FROM v_pr_live"
+            ).fetchall()
+            self.assertEqual(
+                [(str(r["item_key"]), str(r["rollup_state"])) for r in live_prs],
+                [("octo-org/widgets#2", "SUCCESS")],
+            )
+            live_checks = exported_store.conn.execute(
+                "SELECT item_key, name, conclusion FROM v_pr_checks"
+            ).fetchall()
+            self.assertEqual(
+                [
+                    (str(r["item_key"]), str(r["name"]), str(r["conclusion"]))
+                    for r in live_checks
+                ],
+                [("octo-org/widgets#2", "unit-tests", "SUCCESS")],
+            )
+        finally:
+            exported_store.close()
+
+    def test_export_when_zero_repositories_are_removed(self) -> None:
+        """Verifies export when only `mirror` repos exist and zero repos are excluded."""
+        m1 = self.store.register_repo(
+            "octo-org", "widgets", local_path="/tmp/octo-widgets", now=T0
+        )
+        m2 = self.store.register_repo(
+            "octo-org", "gadgets", local_path="/tmp/octo-gadgets", now=T0
+        )
+        self._seed_repo_mirror_artifacts(m1, "widgetsunique")
+        self._seed_repo_live_and_sync_state(m1, "widgetsunique")
+        self._seed_repo_mirror_artifacts(m2, "gadgetsunique")
+        self._seed_repo_live_and_sync_state(m2, "gadgetsunique")
+        self._seed_personal_and_session_state([m1.full_name, m2.full_name])
+
+        dest = self.tmp_dir / "all_mirrors.sqlite"
+        summary = self.store.export_database(dest, repo_ids=None, now=T0 + 100)
+        self.assertEqual(
+            summary.exported_repos, ("octo-org/widgets", "octo-org/gadgets")
+        )
+        self.assertEqual(summary.removed_items_repos, 0)
+        self.assertEqual(summary.removed_mirror_repos, 0)
+        self.assertEqual(summary.chunks_remaining, 4)
+        self.assertEqual(summary.embeddings_remaining, 4)
+        self._assert_exported_sqlite_invariants(dest, [m1, m2])
+
+        reordered_dest = self.tmp_dir / "reordered_mirrors.sqlite"
+        reordered = self.store.export_database(
+            reordered_dest, repo_ids=[m2.repo_id, m1.repo_id], now=T0 + 110
+        )
+        self.assertEqual(
+            reordered.exported_repos, ("octo-org/gadgets", "octo-org/widgets")
+        )
+        self.assertEqual(reordered.removed_mirror_repos, 0)
+
+    def test_overwrite_unlinks_stale_wal_sidecars_without_replay_corruption(
+        self,
+    ) -> None:
+        """Verifies `force=True` removes destination WAL, SHM, and journal sidecars."""
+        m1 = self.store.register_repo(
+            "octo-org", "widgets", local_path="/tmp/octo-widgets", now=T0
+        )
+        self._seed_repo_mirror_artifacts(m1, "widgetsunique")
+        self._seed_repo_live_and_sync_state(m1, "widgetsunique")
+
+        dest = self.tmp_dir / "existing_wal.sqlite"
+        wal_path = Path(f"{dest}-wal")
+        shm_path = Path(f"{dest}-shm")
+        journal_path = Path(f"{dest}-journal")
+
+        stale_conn = sqlite3.connect(str(dest))
+        try:
+            stale_conn.execute("PRAGMA journal_mode = WAL")
+            stale_conn.execute("PRAGMA wal_autocheckpoint = 0")
+            stale_conn.execute("CREATE TABLE stale_only (payload TEXT)")
+            stale_conn.execute(
+                "INSERT INTO stale_only (payload) VALUES ('uncheckpointed-wal-row')"
+            )
+            stale_conn.commit()
+            base_bytes = dest.read_bytes()
+            wal_bytes = wal_path.read_bytes()
+            shm_bytes = shm_path.read_bytes()
+        finally:
+            stale_conn.close()
+
+        # Restore uncheckpointed WAL and SHM bytes after close so sidecars persist on disk.
+        dest.write_bytes(base_bytes)
+        wal_path.write_bytes(wal_bytes)
+        shm_path.write_bytes(shm_bytes)
+        journal_path.write_bytes(b"stale-rollback-journal")
+        self.assertGreater(wal_path.stat().st_size, 0)
+        self.assertTrue(shm_path.exists())
+        self.assertTrue(journal_path.exists())
+
+        self.store.export_database(dest, force=True, now=T0 + 200)
+
+        self.assertFalse(wal_path.exists())
+        self.assertFalse(shm_path.exists())
+        self.assertFalse(journal_path.exists())
+
+        reopened = PackratStore(dest)
+        try:
+            integrity = str(
+                reopened.conn.execute("PRAGMA integrity_check").fetchone()[0]
+            )
+            self.assertEqual(integrity, "ok")
+            stale_tbl = reopened.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stale_only'"
+            ).fetchone()
+            self.assertIsNone(stale_tbl)
+            self.assertEqual(
+                [r.full_name for r in reopened.list_repos()], ["octo-org/widgets"]
+            )
+            hits = reopened.query_fts_candidates("widgetsunique", SearchFilters(), 10)
+            self.assertEqual(len(hits), 2)
+        finally:
+            reopened.close()
+
+    def test_compact_and_verify_raises_export_integrity_error_on_fts_or_fk_drift(
+        self,
+    ) -> None:
+        """Verifies `_compact_and_verify_export_conn` and cleanup on FTS5 or FK drift."""
+        corrupt_fts_path = self.tmp_dir / "corrupt_fts.sqlite"
+        fts_store = PackratStore(corrupt_fts_path)
+        try:
+            repo = fts_store.register_repo("octo-org", "widgets", now=T0)
+            sha = compute_content_sha256("Title", "Orphaned FTS token")
+            fts_store.upsert_chunks(
+                [
+                    TextChunk(
+                        chunk_id="octo-org/widgets#issue:1",
+                        repo_id=repo.repo_id,
+                        source_kind="issue",
+                        source_ref="octo-org/widgets#1",
+                        item_number=1,
+                        title="Title",
+                        text="Orphaned FTS token",
+                        content_sha256=sha,
+                    )
+                ],
+                now=T0,
+            )
+            with fts_store.conn:
+                fts_store.conn.execute(
+                    "DELETE FROM chunks WHERE chunk_id = 'octo-org/widgets#issue:1'"
+                )
+        finally:
+            fts_store.close()
+
+        with (
+            contextlib.closing(sqlite3.connect(str(corrupt_fts_path))) as raw_conn,
+            self.assertRaises(ExportIntegrityError),
+        ):
+            _compact_and_verify_export_conn(raw_conn)
+
+        # Failed export_database cleans up temporary files and leaves existing dest intact.
+        m1 = self.store.register_repo("octo-org", "widgets", now=T0)
+        self._seed_repo_mirror_artifacts(m1, "widgetsunique")
+        with self.store.conn:
+            self.store.conn.execute("DELETE FROM chunks")
+        dest = self.tmp_dir / "protected_dest.sqlite"
+        dest.write_bytes(b"preserve-existing-bytes")
+        with self.assertRaises(ExportIntegrityError):
+            self.store.export_database(dest, force=True)
+        self.assertEqual(dest.read_bytes(), b"preserve-existing-bytes")
+        self.assertEqual(list(self.tmp_dir.glob("*.tmp.*")), [])
+
+        # Foreign-key violation also raises ExportIntegrityError.
+        corrupt_fk_path = self.tmp_dir / "corrupt_fk.sqlite"
+        fk_store = PackratStore(corrupt_fk_path)
+        fk_store.close()
+        with contextlib.closing(sqlite3.connect(str(corrupt_fk_path))) as fk_conn:
+            fk_conn.execute("PRAGMA foreign_keys = OFF")
+            with fk_conn:
+                fk_conn.execute(
+                    "INSERT INTO issues (repo_id, number, state, title, updated_at) "
+                    "VALUES (99999, 1, 'OPEN', 'Orphan issue', '2027-01-01T00:00:00Z')"
+                )
+            with self.assertRaises(ExportIntegrityError):
+                _compact_and_verify_export_conn(fk_conn)
+
+    def test_destination_path_guards(self) -> None:
+        """Verifies destination overwrite, directory, memory, and source-alias guards."""
+        self.store.register_repo("octo-org", "widgets", now=T0)
+
+        existing = self.tmp_dir / "already_exists.sqlite"
+        existing.write_bytes(b"original-content")
+        with self.assertRaises(ValueError):
+            self.store.export_database(existing, force=False)
+        self.assertEqual(existing.read_bytes(), b"original-content")
+
+        dangling_link = self.tmp_dir / "dangling_dest.sqlite"
+        dangling_link.symlink_to(self.tmp_dir / "nonexistent_target.sqlite")
+        with self.assertRaises(ValueError):
+            self.store.export_database(dangling_link, force=False)
+
+        existing_dir = self.tmp_dir / "subdir"
+        existing_dir.mkdir()
+        with self.assertRaises(ValueError):
+            self.store.export_database(existing_dir, force=False)
+        with self.assertRaises(ValueError):
+            self.store.export_database(existing_dir, force=True)
+
+        symlink_to_src = self.tmp_dir / "src_symlink.sqlite"
+        symlink_to_src.symlink_to(self.db_path)
+        hardlink_to_src = self.tmp_dir / "src_hardlink.sqlite"
+        os.link(self.db_path, hardlink_to_src)
+
+        forbidden_destinations: tuple[Path | str, ...] = (
+            self.db_path,
+            self.tmp_dir / "." / "repos.sqlite",
+            symlink_to_src,
+            hardlink_to_src,
+            Path(f"{self.db_path}-wal"),
+            Path(f"{self.db_path}-shm"),
+            Path(f"{self.db_path}-journal"),
+            ":memory:",
+            "",
+            "   ",
+            "file:memexport?mode=memory",
+        )
+        for bad_dest in forbidden_destinations:
+            with self.assertRaises(
+                ValueError, msg=f"Expected rejection for {bad_dest!r}"
+            ):
+                self.store.export_database(bad_dest, force=True)
+
+    def test_repo_selection_guards_and_memory_source_export(self) -> None:
+        """Verifies `repo_ids` validation and exporting from a `:memory:` source store."""
+        dest = self.tmp_dir / "never_created.sqlite"
+        with self.assertRaises(ValueError):
+            self.store.export_database(dest, repo_ids=None)
+
+        items_repo = self.store.ensure_items_repo("items-org", "alpha", now=T0)
+        with self.assertRaises(ValueError):
+            self.store.export_database(dest, repo_ids=None)
+
+        mirror_repo = self.store.register_repo("octo-org", "widgets", now=T0)
+        invalid_selections: tuple[Sequence[int], ...] = (
+            [],
+            [999999],
+            [items_repo.repo_id],
+            [mirror_repo.repo_id, items_repo.repo_id],
+        )
+        for selection in invalid_selections:
+            with self.assertRaises(
+                ValueError, msg=f"Expected rejection for {selection!r}"
+            ):
+                self.store.export_database(dest, repo_ids=selection)
+        self.assertFalse(dest.exists())
+
+        mem_store = PackratStore(":memory:")
+        try:
+            mem_store.register_repo("octo-org", "widgets", now=T0)
+            self.assertIsNone(mem_store.get_state("vector_cache_seq"))
+            mem_dest = self.tmp_dir / "from_memory.sqlite"
+            summary = mem_store.export_database(mem_dest, now=T0 + 300)
+            self.assertEqual(summary.source_db_path, ":memory:")
+            self.assertEqual(summary.source_bytes, 0)
+            self.assertGreater(summary.dest_bytes, 0)
+        finally:
+            mem_store.close()
+
+        with contextlib.closing(sqlite3.connect(str(mem_dest))) as conn:
+            seq = conn.execute(
+                "SELECT value FROM service_state WHERE key = 'vector_cache_seq'"
+            ).fetchone()[0]
+            self.assertEqual(seq, "1")
+
+    def test_export_reports_live_progress_and_resists_concurrent_wal_writes(
+        self,
+    ) -> None:
+        """Verifies live reporter output across all 4 phases and WAL snapshot pinning."""
+        import io
+        from unittest import mock
+
+        from progress import StderrProgressReporter
+
+        self._seed_four_repo_fixture()
+        self.store.wal_checkpoint_truncate()
+
+        buf = io.StringIO()
+        reporter = StderrProgressReporter(
+            "plain",
+            stream=buf,
+            is_tty=False,
+            grace_sec=0.0,
+            plain_interval_sec=0.0,
+        )
+        writer = PackratStore(self.db_path)
+        try:
+            dest = self.tmp_dir / "progress_export.sqlite"
+            phases: list[str] = []
+
+            def inject_concurrent_wal_write(phase: str) -> None:
+                phases.append(phase)
+                if phase == "backup":
+                    writer.set_state("concurrent_during_backup", "yes", now=T0 + 50)
+
+            with (
+                mock.patch("db_store._EXPORT_BACKUP_STEP_PAGES", 4),
+                mock.patch("db_store._EXPORT_VM_PROGRESS_OPS", 50),
+            ):
+                self.store.export_database(
+                    dest,
+                    on_progress=inject_concurrent_wal_write,
+                    reporter=reporter,
+                    now=T0 + 400,
+                )
+        finally:
+            writer.close()
+
+        self.assertEqual(phases, ["backup", "scrub", "vacuum", "verify"])
+        progress_text = buf.getvalue()
+        self.assertIn("[export] backup:", progress_text)
+        self.assertIn("[export] backup done:", progress_text)
+        self.assertIn("[export] scrub:", progress_text)
+        self.assertIn("[export] scrub done:", progress_text)
+        self.assertIn("[export] vacuum: compacting", progress_text)
+        self.assertIn("[export] vacuum done:", progress_text)
+        self.assertIn("[export] verify: step 1/2, checking FTS5 index", progress_text)
+        self.assertIn("[export] verify: step 2/2, checking foreign keys", progress_text)
+        self.assertIn("[export] verify done:", progress_text)
 
 
 if __name__ == "__main__":

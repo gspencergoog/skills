@@ -278,6 +278,41 @@ METHOD_DECL_RE = re.compile(
 )
 CONTROL_KEYWORDS = {"if", "for", "while", "switch", "catch", "when", "return"}
 
+_COMMENT_OR_STRING_RE = re.compile(
+    r"//[^\n]*"
+    r"|#[^\n]*"
+    r"|/\*[\s\S]*?\*/"
+    r'|"""(?:\\[\s\S]|(?!""")[\s\S])*?"""'
+    r"|'''(?:\\[\s\S]|(?!''')[\s\S])*?'''"
+    r'|"(?:\\[\s\S]|[^"\\\n])*"'
+    r"|'(?:\\[\s\S]|[^'\\\n])*'"
+    r"|`(?:\\[\s\S]|[^`\\])*`"
+)
+
+
+@dataclass
+class _OpenDecl:
+    """Tracks an in-progress brace-delimited symbol declaration during a linear scan."""
+
+    entity: dict[str, Any]
+    base_depth: int
+    opened: bool = False
+
+
+def _preserve_newlines(match: re.Match[str]) -> str:
+    """Replaces a matched string or comment span with the same number of newlines."""
+    text = match.group(0)
+    nl_count = text.count("\n")
+    return "\n" * nl_count if nl_count else ""
+
+
+def _strip_comments_and_strings(content: str) -> list[str]:
+    """Strips comments and string/template literals while preserving line numbering."""
+    if not content:
+        return []
+    cleaned = _COMMENT_OR_STRING_RE.sub(_preserve_newlines, content)
+    return cleaned.splitlines()
+
 
 def _format_py_signature(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
     """Formats a Python function signature from its AST node."""
@@ -346,21 +381,44 @@ def _extract_py_entities(
     return entities
 
 
-def _find_brace_end_line(lines: list[str], start_idx: int) -> int:
-    """Finds the 1-indexed closing brace line for a declaration starting at start_idx."""
-    depth = 0
-    opened = False
-    for idx in range(start_idx, len(lines)):
-        opens = lines[idx].count("{")
-        closes = lines[idx].count("}")
-        if opens > 0:
-            opened = True
-        depth += opens - closes
-        if opened and depth <= 0:
-            return idx + 1
-        if not opened and lines[idx].rstrip().endswith(";"):
-            return idx + 1
-    return start_idx + 1
+def _mark_pending_decls_opened(open_stack: list[_OpenDecl]) -> None:
+    """Marks all currently pending declarations on the stack as having seen `{`."""
+    for decl in open_stack:
+        decl.opened = True
+
+
+def _close_decls_at_depth(
+    open_stack: list[_OpenDecl], depth: int, line_num: int
+) -> None:
+    """Pops declarations whose opening brace depth has been closed at `line_num`."""
+    while open_stack and open_stack[-1].opened and depth <= open_stack[-1].base_depth:
+        open_stack.pop().entity["line_end"] = line_num
+
+
+def _close_unopened_semicolon_decls(
+    open_stack: list[_OpenDecl], clean_line: str, line_num: int
+) -> None:
+    """Closes abstract or forward declarations terminated by `;` before any `{`."""
+    if not clean_line.rstrip().endswith(";"):
+        return
+    while open_stack and not open_stack[-1].opened:
+        open_stack.pop().entity["line_end"] = line_num
+
+
+def _step_brace_line(
+    clean_line: str, line_num: int, depth: int, open_stack: list[_OpenDecl]
+) -> int:
+    """Advances brace depth and closes completed declarations for one stripped line."""
+    if "{" in clean_line or "}" in clean_line:
+        for ch in clean_line:
+            if ch == "{":
+                _mark_pending_decls_opened(open_stack)
+                depth += 1
+            elif ch == "}":
+                depth = max(0, depth - 1)
+                _close_decls_at_depth(open_stack, depth, line_num)
+    _close_unopened_semicolon_decls(open_stack, clean_line, line_num)
+    return depth
 
 
 def _match_brace_decl(line: str) -> tuple[str, str] | None:
@@ -380,26 +438,35 @@ def _match_brace_decl(line: str) -> tuple[str, str] | None:
 def _extract_brace_entities(
     file_path: str, side: str, content: str
 ) -> list[dict[str, Any]]:
-    """Extracts symbol spans for brace-delimited languages."""
-    lines = content.splitlines()
+    """Extracts symbol spans for brace-delimited languages in a single O(lines) pass."""
+    raw_lines = content.splitlines()
+    if not raw_lines:
+        return []
+    clean_lines = _strip_comments_and_strings(content)
+    if len(clean_lines) < len(raw_lines):
+        clean_lines.extend([""] * (len(raw_lines) - len(clean_lines)))
+
     entities: list[dict[str, Any]] = []
-    for idx, line in enumerate(lines):
-        matched = _match_brace_decl(line)
-        if not matched:
-            continue
-        kind, name = matched
-        sig = line.strip().rstrip("{").strip()
-        entities.append(
-            {
+    open_stack: list[_OpenDecl] = []
+    depth = 0
+    for idx, raw_line in enumerate(raw_lines):
+        clean_line = clean_lines[idx]
+        matched = _match_brace_decl(clean_line)
+        if matched:
+            kind, name = matched
+            sig = raw_line.strip().rstrip("{").strip()
+            ent: dict[str, Any] = {
                 "file_path": file_path,
                 "side": side,
                 "kind": kind,
                 "name": name,
                 "signature": sig,
                 "line_start": idx + 1,
-                "line_end": _find_brace_end_line(lines, idx),
+                "line_end": idx + 1,
             }
-        )
+            entities.append(ent)
+            open_stack.append(_OpenDecl(entity=ent, base_depth=depth))
+        depth = _step_brace_line(clean_line, idx + 1, depth, open_stack)
     return entities
 
 

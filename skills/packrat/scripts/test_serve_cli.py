@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import io
 import shutil
 import tempfile
 import unittest
@@ -9,8 +11,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import serve_cli
 from db_store import PackratStore
-from gh_transport import BudgetDeferred, GhApiError
+from gh_transport import BudgetDeferred, GhApiError, GhCommandResult
 from models import PrRecord, SyncStats, TimelineMode, TimelineStats
 from rate_budget import RATE_BUDGET_FILENAME, Priority, RateBudget
 from serve_cli import (
@@ -19,7 +22,11 @@ from serve_cli import (
     MirrorAdapter,
     TimelineAdapter,
     build_service,
+    changes_payload,
+    cmd_watch,
+    format_service_status,
     github_sync_stopped,
+    service_status,
 )
 
 
@@ -251,6 +258,256 @@ class TestTimelineAdapters(unittest.TestCase):
         )
         self.assertEqual(self.store.table_counts()["timeline_dirty"], 1)
         self.assertEqual(self.store.table_counts()["timeline_events"], 0)
+
+
+class TestDryRunStoreWave4Forwarding(unittest.TestCase):
+    """Tests that the store methods added in Waves 1-3 are forwarded or dropped by `DryRunStore`."""
+
+    WRITES = (
+        "mark_timelines_synced",
+        "update_pr_fork_owners",
+        "set_gap_state",
+        "touch_live_fetched_at",
+        "wal_checkpoint_truncate",
+        "set_commits_backfill_state",
+        "upsert_indexed_files",
+    )
+    READS = (
+        "get_gap_state",
+        "get_live_pr_fingerprints",
+        "read_schema_and_views_version",
+        "read_snapshot",
+        "get_indexed_blob_oids",
+        "has_any_chunks",
+        "query_fts_candidates",
+        "read_all_embeddings_for_mmap",
+        "resolve_filtered_chunk_ids",
+        "stream_filtered_embeddings",
+    )
+
+    def test_writes_are_dropped_and_reads_forwarded(self) -> None:
+        sentinel = object()
+
+        class Spy:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def __getattr__(self, name: str) -> Any:
+                def fn(*_a: Any, **_k: Any) -> object:
+                    self.calls.append(name)
+                    return sentinel
+
+                return fn
+
+        spy = Spy()
+        dry = DryRunStore(spy)  # type: ignore[arg-type]
+        for name in self.WRITES:
+            with self.subTest(write=name):
+                result = getattr(dry, name)(1, 2)
+                self.assertIsNot(result, sentinel)
+        self.assertEqual(spy.calls, [])
+        for name in self.READS:
+            with self.subTest(read=name):
+                self.assertIs(getattr(dry, name)(), sentinel)
+        self.assertEqual(list(spy.calls), list(self.READS))
+
+    def test_take_refresh_requests_has_no_raw_sql_fallback(self) -> None:
+        class NoPeekStore:
+            conn = object()
+
+        dry = DryRunStore(NoPeekStore())  # type: ignore[arg-type]
+        with self.assertRaises(AttributeError):
+            dry.take_refresh_requests()
+
+
+class TestAdapterBudgetHandoff(unittest.TestCase):
+    """Tests that adapters pass `budget=None` when the runner is already budgeted."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="packrat-serve-budget-"))
+        self.store = PackratStore(self.tmp / "repos.sqlite")
+        self.mirror = self.store.register_repo("octo-org", "widgets")
+        self.items = self.store.ensure_items_repo("octo-org", "gadgets")
+        self.budget = RateBudget(self.tmp / RATE_BUDGET_FILENAME)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _transport(self, budgeted: bool) -> mock.Mock:
+        runner = mock.Mock()
+        runner.is_budgeted_runner = budgeted
+        transport = mock.Mock()
+        transport.as_runner.return_value = runner
+        return transport
+
+    def test_mirror_adapter_budget_handoff(self) -> None:
+        for budgeted, expected in ((True, None), (False, self.budget)):
+            with (
+                self.subTest(budgeted=budgeted),
+                mock.patch(
+                    "serve_cli.sync_github_metadata",
+                    return_value=SyncStats(repo_full_name="octo-org/widgets"),
+                ) as gh,
+                mock.patch(
+                    "serve_cli.sync_repo_timelines", return_value=TimelineStats()
+                ) as tl,
+            ):
+                adapter = MirrorAdapter(
+                    self.store, self._transport(budgeted), self.budget
+                )
+                adapter.sync_mirror([self.mirror.repo_id])
+                self.assertIs(gh.call_args.kwargs["budget"], expected)
+                self.assertIs(tl.call_args.kwargs["budget"], expected)
+
+    def test_timeline_adapter_budget_handoff(self) -> None:
+        for budgeted, expected in ((True, None), (False, self.budget)):
+            with (
+                self.subTest(budgeted=budgeted),
+                mock.patch(
+                    "serve_cli.sync_repo_timelines", return_value=TimelineStats()
+                ) as tl,
+            ):
+                adapter = TimelineAdapter(
+                    self.store, self._transport(budgeted), self.budget
+                )
+                adapter.sync_items_timelines()
+                self.assertIs(tl.call_args.kwargs["budget"], expected)
+
+
+class TestChangesAndStatus(unittest.TestCase):
+    """Tests `changes_payload` snapshotting and the service status health fields."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="packrat-serve-status-"))
+        self.store = PackratStore(self.tmp / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_changes_payload_runs_inside_one_read_snapshot(self) -> None:
+        for n in (1, 2, 3):
+            self.store.append_change(
+                f"octo-org/widgets#{n}", "pr", "updated", now=100.0 + n
+            )
+        in_tx: list[bool] = []
+        real_changes_since = self.store.changes_since
+
+        def spy_changes_since(since: int, limit: int) -> Any:
+            in_tx.append(self.store.conn.in_transaction)
+            return real_changes_since(since, limit)
+
+        with (
+            mock.patch.object(
+                self.store, "read_snapshot", wraps=self.store.read_snapshot
+            ) as snap,
+            mock.patch.object(
+                self.store, "changes_since", side_effect=spy_changes_since
+            ),
+        ):
+            payload = changes_payload(self.store, 1, 10)
+        snap.assert_called_once()
+        self.assertEqual(in_tx, [True])
+        self.assertFalse(self.store.conn.in_transaction)
+        assert payload is not None
+        self.assertEqual(payload["seq"], 3)
+        self.assertEqual(len(payload["changes"]), 2)
+
+    def test_service_status_surfaces_code_stale_and_health_fields(self) -> None:
+        self.store.write_heartbeat(
+            4242,
+            "packrat-serve/2+000000000000",
+            now=1_000.0,
+            last_ok_at="2027-01-01T00:00:00Z",
+            consecutive_failed_ticks=4,
+        )
+        with mock.patch.object(
+            serve_cli,
+            "format_service_version",
+            create=True,
+            return_value="packrat-serve/2+ffffffffffff",
+        ):
+            status = service_status(self.store, now=1_030.0)
+        self.assertTrue(status["code_stale"])
+        self.assertEqual(status["expected_version"], "packrat-serve/2+ffffffffffff")
+        self.assertEqual(status["last_ok_at"], "2027-01-01T00:00:00Z")
+        self.assertEqual(status["consecutive_failed_ticks"], 4)
+        text = format_service_status(status)
+        self.assertIn("Service: degraded", text)
+        self.assertIn("consecutive_failed_ticks=4", text)
+        self.assertIn("last_ok_at=2027-01-01T00:00:00Z", text)
+        self.assertIn("stale code", text)
+
+        stale = format_service_status({**status, "beat_age_s": 400})
+        self.assertIn("Service: stale", stale)
+        healthy = format_service_status(
+            {**status, "consecutive_failed_ticks": 0, "code_stale": False}
+        )
+        self.assertIn("Service: running", healthy)
+        self.assertNotIn("stale code", healthy)
+
+
+class TestWatchAddProbe(unittest.TestCase):
+    """Tests `watch add` validation of unregistered repositories against GitHub."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="packrat-serve-watch-"))
+        self.store = PackratStore(self.tmp / "repos.sqlite")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _add(self, stdout: str, returncode: int = 0) -> tuple[list[str], str]:
+        args = argparse.Namespace(
+            watch_action="add",
+            items=["new-org/thing#7"],
+            consumer="monitor",
+            id="c1",
+            freshness=60,
+            ttl=600,
+            json=True,
+        )
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str], *_a: Any, **_k: Any) -> GhCommandResult:
+            calls.append(list(argv))
+            return GhCommandResult(returncode=returncode, stdout=stdout, stderr="")
+
+        err = io.StringIO()
+        with (
+            mock.patch("serve_cli.run_gh_command", side_effect=runner),
+            mock.patch("sys.stdout", io.StringIO()),
+            mock.patch("sys.stderr", err),
+        ):
+            cmd_watch(args, self.store)
+        return [" ".join(c) for c in calls], err.getvalue()
+
+    def test_200_registers_items_repo(self) -> None:
+        calls, err = self._add('HTTP/2.0 200 OK\r\n\r\n{"full_name": "new-org/thing"}')
+        self.assertTrue(any("repos/new-org/thing" in c for c in calls), calls)
+        repo = self.store.get_repo("new-org/thing")
+        assert repo is not None
+        self.assertEqual(repo.mode, "items")
+        self.assertIn("registered new-org/thing (items)", err)
+
+    def test_404_rejects_without_ghost_repo(self) -> None:
+        with self.assertRaisesRegex(ValueError, "HTTP 404"):
+            self._add('HTTP/2.0 404 Not Found\r\n\r\n{"message": "Not Found"}', 1)
+        self.assertIsNone(self.store.get_repo("new-org/thing"))
+
+    def test_offline_falls_back_with_warning(self) -> None:
+        _, err = self._add("", returncode=4)
+        self.assertIn("Warning: could not verify new-org/thing", err)
+        self.assertIsNotNone(self.store.get_repo("new-org/thing"))
+
+    def test_registered_repo_is_not_probed(self) -> None:
+        self.store.register_repo("new-org", "thing")
+        calls, err = self._add("HTTP/2.0 200 OK\r\n\r\n{}")
+        self.assertEqual(calls, [])
+        self.assertNotIn("registered", err)
 
 
 if __name__ == "__main__":

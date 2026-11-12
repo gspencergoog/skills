@@ -196,6 +196,31 @@ FROM (
     p.created_at AS created_at,
     p.updated_at AS updated_at,
     p.merged_at AS merged_at,
+    LOWER(tp.login) AS participant,
+    'inline_comment' AS role
+  FROM kb.review_threads rt
+  JOIN kb.pull_requests p ON p.repo_id = rt.repo_id AND p.number = rt.pr_number
+  JOIN kb.repos r ON r.repo_id = p.repo_id
+  CROSS JOIN UNNEST(
+    from_json(
+      COALESCE(NULLIF(rt.participants_json, ''), '[]'),
+      '["VARCHAR"]'
+    )
+  ) AS tp(login)
+
+  UNION ALL
+
+  SELECT
+    r.full_name AS repo,
+    'pr' AS kind,
+    p.number AS number,
+    p.title AS title,
+    p.state AS state,
+    p.url AS url,
+    LOWER(NULLIF(p.author, '')) AS item_author,
+    p.created_at AS created_at,
+    p.updated_at AS updated_at,
+    p.merged_at AS merged_at,
     LOWER(tc.comment.author.login) AS participant,
     'inline_comment' AS role
   FROM kb.review_threads rt
@@ -207,6 +232,7 @@ FROM (
       '[{"author":{"login":"VARCHAR"}}]'
     )
   ) AS tc(comment)
+  WHERE COALESCE(NULLIF(rt.participants_json, ''), '[]') = '[]'
 
   UNION ALL
 
@@ -352,16 +378,28 @@ FROM kb.thread_activity t
 JOIN kb.repos r ON r.repo_id = t.repo_id;
 
 CREATE OR REPLACE VIEW v_viewer_items AS
-SELECT set_name, item_key, first_seen_at, last_seen_at FROM kb.viewer_sets;
+SELECT
+  v.set_name,
+  r.full_name || '#' || v.item_number AS item_key,
+  v.first_seen_at,
+  v.last_seen_at
+FROM kb.viewer_sets v
+JOIN kb.repos r ON r.repo_id = v.repo_id;
 
 CREATE OR REPLACE VIEW v_notifications AS
 SELECT thread_id, reason, subject_type, item_key, updated_at, unread, seen_at
 FROM kb.notifications;
 
 CREATE OR REPLACE VIEW v_watches AS
-SELECT consumer, consumer_id, item_key, freshness_s, lease_expires_at,
-  lease_expires_at > strftime(now() AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%SZ') AS active
-FROM kb.watches;
+SELECT
+  w.consumer,
+  w.consumer_id,
+  r.full_name || '#' || w.item_number AS item_key,
+  w.freshness_s,
+  w.lease_expires_at,
+  w.lease_expires_at > strftime(now() AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%SZ') AS active
+FROM kb.watches w
+JOIN kb.repos r ON r.repo_id = w.repo_id;
 
 CREATE OR REPLACE VIEW v_changes AS
 SELECT seq, item_key, kind, fields, "at" FROM kb.changes;
@@ -392,7 +430,9 @@ SELECT
   (SELECT count(*) FROM kb.watches
      WHERE lease_expires_at > strftime(now() AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%SZ'))
     AS active_leases,
-  (SELECT value FROM kb.service_state WHERE key = 'viewer_login') AS viewer_login
+  (SELECT value FROM kb.service_state WHERE key = 'viewer_login') AS viewer_login,
+  h.last_ok_at AS last_ok_at,
+  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks
 FROM (SELECT 1 AS one) AS anchor
 LEFT JOIN kb.service_heartbeat h ON h.id = 1;
 

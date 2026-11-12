@@ -9,7 +9,9 @@ import unittest
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
+from db_store import PackratStore
 from gh_transport import (
     BudgetDeferred,
     GhApiError,
@@ -17,8 +19,16 @@ from gh_transport import (
     GhTransport,
     RateLimited,
 )
-from github_sync import GhCommandResult, _classify_gh_failure
+from github_sync import (
+    PRS_DELTA_QUERY,
+    GhCommandResult,
+    _classify_gh_failure,
+    _fetch_graphql_page_with_halving,
+    poll_repo_events,
+)
+from models import IssueRecord, TimelineMode
 from rate_budget import Priority, RateBudget
+from timeline_sync import sync_repo_timelines
 
 _RESET = int(time.time()) + 3600
 
@@ -419,6 +429,7 @@ class TestAsRunner(_TransportTestCase):
         live_transport = GhTransport(self.budget, self.store)
         live_runner = live_transport.as_runner("sync", Priority.MIRROR)
         self.assertTrue(getattr(live_runner, "_uses_gh_cli", False))
+        self.assertTrue(getattr(live_runner, "is_budgeted_runner", False))
 
         fake_transport, _ = self.transport(
             _fail(
@@ -430,8 +441,111 @@ class TestAsRunner(_TransportTestCase):
         )
         fake_runner = fake_transport.as_runner("sync", Priority.MIRROR)
         self.assertFalse(getattr(fake_runner, "_uses_gh_cli", False))
+        self.assertTrue(getattr(fake_runner, "is_budgeted_runner", False))
         res = fake_runner(["api", "repos/o/r/events"], 20)
         self.assertEqual(res.error_kind, "rate_limited")
+
+    def test_as_runner_extracts_cost_via_regex_without_json_loads(self) -> None:
+        payload = {"data": {"rateLimit": {"cost": 7}, "repository": {"issues": {}}}}
+        raw = _http(
+            "HTTP/2.0 200 OK", json.dumps(payload), resource="graphql", remaining=4010
+        )
+        transport, _ = self.transport(_ok(raw))
+        runner = transport.as_runner("sync", Priority.MIRROR)
+        with patch(
+            "gh_transport.json.loads",
+            side_effect=AssertionError("json.loads should not be called"),
+        ):
+            runner(["api", "graphql", "-f", "q=1"], 20)
+        self.assertEqual(self.store.rows[0]["cost"], 7)
+
+    def test_budgeted_runner_calls_allows_and_record_once_per_call(self) -> None:
+        db = PackratStore(Path(self._tmp.name) / "repos.sqlite")
+        self.addCleanup(db.close)
+        repo = db.register_repo("octo-org", "widgets")
+        events_raw = _http("HTTP/2.0 200 OK", "[]", resource="core", remaining=4900)
+        gql_payload = {
+            "data": {
+                "rateLimit": {"cost": 1},
+                "repository": {
+                    "pullRequests": {
+                        "totalCount": 0,
+                        "pageInfo": {"hasNextPage": False, "endCursor": None},
+                        "nodes": [],
+                    }
+                },
+            }
+        }
+        gql_raw = _http(
+            "HTTP/2.0 200 OK",
+            json.dumps(gql_payload),
+            resource="graphql",
+            remaining=4800,
+        )
+        transport, _ = self.transport(_ok(events_raw), _ok(gql_raw))
+        runner = transport.as_runner("sync", Priority.MIRROR)
+
+        allows_calls = 0
+        record_calls = 0
+        orig_allows = self.budget.allows
+        orig_record = self.budget.record
+
+        def counting_allows(*args: Any, **kwargs: Any) -> bool:
+            nonlocal allows_calls
+            allows_calls += 1
+            return orig_allows(*args, **kwargs)
+
+        def counting_record(*args: Any, **kwargs: Any) -> Any:
+            nonlocal record_calls
+            record_calls += 1
+            return orig_record(*args, **kwargs)
+
+        self.budget.allows = counting_allows  # type: ignore[method-assign]
+        self.budget.record = counting_record  # type: ignore[method-assign]
+
+        poll_repo_events(repo, runner=runner, budget=self.budget)
+        self.assertEqual((allows_calls, record_calls), (1, 1))
+
+        _fetch_graphql_page_with_halving(
+            repo.owner,
+            repo.name,
+            PRS_DELTA_QUERY,
+            "pullRequests",
+            None,
+            runner,
+            budget=self.budget,
+        )
+        self.assertEqual((allows_calls, record_calls), (2, 2))
+
+        # timeline_sync with no candidates makes 0 calls; with a candidate and
+        # exhausted budget it calls budget.allows once via as_runner and defers cleanly.
+        self.exhaust("graphql")
+        allows_calls = 0
+        record_calls = 0
+        db.upsert_issues(
+            [
+                IssueRecord(
+                    repo.repo_id,
+                    1,
+                    "Issue 1",
+                    "OPEN",
+                    "2027-01-01T00:00:00Z",
+                    node_id="I_1",
+                )
+            ]
+        )
+        t_stats = sync_repo_timelines(
+            db,
+            repo,
+            mode=TimelineMode.BACKFILL,
+            runner=transport.as_runner("timeline", Priority.BACKFILL),
+            budget=self.budget,
+            max_batches=1,
+            drain_xrefs=False,
+        )
+        self.assertTrue(t_stats.deferred)
+        self.assertEqual(t_stats.errors, [])
+        self.assertEqual((allows_calls, record_calls), (1, 0))
 
 
 if __name__ == "__main__":

@@ -663,6 +663,363 @@ class TestGitIndexer(unittest.TestCase):
         self.assertEqual([e["name"] for e in entities], ["f"])
         self.assertEqual(caught, [])
 
+    def test_commit_timestamps_are_normalized_to_utc_z(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+            (work_dir / "README.md").write_text("# UTC Check\n", encoding="utf-8")
+            _git(work_dir, "add", ".")
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_DATE": "2026-05-10T16:30:00-07:00",
+                "GIT_COMMITTER_DATE": "2026-05-10T16:30:00-07:00",
+            }
+            subprocess.run(
+                ["git", "-C", str(work_dir), "commit", "-m", "feat: non-utc offset"],
+                env=env,
+                check=True,
+                capture_output=True,
+            )
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                stats = sync_git_codebase(store, repo)
+                self.assertEqual(stats.commits_upserted, 1)
+                commit_row = store.conn.execute(
+                    "SELECT committed_at, substr(committed_at, 20) AS z_suffix FROM commits"
+                ).fetchone()
+                assert commit_row is not None
+                self.assertEqual(commit_row["committed_at"], "2026-05-10T23:30:00Z")
+                self.assertEqual(commit_row["z_suffix"], "Z")
+
+                chunk_row = store.conn.execute(
+                    "SELECT updated_at FROM chunks WHERE source_kind = 'commit'"
+                ).fetchone()
+                assert chunk_row is not None
+                self.assertEqual(chunk_row["updated_at"], "2026-05-10T23:30:00Z")
+            finally:
+                store.close()
+
+    def test_read_blobs_at_sha_batches_cat_file_and_skips_binary_missing_oversized(
+        self,
+    ) -> None:
+        from git_indexer import _read_blobs_at_sha
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "a.py").write_text(
+                "def a() -> int:\n    return 1\n", encoding="utf-8"
+            )
+            (work_dir / "b.md").write_text("# Doc B\n\nBody.\n", encoding="utf-8")
+            (work_dir / "bin.py").write_bytes(b"def bad():\x00\x01\x02\n")
+            (work_dir / "big.py").write_text("x = 1\n" * 200, encoding="utf-8")
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: add mixed blobs")
+            sha = _git(work_dir, "rev-parse", "HEAD")
+
+            cat_file_calls = 0
+            real_run = subprocess.run
+
+            def spy_subproc_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+                nonlocal cat_file_calls
+                cmd = args[0] if args else kwargs.get("args", [])
+                if isinstance(cmd, list) and "cat-file" in cmd and "--batch" in cmd:
+                    cat_file_calls += 1
+                return real_run(*args, **kwargs)
+
+            with mock.patch("git_indexer.subprocess.run", side_effect=spy_subproc_run):
+                blobs = _read_blobs_at_sha(
+                    work_dir,
+                    sha,
+                    ("a.py", "b.md", "bin.py", "big.py", "nonexistent.py"),
+                    max_blob_bytes=500,
+                )
+
+            self.assertEqual(cat_file_calls, 1)
+            self.assertEqual(sorted(blobs.keys()), ["a.py", "b.md"])
+            self.assertIn("def a()", blobs["a.py"])
+            self.assertIn("# Doc B", blobs["b.md"])
+
+    def test_commits_backfill_cursor_drains_across_passes_when_head_unchanged(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            shas: list[str] = []
+            for idx in range(1, 6):
+                (work_dir / "app.py").write_text(
+                    f"def fn_{idx}() -> int:\n    return {idx}\n", encoding="utf-8"
+                )
+                _git(work_dir, "add", ".")
+                _git(work_dir, "commit", "-m", f"feat: commit {idx}")
+                shas.append(_git(work_dir, "rev-parse", "HEAD"))
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                # Pass 1: initial sync with max_commits=2 indexes c5 and c4
+                stats_1 = sync_git_codebase(store, repo, max_commits=2)
+                self.assertEqual(stats_1.commits_upserted, 2)
+                self.assertIn("commits", stats_1.backfill_incomplete)
+                repo_1 = store.get_repo("octo-org/widgets")
+                assert repo_1 is not None
+                self.assertEqual(repo_1.last_indexed_sha, shas[4])
+                self.assertEqual(repo_1.commits_backfill_cursor, shas[2])
+                self.assertIsNone(repo_1.commits_backfill_done_at)
+
+                # Pass 2: HEAD is unchanged (shas[4]), drains c3 and c2 without re-indexing files
+                stats_2 = sync_git_codebase(store, repo_1, max_commits=2)
+                self.assertEqual(stats_2.commits_upserted, 2)
+                self.assertEqual(stats_2.symbols_upserted, 0)
+                self.assertIn("commits", stats_2.backfill_incomplete)
+                repo_2 = store.get_repo("octo-org/widgets")
+                assert repo_2 is not None
+                self.assertEqual(repo_2.commits_backfill_cursor, shas[0])
+                self.assertIsNone(repo_2.commits_backfill_done_at)
+
+                # Pass 3: HEAD is unchanged, drains final commit c1 and marks backfill done
+                stats_3 = sync_git_codebase(store, repo_2, max_commits=2)
+                self.assertEqual(stats_3.commits_upserted, 1)
+                self.assertEqual(stats_3.backfill_incomplete, [])
+                repo_3 = store.get_repo("octo-org/widgets")
+                assert repo_3 is not None
+                self.assertIsNone(repo_3.commits_backfill_cursor)
+                self.assertIsNotNone(repo_3.commits_backfill_done_at)
+
+                stored_shas = [
+                    r["sha"]
+                    for r in store.conn.execute("SELECT sha FROM commits").fetchall()
+                ]
+                self.assertEqual(set(stored_shas), set(shas))
+            finally:
+                store.close()
+
+    def test_commits_backfill_cursor_drains_burst_above_prior_old_sha_floor(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "app.py").write_text(
+                "def base() -> int:\n    return 0\n", encoding="utf-8"
+            )
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: base commit")
+            base_sha = _git(work_dir, "rev-parse", "HEAD")
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                sync_git_codebase(store, repo, max_commits=2)
+
+                burst_shas: list[str] = []
+                for idx in range(1, 5):
+                    (work_dir / "app.py").write_text(
+                        f"def burst_{idx}() -> int:\n    return {idx}\n",
+                        encoding="utf-8",
+                    )
+                    _git(work_dir, "add", ".")
+                    _git(work_dir, "commit", "-m", f"feat: burst {idx}")
+                    burst_shas.append(_git(work_dir, "rev-parse", "HEAD"))
+
+                repo_before = store.get_repo("octo-org/widgets")
+                assert repo_before is not None
+                stats_1 = sync_git_codebase(store, repo_before, max_commits=2)
+                self.assertEqual(stats_1.commits_upserted, 2)
+                self.assertIn("commits", stats_1.backfill_incomplete)
+                repo_mid = store.get_repo("octo-org/widgets")
+                assert repo_mid is not None
+                self.assertEqual(
+                    repo_mid.commits_backfill_cursor,
+                    f"{base_sha}..{burst_shas[1]}",
+                )
+
+                stats_2 = sync_git_codebase(store, repo_mid, max_commits=2)
+                self.assertEqual(stats_2.commits_upserted, 2)
+                self.assertEqual(stats_2.backfill_incomplete, [])
+                repo_done = store.get_repo("octo-org/widgets")
+                assert repo_done is not None
+                self.assertIsNone(repo_done.commits_backfill_cursor)
+                self.assertIsNotNone(repo_done.commits_backfill_done_at)
+
+                stored_shas = {
+                    r["sha"]
+                    for r in store.conn.execute("SELECT sha FROM commits").fetchall()
+                }
+                self.assertEqual(stored_shas, {base_sha, *burst_shas})
+            finally:
+                store.close()
+
+    def test_incremental_sync_checks_commit_exists_once_and_batches_mentions(
+        self,
+    ) -> None:
+        import git_indexer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "mod.py").write_text(
+                "def v0() -> int:\n    return 0\n", encoding="utf-8"
+            )
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: v0")
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                sync_git_codebase(store, repo)
+
+                for idx in (1, 2, 3):
+                    (work_dir / "mod.py").write_text(
+                        f"def v{idx}() -> int:\n    return {idx}\n", encoding="utf-8"
+                    )
+                    _git(work_dir, "add", ".")
+                    _git(
+                        work_dir,
+                        "commit",
+                        "-m",
+                        f"fix: update {idx} (#{100 + idx})",
+                        "-m",
+                        f"Refs #{idx} and #{100 + idx}",
+                    )
+
+                repo_inc = store.get_repo("octo-org/widgets")
+                assert repo_inc is not None
+                with (
+                    mock.patch(
+                        "git_indexer._commit_exists",
+                        wraps=git_indexer._commit_exists,
+                    ) as spy_exists,
+                    mock.patch.object(
+                        store,
+                        "enqueue_timeline_dirty",
+                        wraps=store.enqueue_timeline_dirty,
+                    ) as spy_enqueue,
+                ):
+                    stats = sync_git_codebase(store, repo_inc)
+
+                self.assertEqual(stats.commits_upserted, 3)
+                self.assertEqual(spy_exists.call_count, 1)
+                self.assertEqual(spy_enqueue.call_count, 1)
+                queued_numbers = [
+                    r["item_number"]
+                    for r in store.conn.execute(
+                        "SELECT item_number FROM timeline_dirty ORDER BY item_number"
+                    ).fetchall()
+                ]
+                self.assertEqual(queued_numbers, [1, 2, 3])
+            finally:
+                store.close()
+
+    def test_missing_ancestor_rebase_skips_unchanged_blob_oids_and_deletes_removed(
+        self,
+    ) -> None:
+        import git_indexer
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "unchanged.py").write_text(
+                "def stay_same() -> int:\n    return 1\n", encoding="utf-8"
+            )
+            (work_dir / "changed.py").write_text(
+                "def before_change() -> int:\n    return 2\n", encoding="utf-8"
+            )
+            (work_dir / "removed.py").write_text(
+                "def will_vanish() -> int:\n    return 3\n", encoding="utf-8"
+            )
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: initial tree")
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org", "widgets", local_path=str(work_dir)
+                )
+                sync_git_codebase(store, repo)
+                indexed_oids = store.get_indexed_blob_oids(repo.repo_id)
+                self.assertEqual(
+                    set(indexed_oids.keys()),
+                    {"unchanged.py", "changed.py", "removed.py"},
+                )
+
+                # Simulate a force-push / missing ancestor where unchanged.py has the same blob_oid,
+                # changed.py is updated, and removed.py is deleted.
+                (work_dir / "changed.py").write_text(
+                    "def after_change() -> int:\n    return 22\n", encoding="utf-8"
+                )
+                (work_dir / "removed.py").unlink()
+                _git(work_dir, "add", "-A")
+                _git(work_dir, "commit", "-m", "feat: rebased tree")
+
+                store.update_repo_sync_state(
+                    repo.repo_id, last_indexed_sha="deadbeef" * 5
+                )
+                repo_rebased = store.get_repo("octo-org/widgets")
+                assert repo_rebased is not None
+
+                with mock.patch(
+                    "git_indexer._read_blobs_at_sha",
+                    wraps=git_indexer._read_blobs_at_sha,
+                ) as spy_read_blobs:
+                    stats = sync_git_codebase(store, repo_rebased, force=False)
+
+                self.assertEqual(spy_read_blobs.call_count, 1)
+                read_paths = tuple(spy_read_blobs.call_args.args[2])
+                self.assertEqual(read_paths, ("changed.py",))
+                self.assertEqual(stats.symbols_upserted, 1)
+
+                symbols = {
+                    (r["file_path"], r["symbol_name"])
+                    for r in store.conn.execute(
+                        "SELECT file_path, symbol_name FROM code_symbols WHERE repo_id = ?",
+                        (repo.repo_id,),
+                    ).fetchall()
+                }
+                self.assertEqual(
+                    symbols,
+                    {
+                        ("unchanged.py", "stay_same"),
+                        ("changed.py", "after_change"),
+                    },
+                )
+            finally:
+                store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

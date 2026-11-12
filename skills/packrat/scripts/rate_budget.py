@@ -103,15 +103,17 @@ def parse_rate_headers(headers: Mapping[str, str], now: float) -> RateSnapshot |
 def _supersedes(new: RateSnapshot, old: RateSnapshot | None) -> bool:
     """Returns True when `new` should replace `old` for the same resource.
 
-    A later window wins. Within one window the budget only shrinks, so the
-    lower `remaining` wins; this keeps the result correct when responses from
-    racing processes are recorded out of order.
+    A later window wins. Within one window the budget only shrinks, so a
+    strictly lower `remaining` (or a changed `limit`) wins; equal snapshots
+    return False to avoid disk writes on unchanged 304 responses.
     """
     if old is None or new.reset_at > old.reset_at:
         return True
     if new.reset_at < old.reset_at:
         return False
-    return new.remaining <= old.remaining
+    return new.remaining < old.remaining or (
+        new.remaining == old.remaining and new.limit != old.limit
+    )
 
 
 def _snapshot_from_json(data: Any) -> RateSnapshot | None:

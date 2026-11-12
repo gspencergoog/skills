@@ -32,6 +32,7 @@ To avoid unnecessary context consumption, consult the dedicated reference guide 
 | **Issues & Discussions**  | [references/issues.md](references/issues.md)                   | Creating, filtering, closing, assigning, viewing comments, and branching from issues (`gh issue develop`).                                      |
 | **Repositories & Labels** | [references/repos.md](references/repos.md)                     | Creating, cloning, forking, syncing, archiving repositories, and managing repository labels (`gh repo`, `gh label`).                            |
 | **GitHub Actions**        | [references/actions.md](references/actions.md)                 | Viewing workflow run statuses, watching runs, rerunning jobs, downloading artifacts, and managing caches (`gh run`, `gh workflow`, `gh cache`). |
+| **CI Triage**             | [references/ci-triage.md](references/ci-triage.md)             | Telling a platform incident from a workflow bug when runs stall, finish with no jobs, or checks go missing, and the remedy for each. |
 | **Auth, Config & API**    | [references/auth-and-config.md](references/auth-and-config.md) | Logging in/out, switching accounts, scopes, environment variables, browser navigation (`gh browse`), aliases, and raw API queries (`gh api`).   |
 
 ______________________________________________________________________

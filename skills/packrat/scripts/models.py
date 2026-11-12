@@ -6,21 +6,50 @@ import hashlib
 import math
 import re
 import struct
+import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 EMBEDDING_DIM = 384
 _PACK_FORMAT = f"<{EMBEDDING_DIM}f"
 _PACK_BYTE_LEN = EMBEDDING_DIM * 4
-_CLOSING_UNTRUSTED_RE = re.compile(r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE)
+_CLOSING_UNTRUSTED_RE = re.compile(
+    r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE
+)
+
+EXIT_LOCKED_RETRY = 3
+"""CLI exit code signaling transient SQLite lock contention that callers may retry."""
+
+UNTRUSTED_PROSE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "body",
+        "title",
+        "text",
+        "answer_body",
+        "message",
+        "content",
+        "docstring",
+        "payload_json",
+    }
+)
+"""Column names carrying untrusted external repository prose wrapped by `packrat sql`."""
+
+GIT_BACKFILL_COLUMNS: tuple[str, str] = (
+    "commits_backfill_cursor",
+    "commits_backfill_done_at",
+)
+"""Git commit history backfill cursor and completion columns on `repos`."""
 
 RepoMode = Literal["mirror", "items"]
 BackfillStream = Literal["issues", "prs", "discussions"]
-SourceKind = Literal["issue", "pr", "discussion", "commit", "code_symbol", "doc_section"]
+SourceKind = Literal[
+    "issue", "pr", "discussion", "commit", "code_symbol", "doc_section"
+]
 ParentKind = Literal["pr", "issue"]
 ChangeKind = Literal[
     "pr",
@@ -43,6 +72,56 @@ def iso_at(now: float | None = None) -> str:
 def utc_now_iso() -> str:
     """Returns the current UTC timestamp in ISO-8601 format."""
     return iso_at()
+
+
+def normalize_utc_iso(raw: str | None) -> str:
+    """Converts an ISO-8601 timestamp (including non-UTC offsets) to second-precision UTC `Z`.
+
+    Non-ISO placeholders (such as empty strings or synthetic test markers) are
+    returned stripped without raising.
+    """
+    if not raw:
+        return ""
+    text = raw.strip()
+    if not text:
+        return ""
+    candidate = f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError:
+        return text
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def compute_scripts_sha256(scripts_dir: Path | None = None) -> str:
+    """Computes a deterministic SHA-256 hex digest over packrat's runtime scripts and SQL files."""
+    base = (
+        Path(scripts_dir)
+        if scripts_dir is not None
+        else Path(__file__).resolve().parent
+    )
+    hasher = hashlib.sha256()
+    candidates: list[Path] = []
+    for path in base.iterdir():
+        if not path.is_file():
+            continue
+        name = path.name
+        if name.endswith(".sql") or (
+            name.endswith(".py")
+            and not name.startswith("test_")
+            and not name.startswith("benchmark_")
+        ):
+            candidates.append(path)
+    for path in sorted(candidates, key=lambda p: p.name):
+        hasher.update(path.name.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
 
 
 def compute_content_sha256(title: str, text: str) -> str:
@@ -92,6 +171,33 @@ def quantize_u8_vector(vec: Sequence[float]) -> tuple[bytes, float]:
     inv_scale = 1.0 / scale
     blob = bytes(max(1, min(255, round(float(x) * inv_scale) + 128)) for x in vec)
     return blob, scale
+
+
+def quantize_u8_matrix(
+    vecs: Sequence[Sequence[float]] | Any,
+) -> list[tuple[bytes, float]]:
+    """Quantizes a batch of 384-dim float vectors to `(blob, scale)` pairs.
+
+    Uses vectorized NumPy math when `numpy` is available and falls back to
+    `quantize_u8_vector` otherwise, producing identical bytes and scales.
+    """
+    np_mod = sys.modules.get("numpy")
+    if np_mod is None and len(vecs) >= 4:
+        try:
+            import numpy as np_mod  # type: ignore[no-redef]
+        except ImportError:
+            np_mod = None
+    if np_mod is None:
+        return [quantize_u8_vector(v) for v in vecs]
+    arr = np_mod.asarray(vecs, dtype=np_mod.float64)
+    if arr.size == 0 and len(vecs) == 0:
+        return []
+    if arr.ndim != 2 or arr.shape[1] != EMBEDDING_DIM:
+        raise ValueError(f"Expected (N, {EMBEDDING_DIM}) matrix, got {arr.shape}")
+    scales = np_mod.maximum(np_mod.max(np_mod.abs(arr), axis=1) / 127.0, 1e-8)
+    scaled = np_mod.rint(arr * (1.0 / scales[:, None])) + 128.0
+    clipped = np_mod.clip(scaled, 1.0, 255.0).astype(np_mod.uint8)
+    return [(row.tobytes(), float(sc)) for row, sc in zip(clipped, scales)]
 
 
 def dequantize_u8_vector(blob: bytes, scale: float) -> tuple[float, ...]:
@@ -194,6 +300,8 @@ class RepoConfig:
     prs_backfill_done_at: str | None = None
     discussions_backfill_cursor: str | None = None
     discussions_backfill_done_at: str | None = None
+    commits_backfill_cursor: str | None = None
+    commits_backfill_done_at: str | None = None
     mode: RepoMode = REPO_MODE_MIRROR
 
     @property
@@ -283,6 +391,7 @@ class ReviewThreadRecord:
     updated_at: str | None = None
     body: str = ""
     comments_json: str = "[]"
+    participants_json: str = "[]"
 
 
 @dataclass(frozen=True)
@@ -406,6 +515,7 @@ class CodeSymbolRecord:
     signature: str
     sha: str
     docstring: str = ""
+    blob_oid: str = ""
 
 
 @dataclass(frozen=True)
@@ -424,6 +534,7 @@ class DocSectionRecord:
     subtree_line_end: int
     content: str
     sha: str
+    blob_oid: str = ""
 
 
 @dataclass(frozen=True)
@@ -804,9 +915,42 @@ class ChangeRecord:
 
 @dataclass(frozen=True)
 class ServiceHeartbeat:
-    """The `packrat serve` liveness record."""
+    """The `packrat serve` liveness and tick-outcome health record."""
 
     pid: int | None
     started_at: str | None
     beat_at: str | None
     version: str | None
+    last_ok_at: str | None = None
+    consecutive_failed_ticks: int = 0
+
+
+@dataclass(frozen=True)
+class ExportSummary:
+    """Metrics returned by `PackratStore.export_database`.
+
+    Attributes:
+        source_db_path: Resolved filesystem path of the source SQLite database.
+        dest_db_path: Resolved filesystem path of the exported SQLite database.
+        schema_version: Applied SQLite schema version on the exported database.
+        exported_repos: Full `owner/name` slugs of exported mirror repositories.
+        removed_items_repos: Count of `items`-mode repositories removed.
+        removed_mirror_repos: Count of unselected `mirror` repositories removed.
+        chunks_remaining: Count of `chunks` rows remaining after scrubbing.
+        embeddings_remaining: Count of `chunk_embeddings` rows remaining.
+        source_bytes: Byte size of the source SQLite file before export.
+        dest_bytes: Byte size of the compacted destination SQLite file.
+        duration_sec: Total wall-clock export duration in seconds.
+    """
+
+    source_db_path: str
+    dest_db_path: str
+    schema_version: int
+    exported_repos: tuple[str, ...]
+    removed_items_repos: int
+    removed_mirror_repos: int
+    chunks_remaining: int
+    embeddings_remaining: int
+    source_bytes: int
+    dest_bytes: int
+    duration_sec: float

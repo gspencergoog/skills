@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -21,11 +23,16 @@ from db_migrations import (
     SchemaTooNewError,
     apply_migrations,
     read_schema_version,
+    read_views_version,
     views_sha256,
 )
 from db_schema import SCHEMA_SQL
 from db_store import PackratStore
+from models import EMBEDDING_DIM, l2_normalize
 from search_engine import hybrid_rrf_search
+
+SCHEMA_V1_PATH = Path(__file__).resolve().parent / "fixtures" / "schema_v1.sql"
+SCHEMA_V1_SQL = SCHEMA_V1_PATH.read_text(encoding="utf-8")
 
 READER_VIEWS = (
     "v_api_calls",
@@ -58,10 +65,10 @@ INSERT INTO pull_requests (
 
 
 def _build_pre_migration_db(path: Path) -> None:
-    """Creates a database the way packrat did before `schema_version`, with sample rows."""
+    """Creates a database using the frozen v1 DDL from before `schema_version`."""
     conn = sqlite3.connect(str(path))
     try:
-        conn.executescript("PRAGMA journal_mode = WAL;\n" + SCHEMA_SQL)
+        conn.executescript("PRAGMA journal_mode = WAL;\n" + SCHEMA_V1_SQL)
         conn.execute(
             "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
             "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -80,6 +87,12 @@ def _build_pre_migration_db(path: Path) -> None:
             "INSERT INTO chunks_fts (chunk_id, source_kind, source_ref, title, text) "
             "VALUES ('c1', 'pr', 'octo-org/widgets#7', 'PR #7: Add focus ring', "
             "'keyboard focus ring')"
+        )
+        vec = l2_normalize([0.9 if i == 0 else 0.05 for i in range(EMBEDDING_DIM)])
+        conn.execute(
+            "INSERT INTO chunk_embeddings (chunk_id, model_id, dim, vector_f32, vector_json, "
+            "content_sha256, updated_at) VALUES ('c1', 'legacy', 384, ?, '[]', 'sha', 'now')",
+            (struct.pack(f"<{EMBEDDING_DIM}f", *vec),),
         )
         conn.commit()
     finally:
@@ -113,20 +126,21 @@ class TestMigrations(unittest.TestCase):
         store = PackratStore(self.db_path)
         try:
             self.assertEqual(
-                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
             )
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
-            stored = store.conn.execute(
-                "SELECT views_sha256 FROM views_meta"
-            ).fetchone()[0]
+            stored, version = store.conn.execute(
+                "SELECT views_sha256, views_version FROM views_meta"
+            ).fetchone()
             self.assertEqual(stored, views_sha256())
+            self.assertEqual(version, read_views_version())
             for view in READER_VIEWS:
                 store.conn.execute(f"SELECT * FROM {view}").fetchall()
             health = store.conn.execute(
-                "SELECT beat_age_s, pid FROM v_service_health"
+                "SELECT beat_age_s, pid, last_ok_at, consecutive_failed_ticks FROM v_service_health"
             ).fetchall()
-            self.assertEqual([tuple(r) for r in health], [(None, None)])
+            self.assertEqual([tuple(r) for r in health], [(None, None, None, 0)])
         finally:
             store.close()
 
@@ -135,7 +149,7 @@ class TestMigrations(unittest.TestCase):
         store = PackratStore(self.db_path)
         try:
             self.assertEqual(
-                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
             )
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
@@ -233,7 +247,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9, 10, 11])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -305,7 +319,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9, 10, 11])
+            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9, 10, 11, 12, 13])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -328,7 +342,7 @@ class TestMigrations(unittest.TestCase):
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
             for version, migrate in db_migrations.MIGRATIONS[:5]:
                 db_migrations._run_migration(conn, version, migrate)
-            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9, 10, 11])
+            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9, 10, 11, 12, 13])
             conn.execute(
                 "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
                 "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -348,7 +362,7 @@ class TestMigrations(unittest.TestCase):
             conn.close()
 
     def test_migration_0007_adds_timeline_tables_columns_and_indexes(self) -> None:
-        self.assertEqual(LATEST_SCHEMA_VERSION, 11)
+        self.assertEqual(LATEST_SCHEMA_VERSION, 13)
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
@@ -360,8 +374,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [7, 8, 9, 10, 11])
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(apply_migrations(conn), [7, 8, 9, 10, 11, 12, 13])
+            self.assertEqual(read_schema_version(conn), 13)
             tables = {
                 str(r[0])
                 for r in conn.execute(
@@ -408,7 +422,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0007_timeline_events(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(read_schema_version(conn), 13)
 
             conn.execute(
                 "INSERT INTO timeline_events (event_id, repo_id, item_kind, item_number, "
@@ -444,7 +458,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'bob', 'User', 'CHANGES_REQUESTED', '2026-10-27T20:00:00Z')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [8, 9, 10, 11])
+            self.assertEqual(apply_migrations(conn), [8, 9, 10, 11, 12, 13])
             rows = conn.execute(
                 "SELECT item_key, author, author_type, state, submitted_at, commit_oid "
                 "FROM v_pr_latest_author_reviews"
@@ -493,8 +507,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [9, 10, 11])
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(apply_migrations(conn), [9, 10, 11, 12, 13])
+            self.assertEqual(read_schema_version(conn), 13)
             thread_rows = conn.execute(
                 "SELECT item_key, thread_id, participants_json FROM v_pr_threads"
             ).fetchall()
@@ -507,7 +521,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0009_review_turn_signals(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(read_schema_version(conn), 13)
         finally:
             conn.close()
 
@@ -546,8 +560,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [10, 11])
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(apply_migrations(conn), [10, 11, 12, 13])
+            self.assertEqual(read_schema_version(conn), 13)
             fts_rows = conn.execute("SELECT rowid, chunk_id FROM chunks_fts").fetchall()
             self.assertEqual(fts_rows, [(5, "c5")])
             conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
@@ -608,8 +622,8 @@ class TestMigrations(unittest.TestCase):
             }
             self.assertIn("chunks_fts_content", before_tables)
 
-            self.assertEqual(apply_migrations(conn), [11])
-            self.assertEqual(read_schema_version(conn), 11)
+            self.assertEqual(apply_migrations(conn), [11, 12, 13])
+            self.assertEqual(read_schema_version(conn), 13)
             after_tables = {
                 str(r[0])
                 for r in conn.execute(
@@ -623,6 +637,210 @@ class TestMigrations(unittest.TestCase):
                 "WHERE chunks_fts MATCH 'alpha_unique_symbol'"
             ).fetchall()
             self.assertEqual(hits, [("c5",)])
+        finally:
+            conn.close()
+
+    def test_schema_sql_has_only_v1_tables_and_matches_upgraded_v1_db(self) -> None:
+        create_re = re.compile(
+            r"CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z0-9_]+)",
+            re.IGNORECASE,
+        )
+        v1_tables = set(create_re.findall(SCHEMA_V1_SQL))
+        current_baseline_tables = set(create_re.findall(SCHEMA_SQL))
+        self.assertEqual(current_baseline_tables, v1_tables)
+
+        fresh_path = Path(self.tmp.name) / "fresh.sqlite"
+        upgraded_path = Path(self.tmp.name) / "upgraded.sqlite"
+        _build_pre_migration_db(upgraded_path)
+        fresh = PackratStore(fresh_path)
+        upgraded = PackratStore(upgraded_path)
+        try:
+            def _snapshot(conn: sqlite3.Connection) -> tuple[dict[str, list[tuple[object, ...]]], dict[str, set[str]]]:
+                tables = sorted(
+                    str(r[0])
+                    for r in conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'chunks_fts%'"
+                    )
+                )
+                cols = {
+                    t: [
+                        (str(c[1]), str(c[2]).upper(), int(c[3]), int(c[5]))
+                        for c in conn.execute(f"PRAGMA table_info({t})")
+                    ]
+                    for t in tables
+                }
+                idxs = {
+                    t: {
+                        str(i[1])
+                        for i in conn.execute(f"PRAGMA index_list({t})")
+                        if not str(i[1]).startswith("sqlite_autoindex_")
+                    }
+                    for t in tables
+                }
+                return cols, idxs
+
+            fresh_cols, fresh_idxs = _snapshot(fresh.conn)
+            upg_cols, upg_idxs = _snapshot(upgraded.conn)
+            self.assertEqual(fresh_cols, upg_cols)
+            self.assertEqual(fresh_idxs, upg_idxs)
+        finally:
+            fresh.close()
+            upgraded.close()
+
+    def test_migration_0012_normalizes_utc_prunes_old_heads_and_backfills_participants(
+        self,
+    ) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:11]:
+                db_migrations._run_migration(conn, version, migrate)
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
+                "VALUES ('acme', 'widget', 'acme/widget', 'now', 'now')"
+            )
+            conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
+            conn.execute(
+                "INSERT INTO commits (repo_id, sha, committed_at, title) "
+                "VALUES (1, 'sha1', '2026-03-02T10:00:00-07:00', 'Offset commit')"
+            )
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, repo_id, source_kind, source_ref, title, "
+                "content_sha256, text, updated_at) "
+                "VALUES ('commit:1', 1, 'commit', 'acme/widget@sha1', 'Offset commit', "
+                "'h1', 'body', '2026-03-02T10:00:00-07:00')"
+            )
+            conn.execute(
+                "INSERT INTO check_runs (repo_id, pr_number, head_oid, run_key, name, kind) "
+                "VALUES (1, 7, 'abc', 'CheckRun:1', 'ci', 'CheckRun'), "
+                "(1, 7, 'old_sha', 'CheckRun:2', 'ci', 'CheckRun')"
+            )
+            comments_json = json.dumps(
+                [
+                    {"author": {"login": "carol"}},
+                    {"author": {"login": "bob"}},
+                ]
+            )
+            conn.execute(
+                "INSERT INTO review_threads (thread_id, repo_id, pr_number, reviewer, "
+                "comments_json) VALUES ('RT_1', 1, 7, 'dave', ?)",
+                (comments_json,),
+            )
+            conn.commit()
+
+            self.assertEqual(apply_migrations(conn), [12, 13])
+            committed_at = conn.execute(
+                "SELECT committed_at FROM commits WHERE sha = 'sha1'"
+            ).fetchone()[0]
+            self.assertEqual(committed_at, "2026-03-02T17:00:00Z")
+            chunk_updated = conn.execute(
+                "SELECT updated_at FROM chunks WHERE chunk_id = 'commit:1'"
+            ).fetchone()[0]
+            self.assertEqual(chunk_updated, "2026-03-02T17:00:00Z")
+            heads = [
+                r[0] for r in conn.execute("SELECT head_oid FROM check_runs").fetchall()
+            ]
+            self.assertEqual(heads, ["abc"])
+            participants = conn.execute(
+                "SELECT participants_json FROM review_threads WHERE thread_id = 'RT_1'"
+            ).fetchone()[0]
+            self.assertEqual(json.loads(participants), ["bob", "carol", "dave"])
+            indexes = {
+                str(r[0])
+                for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+            }
+            self.assertLessEqual({"idx_prs_node_id", "idx_issues_node_id"}, indexes)
+        finally:
+            conn.close()
+
+    def test_migration_0013_normalizes_live_state_keys_with_aliases_and_views(
+        self,
+    ) -> None:
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            conn.executescript(db_migrations.CONNECTION_PRAGMAS)
+            for version, migrate in db_migrations.MIGRATIONS[:12]:
+                db_migrations._run_migration(conn, version, migrate)
+            # Recreate pre-v13 views so migrate_0013 must drop them before table rename.
+            conn.executescript(
+                """
+                CREATE VIEW v_watches AS SELECT consumer, consumer_id, item_key FROM watches;
+                CREATE VIEW v_viewer_items AS SELECT set_name, item_key FROM viewer_sets;
+                CREATE VIEW v_service_health AS SELECT COUNT(*) AS active_leases FROM watches;
+                """
+            )
+            conn.execute(
+                "INSERT INTO repos (owner, name, full_name, created_at, updated_at, mode) "
+                "VALUES ('google', 'a2ui-composer', 'google/a2ui-composer', 'now', 'now', 'mirror')"
+            )
+            conn.execute(
+                "INSERT INTO repo_aliases (alias_full_name, repo_id, created_at) "
+                "VALUES ('google/A2UI', 1, 'now')"
+            )
+            conn.execute(
+                "INSERT INTO watches (consumer, consumer_id, item_key, freshness_s, lease_expires_at) "
+                "VALUES ('monitor', 'c1', 'google/A2UI#12', 60, '2099-01-01T00:00:00Z'), "
+                "('monitor', 'c1', 'google/a2ui-composer#12', 30, '2099-01-02T00:00:00Z'), "
+                "('inflight', 'c2', 'new-org/new-repo#5', 120, '2099-01-01T00:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO viewer_sets (set_name, item_key, first_seen_at, last_seen_at) "
+                "VALUES ('authored', 'google/A2UI#12', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO refresh_requests (item_key, requested_at) "
+                "VALUES ('google/A2UI#12', '2026-01-01T00:00:00Z')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        store = PackratStore(self.db_path)
+        try:
+            self.assertEqual(store.applied_migrations, [13])
+            watches = store.active_watches(now=1_800_000_000.0)
+            self.assertEqual(
+                [(w.consumer, w.item_key, w.freshness_s, w.lease_expires_at) for w in watches],
+                [
+                    ("monitor", "google/a2ui-composer#12", 30, "2099-01-02T00:00:00Z"),
+                    ("inflight", "new-org/new-repo#5", 120, "2099-01-01T00:00:00Z"),
+                ],
+            )
+            viewer_items = store.conn.execute(
+                "SELECT set_name, item_key FROM v_viewer_items"
+            ).fetchall()
+            self.assertEqual(
+                [tuple(r) for r in viewer_items],
+                [("authored", "google/a2ui-composer#12")],
+            )
+            self.assertEqual(store.peek_refresh_requests(), ["google/a2ui-composer#12"])
+            # Deleting the auto-created items repo cascades to watches.
+            store.remove_repo("new-org/new-repo")
+            self.assertEqual(
+                [w.item_key for w in store.active_watches(now=1_800_000_000.0)],
+                ["google/a2ui-composer#12"],
+            )
+        finally:
+            store.close()
+
+    def test_older_views_version_does_not_downgrade_views(self) -> None:
+        PackratStore(self.db_path).close()
+        older_views = Path(self.tmp.name) / "older_views.sql"
+        older_views.write_text(
+            "-- packrat-views-version: 1\n"
+            "DROP VIEW IF EXISTS v_watches;\n"
+            "CREATE VIEW v_watches AS SELECT 1 AS downgraded;\n",
+            encoding="utf-8",
+        )
+        cookie = _schema_cookie(self.db_path)
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            self.assertEqual(apply_migrations(conn, older_views), [])
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(v_watches)")]
+            self.assertIn("item_key", cols)
+            self.assertNotIn("downgraded", cols)
+            self.assertEqual(_schema_cookie(self.db_path), cookie)
         finally:
             conn.close()
 
@@ -680,7 +898,7 @@ class TestBackwardCompatibility(unittest.TestCase):
         conn = sqlite3.connect(str(self.db_path))
         try:
             # What packrat's PackratStore.__init__ ran on every open before versioning.
-            conn.executescript("PRAGMA journal_mode = WAL;\n" + SCHEMA_SQL)
+            conn.executescript("PRAGMA journal_mode = WAL;\n" + SCHEMA_V1_SQL)
             conn.execute(OLD_PR_INSERT, (1, 8, "Second PR", "second"))
             conn.commit()
             count = conn.execute("SELECT COUNT(*) FROM v_pr_basic").fetchone()[0]
@@ -815,6 +1033,47 @@ class TestDuckDbParity(unittest.TestCase):
             )
             rows = json.loads(res.stdout[res.stdout.index("[") :])
             self.assertEqual((sqlite_value, rows[0]["core_remaining"]), (4962, 4962))
+
+    @unittest.skipUnless(shutil.which("duckdb"), "duckdb CLI not installed")
+    def test_all_15_reader_views_match_columns_between_sqlite_and_duckdb(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                sqlite_cols = {
+                    view: [
+                        str(r[1])
+                        for r in store.conn.execute(f"PRAGMA table_info({view})")
+                    ]
+                    for view in READER_VIEWS
+                }
+                init_path = store.write_init_sql()
+            finally:
+                store.close()
+            describe_sql = " UNION ALL ".join(
+                f"SELECT '{view}' AS view_name, list(column_name) AS cols "
+                f"FROM (DESCRIBE {view})"
+                for view in READER_VIEWS
+            )
+            res = subprocess.run(
+                [
+                    "duckdb",
+                    "-batch",
+                    "-dark-mode",
+                    "-no-stdin",
+                    "-json",
+                    "-init",
+                    str(init_path),
+                    "-c",
+                    describe_sql,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=True,
+            )
+            duckdb_rows = json.loads(res.stdout[res.stdout.index("[") :])
+            duckdb_cols = {str(r["view_name"]): list(r["cols"]) for r in duckdb_rows}
+            self.assertEqual(duckdb_cols, sqlite_cols)
 
 
 if __name__ == "__main__":

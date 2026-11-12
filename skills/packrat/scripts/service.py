@@ -33,12 +33,19 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from gh_transport import BudgetDeferred, GhApiError
-from models import WatchLease
+from models import WatchLease, compute_scripts_sha256, iso_at
 from rate_budget import Priority
 from sync_runtime import SyncLockInfo, acquire_sync_lock
 
-SERVICE_VERSION = "packrat-serve/1"
-"""Version string written to `service_heartbeat.version`."""
+SERVICE_VERSION = "packrat-serve/2"
+"""Version prefix written to `service_heartbeat.version`."""
+
+
+def format_service_version(scripts_sha: str | None = None) -> str:
+    """Formats the `service_heartbeat.version` string with a 12-char scripts SHA-256 suffix."""
+    sha = scripts_sha if scripts_sha is not None else compute_scripts_sha256()
+    return f"{SERVICE_VERSION}+{sha[:12]}"
+
 
 TICK_S = 5.0
 """Seconds between ticks; bounds how long a queued refresh request waits."""
@@ -139,7 +146,13 @@ class ServiceStore(Protocol):
     def prune_expired_watches(self, now: float | None = None) -> int: ...
 
     def write_heartbeat(
-        self, pid: int, version: str, now: float | None = None
+        self,
+        pid: int,
+        version: str,
+        now: float | None = None,
+        *,
+        last_ok_at: str | None = None,
+        consecutive_failed_ticks: int | None = None,
     ) -> None: ...
 
     def get_live_fetched_at(self, item_keys: Iterable[str]) -> dict[str, float]: ...
@@ -182,6 +195,8 @@ class TickReport:
         pruned: Whether `store.prune()` ran.
         deferred: Workers skipped or stopped for lack of budget.
         errors: Worker failures other than budget deferrals, as `worker: message`.
+        upgrade_detected: Whether a schema, views, or scripts hash upgrade was detected.
+        wal_checkpoint: `(busy, log, checkpointed)` from hourly `wal_checkpoint(TRUNCATE)`.
     """
 
     at: float
@@ -200,6 +215,8 @@ class TickReport:
     pruned: bool = False
     deferred: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    upgrade_detected: bool = False
+    wal_checkpoint: tuple[int, int, int] | None = None
 
 
 class _PopenChild:
@@ -258,6 +275,66 @@ def _leases_by_key(leases: Iterable[WatchLease]) -> dict[str, WatchLease]:
 
 def _freshness(lease: WatchLease) -> int:
     return lease.freshness_s if lease.freshness_s > 0 else DEFAULT_FRESHNESS_S
+
+
+def _read_store_versions(store: Any) -> tuple[int, int] | None:
+    """Returns `(schema_version, views_version)` from `store` when supported."""
+    reader = getattr(store, "read_schema_and_views_version", None)
+    if reader is None:
+        return None
+    try:
+        pair = reader()
+    except sqlite3.OperationalError:
+        return None
+    return int(pair[0]), int(pair[1])
+
+
+def _init_heartbeat_health(store: Any) -> tuple[str | None, int]:
+    """Loads `(last_ok_at, consecutive_failed_ticks)` when the existing heartbeat PID matches."""
+    reader = getattr(store, "read_heartbeat", None)
+    if reader is None:
+        return None, 0
+    try:
+        beat = reader()
+    except sqlite3.OperationalError:
+        return None, 0
+    if beat is not None and beat.pid == os.getpid():
+        return beat.last_ok_at, int(beat.consecutive_failed_ticks or 0)
+    return None, 0
+
+
+def _file_header_token(path: Path) -> tuple[int, int, bytes]:
+    """Reads `(mtime_ns, size, header_136b)` for change detection without SQL queries."""
+    try:
+        with path.open("rb") as handle:
+            st = os.fstat(handle.fileno())
+            return st.st_mtime_ns, st.st_size, handle.read(136)
+    except OSError:
+        return 0, 0, b""
+
+
+def _store_db_token(store: Any) -> Any:
+    """Returns a zero-SQL mutation token for a SQLite store, or None for test doubles."""
+    conn = getattr(store, "conn", None)
+    if conn is None or "read_schema_and_views_version" in getattr(
+        store, "__dict__", {}
+    ):
+        return None
+    db_path = getattr(store, "db_path", None)
+    if db_path is None:
+        return conn.total_changes
+    path = Path(db_path)
+    return (
+        conn.total_changes,
+        _file_header_token(path),
+        _file_header_token(Path(f"{path}-wal")),
+    )
+
+
+def _earliest_lease_expiry(leases: Iterable[WatchLease]) -> str | None:
+    """Returns the earliest non-empty `lease_expires_at` timestamp among `leases`."""
+    expiries = [w.lease_expires_at for w in leases if w.lease_expires_at]
+    return min(expiries) if expiries else None
 
 
 @dataclass
@@ -341,6 +418,15 @@ class PackratService:
         self._deferred: set[str] = set()
         self._requeue: list[str] = []
         self._request_attempts: dict[str, int] = {}
+        self._next_watch_expiry: str | None = None
+        versions = _read_store_versions(store)
+        self._has_version_reader = versions is not None
+        self._startup_schema_version = versions[0] if versions is not None else 0
+        self._startup_views_version = versions[1] if versions is not None else 0
+        self._startup_scripts_sha = compute_scripts_sha256()
+        self._version_string = format_service_version(self._startup_scripts_sha)
+        self._last_ok_at, self._consecutive_failed_ticks = _init_heartbeat_health(store)
+        self._last_db_token = _store_db_token(store)
 
     def _default_sync_lock(self) -> AbstractContextManager[SyncLockInfo]:
         db_path = getattr(self.store, "db_path", None)
@@ -379,7 +465,13 @@ class PackratService:
         except BudgetDeferred as exc:
             self._note_deferred(worker, report, exc.detail)
             return False, None
-        except (GhApiError, sqlite3.OperationalError) as exc:
+        except GhApiError as exc:
+            report.errors.append(f"{worker}: {exc}")
+            self.log(f"{worker} failed: {exc}")
+            return False, None
+        except sqlite3.OperationalError as exc:
+            if self._check_upgrade(report, force_db=True):
+                return False, None
             report.errors.append(f"{worker}: {exc}")
             self.log(f"{worker} failed: {exc}")
             return False, None
@@ -485,20 +577,32 @@ class PackratService:
     def _sweep_due(self, leases: dict[str, WatchLease], now: float) -> list[str]:
         """Returns leased keys whose last hot refresh is older than their sweep interval.
 
-        The last refresh is the later of this process's own record and the
-        stored `live_fetched_at`, so PRs the viewer just refreshed, or that were
-        fresh before a restart, are not refreshed again (M9).
+        Filters against in-memory `self._last_hot` first before querying stored
+        `live_fetched_at`, caching any fresher database timestamps back into
+        `self._last_hot` so idle ticks avoid repeated SQLite lookups (PR-H8).
         """
         if not leases:
             return []
-        fetched = self.store.get_live_fetched_at(leases)
         never = float("-inf")
-        return [
-            key
+        candidates = {
+            key: lease
             for key, lease in leases.items()
-            if now - max(self._last_hot.get(key, never), fetched.get(key, never))
+            if now - self._last_hot.get(key, never)
             >= max(_freshness(lease), LEASE_SWEEP_FLOOR_S)
-        ]
+        }
+        if not candidates:
+            return []
+        fetched = self.store.get_live_fetched_at(candidates)
+        due: list[str] = []
+        for key, lease in candidates.items():
+            db_ts = fetched.get(key, never)
+            if db_ts > self._last_hot.get(key, never):
+                self._last_hot[key] = db_ts
+            if now - self._last_hot.get(key, never) >= max(
+                _freshness(lease), LEASE_SWEEP_FLOOR_S
+            ):
+                due.append(key)
+        return due
 
     def _run_hot(
         self,
@@ -587,6 +691,10 @@ class PackratService:
     def _maybe_spawn_child(self, now: float, report: TickReport) -> None:
         if self.child_argv is None or self.child is not None or now < self._next_child:
             return
+        list_repos = getattr(self.store, "list_repos", None)
+        if list_repos is not None and not list_repos("mirror"):
+            self._next_child = now + BACKFILL_INTERVAL_S
+            return
         if not self._gate("backfill", Priority.BACKFILL, now, report):
             return
         try:
@@ -607,78 +715,177 @@ class PackratService:
 
     # ----- housekeeping and the loop -------------------------------------------------
 
-    def _beat(self, now: float, report: TickReport | None = None) -> None:
-        """Writes the heartbeat stamped with the later of `now` and the clock.
+    def _upgrade_drift_reason(self, *, force_db: bool) -> str | None:
+        """Returns a human-readable upgrade reason if schema, views, or scripts drifted."""
+        current_sha = compute_scripts_sha256()
+        if current_sha != self._startup_scripts_sha:
+            return f"scripts sha changed {self._startup_scripts_sha[:12]} -> {current_sha[:12]}"
+        if not self._has_version_reader:
+            return None
+        current_token = _store_db_token(self.store)
+        if (
+            not force_db
+            and current_token is not None
+            and current_token == self._last_db_token
+        ):
+            return None
+        versions = _read_store_versions(self.store)
+        if versions is None:
+            return None
+        schema_ver, views_ver = versions
+        if schema_ver != self._startup_schema_version:
+            return (
+                f"schema version changed {self._startup_schema_version} -> {schema_ver}"
+            )
+        if views_ver != self._startup_views_version:
+            return f"views version changed {self._startup_views_version} -> {views_ver}"
+        return None
 
-        A tick can take a minute or more (check-run polls, a mirror run), so the
-        end-of-tick beat uses the current clock rather than the tick's start time.
-        """
+    def _check_upgrade(self, report: TickReport, *, force_db: bool = False) -> bool:
+        """Checks for schema, views, or code drift and flags `report.upgrade_detected`."""
+        if report.upgrade_detected:
+            return True
+        reason = self._upgrade_drift_reason(force_db=force_db)
+        if reason is None:
+            return False
+        report.upgrade_detected = True
+        self.log(f"upgrade detected ({reason}); exiting for restart")
+        return True
+
+    def _write_store_heartbeat(self, beat_at: float) -> None:
+        """Persists the heartbeat, falling back for 3-arg test doubles."""
         try:
             self.store.write_heartbeat(
-                os.getpid(), SERVICE_VERSION, max(now, self.clock())
+                os.getpid(),
+                self._version_string,
+                beat_at,
+                last_ok_at=self._last_ok_at,
+                consecutive_failed_ticks=self._consecutive_failed_ticks,
             )
+        except TypeError:
+            self.store.write_heartbeat(os.getpid(), self._version_string, beat_at)
+        self._last_db_token = _store_db_token(self.store)
+
+    def _beat(self, now: float, report: TickReport | None = None) -> None:
+        """Writes the heartbeat stamped with the later of `now` and the clock."""
+        beat_at = max(now, self.clock())
+        try:
+            self._write_store_heartbeat(beat_at)
         except sqlite3.OperationalError as exc:
             if report is not None:
                 report.errors.append(f"heartbeat: {exc}")
             self.log(f"heartbeat failed: {exc}")
 
-    def _housekeeping(self, now: float, report: TickReport) -> None:
-        self._beat(now, report)
+    def _run_wal_checkpoint(self, report: TickReport) -> None:
+        """Runs `PRAGMA wal_checkpoint(TRUNCATE)` when supported by `self.store`."""
+        checkpoint = getattr(self.store, "wal_checkpoint_truncate", None)
+        if checkpoint is None:
+            return
+        result = checkpoint()
+        if isinstance(result, tuple) and len(result) == 3:
+            triple = (int(result[0]), int(result[1]), int(result[2]))
+            report.wal_checkpoint = triple
+            self.log(
+                f"wal_checkpoint(TRUNCATE): busy={triple[0]} log={triple[1]} checkpointed={triple[2]}"
+            )
+
+    def _update_watch_expiry_cache(self, active: Sequence[WatchLease]) -> None:
+        """Updates the earliest seen `lease_expires_at` across active watches."""
+        earliest = _earliest_lease_expiry(active)
+        if earliest is not None and (
+            self._next_watch_expiry is None or earliest < self._next_watch_expiry
+        ):
+            self._next_watch_expiry = earliest
+
+    def _should_prune_watches(self, now: float) -> bool:
+        """Returns True when a cached lease has expired or hourly prune is due."""
+        if now >= self._next_prune:
+            return True
+        return (
+            self._next_watch_expiry is not None
+            and self._next_watch_expiry <= iso_at(now)
+        )
+
+    def _housekeeping(
+        self, now: float, active: Sequence[WatchLease], report: TickReport
+    ) -> None:
+        prune_due = now >= self._next_prune
+        if self._check_upgrade(report, force_db=prune_due):
+            return
         try:
-            self.store.prune_expired_watches(now)
-            if now >= self._next_prune:
+            if self._should_prune_watches(now):
+                self.store.prune_expired_watches(now)
+                self._next_watch_expiry = _earliest_lease_expiry(active)
+            if prune_due:
                 self.store.prune(now)
                 report.pruned = True
                 self._next_prune = now + PRUNE_INTERVAL_S
+                self._run_wal_checkpoint(report)
         except sqlite3.OperationalError as exc:
+            if self._check_upgrade(report, force_db=True):
+                return
             report.errors.append(f"housekeeping: {exc}")
             self.log(f"housekeeping failed: {exc}")
+        if report.errors:
+            self._consecutive_failed_ticks += 1
+        else:
+            self._consecutive_failed_ticks = 0
+            self._last_ok_at = iso_at(now)
+        self._beat(now, report)
 
     def run_once(self, now: float | None = None) -> TickReport:
         """Runs one scheduler tick and reports what it did.
 
-        Order: heartbeat, reap the child, drain refresh requests, poll signals and
-        due check runs, refresh dirty and sweep-due leased items, then the viewer,
-        `items` timelines, mirror, and backfill child when due, and finally heartbeat and pruning.
-        Beating at both ends keeps `beat_age_s` low during long ticks and right
-        after a restart. Refresh requests are also drained between the slower
-        phases, so a reader's `packrat refresh` waits seconds, not a whole tick.
+        Order: reap the child, drain refresh requests, poll signals and due
+        check runs, refresh dirty and sweep-due leased items, then the viewer,
+        `items` timelines, mirror, and backfill child when due, and finally
+        housekeeping (upgrade check, pruning, WAL truncate, and heartbeat).
         """
         moment = self.clock() if now is None else now
         report = TickReport(at=moment)
-        self._beat(moment, report)
         self._reap_child(report)
+        active: list[WatchLease] = []
         try:
             self._drain_requests(moment, report)
-            leases = _leases_by_key(self.store.active_watches(moment))
+            active = self.store.active_watches(moment)
+            self._update_watch_expiry_cache(active)
+            leases = _leases_by_key(active)
             dirty = _Dirty()
             self._poll_signals(moment, dirty, report)
             self._poll_checks(leases, moment, dirty, report)
-            self._drain_requests(moment, report)
+            if report.signals_polled or report.checks_polled:
+                self._drain_requests(moment, report)
             self._run_hot(leases, moment, dirty, report)
             self._run_viewer(moment, dirty, report)
             self._run_timeline(moment, report)
-            self._drain_requests(moment, report)
+            if report.viewer_ran or report.timeline_ran:
+                self._drain_requests(moment, report)
             self._run_mirror(moment, dirty, report)
-            self._drain_requests(moment, report)
+            if report.mirror_ran:
+                self._drain_requests(moment, report)
             self._requeue_failed(moment)
         except sqlite3.OperationalError as exc:
             report.errors.append(f"sqlite: {exc}")
             self.log(f"sqlite error during tick: {exc}")
+            self._check_upgrade(report, force_db=True)
         self._maybe_spawn_child(moment, report)
-        self._housekeeping(moment, report)
+        self._housekeeping(moment, active, report)
         return report
 
     def run(self, stop: threading.Event) -> int:
-        """Ticks until `stop` is set, then stops the backfill child and returns 0.
+        """Ticks until `stop` is set or an upgrade is detected, then stops the child and returns 0.
 
         When called from the main thread, SIGTERM and SIGINT set `stop`, so the
         current tick finishes before the service exits.
         """
         restore = install_stop_handlers(stop)
         try:
+            if self._upgrade_drift_reason(force_db=True) is None:
+                self._beat(self.clock())
             while not stop.is_set():
-                self.run_once()
+                report = self.run_once()
+                if report.upgrade_detected:
+                    break
                 stop.wait(self.tick_s)
         finally:
             self.stop_child()

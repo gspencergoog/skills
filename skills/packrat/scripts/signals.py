@@ -55,6 +55,9 @@ The poller keeps its own ETag so it never consumes the one that
 `github_sync.sync_github_metadata()` uses to decide whether to walk a repo.
 """
 
+EVENTS_LAST_ID_KEY_PREFIX = "events_last_id:"
+"""`service_state` key prefix (plus repo_id) for the newest seen repository event ID."""
+
 _API_URL_PREFIX = "https://api.github.com/"
 _NEXT_LINK_RE = re.compile(r'<([^>]+)>\s*;\s*rel="next"')
 _SUBJECT_NUMBER_RE = re.compile(r"/(?:pulls|issues)/(\d+)$")
@@ -136,6 +139,29 @@ def _reaches_cursor(
     if cursor_iso is None:
         return True
     return any(str(e.get("updated_at") or "") < cursor_iso for e in entries)
+
+
+def _filter_since_cursor(
+    entries: Iterable[dict[str, Any]], cursor_iso: str | None
+) -> list[dict[str, Any]]:
+    """Filters out notification entries strictly older than `cursor_iso`."""
+    if cursor_iso is None:
+        return list(entries)
+    return [e for e in entries if str(e.get("updated_at") or "") >= cursor_iso]
+
+
+def _new_events_since(
+    events: Sequence[Mapping[str, Any]], last_event_id: str | None
+) -> list[Mapping[str, Any]]:
+    """Returns prefix of `events` (newest-first) before `last_event_id` is reached."""
+    if not last_event_id:
+        return list(events)
+    fresh: list[Mapping[str, Any]] = []
+    for event in events:
+        if str(event.get("id") or "") == last_event_id:
+            break
+        fresh.append(event)
+    return fresh
 
 
 def _subject_repo(entry: Mapping[str, Any]) -> tuple[str, str] | None:
@@ -293,11 +319,12 @@ class SignalPoller:
         self, first: GhResponse, cursor_iso: str | None
     ) -> list[dict[str, Any]]:
         """Returns entries from `first` plus `rel="next"` pages until the cursor is reached."""
-        entries = _decode_list(first.body)
+        page_entries = _decode_list(first.body)
+        entries = _filter_since_cursor(page_entries, cursor_iso)
         resp = first
         pages = 1
         while pages < MAX_NOTIFICATION_PAGES and not _reaches_cursor(
-            _decode_list(resp.body), cursor_iso
+            page_entries, cursor_iso
         ):
             next_path = _next_page_path(resp.headers)
             if next_path is None:
@@ -305,7 +332,8 @@ class SignalPoller:
             resp = self._transport.rest_get(
                 next_path, worker=WORKER, priority=Priority.HOT
             )
-            entries.extend(_decode_list(resp.body))
+            page_entries = _decode_list(resp.body)
+            entries.extend(_filter_since_cursor(page_entries, cursor_iso))
             pages += 1
         return entries
 
@@ -406,15 +434,33 @@ class SignalPoller:
         self._events_due_at[repo.repo_id] = now + max(1, poll.poll_interval_sec)
         if poll.error:
             return not poll.rate_limited
-        self._save_events_state(repo.repo_id, poll, now)
+        last_id = self._last_event_id(repo.repo_id)
         if poll.not_modified:
             return True
+        new_events = _new_events_since(poll.events, last_id)
+        newest_id = (
+            str(poll.events[0].get("id") or "") or last_id if poll.events else last_id
+        )
+        self._save_events_state(repo.repo_id, poll, now, last_event_id=newest_id)
         dirty.mirror_repos.add(repo.repo_id)
-        for number in _event_numbers(poll.events):
+        for number in _event_numbers(new_events):
             key = format_item_key(repo.owner, repo.name, number).lower()
             if key in leased:
                 dirty.hot.add(leased[key])
         return True
+
+    def _last_event_id(self, repo_id: int) -> str | None:
+        """Returns the newest event ID previously processed for `repo_id`, or None."""
+        direct = self._store.get_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{repo_id}")
+        if direct:
+            return direct
+        raw = self._store.get_state(f"{EVENTS_STATE_KEY_PREFIX}{repo_id}")
+        try:
+            state = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            return None
+        last_id = state.get("last_event_id") if isinstance(state, dict) else None
+        return str(last_id) if last_id else None
 
     def _with_events_state(self, repo: RepoConfig) -> RepoConfig:
         """Returns `repo` carrying the poller's own events ETag and Last-Modified."""
@@ -432,11 +478,26 @@ class SignalPoller:
         )
 
     def _save_events_state(
-        self, repo_id: int, poll: github_sync.EventsPollResult, now: float
+        self,
+        repo_id: int,
+        poll: github_sync.EventsPollResult,
+        now: float,
+        *,
+        last_event_id: str | None = None,
     ) -> None:
-        """Stores the poller's events ETag and Last-Modified for `repo_id`."""
-        value = json.dumps({"etag": poll.etag, "last_modified": poll.last_modified})
-        self._store.set_state(f"{EVENTS_STATE_KEY_PREFIX}{repo_id}", value, now)
+        """Stores the poller's events ETag, Last-Modified, and newest event ID for `repo_id`."""
+        payload: dict[str, Any] = {
+            "etag": poll.etag,
+            "last_modified": poll.last_modified,
+        }
+        if last_event_id:
+            payload["last_event_id"] = last_event_id
+            self._store.set_state(
+                f"{EVENTS_LAST_ID_KEY_PREFIX}{repo_id}", last_event_id, now
+            )
+        self._store.set_state(
+            f"{EVENTS_STATE_KEY_PREFIX}{repo_id}", json.dumps(payload), now
+        )
 
     # ----- check runs ----------------------------------------------------------------
 
@@ -469,18 +530,21 @@ class SignalPoller:
 
     def _poll_item_checks(self, item_key: str, now: float) -> bool:
         """Polls one item's check runs and status; returns True when it needs a hot refresh."""
-        pr_head = self._store.get_pr_head_sha(item_key)
-        rollup_head, checks_etag, status_etag = self._store.get_rollup_etags(item_key)
+        canonical_key = self._store.canonical_item_key(item_key)
+        pr_head = self._store.get_pr_head_sha(canonical_key)
+        rollup_head, checks_etag, status_etag = self._store.get_rollup_etags(
+            canonical_key
+        )
         head = pr_head or rollup_head
         if head is None:
-            first_time = item_key not in self._headless_marked
-            self._headless_marked.add(item_key)
+            first_time = canonical_key not in self._headless_marked
+            self._headless_marked.add(canonical_key)
             self._checks_polled_at[item_key] = now
             return first_time
-        self._headless_marked.discard(item_key)
+        self._headless_marked.discard(canonical_key)
         if rollup_head != head:
             checks_etag = status_etag = None
-        owner, name, _number = parse_item_key(item_key)
+        owner, name, _number = parse_item_key(canonical_key)
         base = f"repos/{owner}/{name}/commits/{head}"
         try:
             checks = self._transport.rest_get(
@@ -495,12 +559,20 @@ class SignalPoller:
         except GhApiError:
             self._checks_polled_at[item_key] = now
             return False
-        self._store.set_rollup_etags(
-            item_key,
-            head,
-            checks.headers.get("etag") or checks_etag,
-            status.headers.get("etag") or status_etag,
-            now,
-        )
+        new_checks_etag = checks.headers.get("etag") or checks_etag
+        new_status_etag = status.headers.get("etag") or status_etag
+        changed = _response_changed(checks) or _response_changed(status)
+        if changed or (head, new_checks_etag, new_status_etag) != (
+            rollup_head,
+            checks_etag,
+            status_etag,
+        ):
+            self._store.set_rollup_etags(
+                canonical_key,
+                head,
+                new_checks_etag,
+                new_status_etag,
+                now,
+            )
         self._checks_polled_at[item_key] = now
-        return _response_changed(checks) or _response_changed(status)
+        return changed

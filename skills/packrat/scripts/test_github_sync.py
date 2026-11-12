@@ -13,6 +13,8 @@ from unittest.mock import patch
 from db_store import PackratStore
 from github_sync import (
     ADAPTIVE_PAGE_COOLDOWN,
+    DISCUSSIONS_DELTA_QUERY,
+    ISSUES_DELTA_QUERY,
     OPEN_PRS_QUERY,
     PAGE_SIZE_LADDER,
     PRS_DELTA_QUERY,
@@ -35,7 +37,7 @@ from github_sync import (
     sync_backfill_only,
     sync_github_metadata,
 )
-from models import BACKFILL_STREAMS, RepoConfig, SyncStats
+from models import BACKFILL_STREAMS, PrRecord, RepoConfig, SyncStats
 from rate_budget import RATE_BUDGET_FILENAME, Priority, RateBudget
 from sync_runtime import BoundedCmdResult
 
@@ -455,13 +457,21 @@ class TestGithubSync(unittest.TestCase):
                         stderr="",
                     )
 
-                # max_pages=1 while hasNextPage=True must NOT advance issues_watermark (H3)
-                sync_github_metadata(store, repo, max_pages=1, runner=truncated_runner)
+                # max_pages=1 while hasNextPage=True advances issues_watermark to page 1 newest
+                # and saves the resume cursor + old watermark floor in gap state (DR-H2).
+                stats_trunc = sync_github_metadata(
+                    store, repo, max_pages=1, runner=truncated_runner
+                )
                 after_trunc = store.get_repo("octo-org/widgets")
                 assert after_trunc is not None
-                self.assertEqual(after_trunc.issues_watermark, "2026-10-20T00:00:00Z")
+                self.assertEqual(after_trunc.issues_watermark, "2026-10-30T00:00:00Z")
+                self.assertEqual(
+                    store.get_gap_state(repo.repo_id, "issues"),
+                    ("CUR_2", "2026-10-20T00:00:00Z"),
+                )
+                self.assertIn("issues", stats_trunc.backfill_incomplete)
 
-                # force=True must re-index items even when their updatedAt <= stored watermark (H4)
+                # force=True must clear gap state and re-index items even when their updatedAt <= stored watermark (H4)
                 store.update_repo_sync_state(
                     repo.repo_id,
                     issues_watermark="2026-10-31T00:00:00Z",
@@ -516,6 +526,9 @@ class TestGithubSync(unittest.TestCase):
                     store, repo_high_wm, force=True, max_pages=5, runner=complete_runner
                 )
                 self.assertEqual(stats_force.issues_upserted, 1)
+                self.assertEqual(
+                    store.get_gap_state(repo.repo_id, "issues"), (None, None)
+                )
             finally:
                 store.close()
 
@@ -1575,6 +1588,18 @@ class TestOpenPrRefetch(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = PackratStore(Path(self.tmp.name) / "repos.sqlite")
         self.repo = self.store.register_repo("octo-org", "widgets")
+        self.store.upsert_pull_requests(
+            [
+                PrRecord(
+                    self.repo.repo_id,
+                    n,
+                    f"PR {n}",
+                    "OPEN",
+                    f"2026-10-{n:02d}T00:00:00Z",
+                )
+                for n in (10, 11, 12)
+            ]
+        )
         _mark_backfill_complete(self.store, self.repo.repo_id)
         self.store.update_repo_sync_state(
             self.repo.repo_id,
@@ -1603,6 +1628,13 @@ class TestOpenPrRefetch(unittest.TestCase):
         return {int(r[0]): (r[1], r[2]) for r in rows}
 
     def test_queries_select_fork_fields(self) -> None:
+        for query in (
+            ISSUES_DELTA_QUERY,
+            PRS_DELTA_QUERY,
+            OPEN_PRS_QUERY,
+            DISCUSSIONS_DELTA_QUERY,
+        ):
+            self.assertIn("rateLimit { cost }", query)
         for query in (PRS_DELTA_QUERY, OPEN_PRS_QUERY):
             self.assertIn("isCrossRepository", query)
             self.assertIn("headRepositoryOwner { login }", query)
@@ -1611,6 +1643,14 @@ class TestOpenPrRefetch(unittest.TestCase):
             "pullRequests(states: OPEN, first: $pageSize, after: $cursor",
             OPEN_PRS_QUERY,
         )
+        for heavy_field in (
+            "reviewThreads",
+            "reviews(",
+            "comments(",
+            "files(",
+            "closingIssuesReferences",
+        ):
+            self.assertNotIn(heavy_field, OPEN_PRS_QUERY)
 
     def test_parse_pr_node_fills_fork_fields(self) -> None:
         same, _ = _parse_pr_node(
@@ -1696,9 +1736,145 @@ class TestOpenPrRefetch(unittest.TestCase):
 
     def test_public_refetch_returns_count_and_clears_flag(self) -> None:
         runner = OpenPrsRunner()
-        count = refetch_open_prs(self.store, self._reload(), runner, budget=self.budget)
+        with patch.object(
+            self.store,
+            "upsert_pull_requests",
+            side_effect=AssertionError(
+                "open_prs refetch must not call upsert_pull_requests"
+            ),
+        ):
+            count = refetch_open_prs(
+                self.store, self._reload(), runner, budget=self.budget
+            )
         self.assertEqual(count, 3)
         self.assertIsNone(self.store.get_state(self.key))
+        self.assertEqual(
+            self._fork_fields(),
+            {12: ("octo-org", 0), 11: ("forker", 1), 10: ("octo-org", 0)},
+        )
+
+
+class TestIncrementalGapRecovery(unittest.TestCase):
+    """Tests capped (`max_pages`) and mid-walk budget-deferred incremental gap recovery (DR-H2, PR-Q1)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = PackratStore(Path(self.tmp.name) / "repos.sqlite")
+        self.repo = self.store.register_repo("octo-org", "widgets")
+        _mark_backfill_complete(self.store, self.repo.repo_id)
+        self.store.update_repo_sync_state(
+            self.repo.repo_id,
+            issues_watermark="2026-10-05T00:00:00Z",
+            prs_watermark="2026-10-05T00:00:00Z",
+            discussions_watermark="2026-10-05T00:00:00Z",
+        )
+        self.store.set_state(refetch_open_prs_key(self.repo.repo_id), None)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _reload(self) -> RepoConfig:
+        repo = self.store.get_repo_by_id(self.repo.repo_id)
+        assert repo is not None
+        return repo
+
+    def test_eleven_page_burst_with_max_pages_ten_resumes_gap_on_second_sync(
+        self,
+    ) -> None:
+        # 11 pages above the 2026-10-05 watermark (issues 30..20), plus an older
+        # item (issue 4, 2026-10-04) at the bottom of page 11 and an older page C11.
+        pages: dict[str | None, tuple[list[int], bool, str | None]] = {}
+        for idx in range(10):
+            cur = None if idx == 0 else f"C{idx}"
+            next_cur = f"C{idx + 1}"
+            pages[cur] = ([30 - idx], True, next_cur)
+        pages["C10"] = ([20, 4], True, "C11")
+        pages["C11"] = ([3], False, None)
+
+        runner1 = PagedIssuesRunner(pages)
+        stats1 = sync_github_metadata(
+            self.store, self._reload(), max_pages=10, runner=runner1
+        )
+        self.assertEqual(stats1.issues_upserted, 10)
+        self.assertIn("issues", stats1.backfill_incomplete)
+        repo1 = self._reload()
+        self.assertEqual(repo1.issues_watermark, "2026-10-30T00:00:00Z")
+        self.assertEqual(
+            self.store.get_gap_state(repo1.repo_id, "issues"),
+            ("C10", "2026-10-05T00:00:00Z"),
+        )
+        # Initial backfill state must remain complete and unclobbered.
+        self.assertTrue(repo1.backfill("issues").complete)
+        self.assertIsNone(repo1.backfill("issues").cursor)
+
+        # Second sync (even on HTTP 304) drains the gap at C10 down to the prior watermark
+        # without re-walking C1..C9 or walking older history C11 below the gap floor.
+        runner2 = PagedIssuesRunner(pages, events_status=304)
+        stats2 = sync_github_metadata(self.store, repo1, max_pages=10, runner=runner2)
+        self.assertFalse(stats2.events_not_modified)
+        self.assertEqual(runner2.issue_cursors, [None, "C10"])
+        self.assertEqual(stats2.issues_upserted, 1)
+        self.assertEqual(stats2.backfill_incomplete, [])
+        self.assertEqual(
+            self.store.get_gap_state(repo1.repo_id, "issues"), (None, None)
+        )
+        self.assertEqual(self.store.table_counts(repo1.repo_id)["issues"], 11)
+
+    def test_mid_walk_budget_deferral_on_page_three_resumes_from_page_three(
+        self,
+    ) -> None:
+        pages: dict[str | None, tuple[list[int], bool, str | None]] = {
+            None: ([25], True, "C1"),
+            "C1": ([24], True, "C2"),
+            "C2": ([23], True, "C3"),
+            "C3": ([22, 4], True, "C4"),
+            "C4": ([3], False, None),
+        }
+        budget = RateBudget(Path(self.tmp.name) / RATE_BUDGET_FILENAME)
+        # Page 1 reports 4000 remaining; page 2 reports 900 (<20% MIRROR threshold),
+        # so page 3 ("C2") is deferred before being requested.
+        inner1 = PagedIssuesRunner(pages)
+        runner1 = IncludeHeadersRunner(inner1, [4000, 900])
+        stats1 = sync_github_metadata(
+            self.store, self._reload(), max_pages=10, runner=runner1, budget=budget
+        )
+        self.assertEqual(inner1.issue_cursors, [None, "C1"])
+        self.assertEqual(stats1.issues_upserted, 2)
+        self.assertTrue(stats1.deferred)
+        self.assertIn("issues", stats1.deferred_streams)
+        self.assertIn("issues", stats1.backfill_incomplete)
+        repo1 = self._reload()
+        self.assertEqual(repo1.issues_watermark, "2026-10-25T00:00:00Z")
+        self.assertEqual(
+            self.store.get_gap_state(repo1.repo_id, "issues"),
+            ("C2", "2026-10-05T00:00:00Z"),
+        )
+        self.assertTrue(repo1.backfill("issues").complete)
+
+        # Replenish budget for the next window; Sync 2 checks top delta (1 page)
+        # and resumes at C2 -> C3 without refetching C1 or walking C4.
+        budget.record(
+            {
+                "x-ratelimit-resource": "graphql",
+                "x-ratelimit-limit": "5000",
+                "x-ratelimit-remaining": "4500",
+                "x-ratelimit-reset": str(int(time.time()) + 7200),
+            },
+            worker="test",
+        )
+        inner2 = PagedIssuesRunner(pages)
+        runner2 = IncludeHeadersRunner(inner2, [4500])
+        stats2 = sync_github_metadata(
+            self.store, repo1, max_pages=10, runner=runner2, budget=budget
+        )
+        self.assertEqual(inner2.issue_cursors, [None, "C2", "C3"])
+        self.assertEqual(stats2.issues_upserted, 2)
+        self.assertEqual(stats2.backfill_incomplete, [])
+        self.assertEqual(
+            self.store.get_gap_state(repo1.repo_id, "issues"), (None, None)
+        )
+        self.assertEqual(self.store.table_counts(repo1.repo_id)["issues"], 4)
 
 
 class RecordingRunner:
@@ -1993,6 +2169,66 @@ class TestMentionQueueing(unittest.TestCase):
         self.assertEqual(
             [tuple(r) for r in rows],
             [("R_bot", "helper", "Bot"), ("R_old", "bob", None)],
+        )
+
+    def test_review_thread_participants_json_is_sorted_and_deduplicated(self) -> None:
+        thread = {
+            "id": "T_part",
+            "path": "src/a.py",
+            "comments": {
+                "nodes": [
+                    {"id": "C1", "body": "First", "author": {"login": "charlie"}},
+                    {"id": "C2", "body": "Second", "author": {"login": "alice"}},
+                    {"id": "C3", "body": "Third", "author": {"login": "charlie"}},
+                ]
+            },
+        }
+        node = self._mention_pr("Body", reviewThreads={"nodes": [thread]})
+        _persist_prs(self.store, self.repo, [node], self.stats)
+        row = self.store.conn.execute(
+            "SELECT participants_json FROM review_threads WHERE thread_id = 'T_part'"
+        ).fetchone()
+        assert row is not None
+        self.assertEqual(json.loads(row[0]), ["alice", "charlie"])
+
+    def test_enqueue_mentions_batches_page_into_one_call_and_skips_thread_json_decode(
+        self,
+    ) -> None:
+        thread = {
+            "id": "T_batch",
+            "path": "src/a.py",
+            "comments": {
+                "nodes": [
+                    {"id": "C1", "body": "See #31", "author": {"login": "bob"}},
+                ]
+            },
+        }
+        pr1 = self._mention_pr("Mentions #7", reviewThreads={"nodes": [thread]})
+        pr2 = _pr_node(21, head_owner="octo-org", cross_repo=False)
+        pr2["body"] = "Mentions #8 and #21"
+
+        enqueue_calls = 0
+        orig_enqueue = self.store.enqueue_timeline_dirty
+
+        def counting_enqueue(*args: object, **kwargs: object) -> None:
+            nonlocal enqueue_calls
+            enqueue_calls += 1
+            orig_enqueue(*args, **kwargs)  # type: ignore[arg-type]
+
+        self.store.enqueue_timeline_dirty = counting_enqueue  # type: ignore[method-assign]
+        with patch(
+            "github_sync._thread_reply_bodies",
+            side_effect=AssertionError("_thread_reply_bodies should not be called"),
+        ):
+            _persist_prs(self.store, self.repo, [pr1, pr2], self.stats)
+        self.assertEqual(enqueue_calls, 1)
+        self.assertEqual(
+            self._queued(),
+            {
+                ("octo-org/widgets", 7, "mention"),
+                ("octo-org/widgets", 8, "mention"),
+                ("octo-org/widgets", 31, "mention"),
+            },
         )
 
 

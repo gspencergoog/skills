@@ -10,21 +10,36 @@ from unittest import mock
 
 from db_store import PackratStore
 from embedder import (
+    _CLUSTER_STEM_PAIRS,
     ARCTIC_MODEL_ID,
+    CONCEPT_CLUSTERS,
+    CONCEPT_DIM,
     DETERMINISTIC_MODEL_ID,
+    HASH_DIM,
     DeterministicHashEmbedder,
+    _bigram_delta,
+    _char_ngram_deltas,
     _ensure_onnx_deps,
+    _fnv1a,
+    _hash_sign,
+    _stem_token,
+    _tokenize,
+    _unigram_delta,
     embed_structured_deterministic,
     embed_text_deterministic,
     ensure_onnx_deps,
     ensure_onnx_model,
     get_default_embedder,
+    get_default_embedder_model_id,
+    reset_onnx_deps_cache,
     sync_repo_embeddings,
 )
 from models import (
     EMBEDDING_DIM,
+    StoredEmbeddingRecord,
     TextChunk,
     compute_content_sha256,
+    l2_normalize,
     utc_now_iso,
 )
 
@@ -300,6 +315,316 @@ class TestEmbedder(unittest.TestCase):
                 )
             self.assertEqual(emb.model_id, DETERMINISTIC_MODEL_ID)
             self.assertEqual(list(fail_dir.rglob("*.tmp.*")), [])
+
+    def test_lazy_model_id_and_zero_pending_skips_onnx_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            empty_dir = tmp_path / "empty-model"
+            onnx_dir = tmp_path / "present-model"
+            onnx_dir.mkdir(parents=True)
+            (onnx_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+            (onnx_dir / "model.onnx").write_bytes(b"fake-onnx")
+
+            with (
+                mock.patch("embedder.ensure_onnx_deps", return_value=True),
+                mock.patch("embedder.OnnxArcticEmbedder") as mock_onnx_cls,
+            ):
+                self.assertEqual(
+                    get_default_embedder_model_id(model_dir=empty_dir),
+                    DETERMINISTIC_MODEL_ID,
+                )
+                self.assertEqual(
+                    get_default_embedder_model_id(model_dir=onnx_dir),
+                    ARCTIC_MODEL_ID,
+                )
+                self.assertEqual(
+                    get_default_embedder(model_dir=empty_dir).model_id,
+                    get_default_embedder_model_id(model_dir=empty_dir),
+                )
+                mock_onnx_cls.assert_not_called()
+
+                store = PackratStore(tmp_path / "repos.sqlite")
+                try:
+                    repo = store.register_repo("octo-org", "widgets")
+                    # 0 chunks in DB: must return 0 without instantiating OnnxArcticEmbedder
+                    count_empty = sync_repo_embeddings(
+                        store,
+                        repo.repo_id,
+                        embedder=None,
+                        model_dir=onnx_dir,
+                    )
+                    self.assertEqual(count_empty, 0)
+                    mock_onnx_cls.assert_not_called()
+
+                    # 1 chunk already embedded with ARCTIC_MODEL_ID: still 0 pending -> no ONNX init
+                    now = utc_now_iso()
+                    sha = compute_content_sha256("Sym", "Body")
+                    chunk = TextChunk(
+                        chunk_id="octo-org/widgets:symbol:src/a.ts:1",
+                        repo_id=repo.repo_id,
+                        source_kind="code_symbol",
+                        source_ref="src/a.ts#L1",
+                        file_path="src/a.ts",
+                        item_number=None,
+                        title="Sym",
+                        text="Body",
+                        content_sha256=sha,
+                        is_untrusted=False,
+                        updated_at=now,
+                    )
+                    store.upsert_chunks([chunk])
+                    store.upsert_embeddings(
+                        [
+                            StoredEmbeddingRecord(
+                                chunk_id=chunk.chunk_id,
+                                model_id=ARCTIC_MODEL_ID,
+                                content_sha256=sha,
+                                vector=tuple(embed_text_deterministic("Sym Body")),
+                                updated_at=now,
+                            )
+                        ]
+                    )
+                    count_up_to_date = sync_repo_embeddings(
+                        store,
+                        repo.repo_id,
+                        embedder=None,
+                        model_dir=onnx_dir,
+                    )
+                    self.assertEqual(count_up_to_date, 0)
+                    mock_onnx_cls.assert_not_called()
+                finally:
+                    store.close()
+
+    def test_negative_ensure_onnx_deps_memoizes_and_reset_clears(self) -> None:
+        reset_onnx_deps_cache()
+        try:
+            failed_proc = mock.Mock(returncode=1, stdout="", stderr="offline")
+            with (
+                mock.patch("embedder._can_import_onnx_deps", return_value=False),
+                mock.patch("embedder._resolve_uv_binary", return_value="/usr/bin/uv"),
+                mock.patch(
+                    "embedder.subprocess.run", return_value=failed_proc
+                ) as mock_run,
+            ):
+                self.assertFalse(ensure_onnx_deps())
+                self.assertFalse(ensure_onnx_deps())
+                self.assertFalse(ensure_onnx_deps())
+                self.assertEqual(mock_run.call_count, 1)
+
+                reset_onnx_deps_cache()
+                self.assertFalse(ensure_onnx_deps())
+                self.assertEqual(mock_run.call_count, 2)
+        finally:
+            reset_onnx_deps_cache()
+
+    def test_length_sorted_batching_orders_short_before_long(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                now = utc_now_iso()
+                specs = [
+                    ("c1_long", "AlphaTitle", "x" * 600),
+                    ("c2_short", "B", "short"),
+                    ("c3_long", "GammaTitle", "y" * 900),
+                    ("c4_short", "D", "tiny text"),
+                ]
+                chunks = [
+                    TextChunk(
+                        chunk_id=f"octo-org/widgets:symbol:{cid}",
+                        repo_id=repo.repo_id,
+                        source_kind="code_symbol",
+                        source_ref=f"src/{cid}.ts#L1",
+                        file_path=f"src/{cid}.ts",
+                        item_number=None,
+                        title=title,
+                        text=body,
+                        content_sha256=compute_content_sha256(title, body),
+                        is_untrusted=False,
+                        updated_at=now,
+                    )
+                    for cid, title, body in specs
+                ]
+                store.upsert_chunks(chunks)
+
+                embedder = DeterministicHashEmbedder()
+                observed_batches: list[list[str]] = []
+                orig_embed = embedder.embed_chunks
+
+                def record_batches(
+                    batch: list[TextChunk],
+                ) -> list[list[float]]:
+                    observed_batches.append(
+                        [ch.chunk_id.split(":")[-1] for ch in batch]
+                    )
+                    return orig_embed(batch)
+
+                with mock.patch.object(
+                    embedder, "embed_chunks", side_effect=record_batches
+                ):
+                    count = sync_repo_embeddings(
+                        store,
+                        repo.repo_id,
+                        embedder=embedder,
+                        batch_size=2,
+                    )
+                self.assertEqual(count, 4)
+                self.assertEqual(
+                    observed_batches,
+                    [["c2_short", "c4_short"], ["c1_long", "c3_long"]],
+                )
+            finally:
+                store.close()
+
+    def test_keyset_paging_and_single_vector_cache_seq_bump(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                now = utc_now_iso()
+                chunks = [
+                    TextChunk(
+                        chunk_id=f"octo-org/widgets:symbol:src/f{i:02d}.ts:1",
+                        repo_id=repo.repo_id,
+                        source_kind="code_symbol",
+                        source_ref=f"src/f{i:02d}.ts#L1",
+                        file_path=f"src/f{i:02d}.ts",
+                        item_number=None,
+                        title=f"Sym{i}",
+                        text=f"Body text for symbol {i} " * ((i % 3) + 1),
+                        content_sha256=compute_content_sha256(
+                            f"Sym{i}", f"Body text for symbol {i} " * ((i % 3) + 1)
+                        ),
+                        is_untrusted=False,
+                        updated_at=now,
+                    )
+                    for i in range(7)
+                ]
+                store.upsert_chunks(chunks)
+
+                def read_seq() -> int:
+                    row = store.conn.execute(
+                        "SELECT value FROM service_state WHERE key = 'vector_cache_seq'"
+                    ).fetchone()
+                    return int(row["value"]) if row else 0
+
+                seq_before = read_seq()
+                bump_flags: list[bool] = []
+                page_calls: list[tuple[int | None, str | None]] = []
+                orig_upsert = store.upsert_embeddings
+                orig_get_unembedded = store.get_unembedded_chunks
+
+                def spy_upsert(
+                    records: list[StoredEmbeddingRecord],
+                    *,
+                    now: float | None = None,
+                    allow_seq_bump: bool = True,
+                ) -> None:
+                    bump_flags.append(allow_seq_bump)
+                    orig_upsert(records, now=now, allow_seq_bump=allow_seq_bump)
+
+                def spy_get_unembedded(
+                    repo_id: int | None,
+                    model_id: str,
+                    *,
+                    limit: int | None = None,
+                    after_chunk_id: str | None = None,
+                ) -> list[TextChunk]:
+                    page_calls.append((limit, after_chunk_id))
+                    return orig_get_unembedded(
+                        repo_id,
+                        model_id,
+                        limit=limit,
+                        after_chunk_id=after_chunk_id,
+                    )
+
+                with (
+                    mock.patch.object(
+                        store, "upsert_embeddings", side_effect=spy_upsert
+                    ),
+                    mock.patch.object(
+                        store, "get_unembedded_chunks", side_effect=spy_get_unembedded
+                    ),
+                ):
+                    count = sync_repo_embeddings(
+                        store,
+                        repo.repo_id,
+                        embedder=DeterministicHashEmbedder(),
+                        batch_size=2,
+                        page_size=3,
+                    )
+
+                self.assertEqual(count, 7)
+                # 7 chunks with page_size=3 -> pages of 3, 3, 1 (2 + 2 + 1 = 5 batches)
+                self.assertEqual(len(page_calls), 3)
+                self.assertEqual(page_calls[0], (3, None))
+                self.assertEqual(
+                    page_calls[1], (3, "octo-org/widgets:symbol:src/f02.ts:1")
+                )
+                self.assertEqual(
+                    page_calls[2], (3, "octo-org/widgets:symbol:src/f05.ts:1")
+                )
+                self.assertEqual(bump_flags, [False, False, False, False, True])
+                self.assertEqual(read_seq(), seq_before + 1)
+                self.assertEqual(
+                    store.get_unembedded_chunks(repo.repo_id, DETERMINISTIC_MODEL_ID),
+                    [],
+                )
+            finally:
+                store.close()
+
+    def test_deterministic_hash_embedder_bit_identical_reference_vectors(self) -> None:
+        self.assertEqual(len(_CLUSTER_STEM_PAIRS), len(CONCEPT_CLUSTERS))
+        _stem_token.cache_clear()
+        _unigram_delta.cache_clear()
+        _bigram_delta.cache_clear()
+        _char_ngram_deltas.cache_clear()
+
+        def reference_embed(text: str) -> list[float]:
+            vec = [0.0] * EMBEDDING_DIM
+            tokens = _tokenize(text)
+            if not tokens:
+                return vec
+            token_set = set(tokens)
+            for c_idx, cluster in enumerate(CONCEPT_CLUSTERS):
+                matches = sum(
+                    1
+                    for kw in cluster
+                    if kw in token_set or _stem_token.__wrapped__(kw) in token_set
+                )
+                if matches > 0:
+                    vec[c_idx] += 2.8 + min(matches - 1, 3) * 0.6
+            for i, tok in enumerate(tokens):
+                weight = 2.2 if any(ch == "_" or ch.isdigit() for ch in tok) else 1.6
+                idx = CONCEPT_DIM + (_fnv1a(f"u:{tok}") % HASH_DIM)
+                vec[idx] += _hash_sign(f"u:{tok}") * weight
+                if i + 1 < len(tokens):
+                    bigram = f"b:{tok}_{tokens[i + 1]}"
+                    b_idx = CONCEPT_DIM + (_fnv1a(bigram) % HASH_DIM)
+                    vec[b_idx] += _hash_sign(bigram) * 1.2
+                if len(tok) >= 4:
+                    for j in range(len(tok) - 2):
+                        trigram = f"c3:{tok[j : j + 3]}"
+                        c_idx = CONCEPT_DIM + (_fnv1a(trigram) % HASH_DIM)
+                        vec[c_idx] += _hash_sign(trigram) * 0.25
+                    for j in range(len(tok) - 3):
+                        quadgram = f"c4:{tok[j : j + 4]}"
+                        c4_idx = CONCEPT_DIM + (_fnv1a(quadgram) % HASH_DIM)
+                        vec[c4_idx] += _hash_sign(quadgram) * 0.25
+            return list(l2_normalize(vec))
+
+        samples = [
+            "OAuth2 bearer_token v2_auth and CamelCaseIdentifier in https://example.com/api",
+            "```python\ndef sync_repo_embeddings(store, repo_id):\n    return 0\n```\nInline `chunk_embeddings` SQLite WAL.",
+            "Pull requests and rate limiting on side pane with race conditions and memory leaks",
+            "OAuth2 bearer_token v2_auth and CamelCaseIdentifier in https://example.com/api",
+        ]
+        for sample in samples:
+            self.assertEqual(embed_text_deterministic(sample), reference_embed(sample))
+        self.assertGreater(_stem_token.cache_info().hits, 0)
+        self.assertGreater(_unigram_delta.cache_info().hits, 0)
+        self.assertGreater(_bigram_delta.cache_info().hits, 0)
+        self.assertGreater(_char_ngram_deltas.cache_info().hits, 0)
 
 
 if __name__ == "__main__":

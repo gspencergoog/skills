@@ -28,6 +28,9 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from db_store import DEFAULT_DB_PATH
+from live_store import read_heartbeat_version
+from models import compute_scripts_sha256
+from service import format_service_version
 from sync_runtime import AutoSyncRunRecord, read_auto_sync_run_state
 
 SERVICE_NAME = "packrat-sync.service"
@@ -86,6 +89,8 @@ class AutoSyncStatus:
         mode: Installed mode: "service", "timer", or "none".
         serve_unit_path: Path to the `packrat.service` unit or serve launchd plist.
         serve_active: Whether the `packrat serve` unit or agent is running.
+        code_stale: Whether an active service heartbeat reports an older scripts version.
+        expected_version: Expected `service_heartbeat.version` for the current checkout.
     """
 
     enabled: bool
@@ -102,6 +107,8 @@ class AutoSyncStatus:
     mode: str = MODE_NONE
     serve_unit_path: str = ""
     serve_active: bool = False
+    code_stale: bool = False
+    expected_version: str = ""
 
 
 CmdRunner = Callable[[Sequence[str]], CmdResult]
@@ -494,6 +501,22 @@ def _checked(runner: CmdRunner, tool: str, args: Sequence[str]) -> None:
         raise RuntimeError(f"{tool} {' '.join(args)} failed: {res.stderr}")
 
 
+def _expected_service_version() -> str:
+    """Computes the expected `service_heartbeat.version` for the current scripts directory."""
+    return format_service_version(compute_scripts_sha256())
+
+
+def _read_heartbeat_version(db_path: Path) -> str | None:
+    """Reads `service_heartbeat.version` from `db_path` if the database and row exist."""
+    return read_heartbeat_version(db_path)
+
+
+def _is_heartbeat_version_stale(db_path: Path, expected_version: str) -> bool:
+    """Returns True when `db_path` records a heartbeat version differing from `expected_version`."""
+    version = _read_heartbeat_version(db_path)
+    return bool(version and version != expected_version)
+
+
 def _apply_serve_state(
     status: AutoSyncStatus,
     *,
@@ -502,8 +525,13 @@ def _apply_serve_state(
     serve_active: bool,
     serve_detail: str,
     timer_on: bool,
+    db_path: Path = DEFAULT_DB_PATH,
 ) -> AutoSyncStatus:
-    """Adds the serve unit's state and the resolved mode to a timer status."""
+    """Adds the serve unit's state, code-staleness check, and resolved mode to a timer status."""
+    expected_ver = _expected_service_version()
+    code_stale = bool(
+        serve_active and _is_heartbeat_version_stale(db_path, expected_ver)
+    )
     if serve_on:
         return replace(
             status,
@@ -513,12 +541,16 @@ def _apply_serve_state(
             mode=MODE_SERVICE,
             serve_unit_path=str(serve_path),
             serve_active=serve_active,
+            code_stale=code_stale,
+            expected_version=expected_ver,
         )
     return replace(
         status,
         mode=MODE_TIMER if timer_on else MODE_NONE,
         serve_unit_path=str(serve_path),
         serve_active=serve_active,
+        code_stale=code_stale,
+        expected_version=expected_ver,
     )
 
 
@@ -586,6 +618,7 @@ def _status_launchd(
         serve_active=serve_loaded,
         serve_detail="loaded",
         timer_on=timer.active,
+        db_path=db_path,
     )
 
 
@@ -654,6 +687,7 @@ def _status_systemd(
         serve_active=serve_active,
         serve_detail=serve_detail,
         timer_on=timer.enabled,
+        db_path=db_path,
     )
 
 
@@ -761,7 +795,10 @@ def _enable_launchd_serve(
     matches = _file_matches_bytes(serve_path, plist_bytes)
     loaded = _launchd_loaded(runner, LAUNCHD_SERVE_LABEL, serve_path)
     timer_on = _launchd_loaded(runner, LAUNCHD_LABEL, timer_path)
-    if loaded and matches and not timer_on:
+    code_stale = loaded and _is_heartbeat_version_stale(
+        resolved_db, _expected_service_version()
+    )
+    if loaded and matches and not timer_on and not code_stale:
         return _status_launchd(
             launchd_dir, runner, db_path=resolved_db, action="already_enabled"
         )
@@ -771,6 +808,12 @@ def _enable_launchd_serve(
             runner(["unload", "-w", str(serve_path)])
         _atomic_write_bytes(serve_path, plist_bytes)
         _checked(runner, "launchctl", ["load", "-w", str(serve_path)])
+    elif code_stale:
+        _checked(
+            runner,
+            "launchctl",
+            ["kickstart", "-k", f"gui/{os.getuid()}/{LAUNCHD_SERVE_LABEL}"],
+        )
     if timer_on:
         runner(["unload", "-w", str(timer_path)])
     action = "updated" if had_existing else "enabled"
@@ -848,6 +891,29 @@ def _enable_systemd(
     return _status_systemd(systemd_dir, runner, db_path=resolved_db, action=action)
 
 
+def _apply_systemd_serve_changes(
+    runner: CmdRunner,
+    serve_path: Path,
+    unit_bytes: bytes,
+    *,
+    enabled: bool,
+    active: bool,
+    matches: bool,
+    code_stale: bool,
+) -> None:
+    """Writes or reloads `packrat.service` and restarts it when unit bytes or code hash changed."""
+    tool = "systemctl --user"
+    if not (enabled and active and matches):
+        if not matches:
+            _atomic_write_bytes(serve_path, unit_bytes)
+        _checked(runner, tool, ["daemon-reload"])
+        _checked(runner, tool, ["enable", "--now", SERVE_SERVICE_NAME])
+        if active and (not matches or code_stale):
+            _checked(runner, tool, ["restart", SERVE_SERVICE_NAME])
+    elif code_stale:
+        _checked(runner, tool, ["restart", SERVE_SERVICE_NAME])
+
+
 def _enable_systemd_serve(
     resolved_db: Path,
     systemd_dir: Path,
@@ -858,25 +924,31 @@ def _enable_systemd_serve(
     had_existing = serve_path.exists()
     unit_bytes = render_serve_unit(resolved_db).encode("utf-8")
     matches = _file_matches_bytes(serve_path, unit_bytes)
-    enabled, active = False, False
-    if had_existing:
-        enabled, active, _ = _query_unit_state(runner, SERVE_SERVICE_NAME)
+    enabled, active, _ = (
+        _query_unit_state(runner, SERVE_SERVICE_NAME)
+        if had_existing
+        else (False, False, "")
+    )
     timer_on = _systemd_unit_engaged(systemd_dir, runner, TIMER_NAME)
-    if enabled and active and matches and not timer_on:
+    code_stale = active and _is_heartbeat_version_stale(
+        resolved_db, _expected_service_version()
+    )
+    if enabled and active and matches and not timer_on and not code_stale:
         return _status_systemd(
             systemd_dir, runner, db_path=resolved_db, action="already_enabled"
         )
 
-    tool = "systemctl --user"
-    if not (enabled and active and matches):
-        if not matches:
-            _atomic_write_bytes(serve_path, unit_bytes)
-        _checked(runner, tool, ["daemon-reload"])
-        _checked(runner, tool, ["enable", "--now", SERVE_SERVICE_NAME])
-        if active and not matches:
-            _checked(runner, tool, ["restart", SERVE_SERVICE_NAME])
+    _apply_systemd_serve_changes(
+        runner,
+        serve_path,
+        unit_bytes,
+        enabled=enabled,
+        active=active,
+        matches=matches,
+        code_stale=code_stale,
+    )
     if timer_on:
-        _checked(runner, tool, ["disable", "--now", TIMER_NAME])
+        _checked(runner, "systemctl --user", ["disable", "--now", TIMER_NAME])
     action = "updated" if had_existing else "enabled"
     return _status_systemd(systemd_dir, runner, db_path=resolved_db, action=action)
 

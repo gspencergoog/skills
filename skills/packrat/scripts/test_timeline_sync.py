@@ -682,6 +682,67 @@ class TestSyncRepoTimelines(unittest.TestCase):
         self.assertEqual(len(re.findall(r"t\d+: node", self.gh.batch_queries[0])), 20)
         self.assertEqual(stats.pending_backfill, 27 - 20)
 
+    def test_three_batches_of_twenty_items_batch_persistence_and_bound_candidate_limit(
+        self,
+    ) -> None:
+        template_node = copy.deepcopy(self.gh.nodes[ISSUE_NODE])
+        extra_issues: list[IssueRecord] = []
+        for n in range(100, 158):
+            node_id = f"I_batch_{n}"
+            node_copy = copy.deepcopy(template_node)
+            node_copy["id"] = node_id
+            for idx, ev in enumerate(node_copy["timelineItems"]["nodes"]):
+                if isinstance(ev, dict) and "id" in ev:
+                    ev["id"] = f"{ev['id']}_{n}_{idx}"
+            self.gh.nodes[node_id] = node_copy
+            extra_issues.append(
+                IssueRecord(
+                    self.rid,
+                    n,
+                    f"Issue {n}",
+                    "OPEN",
+                    "2027-01-11T00:00:00Z",
+                    node_id=node_id,
+                )
+            )
+        # Keep PR 7 single-page so all 60 items (2 existing + 58 extra) run without follow-up pages.
+        self.gh.nodes[PR_NODE]["timelineItems"]["pageInfo"]["hasNextPage"] = False
+        self.store.upsert_issues(extra_issues)
+
+        upsert_calls = 0
+        mark_batch_calls = 0
+        candidate_limits: list[int] = []
+        orig_upsert = self.store.upsert_timeline_events
+        orig_mark_many = self.store.mark_timelines_synced
+        orig_candidates = self.store.timeline_candidates
+
+        def counting_upsert(*args: Any, **kwargs: Any) -> int:
+            nonlocal upsert_calls
+            upsert_calls += 1
+            return orig_upsert(*args, **kwargs)
+
+        def counting_mark_many(*args: Any, **kwargs: Any) -> None:
+            nonlocal mark_batch_calls
+            mark_batch_calls += 1
+            orig_mark_many(*args, **kwargs)
+
+        def recording_candidates(
+            repo_id: int, mode: TimelineMode, limit: int
+        ) -> list[TimelineTarget]:
+            candidate_limits.append(limit)
+            return orig_candidates(repo_id, mode, limit)
+
+        self.store.upsert_timeline_events = counting_upsert  # type: ignore[method-assign]
+        self.store.mark_timelines_synced = counting_mark_many  # type: ignore[method-assign]
+        self.store.timeline_candidates = recording_candidates  # type: ignore[method-assign]
+
+        stats = self._sync(TimelineMode.BACKFILL, max_batches=3)
+        self.assertEqual(stats.items_synced, 60)
+        self.assertEqual(len(self.gh.batch_queries), 3)
+        self.assertEqual(upsert_calls, 3)
+        self.assertEqual(mark_batch_calls, 3)
+        self.assertEqual(candidate_limits, [20, 20, 20])
+
 
 if __name__ == "__main__":
     unittest.main()

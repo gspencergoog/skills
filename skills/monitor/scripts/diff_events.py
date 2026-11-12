@@ -60,6 +60,29 @@ def _unread_human_threads(snap: PrSnapshot, ctx: DiffContext) -> list[str]:
     return unread
 
 
+def _thread_event_detail_and_summary(
+    snap: PrSnapshot, thread_ids: list[str], adjective: str
+) -> tuple[dict[str, Any], str]:
+    by_id = {t.id: t for t in snap.threads}
+    bot_ids = [tid for tid in thread_ids if by_id.get(tid) and by_id[tid].last_author_is_bot]
+    human_ids = [tid for tid in thread_ids if tid not in set(bot_ids)]
+    detail = {
+        "thread_ids": thread_ids,
+        "bot_thread_ids": bot_ids,
+        "human_thread_ids": human_ids,
+    }
+    if bot_ids and not human_ids:
+        summary = f"{len(thread_ids)} {adjective} bot review comment thread(s)"
+    elif human_ids and not bot_ids:
+        summary = f"{len(thread_ids)} {adjective} review comment thread(s)"
+    else:
+        summary = (
+            f"{len(thread_ids)} {adjective} review comment thread(s) "
+            f"({len(bot_ids)} bot, {len(human_ids)} human)"
+        )
+    return detail, summary
+
+
 def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
     events: list[Event] = []
     for check in cur.effective_required_checks():
@@ -98,6 +121,7 @@ def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
         )
     new_threads = _unread_human_threads(cur, ctx)
     if new_threads:
+        detail, summary = _thread_event_detail_and_summary(cur, new_threads, "unresolved")
         events.append(
             Event(
                 pr=cur.key,
@@ -106,8 +130,8 @@ def _diff_initial(cur: PrSnapshot, ctx: DiffContext) -> list[Event]:
                 to_value=len(new_threads),
                 actionable=True,
                 suggested_action="pr_feedback_handler",
-                summary=f"{len(new_threads)} unresolved review thread(s)",
-                detail={"thread_ids": new_threads},
+                summary=summary,
+                detail=detail,
             )
         )
     return events
@@ -275,6 +299,7 @@ def _diff_threads(prev: PrSnapshot, cur: PrSnapshot, ctx: DiffContext) -> list[E
             triggered.append(thread.id)
     if not triggered:
         return []
+    detail, summary = _thread_event_detail_and_summary(cur, triggered, "new")
     return [
         Event(
             pr=cur.key,
@@ -283,8 +308,8 @@ def _diff_threads(prev: PrSnapshot, cur: PrSnapshot, ctx: DiffContext) -> list[E
             to_value=len(cur.threads),
             actionable=True,
             suggested_action="pr_feedback_handler",
-            summary=f"{len(triggered)} new review comment thread(s)",
-            detail={"thread_ids": triggered},
+            summary=summary,
+            detail=detail,
         )
     ]
 

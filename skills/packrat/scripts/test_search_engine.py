@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import search_engine as se_mod
 from db_store import PackratStore
 from embedder import DeterministicHashEmbedder, sync_repo_embeddings
 from models import (
@@ -302,6 +304,43 @@ class TestSearchEngine(unittest.TestCase):
                 self.assertFalse((Path(tmp) / "vectors.u8.mmap").exists())
             finally:
                 store.close()
+
+    def test_filtered_embeddings_query_plan_drives_from_repos_and_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                for filters, expected_idx in (
+                    (
+                        SearchFilters(repo="octo-org/widgets", kinds=("code",)),
+                        "idx_chunks_repo_kind",
+                    ),
+                    (
+                        SearchFilters(
+                            repo="octo-org/widgets", path_prefix="src/components"
+                        ),
+                        "idx_chunks_repo_file",
+                    ),
+                ):
+                    sql, params = store._filtered_embeddings_sql(
+                        "c.chunk_id", filters, "test-model"
+                    )
+                    plan_rows = store.conn.execute(
+                        f"EXPLAIN QUERY PLAN {sql}", params
+                    ).fetchall()
+                    plan = " | ".join(str(r["detail"]) for r in plan_rows)
+                    self.assertIn(expected_idx, plan)
+                    self.assertNotIn("SCAN ce", plan)
+            finally:
+                store.close()
+
+    def test_search_engine_has_zero_direct_conn_execute_calls(self) -> None:
+        tree = ast.parse(Path(se_mod.__file__).read_text(encoding="utf-8"))
+        forbidden = [
+            ast.unparse(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute) and node.attr in ("conn", "execute")
+        ]
+        self.assertEqual(forbidden, [])
 
 
 if __name__ == "__main__":

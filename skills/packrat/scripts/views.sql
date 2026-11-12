@@ -1,3 +1,4 @@
+-- packrat-views-version: 2
 -- Read-only reader views for packrat's live GitHub data.
 --
 -- Readers (/monitor, inflight, the watchdog) query only these views, never the
@@ -186,10 +187,11 @@ DROP VIEW IF EXISTS v_viewer_items;
 CREATE VIEW v_viewer_items AS
 SELECT
   v.set_name AS set_name,
-  v.item_key AS item_key,
+  r.full_name || '#' || v.item_number AS item_key,
   v.first_seen_at AS first_seen_at,
   v.last_seen_at AS last_seen_at
-FROM viewer_sets v;
+FROM viewer_sets v
+JOIN repos r ON r.repo_id = v.repo_id;
 
 DROP VIEW IF EXISTS v_notifications;
 CREATE VIEW v_notifications AS
@@ -206,13 +208,14 @@ FROM notifications;
 DROP VIEW IF EXISTS v_watches;
 CREATE VIEW v_watches AS
 SELECT
-  consumer,
-  consumer_id,
-  item_key,
-  freshness_s,
-  lease_expires_at,
-  lease_expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now') AS active
-FROM watches;
+  w.consumer AS consumer,
+  w.consumer_id AS consumer_id,
+  r.full_name || '#' || w.item_number AS item_key,
+  w.freshness_s AS freshness_s,
+  w.lease_expires_at AS lease_expires_at,
+  w.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now') AS active
+FROM watches w
+JOIN repos r ON r.repo_id = w.repo_id;
 
 DROP VIEW IF EXISTS v_changes;
 CREATE VIEW v_changes AS
@@ -254,6 +257,8 @@ SELECT
      ORDER BY rowid DESC LIMIT 1) AS core_reset_at,
   (SELECT COUNT(*) FROM watches WHERE lease_expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     AS active_leases,
-  (SELECT value FROM service_state WHERE key = 'viewer_login') AS viewer_login
+  (SELECT value FROM service_state WHERE key = 'viewer_login') AS viewer_login,
+  h.last_ok_at AS last_ok_at,
+  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks
 FROM (SELECT 1 AS one) AS anchor
 LEFT JOIN service_heartbeat h ON h.id = 1;

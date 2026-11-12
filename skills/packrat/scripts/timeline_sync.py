@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from db_store import TIMELINE_SINCE_OVERLAP_S, PackratStore
-from gh_transport import GhRunner
+from gh_transport import BudgetDeferred, GhRunner
 from github_sync import _classify_gh_failure, _split_gh_include_output
 from models import (
     RepoConfig,
@@ -603,15 +603,29 @@ class _TimelineRun:
         Returns None (setting `stopped` and recording the reason) when the
         budget denies the call or the response carries no `data` object.
         """
-        if self.budget is not None and not self.budget.allows("graphql", self.priority):
+        is_budgeted = bool(getattr(self.runner, "is_budgeted_runner", False))
+        if (
+            self.budget is not None
+            and not is_budgeted
+            and not self.budget.allows("graphql", self.priority)
+        ):
             self.stats.deferred = True
             self.stopped = True
             return None
-        res = self.runner(
-            ["api", "graphql", "-i", "-f", f"query={query}"], GH_TIMEOUT_S
-        )
+        try:
+            res = self.runner(
+                ["api", "graphql", "-i", "-f", f"query={query}"], GH_TIMEOUT_S
+            )
+        except BudgetDeferred:
+            self.stats.deferred = True
+            self.stopped = True
+            return None
+        if res.error_kind == "deferred_rate_limit":
+            self.stats.deferred = True
+            self.stopped = True
+            return None
         headers, body = _split_gh_include_output(res.stdout)
-        if self.budget is not None:
+        if self.budget is not None and not is_budgeted:
             self.budget.record(headers, worker="timeline")
         payload = _loads_object(body)
         data = payload.get("data") if payload else None
@@ -627,6 +641,24 @@ class _TimelineRun:
         self.stats.errors.append(f"timeline: {kind}: {detail}")
         self.stats.deferred = self.stats.deferred or kind == "rate_limited"
         self.stopped = True
+
+    def _collect_or_write(
+        self,
+        target: TimelineTarget,
+        connection: Mapping[str, Any],
+        events_out: list[TimelineEventRecord] | None,
+    ) -> None:
+        """Appends parsed timeline events to `events_out`, or writes immediately when None."""
+        if events_out is None:
+            self.write(target, connection)
+            return
+        events_out.extend(
+            parse_timeline_items(
+                target,
+                connection.get("nodes") or [],
+                repo_full_name=self.repo.full_name,
+            )
+        )
 
     def write(self, target: TimelineTarget, connection: Mapping[str, Any]) -> None:
         """Parses and upserts one page of a target's timeline."""
@@ -672,8 +704,37 @@ class _TimelineRun:
         else:
             self.stats.items_synced += 1
 
+    def mark_batch(self, targets: Sequence[TimelineTarget], *, xref_only: bool) -> None:
+        """Marks a batch of targets synced in one store transaction when available."""
+        if not targets:
+            return
+        mark_many = getattr(self.store, "mark_timelines_synced", None)
+        if mark_many is None:
+            for target in targets:
+                self.mark(target, xref_only=xref_only)
+            return
+        if xref_only:
+            synced_at = self.started_at
+        else:
+            synced_at = max(self._full_synced_at(t) for t in targets)
+        mark_many(
+            self.repo.repo_id,
+            [(t.item_kind, t.item_number) for t in targets],
+            synced_at=synced_at,
+            xref_only=xref_only,
+        )
+        if xref_only:
+            self.stats.xref_items_synced += len(targets)
+        else:
+            self.stats.items_synced += len(targets)
+
     def follow_pages(
-        self, target: TimelineTarget, connection: Mapping[str, Any], *, xref_only: bool
+        self,
+        target: TimelineTarget,
+        connection: Mapping[str, Any],
+        *,
+        xref_only: bool,
+        events_out: list[TimelineEventRecord] | None = None,
     ) -> bool:
         """Fetches follow-up pages up to `MAX_EXTRA_PAGES`.
 
@@ -687,7 +748,7 @@ class _TimelineRun:
             next_conn = self._fetch_page(target, page_info.get("endCursor"), xref_only)
             if next_conn is None:
                 return False
-            self.write(target, next_conn)
+            self._collect_or_write(target, next_conn, events_out)
             page_info = next_conn.get("pageInfo") or {}
             pages += 1
         if page_info.get("hasNextPage"):
@@ -722,9 +783,15 @@ class _TimelineRun:
         return conn
 
     def sync_target(
-        self, target: TimelineTarget, node: Any, *, failed: bool, xref_only: bool
-    ) -> None:
-        """Writes one item's first page, follows its pages, and marks it synced.
+        self,
+        target: TimelineTarget,
+        node: Any,
+        *,
+        failed: bool,
+        xref_only: bool,
+        events_out: list[TimelineEventRecord] | None = None,
+    ) -> bool:
+        """Collects or writes one item's pages and returns True when it may be marked synced.
 
         A null node (deleted or inaccessible item) or a node of another type
         is marked synced with no events, so it is not retried forever. A null
@@ -734,28 +801,47 @@ class _TimelineRun:
             self.stats.errors.append(
                 f"timeline: {_item_label(self.repo, target)}: fetch failed"
             )
-            return
+            return False
         conn = node.get("timelineItems") if isinstance(node, Mapping) else None
         if isinstance(conn, Mapping):
-            self.write(target, conn)
-            if not self.follow_pages(target, conn, xref_only=xref_only):
-                return
-        self.mark(target, xref_only=xref_only)
+            self._collect_or_write(target, conn, events_out)
+            if not self.follow_pages(
+                target, conn, xref_only=xref_only, events_out=events_out
+            ):
+                return False
+        if events_out is None:
+            self.mark(target, xref_only=xref_only)
+        return True
 
-    def sync_batch(self, targets: Sequence[TimelineTarget], *, xref_only: bool) -> None:
+    def sync_batch(
+        self, targets: Sequence[TimelineTarget], *, xref_only: bool
+    ) -> set[tuple[str, int]]:
         """Fetches and stores one batch of up to `TIMELINE_BATCH_SIZE` items."""
         payload = self.query(build_timeline_query(targets, xref_only=xref_only))
         if payload is None:
-            return
+            return set()
         failed = _retryable_aliases(payload)
         data = payload["data"]
+        batch_events: list[TimelineEventRecord] = []
+        synced_targets: list[TimelineTarget] = []
         for i, target in enumerate(targets):
             if self.stopped:
-                return
+                break
             alias = f"t{i}"
-            self.sync_target(
-                target, data.get(alias), failed=alias in failed, xref_only=xref_only
+            if self.sync_target(
+                target,
+                data.get(alias),
+                failed=alias in failed,
+                xref_only=xref_only,
+                events_out=batch_events,
+            ):
+                synced_targets.append(target)
+        if batch_events:
+            self.stats.events_written += self.store.upsert_timeline_events(
+                batch_events, repo_full_name=self.repo.full_name
             )
+        self.mark_batch(synced_targets, xref_only=xref_only)
+        return {(t.item_kind, t.item_number) for t in synced_targets}
 
     def run_pass(
         self,
@@ -771,18 +857,21 @@ class _TimelineRun:
         run) is fetched at most once per pass.
         """
         seen: set[tuple[str, int]] = set()
+        unsynced_seen: set[tuple[str, int]] = set()
         phase = "timeline xrefs" if xref_only else "timeline"
         self.reporter.start_phase(self.repo.full_name, phase)
         for _ in range(max_batches):
             fresh = [
                 t
-                for t in fetch(TIMELINE_BATCH_SIZE + len(seen))
+                for t in fetch(TIMELINE_BATCH_SIZE + len(unsynced_seen))
                 if (t.item_kind, t.item_number) not in seen
             ][:TIMELINE_BATCH_SIZE]
             if not fresh or self.stopped:
                 break
-            seen.update((t.item_kind, t.item_number) for t in fresh)
-            self.sync_batch(fresh, xref_only=xref_only)
+            batch_keys = {(t.item_kind, t.item_number) for t in fresh}
+            seen.update(batch_keys)
+            synced_keys = self.sync_batch(fresh, xref_only=xref_only)
+            unsynced_seen.update(batch_keys - synced_keys)
             self.reporter.advance(
                 len(seen), detail=f"{self.stats.events_written} events"
             )

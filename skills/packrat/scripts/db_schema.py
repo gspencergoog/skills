@@ -1,16 +1,17 @@
-"""Baseline (schema version 1) table definitions for the packrat database.
+"""Fresh-install baseline DDL for migration-1 tables in the packrat database.
 
-These are the tables that existed before versioned migrations. Migration 1
-(`db_migrations.migrate_0001_baseline`) creates them on a fresh database and
-leaves an existing one unchanged; later migrations only add to them.
+`SCHEMA_SQL` defines only the core mirror tables that existed in migration 1
+(keeping migration-2+ tables in `db_migrations.py`), while including the current
+column and index layout so fresh installs avoid redundant column additions. The
+frozen historical pre-migration DDL lives in `fixtures/schema_v1.sql`.
 """
 
 from __future__ import annotations
 
 try:
-    from .models import BACKFILL_STREAMS
+    from .models import BACKFILL_STREAMS, GIT_BACKFILL_COLUMNS
 except ImportError:
-    from models import BACKFILL_STREAMS  # type: ignore[no-redef]
+    from models import BACKFILL_STREAMS, GIT_BACKFILL_COLUMNS  # type: ignore[no-redef]
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS repos (
@@ -267,6 +268,8 @@ BACKFILL_COLUMNS: tuple[str, ...] = tuple(
     for stream in BACKFILL_STREAMS
     for suffix in ("cursor", "done_at")
 )
+
+ALL_BACKFILL_COLUMNS: tuple[str, ...] = (*BACKFILL_COLUMNS, *GIT_BACKFILL_COLUMNS)
 
 BACKFILL_COLUMN_DECLS: tuple[tuple[str, str, str], ...] = tuple(
     ("repos", col, "TEXT") for col in BACKFILL_COLUMNS

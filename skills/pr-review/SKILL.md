@@ -234,6 +234,7 @@ Follow these steps in order when reviewing a pull request:
 - **[review_guidelines.md](references/review_guidelines.md)**: Rules for blind-first PR descriptions, intent reconciliation annotations, and actionable code review feedback.
 - **[suggestion_syntax.md](references/suggestion_syntax.md)**: GitHub markdown suggestion fence syntax and line range rules.
 - **[findings_schema.md](references/findings_schema.md)**: Fields of `review_findings.json`, `review_decisions.json`, `pr_coords.json`, `pr_context.json`, and `code_review_prep.json`.
+- **[batch_reviews.md](references/batch_reviews.md)**: Reviewing several PRs at once with a swarm: worker pool, helper naming, the two ways to finish, and re-review ordering.
 - **`scripts/diff_parser.py`**: Unified diff parser and diff hunk line validator.
 - **`scripts/review_engine.py`**: Two-stage workspace preparer (`--prepare-workspace`, with hardened git config, static execution-risk pre-scanning into `pr_coords.json.security_prescan` or `--security-scan`, and GitHub stack detection via `gh stack view --json` into `--output-stack`), Stage 1 description budget checker (`--check-description-budgets`), context fetcher (`--fetch-context` with `--require-blind-description`, `--input-stack`, and `--prepare-code-review` / `--output-prep`), and cleanup utility.
 - **`scripts/launch_dashboard.py`**: Local HTTP server and `--dump-json` data normalizer for the interactive review dashboard. Normalizes findings and merges `--meta-file` and `--description-file`.

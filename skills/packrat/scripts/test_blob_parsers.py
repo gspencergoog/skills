@@ -179,6 +179,64 @@ class TestBlobParsers(unittest.TestCase):
         self.assertEqual(entities[2]["line_start"], 9)
         self.assertEqual(entities[2]["line_end"], 14)
 
+    def test_typescript_ignores_braces_in_strings_templates_and_comments(self) -> None:
+        code = (
+            "/*\n"
+            "export class FakeCommentClass {\n"
+            "}\n"
+            "*/\n"
+            "export class BraceStressController {\n"
+            "  abstract configure(pattern: string): void;\n"
+            "  public parseToken(raw: string): string {\n"
+            '    const dbl = "unmatched }} and { and \\"} in double";\n'
+            "    const sgl = 'unmatched }} and { in single';\n"
+            "    const tpl = `multi-line template {\n"
+            "      with unmatched }} braces\n"
+            "    `;\n"
+            "    // single-line comment with }} {\n"
+            "    /* block comment with\n"
+            "       unmatched }}} braces */\n"
+            "    return dbl + sgl + tpl;\n"
+            "  }\n"
+            "}\n"
+        )
+        entities = extract_content_entities("stress.ts", "NEW", code)
+        by_name = {e["name"]: e for e in entities}
+        self.assertNotIn("FakeCommentClass", by_name)
+        self.assertEqual(
+            [(e["kind"], e["name"], e["line_start"], e["line_end"]) for e in entities],
+            [
+                ("class", "BraceStressController", 5, 18),
+                ("method", "parseToken", 7, 17),
+            ],
+        )
+
+    def test_dart_ignores_braces_in_triple_quotes_strings_and_comments(self) -> None:
+        code = (
+            "class WidgetFormatter {\n"
+            "  Future<String> formatSnippet(String input) async {\n"
+            '    final a = "{unclosed in double";\n'
+            "    final b = '}} unclosed in single';\n"
+            "    final multi = '''\n"
+            "      triple single quote with }} and {\n"
+            "    ''';\n"
+            '    final multiDbl = """\n'
+            "      triple double quote with {{{ and }\n"
+            '    """;\n'
+            "    // trailing comment }\n"
+            "    return a + b + multi + multiDbl;\n"
+            "  }\n"
+            "}\n"
+        )
+        entities = extract_content_entities("formatter.dart", "NEW", code)
+        self.assertEqual(
+            [(e["kind"], e["name"], e["line_start"], e["line_end"]) for e in entities],
+            [
+                ("class", "WidgetFormatter", 1, 14),
+                ("method", "formatSnippet", 2, 13),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

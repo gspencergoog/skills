@@ -2,25 +2,29 @@
 
 ## SQLite WAL Schema (`~/.local/share/packrat/repos.sqlite`)
 
-All tables are partitioned by `repo_id` (foreign key to `repos.repo_id`).
+Content tables carry a `repo_id` column (foreign key to `repos.repo_id`, deleted with the repository). Embedding, change-feed, and notification tables are keyed by `chunk_id`, `seq`, or `thread_id` instead and reach a repository only through a join. Schema migrations are recorded in `schema_version`; `packrat` refuses to open a database whose version is newer than the code knows.
 
-| Table | Primary Key | Key Columns |
+| Table | Primary Key | Columns |
 | :--- | :--- | :--- |
-| `repos` | `repo_id` | `owner`, `name`, `full_name`, `mode` (`mirror` or `items`), `local_path`, `default_branch`, `events_etag`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_indexed_sha`, `last_full_sweep_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at` |
-| `issues` | `(repo_id, number)` | `state`, `author`, `author_association`, `title`, `body`, `labels_json`, `assignees_json`, `created_at`, `updated_at`, `closed_at`, `timeline_synced_at`, `xref_synced_at` |
-| `pull_requests` | `(repo_id, number)` | `state`, `is_draft`, `author`, `title`, `body`, `labels_json`, `base_ref`, `head_ref`, `head_sha`, `merge_commit_sha`, `review_decision`, `additions`, `deletions`, `changed_files`, `updated_at`, `merged_at`, plus the live columns `node_id`, `author_type`, `mergeable`, `merge_state_status`, `auto_merge_enabled_at`, `head_committed_date`, `head_repo_owner`, `is_cross_repository`, `live_fetched_at`, plus `timeline_synced_at` and `xref_synced_at` |
+| `repos` | `repo_id` | `owner`, `name`, `full_name`, `mode` (`mirror` or `items`), `local_path`, `default_branch`, `events_etag`, `events_last_modified`, `poll_interval_sec`, `last_events_check_at`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_full_sweep_at`, `last_indexed_sha`, `created_at`, `updated_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at`, `commits_backfill_cursor`, `commits_backfill_done_at` (older commits still to index when a repository has more than one run's worth) |
+| `repo_aliases` | `alias_full_name` | `repo_id`, `created_at`. Former names of renamed or transferred repositories, so old item keys still resolve |
+| `schema_version` | `version` | `applied_at` |
+| `views_meta` | `id` (always `1`) | `views_sha256`, `views_version`. Identifies the installed reader views |
+| `issues` | `(repo_id, number)` | `node_id`, `state`, `author`, `author_association`, `title`, `body`, `labels_json`, `assignees_json`, `created_at`, `updated_at`, `closed_at`, `url`, `timeline_synced_at`, `xref_synced_at` |
+| `pull_requests` | `(repo_id, number)` | `node_id`, `state`, `is_draft`, `author`, `author_association`, `title`, `body`, `labels_json`, `base_ref`, `head_ref`, `head_sha`, `merge_commit_sha`, `review_decision`, `mergeable`, `additions`, `deletions`, `changed_files`, `created_at`, `updated_at`, `merged_at`, `closed_at`, `url`, plus the live columns `merge_state_status`, `auto_merge_enabled_at`, `head_committed_date`, `head_repo_owner`, `is_cross_repository`, `author_type`, `live_fetched_at`, plus `timeline_synced_at` and `xref_synced_at` |
 | `pr_files` | `(repo_id, pr_number, file_path)` | `change_type`, `additions`, `deletions` |
 | `reviews` | `(repo_id, review_id)` | `pr_number`, `author`, `author_association`, `author_type` (`User`, `Bot`, `Mannequin`, or `Organization`; filled by mirror syncs and the live service), `state`, `body`, `submitted_at` |
-| `review_threads` | `thread_id` | `repo_id`, `pr_number`, `file_path`, `line`, `start_line`, `is_resolved`, `is_outdated`, `reviewer`, `body`, `comments_json` |
-| `comments` | `(repo_id, comment_id)` | `parent_kind` (`issue` or `pr`), `parent_number`, `author`, `author_type`, `body`, `created_at`, `updated_at` |
+| `review_threads` | `thread_id` | `repo_id`, `pr_number`, `file_path`, `line`, `start_line`, `is_resolved`, `is_outdated`, `reviewer`, `author_association`, `created_at`, `updated_at`, `body`, `comments_json`, `participants_json` (logins of everyone who commented in the thread) |
+| `comments` | `(repo_id, comment_id)` | `parent_kind` (`issue` or `pr`), `parent_number`, `author`, `author_association`, `author_type`, `body`, `created_at`, `updated_at`, `url` |
 | `issue_pr_links` | `(repo_id, issue_number, pr_number, link_type)` | `link_type`: `closes` or `references` from PR text, `closed_by` from an issue's `ClosedEvent` closer, `xref` from cross-reference and connect events. Re-saving a PR replaces only its text-derived rows |
-| `discussions` | `(repo_id, number)` | `category`, `author`, `title`, `body`, `answer_body`, `updated_at` |
-| `commits` | `(repo_id, sha)` | `author_name`, `author_email`, `committed_at`, `title`, `message`, `pr_number` |
+| `discussions` | `(repo_id, number)` | `node_id`, `category`, `author`, `title`, `body`, `answer_body`, `created_at`, `updated_at`, `url` |
+| `commits` | `(repo_id, sha)` | `author_name`, `author_email`, `committed_at` (UTC, `Z` suffix), `title`, `message`, `pr_number` |
+| `commit_files` | `(repo_id, sha, file_path)` | `change_type`, `old_path`, `additions`, `deletions` |
 | `timeline_events` | `event_id` (GraphQL node id) | `repo_id`, `item_kind` (`pr` or `issue`), `item_number`, `event_type` (GraphQL `__typename`, such as `ReviewRequestedEvent`), `created_at`, `actor`, `actor_type`, `subject`, `subject_type`, `payload_json` |
 | `timeline_dirty` | `(repo_id, item_number)` | `reason` (`mention` or `commit`), `queued_at`. Items another item or commit mentioned, waiting for a cross-reference fetch |
-| `commit_files` | `(repo_id, sha, file_path)` | `change_type`, `old_path`, `additions`, `deletions` |
-| `code_symbols` | `(repo_id, file_path, kind, symbol_name, line_start)` | `kind`, `line_end`, `signature`, `docstring`, `sha` |
-| `doc_sections` | `(repo_id, file_path, section_id)` | `level`, `heading`, `breadcrumb`, `anchor_slug`, `line_start`, `line_end`, `subtree_line_end`, `content`, `sha` |
+| `indexed_files` | `(repo_id, file_path)` | `blob_oid`, `sha`. The git blob each indexed file was parsed from, so unchanged blobs are skipped on the next index run |
+| `code_symbols` | `(repo_id, file_path, kind, symbol_name, line_start)` | `line_end`, `signature`, `docstring`, `sha`, `blob_oid` |
+| `doc_sections` | `(repo_id, file_path, section_id)` | `level`, `heading`, `breadcrumb`, `anchor_slug`, `line_start`, `line_end`, `subtree_line_end`, `content`, `sha`, `blob_oid` |
 | `chunks` | `chunk_id` | `repo_id`, `source_kind`, `source_ref`, `file_path`, `item_number`, `title`, `text`, `content_sha256`, `is_untrusted`, `updated_at` |
 | `chunks_fts` | FTS5 virtual table | `chunk_id`, `source_kind`, `source_ref`, `title`, `text` (tokenized with `porter unicode61`) |
 | `chunk_embeddings` | `chunk_id` | `model_id`, `dim` (`384`), `scale` (`REAL`), `vector_u8` (`BLOB`), `content_sha256`, `updated_at` |
@@ -53,27 +57,42 @@ The `packrat serve` service writes these tables. Migrations are tracked in `sche
 | Table | Primary Key | Key Columns |
 | :--- | :--- | :--- |
 | `pr_rollup` | `(repo_id, pr_number)` | `head_oid`, `state`, `total`, `checks_etag`, `status_etag`, `fetched_at`. A new head clears the state and ETags |
-| `check_runs` | `(repo_id, pr_number, head_oid, run_key)` | `run_key` (`CheckRun:<databaseId>` or `StatusContext:<context>`; schema v3), `name`, `kind` (`CheckRun` or `StatusContext`), `status`, `conclusion`, `details_url`, `started_at`, `completed_at`, `is_required`, `workflow_run_id` |
-| `review_requests` | `(repo_id, pr_number, reviewer)` | `reviewer_kind` (`User`, `Team`, `Bot`, `Mannequin`) |
+| `check_runs` | `(repo_id, pr_number, head_oid, run_key)` | `run_key` (`CheckRun:<databaseId>` or `StatusContext:<context>`), `name`, `kind` (`CheckRun` or `StatusContext`), `status`, `conclusion`, `details_url`, `started_at`, `completed_at`, `is_required`, `workflow_run_id` |
+| `review_requests` | `(repo_id, pr_number, reviewer)` | `reviewer_kind` (`User`, `Team`, `Bot`, `Mannequin`), `requested_at` |
 | `latest_opinionated_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state`, `submitted_at` |
-| `latest_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state` (includes `COMMENTED`), `submitted_at`, `commit_oid` (schema v8) |
-| `thread_activity` | `thread_id` | `repo_id`, `pr_number`, `is_resolved`, `is_outdated`, `last_author`, `last_author_type`, `last_at` |
+| `latest_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state` (includes `COMMENTED`), `submitted_at`, `commit_oid` |
+| `thread_activity` | `thread_id` | `repo_id`, `pr_number`, `is_resolved`, `is_outdated`, `last_author`, `last_author_type`, `last_at`, `participants_json` |
 | `notifications` | `thread_id` | `reason`, `subject_type`, `item_key`, `updated_at`, `unread`, `seen_at` |
-| `viewer_sets` | `(set_name, item_key)` | `set_name` (`authored`, `review_requested`, `reviewed`, `issues`), `first_seen_at`, `last_seen_at` |
-| `watches` | `(consumer, consumer_id, item_key)` | `freshness_s`, `lease_expires_at` |
-| `refresh_requests` | `item_key` | `requested_at` |
+| `viewer_sets` | `(set_name, repo_id, item_number)` | `set_name` (`authored`, `review_requested`, `reviewed`, `issues`), `first_seen_at`, `last_seen_at`. `v_viewer_items` adds the item key text |
+| `watches` | `(consumer, consumer_id, repo_id, item_number)` | `freshness_s`, `lease_expires_at`. `v_watches` adds the item key text |
+| `refresh_requests` | `(repo_id, item_number)` | `requested_at` |
 | `changes` | `seq` (autoincrement) | `item_key`, `kind`, `fields` (JSON array), `at` |
 | `api_calls` | none (append-only) | `at`, `worker`, `resource` (`graphql` or `core`), `cost`, `remaining`, `reset_at`, `status` |
-| `service_heartbeat` | `id` (always `1`) | `pid`, `started_at`, `beat_at`, `version` |
+| `service_heartbeat` | `id` (always `1`) | `pid`, `started_at`, `beat_at`, `version` (`packrat-serve/<n>+<scripts sha>`), `last_ok_at`, `consecutive_failed_ticks` |
 | `service_state` | `key` | `value`, `updated_at`. Holds cursors such as `notifications_last_modified` |
 
-Item keys are `owner/name#number` with the repository's registered casing. Timestamps are ISO-8601 UTC text.
+`watches`, `viewer_sets`, and `refresh_requests` reference `(repo_id, item_number)` with `ON DELETE CASCADE`, so removing or merging a repository drops its leases and sets; the reader views add the `item_key` text. Item keys are `owner/name#number` with the repository's registered casing. Timestamps are ISO-8601 UTC text.
 
 ### SQLite Reader Views
 
-Tools that read live data (`/monitor`, `inflight`, the watchdog) open `repos.sqlite` read-only and query only these views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, and `v_service_health`. [reader_contract.md](reader_contract.md) documents every column, along with the lease and change-feed rules.
+Tools that read live data (`/monitor`, `inflight`, the watchdog) open `repos.sqlite` read-only and query only these views: `v_pr_basic`, `v_issue_basic`, `v_item_comments`, `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, `v_pr_threads`, `v_viewer_items`, `v_notifications`, `v_service_health`, `v_watches`, `v_changes`, and `v_api_calls`. [reader_contract.md](reader_contract.md) documents every column, along with the lease and change-feed rules. The views are versioned by `views_meta.views_version`; `packrat` recreates them when `views.sql` changes.
 
 `v_pr_checks` has one row per check run or status context on the current head, keyed by `run_key`. Several rows can share a `name` (re-runs, or one job name in two workflows), so judge every row rather than one per name. `v_item_comments` holds the 10 newest conversation comments per PR and issue, with `author_type` (`User` or `Bot`).
+
+### Database Portability and packrat export
+
+`packrat export <dest-sqlite-path> [--repo <owner>/<name> ...]` copies the active WAL database into `<dest>.tmp.<pid>` in `32 MiB` steps (`8,192` pages) inside a pinned `read_snapshot`. Concurrent `packrat serve` writes neither block nor restart the copy. Next, it scrubs non-portable state under `PRAGMA foreign_keys = ON`, runs `VACUUM`, switches to `PRAGMA journal_mode = DELETE`, and streams live `stderr` progress. Before replacing `<dest-sqlite-path>` and unlinking `<dest>-wal`, `<dest>-shm`, and `<dest>-journal`, it checks `INSERT INTO chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)` and `PRAGMA foreign_key_check`.
+
+| Category | Tables / Keys | Export Disposition |
+| :--- | :--- | :--- |
+| Repository registry & schema metadata | `repos`, `repo_aliases`, `schema_version`, `views_meta` | Kept for selected `mirror` repositories (`mode = 'mirror'`). All `items`-mode repositories and unselected `mirror` repositories are dropped. `repos.local_path` is set to `NULL` on every exported row while preserving watermarks, backfill cursors, `events_etag`, `events_last_modified`, and `last_indexed_sha`. |
+| Historical mirror content & git index | `issues`, `pull_requests`, `pr_files`, `reviews`, `review_threads`, `comments`, `issue_pr_links`, `discussions`, `commits`, `commit_files`, `timeline_events`, `timeline_dirty`, `indexed_files`, `code_symbols`, `doc_sections`, `chunks`, `chunks_fts`, `chunk_embeddings` | Kept for exported `mirror` repositories. For dropped repositories, external-content `chunks_fts` rows are cleared before `DELETE FROM repos WHERE repo_id NOT IN (...)` cascades across all 19 child tables. |
+| Live PR status tables | `pr_rollup`, `check_runs`, `review_requests`, `latest_opinionated_reviews`, `latest_reviews`, `thread_activity` | Kept for exported `mirror` repositories so `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, and `v_pr_threads` remain populated. Rows for `items` and excluded `mirror` repositories cascade-delete with `repos`. |
+| Personal, viewer, & runtime tables | `notifications`, `viewer_sets`, `watches`, `refresh_requests`, `changes`, `api_calls`, `service_heartbeat` | Scrubbed completely (`0` rows), along with `sqlite_sequence WHERE name = 'changes'` so the recipient change feed resets to `seq = 1`. |
+| Kept `service_state` keys | `signals_events:<id>`, `events_last_id:<id>`, `refetch_open_prs:<id>`, `gap_cursor:<id>:*`, `gap_floor:<id>:*`, `vector_cache_seq` | Preserved only when `<id>` matches an exported `mirror` `repo_id`. `vector_cache_seq` is incremented on the exported copy so recipient `vectors.*.mmap` sidecars rebuild on the next `packrat search`. |
+| Scrubbed `service_state` keys | `viewer_login`, `notifications_last_modified`, `viewer_set:*`, `node_id:*`, and keys for dropped `<id>` values | Cleared so the recipient's `packrat serve` polls unread notifications without a sender `If-Modified-Since` cutoff and populates `viewer_sets` for the recipient's GitHub login. |
+
+Every exported `repos` row has `local_path = NULL`. Interactive `packrat sync` on the recipient machine skips local git indexing with a `no_local_path` note and syncs GitHub metadata and embeddings. Binding a local clone with `packrat repo set-path <owner>/<name> <checkout>` resumes incremental `git diff-tree` indexing from `last_indexed_sha`.
 
 ## DuckDB v2.0 Views and Macros (`~/.local/share/packrat/init.sql`)
 
@@ -299,7 +318,7 @@ WHERE w.active
 ORDER BY c.item_key, c.name;
 ```
 
-A reader using the SQLite views has no leases view. It passes the keys it leased instead:
+The same query works against the SQLite `v_watches` view. A reader that already knows its own keys can skip the join:
 
 ```sql
 SELECT item_key, kind, name, conclusion, details_url

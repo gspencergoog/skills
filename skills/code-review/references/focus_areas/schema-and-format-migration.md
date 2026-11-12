@@ -24,6 +24,8 @@ Theme id: `schema-and-format-migration`. Lane for merges: B.
    Look at: fallback helpers, legacy-record branches, and status classifiers reading dual denormalized fields. Settles it: trace each non-null enum value of the legacy field when the new field is `None`; `Deduction`.
 7. A single persisted state file (such as `state.json`) backs multiple CLI modes or roles in the same directory or conversation, and startup pruning retains open records created by another mode.
    Look at: startup state loaders, pruning filters, and watch-list merge logic when switching flags on an existing state file. Settles it: trace loading a state file written by mode A under mode B; `Deduction`.
+8. Dual-accepting a renamed or prefixed envelope/mixin key (`@key` vs. legacy bare `key`) collides with user-defined properties of the bare name in secondary schema helpers, code generators, or format lowerers that check a boolean mixin flag or raw flattened `properties` map instead of the property's structural schema.
+   Look at: secondary schema extractors (`CatalogSchemaHelper`, `MessageReader`), codegen base-class field reservations, `AliasChoices` precedence, and version-lowering scripts alongside the core validator. Settles it: trace a schema that composes the new mixin (`@key`) and also declares a custom bare `key` property through every helper, compiler, decompiler, and code emitter; `Read` or `Deduction`.
 
 ## Hypothesis templates
 
@@ -33,3 +35,4 @@ Theme id: `schema-and-format-migration`. Lane for merges: B.
 - "Old readers still deployed during rollout reject `<new_enum_or_field>` produced by `<writer>`."
 - "When `<new_table_or_field>` is absent or `None`, `<reader>` falls back to `<legacy_field>` for `<state_a>` but misclassifies `<state_b>` as `<default_state>`."
 - "Starting `<mode_b>` against a persisted `<state_file>` written by `<mode_a>` retains `<mode_a>` records in `<active_collection>` because `<prune_fn>` only filters terminal states."
+- "When a schema composes `<prefixed_mixin>` and also declares a custom bare `<key>` property, `<helper_or_emitter>` discards or overwrites `<key>` instead of checking its structural schema."

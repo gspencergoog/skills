@@ -16,7 +16,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gh_transport import BudgetDeferred, GhApiError
-from models import WatchLease
+from models import ServiceHeartbeat, WatchLease, iso_at
 from rate_budget import Priority
 from service import (
     BACKFILL_INTERVAL_S,
@@ -25,6 +25,7 @@ from service import (
     SERVICE_VERSION,
     VIEWER_INTERVAL_S,
     PackratService,
+    format_service_version,
     spawn_niced_child,
 )
 from sync_runtime import SyncLockInfo, acquire_sync_lock
@@ -46,10 +47,16 @@ class FakeStore:
         self.requeued: list[list[str]] = []
         self.watches: list[WatchLease] = []
         self.heartbeats: list[tuple[int, str, float | None]] = []
+        self.heartbeat_records: list[ServiceHeartbeat] = []
+        self.initial_heartbeat: ServiceHeartbeat | None = None
         self.prunes: list[float | None] = []
         self.expired_prunes = 0
         self.fetched_at: dict[str, float] = {}
         self.requeue_for_real = False
+        self.schema_version = 13
+        self.views_version = 2
+        self.wal_checkpoints: list[tuple[int, int, int]] = []
+        self.mirror_repos: list[Any] = [object()]
 
     def take_refresh_requests(self) -> list[str]:
         self.log.append("take_requests")
@@ -72,8 +79,44 @@ class FakeStore:
         self.expired_prunes += 1
         return 0
 
-    def write_heartbeat(self, pid: int, version: str, now: float | None = None) -> None:
+    def write_heartbeat(
+        self,
+        pid: int,
+        version: str,
+        now: float | None = None,
+        *,
+        last_ok_at: str | None = None,
+        consecutive_failed_ticks: int | None = None,
+    ) -> None:
         self.heartbeats.append((pid, version, now))
+        self.heartbeat_records.append(
+            ServiceHeartbeat(
+                pid=pid,
+                started_at=iso_at(now),
+                beat_at=iso_at(now),
+                version=version,
+                last_ok_at=last_ok_at,
+                consecutive_failed_ticks=consecutive_failed_ticks or 0,
+            )
+        )
+
+    def read_heartbeat(self) -> ServiceHeartbeat | None:
+        if self.heartbeat_records:
+            return self.heartbeat_records[-1]
+        return self.initial_heartbeat
+
+    def read_schema_and_views_version(self) -> tuple[int, int]:
+        return (self.schema_version, self.views_version)
+
+    def wal_checkpoint_truncate(self) -> tuple[int, int, int]:
+        result = (0, 4, 4)
+        self.wal_checkpoints.append(result)
+        return result
+
+    def list_repos(self, mode: str | None = None) -> list[Any]:
+        if mode == "mirror":
+            return list(self.mirror_repos)
+        return list(self.mirror_repos)
 
     def prune(self, now: float | None = None) -> dict[str, int]:
         self.prunes.append(now)
@@ -433,32 +476,55 @@ class TestBudgetAndLocks(ServiceHarness):
 
 class TestHousekeepingAndChild(ServiceHarness):
     def test_heartbeat_and_expired_leases_every_tick(self) -> None:
+        expected_ver = format_service_version()
+        self.assertTrue(expected_ver.startswith(SERVICE_VERSION + "+"))
         svc = self.make()
         svc.run_once(T0)
         svc.run_once(T0 + 5)
         self.assertEqual(
             [hb[1:] for hb in self.store.heartbeats],
             [
-                (SERVICE_VERSION, T0),
-                (SERVICE_VERSION, T0),
-                (SERVICE_VERSION, T0 + 5),
-                (SERVICE_VERSION, T0 + 5),
+                (expected_ver, T0),
+                (expected_ver, T0 + 5),
             ],
         )
+        # First tick (hourly housekeeping) prunes expired leases; idle 5s tick skips it
+        # when no watched leases are approaching expiry.
+        self.assertEqual(self.store.expired_prunes, 1)
+
+    def test_expired_watch_is_pruned_when_earliest_lease_expires(self) -> None:
+        self.store.watches = [
+            WatchLease(
+                consumer="monitor",
+                consumer_id="c1",
+                item_key="o/r#1",
+                freshness_s=120,
+                lease_expires_at=iso_at(T0 + 10),
+            )
+        ]
+        svc = self.make()
+        svc.run_once(T0)
+        self.assertEqual(self.store.expired_prunes, 1)
+        svc.run_once(T0 + 5)
+        self.assertEqual(self.store.expired_prunes, 1)
+        svc.run_once(T0 + 10)
         self.assertEqual(self.store.expired_prunes, 2)
 
     def test_end_of_tick_heartbeat_uses_the_clock_after_a_long_tick(self) -> None:
-        times = iter([T0, T0 + 70.0])
         svc = self.make()
-        svc.clock = lambda: next(times, T0 + 70.0)
+        svc.clock = lambda: T0 + 70.0
         svc.run_once(T0)
-        self.assertEqual([hb[2] for hb in self.store.heartbeats], [T0, T0 + 70.0])
+        self.assertEqual([hb[2] for hb in self.store.heartbeats], [T0 + 70.0])
 
-    def test_prune_runs_hourly(self) -> None:
+    def test_prune_and_wal_checkpoint_run_hourly(self) -> None:
         svc = self.make()
-        pruned = [svc.run_once(T0 + dt).pruned for dt in (0, 5, 3599, 3600, 3605)]
-        self.assertEqual(pruned, [True, False, False, True, False])
+        reports = [svc.run_once(T0 + dt) for dt in (0, 5, 3599, 3600, 3605)]
+        self.assertEqual([r.pruned for r in reports], [True, False, False, True, False])
         self.assertEqual(self.store.prunes, [T0, T0 + 3600])
+        self.assertEqual(len(self.store.wal_checkpoints), 2)
+        self.assertEqual(reports[0].wal_checkpoint, (0, 4, 4))
+        self.assertIsNone(reports[1].wal_checkpoint)
+        self.assertEqual(reports[3].wal_checkpoint, (0, 4, 4))
 
     def test_child_not_spawned_twice_and_reaped(self) -> None:
         svc = self.make(child_argv=["packrat.py", "sync", "--backfill-only"])
@@ -469,6 +535,13 @@ class TestHousekeepingAndChild(ServiceHarness):
         self.assertEqual((report.child_exit, report.child_spawned), (0, False))
         self.assertTrue(svc.run_once(T0 + BACKFILL_INTERVAL_S).child_spawned)
         self.assertEqual(len(self.children), 2)
+
+    def test_zero_mirror_repos_skips_backfill_child_spawn(self) -> None:
+        self.store.mirror_repos = []
+        svc = self.make(child_argv=["packrat.py", "sync", "--backfill-only"])
+        report = svc.run_once(T0)
+        self.assertFalse(report.child_spawned)
+        self.assertEqual(self.children, [])
 
     def test_no_child_argv_never_spawns(self) -> None:
         svc = self.make(child_argv=None)
@@ -484,9 +557,150 @@ class TestHousekeepingAndChild(ServiceHarness):
         svc = self.make(child_argv=["backfill"])
         stop = OneTickEvent()
         self.assertEqual(svc.run(stop), 0)
+        # Initial startup heartbeat before loop + 1 end-of-tick heartbeat
         self.assertEqual(len(self.store.heartbeats), 2)
         self.assertTrue(self.children[0].terminated)
         self.assertIsNone(svc.child)
+
+    def test_consecutive_failed_ticks_and_last_ok_at_tracking(self) -> None:
+        import os
+
+        self.store.initial_heartbeat = ServiceHeartbeat(
+            pid=os.getpid(),
+            started_at=iso_at(T0 - 10),
+            beat_at=iso_at(T0 - 10),
+            version=format_service_version(),
+            last_ok_at=iso_at(T0 - 10),
+            consecutive_failed_ticks=2,
+        )
+        svc = self.make()
+        self.viewer.raise_next = GhApiError(502, "bad gateway")
+        r1 = svc.run_once(T0)
+        self.assertTrue(r1.errors)
+        hb1 = self.store.heartbeat_records[-1]
+        self.assertEqual(hb1.consecutive_failed_ticks, 3)
+        self.assertEqual(hb1.last_ok_at, iso_at(T0 - 10))
+
+        r2 = svc.run_once(T0 + 5)
+        self.assertEqual(r2.errors, [])
+        hb2 = self.store.heartbeat_records[-1]
+        self.assertEqual(hb2.consecutive_failed_ticks, 0)
+        self.assertEqual(hb2.last_ok_at, iso_at(T0 + 5))
+
+    def test_upgrade_detected_on_schema_views_and_scripts_hash_drift(self) -> None:
+        from unittest import mock
+
+        for kind in ("schema", "views", "scripts"):
+            with self.subTest(kind=kind):
+                self.setUp()
+                svc = self.make(child_argv=["backfill"])
+                svc.run_once(T0)
+                beats_before = len(self.store.heartbeats)
+                if kind == "schema":
+                    self.store.schema_version += 1
+                    report = svc.run_once(T0 + 3600)
+                elif kind == "views":
+                    self.store.views_version += 1
+                    report = svc.run_once(T0 + 3600)
+                else:
+                    with mock.patch(
+                        "service.compute_scripts_sha256",
+                        return_value="f" * 64,
+                    ):
+                        report = svc.run_once(T0 + 3600)
+                self.assertTrue(report.upgrade_detected)
+                # Does not overwrite heartbeat over newer schema/code
+                self.assertEqual(len(self.store.heartbeats), beats_before)
+                self.assertTrue(
+                    any("upgrade detected" in line for line in self.logs),
+                    self.logs,
+                )
+
+    def test_run_exits_cleanly_when_upgrade_detected(self) -> None:
+        svc = self.make(child_argv=["backfill"])
+        self.store.schema_version += 1
+        stop = threading.Event()
+        self.assertEqual(svc.run(stop), 0)
+        self.assertEqual(self.store.heartbeats, [])
+        self.assertIsNone(svc.child)
+        self.assertTrue(any("upgrade detected" in line for line in self.logs))
+
+    def test_operational_error_with_schema_drift_triggers_upgrade_detected(
+        self,
+    ) -> None:
+        import sqlite3
+
+        svc = self.make()
+        svc.run_once(T0)
+
+        def fail_with_upgrade(lookback_days: int = 7) -> list[str]:
+            self.store.schema_version += 1
+            raise sqlite3.OperationalError("no such column: new_col")
+
+        self.viewer.refresh_viewer = fail_with_upgrade  # type: ignore[method-assign]
+        self.signals.notifications.append(Dirty(viewer=True))
+        beats_before = len(self.store.heartbeats)
+        report = svc.run_once(T0 + 60)
+        self.assertTrue(report.upgrade_detected)
+        self.assertEqual(report.errors, [])
+        self.assertEqual(len(self.store.heartbeats), beats_before)
+
+    def test_steady_state_idle_tick_executes_at_most_five_sql_statements(self) -> None:
+        from db_store import PackratStore
+
+        with tempfile.TemporaryDirectory() as tmp:
+            real_store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                real_store.add_watch(
+                    "monitor",
+                    "c1",
+                    ["o/r#1", "o/r#2"],
+                    freshness_s=120,
+                    ttl_s=3600,
+                    now=T0,
+                )
+                svc = PackratService(
+                    real_store,
+                    self.signals,
+                    self.hot,
+                    self.viewer,
+                    self.mirror,
+                    None,
+                    clock=lambda: T0,
+                    budget=self.budget,
+                    sync_lock=self._lock,
+                    spawn=self._spawn,
+                    log=self.logs.append,
+                )
+                # Initial tick at T0 warms _last_hot, _last_checks, and housekeeping
+                first = svc.run_once(T0)
+                self.assertFalse(first.upgrade_detected)
+
+                sql_statements: list[str] = []
+                real_store.conn.set_trace_callback(sql_statements.append)
+                try:
+                    svc.clock = lambda: T0 + 5
+                    idle_report = svc.run_once(T0 + 5)
+                finally:
+                    real_store.conn.set_trace_callback(None)
+
+                self.assertFalse(idle_report.signals_polled)
+                self.assertFalse(idle_report.viewer_ran)
+                self.assertEqual(idle_report.swept, [])
+                self.assertEqual(idle_report.checks_polled, 0)
+                self.assertLessEqual(
+                    len(sql_statements),
+                    5,
+                    f"Expected <= 5 SQL statements on idle tick, got {len(sql_statements)}: {sql_statements}",
+                )
+                write_txs = [
+                    s
+                    for s in sql_statements
+                    if s.strip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+                ]
+                self.assertEqual(len(write_txs), 1, sql_statements)
+            finally:
+                real_store.close()
 
     def test_spawn_niced_child_runs_in_own_group_and_terminates(self) -> None:
         script = "import os, time; os.nice(0); time.sleep(30)"

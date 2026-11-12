@@ -15,6 +15,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -27,6 +28,7 @@ DEFAULT_TIMEOUT_SEC = 30
 
 _INCLUDE_FLAGS = ("-i", "--include")
 _NOT_MODIFIED = 304
+_RATE_LIMIT_COST_RE = re.compile(r'"rateLimit"\s*:\s*\{[^{}]*?"cost"\s*:\s*(\d+)')
 
 _RATE_LIMIT_SUBSTRINGS: tuple[str, ...] = (
     "rate_limit",
@@ -340,6 +342,11 @@ def _with_include_flag(args: Sequence[str]) -> list[str]:
 def _runner_call_cost(resource: str, parsed: _ParsedOutput) -> int | None:
     """Computes the API call cost for an `as_runner` response."""
     if resource == "graphql":
+        match = _RATE_LIMIT_COST_RE.search(parsed.body)
+        if match is not None:
+            return int(match.group(1))
+        if "rateLimit" not in parsed.body:
+            return None
         return _graphql_cost(_decode_json_object(parsed.body))
     return 0 if parsed.status == _NOT_MODIFIED else 1
 
@@ -557,4 +564,5 @@ class GhTransport:
             return _tag_runner_result(res, parsed)
 
         run._uses_gh_cli = self._runner is run_gh_command
+        run.is_budgeted_runner = True
         return run

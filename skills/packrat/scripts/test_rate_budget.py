@@ -125,6 +125,27 @@ class TestRateBudget(unittest.TestCase):
         assert snap is not None
         self.assertEqual((snap.remaining, snap.reset_at), (4999, RESET_AT + 3600))
 
+    def test_equal_snapshot_in_same_window_skips_disk_write(self) -> None:
+        self.budget.record(_headers(4000), worker="a")
+        writes = 0
+        orig_write = self.budget._write_all
+
+        def counting_write(snapshots: dict[str, RateSnapshot]) -> None:
+            nonlocal writes
+            writes += 1
+            orig_write(snapshots)
+
+        self.budget._write_all = counting_write  # type: ignore[method-assign]
+        self.budget.record(_headers(4000), worker="b")
+        self.assertEqual(writes, 0)
+
+        # Changing the limit with equal remaining and reset_at still supersedes.
+        self.budget.record(_headers(4000, limit=10000), worker="b")
+        self.assertEqual(writes, 1)
+        snap = self.budget.current("graphql", now=BEFORE_RESET)
+        assert snap is not None
+        self.assertEqual(snap.limit, 10000)
+
     def test_reserve_and_floor_thresholds(self) -> None:
         cases = {
             # remaining: (HOT, VIEWER, MIRROR, BACKFILL)

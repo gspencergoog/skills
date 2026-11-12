@@ -9,17 +9,20 @@ repository case-insensitively and use its registered `full_name`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 LOGGER = logging.getLogger(__name__)
 
 try:
+    from .db_migrations import read_schema_version, read_stored_views_version
     from .models import (
         REPO_MODE_ITEMS,
         ChangeRecord,
@@ -39,6 +42,10 @@ try:
         parse_item_key,
     )
 except ImportError:
+    from db_migrations import (  # type: ignore[no-redef]
+        read_schema_version,
+        read_stored_views_version,
+    )
     from models import (  # type: ignore[no-redef]
         REPO_MODE_ITEMS,
         ChangeRecord,
@@ -133,6 +140,12 @@ class LiveStoreMixin:
         """Looks up a repository by repo_id (implemented by `PackratStore`)."""
         raise NotImplementedError
 
+    def _bump_vector_cache_seq_in_tx(
+        self, now: float | None = None
+    ) -> None:  # pragma: no cover
+        """Increments `vector_cache_seq` in `service_state` (implemented by `PackratStore`)."""
+        raise NotImplementedError
+
     # ----- repositories and item keys -------------------------------------------------
 
     def _find_repo_row(self, owner: str, name: str) -> sqlite3.Row | None:
@@ -214,50 +227,66 @@ class LiveStoreMixin:
         found = self._find_repo_row(owner, name)
         return self.get_repo_by_id(int(found["repo_id"])) if found is not None else None
 
-    def _rewrite_alias_item_keys_in_tx(
-        self, alias_full_name: str, canonical_full_name: str
+    def _migrate_normalized_live_rows_in_tx(
+        self, alias_repo_id: int, canonical_repo_id: int
     ) -> None:
-        """Rewrites item keys from `alias_full_name` to `canonical_full_name` inside a transaction."""
+        """Moves normalized `(repo_id, item_number)` rows from `alias_repo_id` to `canonical_repo_id`."""
+        if alias_repo_id == canonical_repo_id:
+            return
+        self.conn.execute(
+            """
+            INSERT INTO watches (
+              consumer, consumer_id, repo_id, item_number, freshness_s, lease_expires_at
+            )
+            SELECT consumer, consumer_id, ?, item_number, freshness_s, lease_expires_at
+            FROM watches WHERE repo_id = ?
+            ON CONFLICT(consumer, consumer_id, repo_id, item_number) DO UPDATE SET
+              freshness_s = MIN(watches.freshness_s, excluded.freshness_s),
+              lease_expires_at = MAX(watches.lease_expires_at, excluded.lease_expires_at)
+            """,
+            (canonical_repo_id, alias_repo_id),
+        )
+        self.conn.execute("DELETE FROM watches WHERE repo_id = ?", (alias_repo_id,))
+        self.conn.execute(
+            """
+            INSERT INTO viewer_sets (
+              set_name, repo_id, item_number, first_seen_at, last_seen_at
+            )
+            SELECT set_name, ?, item_number, first_seen_at, last_seen_at
+            FROM viewer_sets WHERE repo_id = ?
+            ON CONFLICT(set_name, repo_id, item_number) DO UPDATE SET
+              first_seen_at = MIN(viewer_sets.first_seen_at, excluded.first_seen_at),
+              last_seen_at = MAX(viewer_sets.last_seen_at, excluded.last_seen_at)
+            """,
+            (canonical_repo_id, alias_repo_id),
+        )
+        self.conn.execute("DELETE FROM viewer_sets WHERE repo_id = ?", (alias_repo_id,))
+        self.conn.execute(
+            """
+            INSERT INTO refresh_requests (repo_id, item_number, requested_at)
+            SELECT ?, item_number, requested_at
+            FROM refresh_requests WHERE repo_id = ?
+            ON CONFLICT(repo_id, item_number) DO UPDATE SET
+              requested_at = MIN(refresh_requests.requested_at, excluded.requested_at)
+            """,
+            (canonical_repo_id, alias_repo_id),
+        )
+        self.conn.execute(
+            "DELETE FROM refresh_requests WHERE repo_id = ?", (alias_repo_id,)
+        )
+
+    def _rewrite_alias_item_keys_in_tx(
+        self,
+        alias_repo_id: int,
+        alias_full_name: str,
+        canonical_repo_id: int,
+        canonical_full_name: str,
+    ) -> None:
+        """Rewrites live state and log item keys from `alias_full_name` to `canonical_full_name`."""
+        self._migrate_normalized_live_rows_in_tx(alias_repo_id, canonical_repo_id)
         prefix = f"{alias_full_name}#"
         plen = len(prefix)
         rewrite_args = (canonical_full_name, plen, plen, prefix)
-        delete_args = (plen, prefix)
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO watches (consumer, consumer_id, item_key, freshness_s, lease_expires_at)
-            SELECT consumer, consumer_id, ? || substr(item_key, ?), freshness_s, lease_expires_at
-            FROM watches WHERE lower(substr(item_key, 1, ?)) = lower(?)
-            """,
-            rewrite_args,
-        )
-        self.conn.execute(
-            "DELETE FROM watches WHERE lower(substr(item_key, 1, ?)) = lower(?)",
-            delete_args,
-        )
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO viewer_sets (set_name, item_key, first_seen_at, last_seen_at)
-            SELECT set_name, ? || substr(item_key, ?), first_seen_at, last_seen_at
-            FROM viewer_sets WHERE lower(substr(item_key, 1, ?)) = lower(?)
-            """,
-            rewrite_args,
-        )
-        self.conn.execute(
-            "DELETE FROM viewer_sets WHERE lower(substr(item_key, 1, ?)) = lower(?)",
-            delete_args,
-        )
-        self.conn.execute(
-            """
-            INSERT OR IGNORE INTO refresh_requests (item_key, requested_at)
-            SELECT ? || substr(item_key, ?), requested_at
-            FROM refresh_requests WHERE lower(substr(item_key, 1, ?)) = lower(?)
-            """,
-            rewrite_args,
-        )
-        self.conn.execute(
-            "DELETE FROM refresh_requests WHERE lower(substr(item_key, 1, ?)) = lower(?)",
-            delete_args,
-        )
         self.conn.execute(
             """
             UPDATE notifications SET item_key = ? || substr(item_key, ?)
@@ -273,15 +302,47 @@ class LiveStoreMixin:
             rewrite_args,
         )
         state_prefix = f"{NODE_ID_STATE_PREFIX}{alias_full_name}#"
+        new_state_prefix = f"{NODE_ID_STATE_PREFIX}{canonical_full_name}#"
         slen = len(state_prefix)
+        if state_prefix != new_state_prefix:
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO service_state (key, value, updated_at)
+                SELECT ? || substr(key, ?), value, updated_at
+                FROM service_state WHERE lower(substr(key, 1, ?)) = lower(?)
+                """,
+                (
+                    f"{NODE_ID_STATE_PREFIX}{canonical_full_name}",
+                    slen,
+                    slen,
+                    state_prefix,
+                ),
+            )
+            self.conn.execute(
+                """
+                DELETE FROM service_state
+                WHERE lower(substr(key, 1, ?)) = lower(?) AND substr(key, 1, ?) <> ?
+                """,
+                (slen, state_prefix, len(new_state_prefix), new_state_prefix),
+            )
+
+    def _delete_repo_live_logs_in_tx(self, full_name: str) -> None:
+        """Deletes matching `full_name#` rows from `notifications`, `changes`, and `service_state`."""
+        prefix = f"{full_name}#"
+        plen = len(prefix)
         self.conn.execute(
             """
-            INSERT OR REPLACE INTO service_state (key, value, updated_at)
-            SELECT ? || substr(key, ?), value, updated_at
-            FROM service_state WHERE lower(substr(key, 1, ?)) = lower(?)
+            DELETE FROM notifications
+            WHERE item_key IS NOT NULL AND lower(substr(item_key, 1, ?)) = lower(?)
             """,
-            (f"{NODE_ID_STATE_PREFIX}{canonical_full_name}", slen, slen, state_prefix),
+            (plen, prefix),
         )
+        self.conn.execute(
+            "DELETE FROM changes WHERE lower(substr(item_key, 1, ?)) = lower(?)",
+            (plen, prefix),
+        )
+        state_prefix = f"{NODE_ID_STATE_PREFIX}{full_name}#"
+        slen = len(state_prefix)
         self.conn.execute(
             "DELETE FROM service_state WHERE lower(substr(key, 1, ?)) = lower(?)",
             (slen, state_prefix),
@@ -305,6 +366,37 @@ class LiveStoreMixin:
             """,
             (f"{new_full_name}#", plen + 1, plen, prefix),
         )
+
+    def _rewrite_repo_identity_in_tx(
+        self,
+        old_repo_id: int,
+        old_full_name: str,
+        canonical_repo_id: int,
+        new_full_name: str,
+        now_iso: str,
+    ) -> None:
+        """Records `old_full_name` in `repo_aliases` and rewrites live state, logs, and timeline subjects."""
+        self.conn.execute(
+            "DELETE FROM repo_aliases WHERE alias_full_name = ?",
+            (new_full_name,),
+        )
+        if old_repo_id != canonical_repo_id:
+            self.conn.execute(
+                "UPDATE repo_aliases SET repo_id = ? WHERE repo_id = ?",
+                (canonical_repo_id, old_repo_id),
+            )
+        if old_full_name.lower() != new_full_name.lower():
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO repo_aliases (alias_full_name, repo_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                (old_full_name, canonical_repo_id, now_iso),
+            )
+        self._rewrite_alias_item_keys_in_tx(
+            old_repo_id, old_full_name, canonical_repo_id, new_full_name
+        )
+        self._rewrite_timeline_subjects_in_tx(old_full_name, new_full_name)
 
     def merge_repo_alias(
         self,
@@ -339,24 +431,14 @@ class LiveStoreMixin:
                 same = self.get_repo_by_id(alias_repo_id)
                 if same is not None:
                     return same
-            self.conn.execute(
-                "DELETE FROM repo_aliases WHERE alias_full_name = ?",
-                (canonical_full_name,),
-            )
             canonical = self._ensure_items_repo_in_tx(owner, name, now_iso)
-            self.conn.execute(
-                "UPDATE repo_aliases SET repo_id = ? WHERE repo_id = ?",
-                (canonical.repo_id, alias_repo_id),
+            self._rewrite_repo_identity_in_tx(
+                alias_repo_id,
+                alias_full_name,
+                canonical.repo_id,
+                canonical.full_name,
+                now_iso,
             )
-            self.conn.execute(
-                """
-                INSERT OR REPLACE INTO repo_aliases (alias_full_name, repo_id, created_at)
-                VALUES (?, ?, ?)
-                """,
-                (alias_full_name, canonical.repo_id, now_iso),
-            )
-            self._rewrite_alias_item_keys_in_tx(alias_full_name, canonical.full_name)
-            self._rewrite_timeline_subjects_in_tx(alias_full_name, canonical.full_name)
             if alias_mode == REPO_MODE_ITEMS and alias_repo_id != canonical.repo_id:
                 self.conn.execute(
                     "DELETE FROM chunks_fts WHERE rowid IN "
@@ -366,6 +448,7 @@ class LiveStoreMixin:
                 self.conn.execute(
                     "DELETE FROM repos WHERE repo_id = ?", (alias_repo_id,)
                 )
+                self._bump_vector_cache_seq_in_tx(now)
             elif alias_mode != REPO_MODE_ITEMS:
                 LOGGER.warning(
                     "Repository %s is in mirror mode; added alias to %s without deleting mirror repo",
@@ -471,6 +554,19 @@ class LiveStoreMixin:
             return self.max_change_seq()
         return int(row["s"]) - 1
 
+    @contextlib.contextmanager
+    def read_snapshot(self) -> Iterator[None]:
+        """Holds a consistent read snapshot (`BEGIN` .. `COMMIT`) across multiple queries."""
+        if self.conn.in_transaction:
+            yield
+            return
+        self.conn.execute("BEGIN")
+        try:
+            yield
+        finally:
+            if self.conn.in_transaction:
+                self.conn.execute("COMMIT")
+
     # ----- live PR state -------------------------------------------------------------
 
     def _pr_live_row(self, repo_id: int, number: int) -> sqlite3.Row | None:
@@ -546,7 +642,7 @@ class LiveStoreMixin:
                 ),
             )
 
-    def _note_mirror_pr_change_in_tx(self, pr: Any) -> None:
+    def _note_mirror_pr_change_in_tx(self, pr: Any) -> sqlite3.Row | None:
         """Appends a "pr" change row when a mirror upsert changes a live PR's fields.
 
         Called by `PackratStore._upsert_single_pr` before it writes `pr` (a
@@ -560,7 +656,9 @@ class LiveStoreMixin:
             (pr.repo_id, pr.number),
         ).fetchone()
         if old is None or old["live_fetched_at"] is None:
-            return
+            return old
+        if str(old["updated_at"] or "") > pr.updated_at:
+            return old
         changed = [
             f
             for f in MIRROR_LIVE_FIELDS
@@ -569,6 +667,7 @@ class LiveStoreMixin:
         if changed:
             key = self._item_key_for(pr.repo_id, pr.number)
             self._append_change_in_tx(key, "pr", changed, None)
+        return old
 
     def upsert_pr_live(
         self, record: PrLiveRecord, now: float | None = None
@@ -795,18 +894,26 @@ class LiveStoreMixin:
         Returns:
             True (and appends a "comments" change row) when a new comment appeared.
         """
+        if not comments:
+            return False
         ids = [c.comment_id for c in comments]
-        marks = ", ".join("?" for _ in ids) or "NULL"
+        marks = ", ".join("?" for _ in ids)
         # Rows the mirror stored (author_type NULL) haven't been seen by a live
         # refresh yet, so they still count as new for the change feed (M2).
-        existing = {
-            str(r["comment_id"])
-            for r in self.conn.execute(
-                f"SELECT comment_id FROM comments WHERE repo_id = ? AND comment_id IN ({marks})"
-                " AND author_type IS NOT NULL",
-                (repo_id, *ids),
-            )
+        existing_rows = self.conn.execute(
+            f"SELECT comment_id, author_type FROM comments WHERE repo_id = ? AND comment_id IN ({marks})",
+            (repo_id, *ids),
+        ).fetchall()
+        existing_types = {str(r["comment_id"]): r["author_type"] for r in existing_rows}
+        existing_seen = {
+            cid for cid, atype in existing_types.items() if atype is not None
         }
+        added = set(ids) - existing_seen
+        needs_write = bool(added) or any(
+            existing_types.get(c.comment_id) != c.author_type for c in comments
+        )
+        if not needs_write:
+            return False
         rows = [
             (
                 repo_id,
@@ -819,7 +926,6 @@ class LiveStoreMixin:
             )
             for c in comments
         ]
-        added = set(ids) - existing
         with self.conn:
             self.conn.executemany(
                 """
@@ -845,39 +951,48 @@ class LiveStoreMixin:
         Each new or updated notification with an item key also appends a
         "notification" change row.
         """
+        if not records:
+            return []
         now_iso = iso_at(now)
+        tids = [rec.thread_id for rec in records]
+        marks = ", ".join("?" for _ in tids)
+        existing = {
+            str(r["thread_id"]): (r["updated_at"], int(r["unread"]))
+            for r in self.conn.execute(
+                f"SELECT thread_id, updated_at, unread FROM notifications WHERE thread_id IN ({marks})",
+                tids,
+            ).fetchall()
+        }
         changed: list[str] = []
-        with self.conn:
-            for rec in records:
-                old = self.conn.execute(
-                    "SELECT updated_at, unread FROM notifications WHERE thread_id = ?",
-                    (rec.thread_id,),
-                ).fetchone()
-                is_new = old is None or (old["updated_at"], old["unread"]) != (
+        rows: list[tuple[Any, ...]] = []
+        for rec in records:
+            state = (rec.updated_at, int(rec.unread))
+            is_new = existing.get(rec.thread_id) != state
+            existing[rec.thread_id] = state
+            rows.append(
+                (
+                    rec.thread_id,
+                    rec.reason,
+                    rec.subject_type,
+                    rec.item_key,
                     rec.updated_at,
                     int(rec.unread),
+                    now_iso,
                 )
-                self.conn.execute(
-                    """
-                    INSERT OR REPLACE INTO notifications
-                      (thread_id, reason, subject_type, item_key, updated_at, unread, seen_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        rec.thread_id,
-                        rec.reason,
-                        rec.subject_type,
-                        rec.item_key,
-                        rec.updated_at,
-                        int(rec.unread),
-                        now_iso,
-                    ),
-                )
-                if is_new and rec.item_key:
-                    changed.append(rec.item_key)
-                    self._append_change_in_tx(
-                        rec.item_key, "notification", ["reason"], now
-                    )
+            )
+            if is_new and rec.item_key:
+                changed.append(rec.item_key)
+        with self.conn:
+            self.conn.executemany(
+                """
+                INSERT OR REPLACE INTO notifications
+                  (thread_id, reason, subject_type, item_key, updated_at, unread, seen_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            for key in changed:
+                self._append_change_in_tx(key, "notification", ["reason"], now)
         return changed
 
     def replace_viewer_set(
@@ -893,28 +1008,43 @@ class LiveStoreMixin:
             `(added, removed)` item keys; each appends a "viewer" change row.
         """
         now_iso = iso_at(now)
-        current = set(item_keys)
-        previous = {
-            str(r["item_key"])
-            for r in self.conn.execute(
-                "SELECT item_key FROM viewer_sets WHERE set_name = ?", (set_name,)
-            )
+        resolved = [self._resolve_key(k, create=True) for k in item_keys]
+        current_map = {r[1]: (r[0], r[2]) for r in resolved if r is not None}
+        prev_rows = self.conn.execute(
+            """
+            SELECT r.full_name || '#' || v.item_number AS item_key, v.repo_id, v.item_number
+            FROM viewer_sets v
+            JOIN repos r ON r.repo_id = v.repo_id
+            WHERE v.set_name = ?
+            """,
+            (set_name,),
+        ).fetchall()
+        previous_map = {
+            str(r["item_key"]): (int(r["repo_id"]), int(r["item_number"]))
+            for r in prev_rows
         }
-        added = sorted(current - previous)
-        removed = sorted(previous - current)
+        added = sorted(set(current_map) - set(previous_map))
+        removed = sorted(set(previous_map) - set(current_map))
         with self.conn:
-            self.conn.executemany(
-                "DELETE FROM viewer_sets WHERE set_name = ? AND item_key = ?",
-                [(set_name, key) for key in removed],
-            )
-            self.conn.executemany(
-                """
-                INSERT INTO viewer_sets (set_name, item_key, first_seen_at, last_seen_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(set_name, item_key) DO UPDATE SET last_seen_at = excluded.last_seen_at
-                """,
-                [(set_name, key, now_iso, now_iso) for key in sorted(current)],
-            )
+            if removed:
+                self.conn.executemany(
+                    "DELETE FROM viewer_sets WHERE set_name = ? AND repo_id = ? AND item_number = ?",
+                    [(set_name, *previous_map[key]) for key in removed],
+                )
+            if current_map:
+                self.conn.executemany(
+                    """
+                    INSERT INTO viewer_sets (
+                      set_name, repo_id, item_number, first_seen_at, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(set_name, repo_id, item_number) DO UPDATE SET
+                      last_seen_at = excluded.last_seen_at
+                    """,
+                    [
+                        (set_name, *current_map[key], now_iso, now_iso)
+                        for key in sorted(current_map)
+                    ],
+                )
             self._set_state_in_tx(
                 f"{VIEWER_SET_STATE_PREFIX}{set_name}", now_iso, now_iso
             )
@@ -940,19 +1070,22 @@ class LiveStoreMixin:
         """
         moment = time.time() if now is None else now
         expires = iso_at(moment + ttl_s)
-        keys = [self._resolve_key(k, create=True) for k in item_keys]
-        canonical = [k[1] for k in keys if k is not None]
+        resolved = [
+            r for k in item_keys if (r := self._resolve_key(k, create=True)) is not None
+        ]
+        canonical = [r[1] for r in resolved]
         with self.conn:
             self.conn.executemany(
                 """
-                INSERT INTO watches (consumer, consumer_id, item_key, freshness_s, lease_expires_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(consumer, consumer_id, item_key) DO UPDATE SET
+                INSERT INTO watches (
+                  consumer, consumer_id, repo_id, item_number, freshness_s, lease_expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(consumer, consumer_id, repo_id, item_number) DO UPDATE SET
                   freshness_s = excluded.freshness_s, lease_expires_at = excluded.lease_expires_at
                 """,
                 [
-                    (consumer, consumer_id, key, int(freshness_s), expires)
-                    for key in canonical
+                    (consumer, consumer_id, r[0], r[2], int(freshness_s), expires)
+                    for r in resolved
                 ],
             )
         return canonical
@@ -964,9 +1097,17 @@ class LiveStoreMixin:
         where = "consumer = ? AND consumer_id = ?"
         params: list[Any] = [consumer, consumer_id]
         if item_keys is not None:
-            keys = [self.canonical_item_key(k) for k in item_keys]
-            where += f" AND item_key IN ({', '.join('?' for _ in keys) or 'NULL'})"
-            params.extend(keys)
+            pairs = [
+                (r[0], r[2])
+                for k in item_keys
+                if (r := self._resolve_key(k, create=False)) is not None
+            ]
+            if not pairs:
+                return "1 = 0", []
+            values_sql = ", ".join("(?, ?)" for _ in pairs)
+            where += f" AND (repo_id, item_number) IN (VALUES {values_sql})"
+            for repo_id, number in pairs:
+                params.extend((repo_id, number))
         return where, params
 
     def renew_watch(
@@ -999,7 +1140,14 @@ class LiveStoreMixin:
     def active_watches(self, now: float | None = None) -> list[WatchLease]:
         """Returns leases that have not expired, ordered by item key."""
         rows = self.conn.execute(
-            "SELECT * FROM watches WHERE lease_expires_at > ? ORDER BY item_key, consumer",
+            """
+            SELECT w.consumer, w.consumer_id, r.full_name || '#' || w.item_number AS item_key,
+                   w.freshness_s, w.lease_expires_at
+            FROM watches w
+            JOIN repos r ON r.repo_id = w.repo_id
+            WHERE w.lease_expires_at > ?
+            ORDER BY item_key, w.consumer
+            """,
             (iso_at(now),),
         ).fetchall()
         return [
@@ -1025,27 +1173,58 @@ class LiveStoreMixin:
         self, item_keys: Iterable[str], now: float | None = None
     ) -> list[str]:
         """Queues items for an immediate refresh by the service; returns the canonical keys."""
-        keys = [self.canonical_item_key(k) for k in item_keys]
+        resolved = [
+            r for k in item_keys if (r := self._resolve_key(k, create=True)) is not None
+        ]
+        now_iso = iso_at(now)
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO refresh_requests (item_key, requested_at) VALUES (?, ?)",
-                [(k, iso_at(now)) for k in keys],
+                "INSERT OR REPLACE INTO refresh_requests (repo_id, item_number, requested_at) "
+                "VALUES (?, ?, ?)",
+                [(r[0], r[2], now_iso) for r in resolved],
             )
-        return keys
+        return [r[1] for r in resolved]
 
     def peek_refresh_requests(self) -> list[str]:
         """Returns every queued refresh request without removing it, oldest first."""
         rows = self.conn.execute(
-            "SELECT item_key FROM refresh_requests ORDER BY requested_at, item_key"
+            """
+            SELECT r.full_name || '#' || rr.item_number AS item_key
+            FROM refresh_requests rr
+            JOIN repos r ON r.repo_id = rr.repo_id
+            ORDER BY rr.requested_at, item_key
+            """
         ).fetchall()
         return [str(r["item_key"]) for r in rows]
 
     def take_refresh_requests(self) -> list[str]:
         """Atomically removes and returns every queued refresh request, oldest first."""
-        with self.conn:
-            keys = self.peek_refresh_requests()
-            self.conn.execute("DELETE FROM refresh_requests")
-        return keys
+        if (
+            self.conn.execute("SELECT 1 FROM refresh_requests LIMIT 1").fetchone()
+            is None
+        ):
+            return []
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            rows = self.conn.execute(
+                """
+                SELECT rr.repo_id, rr.item_number,
+                       r.full_name || '#' || rr.item_number AS item_key
+                FROM refresh_requests rr
+                JOIN repos r ON r.repo_id = rr.repo_id
+                ORDER BY rr.requested_at, item_key
+                """
+            ).fetchall()
+            if rows:
+                self.conn.executemany(
+                    "DELETE FROM refresh_requests WHERE repo_id = ? AND item_number = ?",
+                    [(int(r["repo_id"]), int(r["item_number"])) for r in rows],
+                )
+            self.conn.execute("COMMIT")
+            return [str(r["item_key"]) for r in rows]
+        except BaseException:
+            self.conn.execute("ROLLBACK")
+            raise
 
     # ----- api calls, heartbeat, service state ---------------------------------------
 
@@ -1068,21 +1247,49 @@ class LiveStoreMixin:
                 (iso_at(now), worker, resource, cost, remaining, reset_at, status),
             )
 
-    def write_heartbeat(self, pid: int, version: str, now: float | None = None) -> None:
+    def write_heartbeat(
+        self,
+        pid: int,
+        version: str,
+        now: float | None = None,
+        *,
+        last_ok_at: str | None = None,
+        consecutive_failed_ticks: int | None = None,
+    ) -> None:
         """Updates the service heartbeat, resetting `started_at` when the PID changes."""
         now_iso = iso_at(now)
         with self.conn:
             self.conn.execute(
                 """
-                INSERT INTO service_heartbeat (id, pid, started_at, beat_at, version)
-                VALUES (1, ?, ?, ?, ?)
+                INSERT INTO service_heartbeat (
+                  id, pid, started_at, beat_at, version, last_ok_at, consecutive_failed_ticks
+                ) VALUES (1, ?, ?, ?, ?, ?, COALESCE(?, 0))
                 ON CONFLICT(id) DO UPDATE SET
                   started_at = CASE WHEN service_heartbeat.pid = excluded.pid
                                     THEN service_heartbeat.started_at
                                     ELSE excluded.started_at END,
-                  pid = excluded.pid, beat_at = excluded.beat_at, version = excluded.version
+                  last_ok_at = COALESCE(?, service_heartbeat.last_ok_at),
+                  consecutive_failed_ticks = CASE
+                    WHEN ? IS NOT NULL THEN ?
+                    WHEN service_heartbeat.pid = excluded.pid
+                      THEN service_heartbeat.consecutive_failed_ticks
+                    ELSE 0
+                  END,
+                  pid = excluded.pid,
+                  beat_at = excluded.beat_at,
+                  version = excluded.version
                 """,
-                (pid, now_iso, now_iso, version),
+                (
+                    pid,
+                    now_iso,
+                    now_iso,
+                    version,
+                    last_ok_at,
+                    consecutive_failed_ticks,
+                    last_ok_at,
+                    consecutive_failed_ticks,
+                    consecutive_failed_ticks,
+                ),
             )
 
     def read_heartbeat(self) -> ServiceHeartbeat | None:
@@ -1097,7 +1304,54 @@ class LiveStoreMixin:
             started_at=row["started_at"],
             beat_at=row["beat_at"],
             version=row["version"],
+            last_ok_at=row["last_ok_at"],
+            consecutive_failed_ticks=int(row["consecutive_failed_ticks"] or 0),
         )
+
+    def read_schema_and_views_version(self) -> tuple[int, int]:
+        """Returns `(schema_version, views_version)` currently recorded in the database."""
+        return read_schema_version(self.conn), read_stored_views_version(self.conn)
+
+    def wal_checkpoint_truncate(self) -> tuple[int, int, int]:
+        """Runs `PRAGMA wal_checkpoint(TRUNCATE)` and returns `(busy, log, checkpointed)`."""
+        row = self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if row is None:
+            return 0, 0, 0
+        return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+
+    def get_gap_state(self, repo_id: int, stream: str) -> tuple[str | None, str | None]:
+        """Returns `(cursor, floor_watermark)` for an interrupted incremental GitHub walk."""
+        cursor = self.get_state(f"gap_cursor:{repo_id}:{stream}")
+        floor = self.get_state(f"gap_floor:{repo_id}:{stream}")
+        return cursor, floor
+
+    def set_gap_state(
+        self,
+        repo_id: int,
+        stream: str,
+        *,
+        cursor: str | None,
+        floor: str | None,
+        now: float | None = None,
+    ) -> None:
+        """Persists or clears `(cursor, floor_watermark)` for an interrupted incremental walk."""
+        cursor_key = f"gap_cursor:{repo_id}:{stream}"
+        floor_key = f"gap_floor:{repo_id}:{stream}"
+        now_iso = iso_at(now)
+        with self.conn:
+            if cursor is None:
+                self.conn.execute(
+                    "DELETE FROM service_state WHERE key IN (?, ?)",
+                    (cursor_key, floor_key),
+                )
+            else:
+                self._set_state_in_tx(cursor_key, cursor, now_iso)
+                if floor is None:
+                    self.conn.execute(
+                        "DELETE FROM service_state WHERE key = ?", (floor_key,)
+                    )
+                else:
+                    self._set_state_in_tx(floor_key, floor, now_iso)
 
     def _set_state_in_tx(self, key: str, value: str | None, now_iso: str) -> None:
         """Writes one `service_state` row inside the caller's transaction."""
@@ -1123,23 +1377,82 @@ class LiveStoreMixin:
 
     # ----- node ids and rollup ETags -------------------------------------------------
 
+    def _resolve_keys_batch(
+        self, item_keys: Iterable[str]
+    ) -> list[tuple[str, str, tuple[int, int] | None]]:
+        """Resolves a batch of item keys without creating repos, caching repo lookups per batch."""
+        repo_cache: dict[tuple[str, str], sqlite3.Row | None] = {}
+        out: list[tuple[str, str, tuple[int, int] | None]] = []
+        for key in item_keys:
+            owner, name, number = parse_item_key(key)
+            cache_key = (owner.lower(), name.lower())
+            if cache_key not in repo_cache:
+                repo_cache[cache_key] = self._find_repo_row(owner, name)
+            row = repo_cache[cache_key]
+            if row is None:
+                out.append((key, key, None))
+            else:
+                out.append(
+                    (key, f"{row['full_name']}#{number}", (int(row["repo_id"]), number))
+                )
+        return out
+
+    def _query_pr_node_ids(
+        self, pairs: Sequence[tuple[int, int]]
+    ) -> dict[tuple[int, int] | None, str]:
+        """Batch-loads known `pull_requests.node_id` values for `(repo_id, number)` pairs."""
+        unique_pairs = list(dict.fromkeys(pairs))
+        if not unique_pairs:
+            return {}
+        values_sql = ", ".join("(?, ?)" for _ in unique_pairs)
+        params = [v for pair in unique_pairs for v in pair]
+        rows = self.conn.execute(
+            f"""
+            SELECT repo_id, number, node_id FROM pull_requests
+            WHERE node_id IS NOT NULL AND (repo_id, number) IN (VALUES {values_sql})
+            """,
+            params,
+        ).fetchall()
+        return {
+            (int(r["repo_id"]), int(r["number"])): str(r["node_id"])
+            for r in rows
+            if r["node_id"]
+        }
+
+    def _query_state_node_ids(self, state_keys: Sequence[str]) -> dict[str, str]:
+        """Batch-loads fallback `node_id:<item_key>` entries from `service_state`."""
+        unique_keys = list(dict.fromkeys(state_keys))
+        if not unique_keys:
+            return {}
+        marks = ", ".join("?" for _ in unique_keys)
+        rows = self.conn.execute(
+            f"SELECT key, value FROM service_state WHERE value IS NOT NULL AND key IN ({marks})",
+            unique_keys,
+        ).fetchall()
+        return {str(r["key"]): str(r["value"]) for r in rows if r["value"]}
+
     def get_node_ids(self, item_keys: Iterable[str]) -> dict[str, str]:
         """Returns known GraphQL node ids keyed by the item keys passed in."""
+        batch = self._resolve_keys_batch(item_keys)
+        if not batch:
+            return {}
+        pr_nodes = self._query_pr_node_ids(
+            [pair for _, _, pair in batch if pair is not None]
+        )
+        state_nodes = self._query_state_node_ids(
+            [
+                f"{NODE_ID_STATE_PREFIX}{canon}"
+                for _, canon, pair in batch
+                if pair not in pr_nodes
+            ]
+        )
         out: dict[str, str] = {}
-        for key in item_keys:
-            resolved = self._resolve_key(key, create=False)
-            node_id = None
-            if resolved is not None:
-                row = self.conn.execute(
-                    "SELECT node_id FROM pull_requests WHERE repo_id = ? AND number = ?",
-                    (resolved[0], resolved[2]),
-                ).fetchone()
-                node_id = row["node_id"] if row else None
-            node_id = node_id or self.get_state(
-                f"{NODE_ID_STATE_PREFIX}{self.canonical_item_key(key)}"
+        for key, canon, pair in batch:
+            node_id = pr_nodes.get(pair) or state_nodes.get(
+                f"{NODE_ID_STATE_PREFIX}{canon}"
             )
             if node_id:
-                out[key] = str(node_id)
+                out[key] = node_id
         return out
 
     def set_node_id(self, item_key: str, node_id: str) -> None:
@@ -1162,25 +1475,100 @@ class LiveStoreMixin:
 
         Keys are canonicalized against registered repository casing before matching.
         """
-        keys = list(dict.fromkeys(self.canonical_item_key(k) for k in item_keys))
-        if not keys:
+        key_by_pair = {
+            pair: canon
+            for _, canon, pair in self._resolve_keys_batch(item_keys)
+            if pair is not None
+        }
+        if not key_by_pair:
             return {}
-        marks = ", ".join("?" for _ in keys)
+        pairs = list(key_by_pair)
+        values_sql = ", ".join("(?, ?)" for _ in pairs)
+        params = [v for pair in pairs for v in pair]
         rows = self.conn.execute(
             f"""
-            SELECT r.full_name || '#' || p.number AS item_key, p.live_fetched_at
-            FROM pull_requests p JOIN repos r ON r.repo_id = p.repo_id
+            SELECT p.repo_id, p.number, p.live_fetched_at
+            FROM pull_requests p
             WHERE p.live_fetched_at IS NOT NULL
-              AND r.full_name || '#' || p.number IN ({marks})
+              AND (p.repo_id, p.number) IN (VALUES {values_sql})
             """,
-            keys,
+            params,
         ).fetchall()
         return {
-            str(r["item_key"]): datetime.fromisoformat(
+            key_by_pair[(int(r["repo_id"]), int(r["number"]))]: datetime.fromisoformat(
                 str(r["live_fetched_at"])
             ).timestamp()
             for r in rows
+            if (int(r["repo_id"]), int(r["number"])) in key_by_pair
         }
+
+    def get_live_pr_fingerprints(
+        self, item_keys: Iterable[str]
+    ) -> dict[str, tuple[str | None, str | None, str | None, int | None]]:
+        """Returns `{canonical_key: (updated_at, head_sha, rollup_state, rollup_total)}` for live PRs."""
+        resolved = [
+            r
+            for k in item_keys
+            if (r := self._resolve_key(k, create=False)) is not None
+        ]
+        if not resolved:
+            return {}
+        pairs = list(dict.fromkeys((r[0], r[2]) for r in resolved))
+        key_by_pair = {(r[0], r[2]): r[1] for r in resolved}
+        values_sql = ", ".join("(?, ?)" for _ in pairs)
+        params: list[Any] = []
+        for repo_id, number in pairs:
+            params.extend((repo_id, number))
+        rows = self.conn.execute(
+            f"""
+            SELECT p.repo_id, p.number, p.updated_at, p.head_sha,
+                   ro.state AS rollup_state, ro.total AS rollup_total
+            FROM pull_requests p
+            LEFT JOIN pr_rollup ro
+              ON ro.repo_id = p.repo_id AND ro.pr_number = p.number AND ro.head_oid = p.head_sha
+            WHERE p.live_fetched_at IS NOT NULL
+              AND (p.repo_id, p.number) IN (VALUES {values_sql})
+            """,
+            params,
+        ).fetchall()
+        out: dict[str, tuple[str | None, str | None, str | None, int | None]] = {}
+        for row in rows:
+            pair = (int(row["repo_id"]), int(row["number"]))
+            key = key_by_pair.get(pair)
+            if key is not None:
+                out[key] = (
+                    row["updated_at"],
+                    row["head_sha"],
+                    row["rollup_state"],
+                    int(row["rollup_total"])
+                    if row["rollup_total"] is not None
+                    else None,
+                )
+        return out
+
+    def touch_live_fetched_at(
+        self, item_keys: Iterable[str], now: float | None = None
+    ) -> None:
+        """Stamps `live_fetched_at` (and `pr_rollup.fetched_at`) for unchanged hot refreshes."""
+        pairs = list(
+            dict.fromkeys(
+                (r[0], r[2])
+                for k in item_keys
+                if (r := self._resolve_key(k, create=False)) is not None
+            )
+        )
+        if not pairs:
+            return
+        now_iso = iso_at(now)
+        with self.conn:
+            self.conn.executemany(
+                "UPDATE pull_requests SET live_fetched_at = ? WHERE repo_id = ? AND number = ?",
+                [(now_iso, repo_id, number) for repo_id, number in pairs],
+            )
+            self.conn.executemany(
+                "UPDATE pr_rollup SET fetched_at = ? WHERE repo_id = ? AND pr_number = ?",
+                [(now_iso, repo_id, number) for repo_id, number in pairs],
+            )
 
     def get_pr_head_sha(self, item_key: str) -> str | None:
         """Returns the stored `pull_requests.head_sha` for a PR, or None if unknown."""
@@ -1255,14 +1643,12 @@ class LiveStoreMixin:
         """Deletes idle `items` repositories older than `cutoff_iso` inside a transaction."""
         rows = self.conn.execute(
             """
-            SELECT r.repo_id FROM repos r
+            SELECT r.repo_id, r.full_name FROM repos r
             WHERE r.mode = ?
               AND r.created_at < ?
               AND NOT EXISTS (
                 SELECT 1 FROM watches w
-                WHERE w.lease_expires_at > ?
-                  AND lower(substr(w.item_key, 1, length(r.full_name) + 1))
-                      = lower(r.full_name || '#')
+                WHERE w.repo_id = r.repo_id AND w.lease_expires_at > ?
               )
               AND NOT EXISTS (
                 SELECT 1 FROM notifications n
@@ -1273,18 +1659,24 @@ class LiveStoreMixin:
               )
               AND NOT EXISTS (
                 SELECT 1 FROM viewer_sets v
-                WHERE v.last_seen_at >= ?
-                  AND lower(substr(v.item_key, 1, length(r.full_name) + 1))
+                WHERE v.repo_id = r.repo_id AND v.last_seen_at >= ?
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM changes c
+                WHERE c.at >= ?
+                  AND lower(substr(c.item_key, 1, length(r.full_name) + 1))
                       = lower(r.full_name || '#')
               )
             """,
-            (REPO_MODE_ITEMS, cutoff_iso, now_iso, cutoff_iso, cutoff_iso),
+            (REPO_MODE_ITEMS, cutoff_iso, now_iso, cutoff_iso, cutoff_iso, cutoff_iso),
         ).fetchall()
         repo_ids = [int(r["repo_id"]) for r in rows]
         if not repo_ids:
             return 0
+        for row in rows:
+            self._delete_repo_live_logs_in_tx(str(row["full_name"]))
         marks = ", ".join("?" for _ in repo_ids)
-        self.conn.execute(
+        fts_cur = self.conn.execute(
             f"""
             DELETE FROM chunks_fts
             WHERE rowid IN (SELECT rowid FROM chunks WHERE repo_id IN ({marks}))
@@ -1294,6 +1686,8 @@ class LiveStoreMixin:
         cur = self.conn.execute(
             f"DELETE FROM repos WHERE repo_id IN ({marks})", repo_ids
         )
+        if fts_cur.rowcount:
+            self._bump_vector_cache_seq_in_tx()
         return cur.rowcount
 
     def prune(
@@ -1314,7 +1708,8 @@ class LiveStoreMixin:
         watch or recent notification or viewer-set row are removed along with
         their FTS chunks and cascaded child/alias rows. `timeline_dirty` rows
         older than `keep_timeline_dirty_s` (targets that were never stored) are
-        removed too.
+        removed too, as are superseded `check_runs` rows whose `head_oid`
+        differs from the stored PR's `head_sha`.
 
         Returns:
             Rows deleted per table.
@@ -1335,9 +1730,35 @@ class LiveStoreMixin:
                     (iso_at(moment - keep_s),),
                 )
                 deleted[table] = cur.rowcount
+            self.conn.execute(
+                """
+                DELETE FROM check_runs
+                WHERE EXISTS (
+                  SELECT 1 FROM pull_requests p
+                  WHERE p.repo_id = check_runs.repo_id
+                    AND p.number = check_runs.pr_number
+                    AND p.head_sha IS NOT NULL
+                    AND p.head_sha <> check_runs.head_oid
+                )
+                """
+            )
         deleted["watches"] = self.prune_expired_watches(moment)
         with self.conn:
             deleted["items_repos"] = self._prune_idle_items_repos_in_tx(
                 iso_at(moment), iso_at(moment - keep_idle_items_repo_s)
             )
         return deleted
+
+
+def read_heartbeat_version(db_path: Path) -> str | None:
+    """Reads `service_heartbeat.version` from `db_path` without migrating or creating the DB."""
+    if not db_path.is_file():
+        return None
+    try:
+        with contextlib.closing(sqlite3.connect(db_path, timeout=2.0)) as conn:
+            row = conn.execute(
+                "SELECT version FROM service_heartbeat WHERE id = 1"
+            ).fetchone()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row and row[0] is not None else None

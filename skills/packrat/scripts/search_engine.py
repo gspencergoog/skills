@@ -139,48 +139,7 @@ def sanitize_fts5_query(raw_query: str) -> str:
 
 def _build_filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
     """Builds SQL WHERE predicates and bind parameters for SearchFilters."""
-    clauses: list[str] = []
-    params: list[Any] = []
-
-    if filters.repo:
-        clauses.append("(LOWER(r.full_name) = LOWER(?) OR LOWER(r.name) = LOWER(?))")
-        params.extend([filters.repo, filters.repo])
-
-    if filters.kinds:
-        placeholders = ",".join("?" for _ in filters.kinds)
-        clauses.append(f"c.source_kind IN ({placeholders})")
-        params.extend(filters.kinds)
-
-    if filters.path_prefix:
-        escaped_prefix = (
-            filters.path_prefix.replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
-        clauses.append("c.file_path LIKE ? ESCAPE '\\'")
-        params.append(f"{escaped_prefix}%")
-
-    if filters.state:
-        clauses.append(
-            """(
-              (c.source_kind = 'issue' AND EXISTS (
-                SELECT 1 FROM issues i
-                WHERE i.repo_id = c.repo_id AND i.number = c.item_number
-                  AND UPPER(i.state) = UPPER(?)
-              ))
-              OR
-              (c.source_kind = 'pr' AND EXISTS (
-                SELECT 1 FROM pull_requests p
-                WHERE p.repo_id = c.repo_id AND p.number = c.item_number
-                  AND UPPER(p.state) = UPPER(?)
-              ))
-            )"""
-        )
-        params.extend([filters.state, filters.state])
-
-    if not clauses:
-        return "", params
-    return " AND " + " AND ".join(clauses), params
+    return PackratStore.build_search_filter_sql(filters)
 
 
 def search_fts5_bm25(
@@ -193,23 +152,9 @@ def search_fts5_bm25(
     fts_expr = sanitize_fts5_query(query)
     if not fts_expr:
         return []
-    filter_sql, filter_params = _build_filter_sql(filters)
-    sql = f"""
-    SELECT
-      c.chunk_id,
-      bm25(chunks_fts, 1.0, 1.0, 1.5, 5.0, 1.0) AS raw_bm25
-    FROM chunks_fts
-    JOIN chunks c ON c.rowid = chunks_fts.rowid
-    JOIN repos r ON r.repo_id = c.repo_id
-    WHERE chunks_fts MATCH ?
-    {filter_sql}
-    ORDER BY raw_bm25 ASC
-    LIMIT ?
-    """
-    rows = store.conn.execute(sql, [fts_expr, *filter_params, limit]).fetchall()
+    rows = store.query_fts_candidates(fts_expr, filters, limit=limit)
     return [
-        (str(row["chunk_id"]), idx + 1, float(row["raw_bm25"]))
-        for idx, row in enumerate(rows)
+        (chunk_id, idx + 1, raw_bm25) for idx, (chunk_id, raw_bm25) in enumerate(rows)
     ]
 
 
@@ -330,15 +275,7 @@ def _ensure_vector_mmap_cache(
     if existing is not None or not allow_rebuild:
         return existing
 
-    rows = store.conn.execute(
-        """
-        SELECT ce.rowid, ce.scale, ce.vector_u8, ce.model_id
-        FROM chunk_embeddings ce
-        JOIN chunks c ON c.chunk_id = ce.chunk_id
-        WHERE ce.content_sha256 = c.content_sha256
-        ORDER BY ce.rowid ASC
-        """
-    ).fetchall()
+    rows = store.read_all_embeddings_for_mmap()
     models = {str(r[3]) for r in rows if r[3]}
     uniform_model = next(iter(models)) if len(models) == 1 else None
     meta_path, u8_path, scales_path, rowids_path = _mmap_paths(resolved_dir)
@@ -364,24 +301,11 @@ def _resolve_filtered_mmap_indices(
     """Returns sorted mmap row indices matching `filters` and `model_id`."""
     import numpy as np
 
-    filter_sql, filter_params = _build_filter_sql(filters)
-    model_sql = " AND ce.model_id = ?" if model_id else ""
-    sql_params = [model_id, *filter_params] if model_id else filter_params
-    sql = f"""
-    SELECT ce.rowid
-    FROM chunk_embeddings ce
-    JOIN chunks c ON c.chunk_id = ce.chunk_id
-    JOIN repos r ON r.repo_id = c.repo_id
-    WHERE ce.content_sha256 = c.content_sha256
-    {model_sql}
-    {filter_sql}
-    ORDER BY ce.rowid ASC
-    """
-    rows = store.conn.execute(sql, sql_params).fetchall()
-    if not rows:
+    rowids = store.resolve_filtered_chunk_ids(filters, model_id)
+    if not rowids:
         return np.empty(0, dtype=np.int64)
     n_rows = len(rowids_mmap)
-    matching_rowids = np.array([int(r[0]) for r in rows], dtype=np.int64)
+    matching_rowids = np.array(rowids, dtype=np.int64)
     idx = np.searchsorted(rowids_mmap, matching_rowids)
     valid_mask = (idx < n_rows) & (
         rowids_mmap[np.minimum(idx, n_rows - 1)] == matching_rowids
@@ -443,12 +367,7 @@ def _map_winning_rowids_to_chunks(
     if not winning_pairs:
         return []
     winning_rowids = [rid for rid, _ in winning_pairs]
-    placeholders = ",".join("?" for _ in winning_rowids)
-    id_rows = store.conn.execute(
-        f"SELECT rowid, chunk_id FROM chunk_embeddings WHERE rowid IN ({placeholders})",
-        winning_rowids,
-    ).fetchall()
-    rowid_to_cid = {int(r[0]): str(r[1]) for r in id_rows}
+    rowid_to_cid = store.get_embedding_chunk_ids_by_rowids(winning_rowids)
     scored_hits = [
         (score_val, rowid_to_cid[rid])
         for rid, score_val in winning_pairs
@@ -531,29 +450,11 @@ def _search_vector_stdlib(
     q_offset_int = 128 * sum(w for _, w in nz_dims)
     inv_q_scale = 1.0 / 16384.0
 
-    filter_sql, filter_params = _build_filter_sql(filters)
-    model_sql = " AND ce.model_id = ?" if model_id else ""
-    sql_params = [model_id, *filter_params] if model_id else filter_params
-    sql = f"""
-    SELECT
-      ce.chunk_id,
-      ce.scale,
-      ce.vector_u8
-    FROM chunk_embeddings ce
-    JOIN chunks c ON c.chunk_id = ce.chunk_id
-    JOIN repos r ON r.repo_id = c.repo_id
-    WHERE ce.content_sha256 = c.content_sha256
-    {model_sql}
-    {filter_sql}
-    """
-    cursor = store.conn.execute(sql, sql_params)
     heap: list[tuple[float, str]] = []
-    for row in cursor:
-        blob = bytes(row[2])
-        scale = float(row[1])
+    for chunk_id, scale, blob in store.stream_filtered_embeddings(filters, model_id):
         dot_int = sum(w * blob[i] for i, w in nz_dims) - q_offset_int
         sim = dot_int * scale * inv_q_scale
-        item = (sim, str(row[0]))
+        item = (sim, chunk_id)
         if len(heap) < limit:
             heapq.heappush(heap, item)
         elif item > heap[0]:

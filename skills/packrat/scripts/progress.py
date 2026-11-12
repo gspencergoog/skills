@@ -24,6 +24,18 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h{rem_min:02d}m"
 
 
+def format_bytes(num_bytes: int) -> str:
+    """Formats a byte count as a compact human-readable string (B, KiB, MiB, GiB)."""
+    size = max(0, int(num_bytes))
+    if size >= 1024**3:
+        return f"{size / (1024**3):.2f} GiB"
+    if size >= 1024**2:
+        return f"{size / (1024**2):.2f} MiB"
+    if size >= 1024:
+        return f"{size / 1024:.1f} KiB"
+    return f"{size} B"
+
+
 def format_eta(elapsed_sec: float, completed: int, total: int | None) -> str:
     """Computes a remaining time estimate string when a positive rate and total are known."""
     if (
@@ -58,6 +70,8 @@ def format_status_line(
     detail: str = "",
 ) -> str:
     """Builds a single-line status summary for either TTY or plain heartbeat output."""
+    if total is None and completed <= 0 and detail:
+        return f"[{repo}] {phase}: {detail} ({format_duration(elapsed_sec)})"
     counts = _format_counts(completed, total)
     parts = [f"[{repo}] {phase}: {counts}"]
     if detail:
@@ -190,6 +204,11 @@ class StderrProgressReporter:
     def effective_mode(self) -> Literal["tty", "plain", "off"]:
         """Returns the resolved output mode ('tty', 'plain', or 'off')."""
         return self._effective_mode
+
+    @property
+    def has_emitted_in_phase(self) -> bool:
+        """Whether at least one progress update was written during the current phase."""
+        return self._last_emit_at is not None
 
     def _terminal_limit(self) -> int:
         """Returns the maximum character width for a single-line TTY status update."""

@@ -4,8 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -14,76 +17,122 @@ import time
 from collections.abc import Sequence
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from auto_sync import (
-    AutoSyncStatus,
-    disable_auto_sync,
-    enable_auto_sync,
-    get_auto_sync_status,
-)
-from db_migrations import SchemaTooNewError
-from db_store import DEFAULT_DB_PATH, PackratStore
-from embedder import (
-    ensure_onnx_model,
-    get_default_embedder,
-    sync_repo_embeddings,
-)
-from gh_transport import run_gh_command
-from git_indexer import sync_git_codebase
-from github_sync import (
-    DEFAULT_BACKFILL_MAX_PAGES,
-    GhAuthProbe,
-    probe_gh_auth,
-    sync_backfill_only,
-    sync_github_metadata,
-)
-from models import (
-    BACKFILL_STREAMS,
-    RepoConfig,
-    SearchFilters,
-    SyncStats,
-    TimelineMode,
-    utc_now_iso,
-)
-from progress import (
-    NULL_REPORTER,
-    ProgressReporter,
-    StderrProgressReporter,
-    format_duration,
-)
-from rate_budget import RATE_BUDGET_FILENAME, RateBudget, RateSnapshot
-from search_engine import hybrid_rrf_search
-from serve_cli import (
-    add_live_parsers,
-    cmd_serve,
-    fold_timeline_stats,
-    format_service_status,
-    github_sync_stopped,
-    service_status,
-)
-from sync_runtime import (
-    AutoSyncRunRecord,
-    LockMode,
-    SyncLockInfo,
-    acquire_sync_lock,
-    write_auto_sync_run_state,
-)
-from timeline_sync import sync_repo_timelines
+if TYPE_CHECKING:
+    from auto_sync import AutoSyncStatus
+    from db_store import PackratStore
+    from github_sync import GhAuthProbe
+    from models import ExportSummary, RepoConfig, SyncStats
+    from progress import ProgressReporter
+    from rate_budget import RateBudget, RateSnapshot
+    from sync_runtime import AutoSyncRunRecord, LockMode, SyncLockInfo
+
+_LAZY_ATTRS: dict[str, tuple[str, str]] = {
+    "AutoSyncStatus": ("auto_sync", "AutoSyncStatus"),
+    "disable_auto_sync": ("auto_sync", "disable_auto_sync"),
+    "enable_auto_sync": ("auto_sync", "enable_auto_sync"),
+    "get_auto_sync_status": ("auto_sync", "get_auto_sync_status"),
+    "SchemaTooNewError": ("db_migrations", "SchemaTooNewError"),
+    "DEFAULT_DB_PATH": ("db_store", "DEFAULT_DB_PATH"),
+    "ExportIntegrityError": ("db_store", "ExportIntegrityError"),
+    "PackratStore": ("db_store", "PackratStore"),
+    "ensure_onnx_model": ("embedder", "ensure_onnx_model"),
+    "get_default_embedder": ("embedder", "get_default_embedder"),
+    "get_default_embedder_model_id": ("embedder", "get_default_embedder_model_id"),
+    "sync_repo_embeddings": ("embedder", "sync_repo_embeddings"),
+    "run_gh_command": ("gh_transport", "run_gh_command"),
+    "sync_git_codebase": ("git_indexer", "sync_git_codebase"),
+    "DEFAULT_BACKFILL_MAX_PAGES": ("github_sync", "DEFAULT_BACKFILL_MAX_PAGES"),
+    "GhAuthProbe": ("github_sync", "GhAuthProbe"),
+    "probe_gh_auth": ("github_sync", "probe_gh_auth"),
+    "sync_backfill_only": ("github_sync", "sync_backfill_only"),
+    "sync_github_metadata": ("github_sync", "sync_github_metadata"),
+    "BACKFILL_STREAMS": ("models", "BACKFILL_STREAMS"),
+    "EXIT_LOCKED_RETRY": ("models", "EXIT_LOCKED_RETRY"),
+    "RepoConfig": ("models", "RepoConfig"),
+    "SearchFilters": ("models", "SearchFilters"),
+    "SyncStats": ("models", "SyncStats"),
+    "TimelineMode": ("models", "TimelineMode"),
+    "UNTRUSTED_PROSE_COLUMNS": ("models", "UNTRUSTED_PROSE_COLUMNS"),
+    "utc_now_iso": ("models", "utc_now_iso"),
+    "wrap_untrusted_text": ("models", "wrap_untrusted_text"),
+    "NULL_REPORTER": ("progress", "NULL_REPORTER"),
+    "ProgressReporter": ("progress", "ProgressReporter"),
+    "StderrProgressReporter": ("progress", "StderrProgressReporter"),
+    "format_duration": ("progress", "format_duration"),
+    "RATE_BUDGET_FILENAME": ("rate_budget", "RATE_BUDGET_FILENAME"),
+    "RateBudget": ("rate_budget", "RateBudget"),
+    "RateSnapshot": ("rate_budget", "RateSnapshot"),
+    "hybrid_rrf_search": ("search_engine", "hybrid_rrf_search"),
+    "add_live_parsers": ("serve_cli", "add_live_parsers"),
+    "cmd_serve": ("serve_cli", "cmd_serve"),
+    "fold_timeline_stats": ("serve_cli", "fold_timeline_stats"),
+    "format_service_status": ("serve_cli", "format_service_status"),
+    "github_sync_stopped": ("serve_cli", "github_sync_stopped"),
+    "service_status": ("serve_cli", "service_status"),
+    "AutoSyncRunRecord": ("sync_runtime", "AutoSyncRunRecord"),
+    "LockMode": ("sync_runtime", "LockMode"),
+    "SyncLockInfo": ("sync_runtime", "SyncLockInfo"),
+    "acquire_sync_lock": ("sync_runtime", "acquire_sync_lock"),
+    "write_auto_sync_run_state": ("sync_runtime", "write_auto_sync_run_state"),
+    "sync_repo_timelines": ("timeline_sync", "sync_repo_timelines"),
+}
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily loads command-specific symbols on first attribute access (PEP 562)."""
+    target = _LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    mod_name, attr_name = target
+    mod = __import__(mod_name, fromlist=[attr_name])
+    val = getattr(mod, attr_name)
+    globals()[name] = val
+    return val
+
+
+def _lazy(name: str) -> Any:
+    """Resolves a symbol via module globals (honoring mock.patch) or PEP 562 __getattr__."""
+    if name in globals():
+        return globals()[name]
+    return __getattr__(name)
+
 
 INIT_SQL_FILENAME = "init.sql"
 
 SYNC_TIMELINE_MAX_BATCHES = 500
 """Timeline batches per pass in `packrat sync` (20 items each, not counting follow-up pages)."""
 
+_DEFAULT_BACKFILL_MAX_PAGES = 250
+
+_EMPTY_TABLE_COUNTS: dict[str, int] = {
+    "issues": 0,
+    "pull_requests": 0,
+    "review_threads": 0,
+    "comments": 0,
+    "discussions": 0,
+    "commits": 0,
+    "code_symbols": 0,
+    "doc_sections": 0,
+    "chunks": 0,
+    "timeline_events": 0,
+    "timeline_dirty": 0,
+    "chunk_embeddings": 0,
+}
+
 
 def _resolve_db_path(db_path_str: str | None) -> Path:
     """Resolves the target SQLite database path from CLI args or default."""
-    return Path(db_path_str).expanduser() if db_path_str else DEFAULT_DB_PATH
+    return (
+        Path(db_path_str).expanduser()
+        if db_path_str
+        else Path(_lazy("DEFAULT_DB_PATH"))
+    )
 
 
 def _open_store(
@@ -91,7 +140,7 @@ def _open_store(
 ) -> PackratStore:
     """Opens PackratStore and optionally refreshes init.sql."""
     db_path = _resolve_db_path(db_path_str)
-    store = PackratStore(db_path)
+    store = _lazy("PackratStore")(db_path)
     if refresh_init_sql:
         store.write_init_sql()
     return store
@@ -104,39 +153,91 @@ NO_REPOS_MESSAGE = (
 )
 
 
-def _select_repos(store: PackratStore, repo_arg: str | None) -> list[RepoConfig]:
-    """Resolves the target repository list from an optional --repo filter."""
-    all_repos = store.list_repos()
+def _parse_repo_tokens(repo_arg: str | Sequence[str] | None) -> list[str]:
+    """Splits a string or sequence of `--repo` arguments into non-empty tokens."""
     if not repo_arg:
-        return all_repos
-    needle = repo_arg.strip().lower()
-    matched = [
-        r
-        for r in all_repos
-        if r.full_name.lower() == needle or r.name.lower() == needle
+        return []
+    items = [repo_arg] if isinstance(repo_arg, str) else list(repo_arg)
+    return [
+        part.strip() for raw in items for part in str(raw).split(",") if part.strip()
     ]
-    if not matched:
-        raise ValueError(f"Repository '{repo_arg}' is not registered in packrat.")
-    return matched
 
 
-def _select_mirror_repos(store: PackratStore, repo_arg: str | None) -> list[RepoConfig]:
-    """Resolves the `mirror` repositories that `packrat sync` should process.
+def _resolve_repo_token(
+    store: PackratStore,
+    all_repos: Sequence[RepoConfig],
+    token: str,
+) -> list[RepoConfig]:
+    """Resolves one `<owner>/<name>`, alias, or short `<name>` token to registered repos.
 
-    `items` repositories hold only watched or notified items; `packrat serve`
-    refreshes those, so sync skips them (no backfill, events, or indexing).
+    Looks up `store.get_repo(token)` (`full_name` and `repo_aliases`) first. If
+    not found, falls back to case-insensitive short `name` matching across
+    `all_repos`, preferring `mirror` repos when at least one `mirror` repo
+    matches so an auto-registered `items` repo with the same short name never
+    creates false ambiguity.
 
     Raises:
-        ValueError: `repo_arg` is unregistered, or names only `items` repositories.
+        ValueError: If `token` is unregistered or matches multiple candidate
+            repositories by short name.
     """
-    selected = _select_repos(store, repo_arg)
-    repos = [r for r in selected if r.is_mirror]
-    if repo_arg and not repos:
-        name = selected[0].full_name
+    cleaned = token.strip()
+    exact = store.get_repo(cleaned)
+    if exact is not None:
+        return [exact]
+    needle = cleaned.lower()
+    matched = [r for r in all_repos if r.name.lower() == needle]
+    if not matched:
+        raise ValueError(f"Repository '{cleaned}' is not registered in packrat.")
+    mirrors = [r for r in matched if r.is_mirror]
+    candidates = mirrors or matched
+    if len(candidates) > 1:
+        names = ", ".join(r.full_name for r in candidates)
         raise ValueError(
-            f"{name} is in items mode; run 'packrat repo add {name}' to mirror it."
+            f"Repository name '{cleaned}' is ambiguous ({names}); pass <owner>/<name>."
         )
-    return repos
+    return candidates
+
+
+def _select_repos(
+    store: PackratStore, repo_arg: str | Sequence[str] | None
+) -> list[RepoConfig]:
+    """Resolves the target repository list from an optional `--repo` filter."""
+    all_repos = store.list_repos()
+    tokens = _parse_repo_tokens(repo_arg)
+    if not tokens:
+        return all_repos
+    selected: list[RepoConfig] = []
+    seen_ids: set[int] = set()
+    for token in tokens:
+        for repo in _resolve_repo_token(store, all_repos, token):
+            if repo.repo_id not in seen_ids:
+                seen_ids.add(repo.repo_id)
+                selected.append(repo)
+    return selected
+
+
+def _select_mirror_repos(
+    store: PackratStore, repo_arg: str | Sequence[str] | None
+) -> list[RepoConfig]:
+    """Resolves the `mirror` repositories that `packrat sync` or `packrat export` should process.
+
+    `items` repositories hold only watched or notified items; `packrat serve`
+    refreshes those, so sync and export skip them unless explicitly named.
+
+    Raises:
+        ValueError: If `repo_arg` is unregistered or names any `items` repository.
+    """
+    tokens = _parse_repo_tokens(repo_arg)
+    selected = _select_repos(store, tokens or None)
+    if tokens:
+        for repo in selected:
+            if not repo.is_mirror:
+                raise ValueError(
+                    f"{repo.full_name} is in items mode; "
+                    f"run 'packrat repo add {repo.full_name}' to mirror it."
+                )
+        return selected
+    return [r for r in selected if r.is_mirror]
 
 
 def _merge_sync_stats(
@@ -147,7 +248,9 @@ def _merge_sync_stats(
     duration_sec: float = 0.0,
 ) -> dict[str, Any]:
     """Combines git, GitHub, and embedding sync metrics into a single dictionary."""
-    combined = SyncStats(repo_full_name=repo_name, duration_sec=round(duration_sec, 2))
+    combined = _lazy("SyncStats")(
+        repo_full_name=repo_name, duration_sec=round(duration_sec, 2)
+    )
     if git_stats is not None:
         combined.indexed_ref = git_stats.indexed_ref
         combined.indexed_sha = git_stats.indexed_sha
@@ -180,7 +283,7 @@ def _merge_sync_stats(
 def _backfill_summary(repo: RepoConfig) -> dict[str, dict[str, Any]]:
     """Returns per-stream backfill progress for `packrat status --json`."""
     summary: dict[str, dict[str, Any]] = {}
-    for stream in BACKFILL_STREAMS:
+    for stream in _lazy("BACKFILL_STREAMS"):
         state = repo.backfill(stream)
         summary[stream] = {
             "complete": state.complete,
@@ -199,7 +302,7 @@ def _backfill_warnings(repo: RepoConfig) -> list[str]:
     warnings: list[str] = []
     if not repo.is_mirror:
         return warnings
-    for stream in BACKFILL_STREAMS:
+    for stream in _lazy("BACKFILL_STREAMS"):
         state = repo.backfill(stream)
         if state.complete:
             continue
@@ -232,7 +335,7 @@ def _format_last_auto_sync(last_run: AutoSyncRunRecord | None) -> str | None:
     """Formats the persisted background auto-sync run summary for CLI output."""
     if last_run is None:
         return None
-    dur = format_duration(last_run.duration_sec)
+    dur = _lazy("format_duration")(last_run.duration_sec)
     counts = (
         f"repos={last_run.repos_total}, "
         f"commits=+{last_run.git_commits_upserted}, "
@@ -252,7 +355,7 @@ def _format_last_auto_sync(last_run: AutoSyncRunRecord | None) -> str | None:
 
 def _rate_budget_for(db_path: Path) -> RateBudget:
     """Returns the shared GitHub rate budget stored next to the database."""
-    return RateBudget(db_path.parent / RATE_BUDGET_FILENAME)
+    return _lazy("RateBudget")(db_path.parent / _lazy("RATE_BUDGET_FILENAME"))
 
 
 def _rate_budget_payload(
@@ -292,11 +395,12 @@ def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> No
     if last_line is not None:
         print(last_line)
     if "service" in payload:
-        print(format_service_status(payload["service"]))
+        print(_lazy("format_service_status")(payload["service"]))
     now = time.time()
+    snap_cls = _lazy("RateSnapshot")
     for raw in payload.get("rate_budget", {}).values():
         fields = {k: v for k, v in raw.items() if k != "expired"}
-        print(_format_rate_snapshot(RateSnapshot(**fields), now))
+        print(_format_rate_snapshot(snap_cls(**fields), now))
     if not payload["repos"]:
         print(f"\n{NO_REPOS_MESSAGE.replace('Error: ', '')}", end="")
     for item in payload["repos"]:
@@ -317,26 +421,57 @@ def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> No
             print(f"  Warning: {warning}")
 
 
+def _resolve_active_embedder_id(
+    *, allow_download: bool = False, reporter: Any = None
+) -> tuple[str, Any | None]:
+    """Resolves `(model_id, custom_embedder_or_None)`, honoring patched `get_default_embedder`."""
+    patched = globals().get("get_default_embedder")
+    if patched is not None and getattr(patched, "__module__", None) != "embedder":
+        kw: dict[str, Any] = {}
+        if allow_download:
+            kw["allow_download"] = allow_download
+        if reporter is not None:
+            kw["reporter"] = reporter
+        try:
+            emb = patched(**kw)
+        except TypeError:
+            emb = patched()
+        return str(emb.model_id), emb
+    rep = reporter if reporter is not None else _lazy("NULL_REPORTER")
+    model_id = str(
+        _lazy("get_default_embedder_model_id")(
+            allow_download=allow_download, reporter=rep
+        )
+    )
+    return model_id, None
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Handles `packrat status`."""
     store = _open_store(args.db)
     try:
         repos = _select_repos(store, args.repo)
-        embedder = get_default_embedder()
+        embedder_id, _ = _resolve_active_embedder_id()
         init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
         if not init_sql_path.exists():
             init_sql_path = store.write_init_sql()
-        auto_sync = get_auto_sync_status(db_path=store.db_path)
+        auto_sync = _lazy("get_auto_sync_status")(db_path=store.db_path)
+        verbose = bool(getattr(args, "verbose", False))
         payload: dict[str, Any] = {
             "db_path": str(store.db_path),
             "init_sql_path": str(init_sql_path),
-            "active_embedder": embedder.model_id,
+            "active_embedder": embedder_id,
             "auto_sync": asdict(auto_sync),
             "rate_budget": _rate_budget_payload(_rate_budget_for(store.db_path)),
-            "service": service_status(store),
+            "service": _lazy("service_status")(store),
             "repos": [],
         }
         for r in repos:
+            counts = (
+                store.table_counts(r.repo_id)
+                if (r.is_mirror or verbose)
+                else dict(_EMPTY_TABLE_COUNTS)
+            )
             payload["repos"].append(
                 {
                     "repo_id": r.repo_id,
@@ -350,7 +485,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "prs_watermark": r.prs_watermark,
                     "discussions_watermark": r.discussions_watermark,
                     "last_full_sweep_at": r.last_full_sweep_at,
-                    "counts": store.table_counts(r.repo_id),
+                    "counts": counts,
                     "backfill": _backfill_summary(r),
                     "warnings": _backfill_warnings(r) + _timeline_warnings(store, r),
                 }
@@ -368,7 +503,7 @@ def _skipped_gh_stats_from_probe(repo_name: str, probe: GhAuthProbe) -> SyncStat
     """Builds a skipped GitHub SyncStats record when preflight auth probing fails."""
     kind = probe.error_kind or "auth_error"
     detail = probe.detail or "gh auth unavailable"
-    gh_stats = SyncStats(repo_full_name=repo_name)
+    gh_stats = _lazy("SyncStats")(repo_full_name=repo_name)
     gh_stats.skipped_reason = f"github_{kind}: {detail}"
     gh_stats.errors.append(f"github auth preflight failed ({kind}: {detail})")
     return gh_stats
@@ -391,7 +526,7 @@ def _run_github_sync(
     """
     backfill_only = bool(getattr(args, "backfill_only", False))
     if backfill_only:
-        stats = sync_backfill_only(
+        stats = _lazy("sync_backfill_only")(
             store,
             repo,
             backfill_max_pages=args.backfill_max_pages,
@@ -399,7 +534,7 @@ def _run_github_sync(
             budget=budget,
         )
     else:
-        stats = sync_github_metadata(
+        stats = _lazy("sync_github_metadata")(
             store,
             repo,
             force=args.force,
@@ -408,19 +543,20 @@ def _run_github_sync(
             reporter=reporter,
             budget=budget,
         )
-    if getattr(args, "no_timeline", False) or github_sync_stopped(stats):
+    if getattr(args, "no_timeline", False) or _lazy("github_sync_stopped")(stats):
         return stats
-    timeline = sync_repo_timelines(
+    t_mode = _lazy("TimelineMode")
+    timeline = _lazy("sync_repo_timelines")(
         store,
         store.get_repo(repo.full_name) or repo,
-        mode=TimelineMode.BACKFILL if backfill_only else TimelineMode.ALL,
-        runner=run_gh_command,
+        mode=t_mode.BACKFILL if backfill_only else t_mode.ALL,
+        runner=_lazy("run_gh_command"),
         budget=budget,
         max_batches=SYNC_TIMELINE_MAX_BATCHES,
         drain_xrefs=not backfill_only,
         reporter=reporter,
     )
-    fold_timeline_stats(stats, timeline)
+    _lazy("fold_timeline_stats")(stats, timeline)
     return stats
 
 
@@ -429,39 +565,45 @@ def _sync_single_repo(
     repo: RepoConfig,
     args: argparse.Namespace,
     embedder: Any,
-    reporter: ProgressReporter = NULL_REPORTER,
+    reporter: ProgressReporter | None = None,
     gh_probe: GhAuthProbe | None = None,
     budget: RateBudget | None = None,
+    *,
+    allow_download: bool = False,
 ) -> dict[str, Any]:
     """Executes git, GitHub, and embedding sync for a single repository.
 
     Args:
         budget: Shared GitHub rate budget passed to `sync_github_metadata`.
     """
+    active_reporter = reporter if reporter is not None else _lazy("NULL_REPORTER")
     started = time.monotonic()
     git_stats: SyncStats | None = None
     gh_stats: SyncStats | None = None
 
     if not args.github_only:
-        git_stats = sync_git_codebase(
+        git_stats = _lazy("sync_git_codebase")(
             store,
             repo,
             force=args.force,
             fetch=args.fetch,
             max_commits=args.max_commits,
-            reporter=reporter,
+            reporter=active_reporter,
         )
     if not args.git_only:
         if gh_probe is not None and not gh_probe.ok:
             gh_stats = _skipped_gh_stats_from_probe(repo.full_name, gh_probe)
         else:
             fresh_repo = store.get_repo(repo.full_name) or repo
-            gh_stats = _run_github_sync(store, fresh_repo, args, reporter, budget)
-    embedded_count = sync_repo_embeddings(
+            gh_stats = _run_github_sync(
+                store, fresh_repo, args, active_reporter, budget
+            )
+    embedded_count = _lazy("sync_repo_embeddings")(
         store,
         repo.repo_id,
         embedder=embedder,
-        reporter=reporter,
+        allow_download=allow_download,
+        reporter=active_reporter,
         repo_label=repo.full_name,
     )
     elapsed = max(0.0, time.monotonic() - started)
@@ -488,9 +630,9 @@ def _sync_single_repo_guarded(
         return _sync_single_repo(store, repo, args, embedder, **kwargs)
     except sqlite3.OperationalError as exc:
         msg = f"sqlite write failed during sync ({exc})"
-        reporter = kwargs.get("reporter") or NULL_REPORTER
+        reporter = kwargs.get("reporter") or _lazy("NULL_REPORTER")
         reporter.error(repo.full_name, msg)
-        failed = SyncStats(repo_full_name=repo.full_name, errors=[msg])
+        failed = _lazy("SyncStats")(repo_full_name=repo.full_name, errors=[msg])
         return asdict(failed)
 
 
@@ -501,8 +643,11 @@ def _validate_git_sync_paths(
     """Returns an actionable error message if any target repo lacks a valid local git path."""
     if args.github_only or getattr(args, "backfill_only", False):
         return None
+    git_only = bool(getattr(args, "git_only", False))
     for repo in repos:
         if not repo.local_path:
+            if not git_only:
+                continue
             return (
                 f"Error: No local git worktree path is configured for '{repo.full_name}'.\n"
                 f"Configure it with:\n"
@@ -533,6 +678,16 @@ def _timeline_summary(res: dict[str, Any]) -> str:
     )
 
 
+def _format_skipped_sync_note(repo_full_name: str, skipped_reason: str) -> str:
+    """Formats a repository sync skipped-reason note for `_print_repo_sync_summary`."""
+    if skipped_reason == "no_local_path":
+        return (
+            f"  note: no_local_path (bind a checkout with: "
+            f"packrat repo set-path {repo_full_name} /path/to/checkout)"
+        )
+    return f"  note: {skipped_reason}"
+
+
 def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) -> None:
     """Prints a single repository's sync summary and notes immediately to stdout."""
     reporter.clear_active_line()
@@ -540,7 +695,7 @@ def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) ->
     ref_disp = res.get("indexed_ref") or "-"
     etag_note = "304-not-modified" if res.get("events_not_modified") else "checked"
     dur_sec = float(res.get("duration_sec") or 0.0)
-    dur_suffix = f" ({format_duration(dur_sec)})" if dur_sec >= 2.0 else ""
+    dur_suffix = f" ({_lazy('format_duration')(dur_sec)})" if dur_sec >= 2.0 else ""
     print(
         f"[{res['repo_full_name']}] ref={ref_disp} ({sha_disp}) events={etag_note} "
         f"commits=+{res['commits_upserted']} symbols=+{res['symbols_upserted']} "
@@ -550,9 +705,15 @@ def _print_repo_sync_summary(res: dict[str, Any], reporter: ProgressReporter) ->
         flush=True,
     )
     for key in (res.get("timeline") or {}).get("capped_items") or []:
-        print(f"  note: timeline of {key} has too many pages; marked synced", flush=True)
-    if res.get("skipped_reason"):
-        print(f"  note: {res['skipped_reason']}", flush=True)
+        print(
+            f"  note: timeline of {key} has too many pages; marked synced", flush=True
+        )
+    skipped_reason = res.get("skipped_reason")
+    if skipped_reason:
+        print(
+            _format_skipped_sync_note(str(res["repo_full_name"]), str(skipped_reason)),
+            flush=True,
+        )
     for stream in res.get("backfill_incomplete") or []:
         print(
             f"  note: {stream} backfill incomplete; run packrat sync again to continue",
@@ -585,10 +746,10 @@ def _handle_contended_sync_lock(
     detail = f"sync.lock held ({holder})"
 
     if getattr(args, "auto", False):
-        write_auto_sync_run_state(
+        _lazy("write_auto_sync_run_state")(
             db_path,
-            AutoSyncRunRecord(
-                ran_at=utc_now_iso(),
+            _lazy("AutoSyncRunRecord")(
+                ran_at=_lazy("utc_now_iso")(),
                 duration_sec=round(max(0.0, time.monotonic() - started), 2),
                 outcome="skipped_locked",
                 detail=detail,
@@ -676,10 +837,10 @@ def _record_auto_sync_run(
         + int(r.get("discussions_upserted") or 0)
         for r in results
     )
-    write_auto_sync_run_state(
+    _lazy("write_auto_sync_run_state")(
         db_path,
-        AutoSyncRunRecord(
-            ran_at=utc_now_iso(),
+        _lazy("AutoSyncRunRecord")(
+            ran_at=_lazy("utc_now_iso")(),
             duration_sec=round(max(0.0, time.monotonic() - started), 2),
             outcome=outcome,
             repos_total=len(results),
@@ -697,7 +858,7 @@ def _probe_github_if_needed(
     """Runs the preflight GitHub token check unless `--git-only` is active."""
     if args.git_only:
         return None
-    probe = probe_gh_auth()
+    probe = _lazy("probe_gh_auth")()
     if not probe.ok:
         kind = probe.error_kind or "auth_error"
         detail = probe.detail or "gh auth unavailable"
@@ -769,7 +930,7 @@ def _propagate_keyring_lock(
         and gh_probe.ok
         and any("keyring_locked" in str(err) for err in (res.get("errors") or ()))
     ):
-        return GhAuthProbe(
+        return _lazy("GhAuthProbe")(
             ok=False,
             error_kind="keyring_locked",
             detail="OS keyring locked during sync",
@@ -804,9 +965,10 @@ def _sync_repos_under_lock(
 
         gh_probe = _probe_github_if_needed(args, reporter)
         allow_download = not getattr(args, "no_download_model", False) and (
-            getattr(args, "download_model", False) or db_path == DEFAULT_DB_PATH
+            getattr(args, "download_model", False)
+            or db_path == Path(_lazy("DEFAULT_DB_PATH"))
         )
-        embedder = get_default_embedder(
+        embedder_id, embedder = _resolve_active_embedder_id(
             allow_download=allow_download, reporter=reporter
         )
         results: list[dict[str, Any]] = []
@@ -819,6 +981,7 @@ def _sync_repos_under_lock(
                 reporter=reporter,
                 gh_probe=gh_probe,
                 budget=budget,
+                allow_download=allow_download,
             )
             results.append(res)
             gh_probe = _propagate_keyring_lock(gh_probe, res)
@@ -831,7 +994,7 @@ def _sync_repos_under_lock(
             db_path,
             started,
             is_auto=is_auto,
-            embedder_id=embedder.model_id,
+            embedder_id=embedder_id,
             results=results,
             gh_probe=gh_probe,
         )
@@ -847,11 +1010,11 @@ def cmd_sync(args: argparse.Namespace) -> int:
     raw_mode = getattr(args, "lock_mode", None)
     lock_mode: LockMode = raw_mode or ("skip" if is_auto else "wait")
 
-    reporter = StderrProgressReporter(
+    reporter = _lazy("StderrProgressReporter")(
         mode=getattr(args, "progress", "auto"),
         quiet=bool(getattr(args, "quiet", False)),
     )
-    with acquire_sync_lock(db_path, mode=lock_mode) as lock_info:
+    with _lazy("acquire_sync_lock")(db_path, mode=lock_mode) as lock_info:
         if not lock_info.acquired:
             return _handle_contended_sync_lock(
                 args, db_path, lock_info, lock_mode, started
@@ -859,7 +1022,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         if getattr(args, "download_model", False) and not getattr(
             args, "no_download_model", False
         ):
-            ensure_onnx_model(allow_download=True, reporter=reporter)
+            _lazy("ensure_onnx_model")(allow_download=True, reporter=reporter)
         budget = _rate_budget_for(db_path)
         return _sync_repos_under_lock(args, db_path, reporter, started, budget=budget)
 
@@ -872,8 +1035,7 @@ def _empty_search_hint(store: PackratStore, repo_arg: str | None) -> str | None:
         return None
     if not repos:
         return "Note: no repositories are registered in packrat; run `packrat repo add <owner>/<name>`."
-    total_chunks = sum(store.table_counts(r.repo_id).get("chunks", 0) for r in repos)
-    if total_chunks == 0:
+    if not store.has_any_chunks([r.repo_id for r in repos]):
         return "Note: 0 indexed chunks in packrat; run `packrat sync` to populate the mirror."
     incomplete = [r.full_name for r in repos if _backfill_warnings(r)]
     if incomplete:
@@ -887,13 +1049,13 @@ def cmd_search(args: argparse.Namespace) -> int:
     store = _open_store(args.db)
     try:
         kinds = tuple(k.strip() for k in (args.kind or "").split(",") if k.strip())
-        filters = SearchFilters(
+        filters = _lazy("SearchFilters")(
             repo=args.repo,
             kinds=kinds,
             path_prefix=args.path,
             state=args.state,
         )
-        hits = hybrid_rrf_search(
+        hits = _lazy("hybrid_rrf_search")(
             store,
             query=args.query,
             filters=filters,
@@ -923,22 +1085,23 @@ def cmd_search(args: argparse.Namespace) -> int:
         store.close()
 
 
-def cmd_sql(args: argparse.Namespace) -> int:
-    """Handles `packrat sql` via read-only DuckDB v2.0 with init.sql."""
-    store = _open_store(args.db, refresh_init_sql=True)
-    init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
-    store.close()
-
-    duckdb_bin = (
+def _resolve_duckdb_bin() -> str:
+    """Returns the DuckDB CLI binary (`DUCKDB_BIN`, `PATH`, or `~/.local/bin/duckdb`)."""
+    return (
         os.environ.get("DUCKDB_BIN")
         or shutil.which("duckdb")
         or str(Path.home() / ".local" / "bin" / "duckdb")
     )
-    fmt_flag = f"-{args.format}"
+
+
+def _run_duckdb(
+    init_sql_path: Path, fmt_flag: str, query: str
+) -> subprocess.CompletedProcess[str] | None:
+    """Runs one read-only DuckDB query, writing a stderr line and returning None on launch failure."""
     try:
-        proc = subprocess.run(
+        return subprocess.run(
             [
-                duckdb_bin,
+                _resolve_duckdb_bin(),
                 "-batch",
                 "-dark-mode",
                 "-no-stdin",
@@ -946,7 +1109,7 @@ def cmd_sql(args: argparse.Namespace) -> int:
                 str(init_sql_path),
                 fmt_flag,
                 ":memory:",
-                args.query,
+                query,
             ],
             capture_output=True,
             text=True,
@@ -955,12 +1118,137 @@ def cmd_sql(args: argparse.Namespace) -> int:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         sys.stderr.write(f"Error executing duckdb: {exc}\n")
+        return None
+
+
+def _sql_source_ref(row: dict[str, Any], col: str) -> str:
+    """Picks the most specific identifier of `row` to label wrapped prose with."""
+    for key in ("item_key", "source_ref", "full_name"):
+        val = row.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return f"packrat:sql:{col}"
+
+
+def _wrap_sql_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Wraps string values of untrusted prose columns in `<untrusted_repo_content>`."""
+    prose_cols = _lazy("UNTRUSTED_PROSE_COLUMNS")
+    wrap = _lazy("wrap_untrusted_text")
+    wrapped: list[dict[str, Any]] = []
+    for row in rows:
+        out = dict(row)
+        for col, val in row.items():
+            if isinstance(val, str) and col.lower() in prose_cols:
+                out[col] = wrap(_sql_source_ref(row, col), val)
+        wrapped.append(out)
+    return wrapped
+
+
+def _cell_text(val: Any) -> str:
+    """Renders one SQL cell for text table output."""
+    if val is None:
+        return ""
+    if isinstance(val, (dict, list)):
+        return json.dumps(val, ensure_ascii=False)
+    return str(val)
+
+
+def _render_csv(cols: list[str], rows: list[dict[str, Any]]) -> str:
+    """Renders rows as CSV with a header line."""
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow(cols)
+    for row in rows:
+        writer.writerow([_cell_text(row.get(c)) for c in cols])
+    return buf.getvalue()
+
+
+def _render_markdown(cols: list[str], cells: list[list[str]]) -> str:
+    """Renders single-line cells as a GitHub-flavored Markdown table."""
+    esc = [[c.replace("|", "\\|") for c in r] for r in cells]
+    lines = [
+        "| " + " | ".join(cols) + " |",
+        "|" + "|".join("---" for _ in cols) + "|",
+    ]
+    lines.extend("| " + " | ".join(r) + " |" for r in esc)
+    return "\n".join(lines) + "\n"
+
+
+def _render_box(cols: list[str], cells: list[list[str]]) -> str:
+    """Renders single-line cells as a fixed-width box table."""
+    widths = [max(len(c), *(len(r[i]) for r in cells)) for i, c in enumerate(cols)]
+    border = "+" + "+".join("-" * (w + 2) for w in widths) + "+"
+    header = "|" + "|".join(f" {c.ljust(w)} " for c, w in zip(cols, widths)) + "|"
+    lines = [border, header, border]
+    lines.extend(
+        "|" + "|".join(f" {v.ljust(w)} " for v, w in zip(r, widths)) + "|"
+        for r in cells
+    )
+    lines.append(border)
+    return "\n".join(lines) + "\n"
+
+
+def _render_sql_table(rows: list[dict[str, Any]], fmt: str) -> str:
+    """Renders wrapped rows as `json`, `csv`, `markdown`, or `box` text without truncating cells."""
+    if fmt == "json":
+        return json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
+    if not rows:
+        return ""
+    cols = list(rows[0].keys())
+    if fmt == "csv":
+        return _render_csv(cols, rows)
+    cells = [
+        [_cell_text(row.get(c)).replace("\n", "\\n") for c in cols] for row in rows
+    ]
+    if fmt == "markdown":
+        return _render_markdown(cols, cells)
+    return _render_box(cols, cells)
+
+
+def _parse_duckdb_json(stdout: str) -> list[dict[str, Any]]:
+    """Parses `duckdb -json` output (one JSON array per statement) into the last result set."""
+    rows: list[dict[str, Any]] = []
+    decoder = json.JSONDecoder()
+    idx = 0
+    text = stdout.strip()
+    while idx < len(text):
+        parsed, end = decoder.raw_decode(text, idx)
+        if isinstance(parsed, list):
+            rows = [r for r in parsed if isinstance(r, dict)]
+        idx = end
+        while idx < len(text) and text[idx].isspace():
+            idx += 1
+    return rows
+
+
+def cmd_sql(args: argparse.Namespace) -> int:
+    """Handles `packrat sql` via read-only DuckDB v2.0 with init.sql.
+
+    Prose columns (`body`, `title`, `text`, ...) hold untrusted repository
+    content and are wrapped in `<untrusted_repo_content>` unless `--raw` is set.
+    """
+    store = _open_store(args.db, refresh_init_sql=True)
+    init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
+    store.close()
+
+    raw = bool(getattr(args, "raw", False))
+    fmt_flag = f"-{args.format}" if raw else "-json"
+    proc = _run_duckdb(init_sql_path, fmt_flag, args.query)
+    if proc is None:
         return 2
-    if proc.stdout:
-        sys.stdout.write(proc.stdout)
     if proc.stderr:
         sys.stderr.write(proc.stderr)
-    return proc.returncode
+    if proc.returncode != 0 or raw:
+        if proc.stdout:
+            sys.stdout.write(proc.stdout)
+        return proc.returncode
+    try:
+        rows = _parse_duckdb_json(proc.stdout)
+    except json.JSONDecodeError:
+        sys.stdout.write(proc.stdout)
+        return 0
+    sys.stdout.write(_render_sql_table(_wrap_sql_rows(rows), args.format))
+    return 0
 
 
 def _split_full_name(full_name: str) -> tuple[str, str] | None:
@@ -1026,7 +1314,7 @@ def cmd_repo(args: argparse.Namespace) -> int:
         if args.repo_action == "remove":
             return _cmd_repo_remove(store, args)
 
-        repos = store.list_repos()
+        repos = store.list_repos(mode=getattr(args, "mode", None))
         if args.json:
             print(json.dumps([asdict(r) for r in repos], indent=2))
             return 0
@@ -1106,16 +1394,16 @@ def cmd_auto_sync(args: argparse.Namespace) -> int:
     use_timer = bool(args.timer or getattr(args, "command", "") == "timer")
     try:
         if action in ("on", "enable"):
-            state = enable_auto_sync(
+            state = _lazy("enable_auto_sync")(
                 db_path=db_path,
                 interval_min=args.interval_min,
                 fetch=args.fetch,
                 mode="timer" if use_timer else "service",
             )
         elif action in ("off", "disable"):
-            state = disable_auto_sync(db_path=db_path)
+            state = _lazy("disable_auto_sync")(db_path=db_path)
         else:
-            state = get_auto_sync_status(db_path=db_path)
+            state = _lazy("get_auto_sync_status")(db_path=db_path)
     except (RuntimeError, ValueError, OSError) as exc:
         sys.stderr.write(f"Error managing auto-sync: {exc}\n")
         return 2
@@ -1130,6 +1418,104 @@ def cmd_auto_sync(args: argparse.Namespace) -> int:
     return 0
 
 
+_EXPORT_IMMEDIATE_PROGRESS_BYTES = 16 * 1024 * 1024
+
+
+def _format_byte_size(num_bytes: int) -> str:
+    """Formats a byte count as a human-readable KiB, MiB, or GiB string."""
+    if num_bytes >= 1024**3:
+        return f"{num_bytes / (1024**3):.2f} GiB ({num_bytes:,} bytes)"
+    if num_bytes >= 1024 * 1024:
+        return f"{num_bytes / (1024 * 1024):.2f} MiB ({num_bytes:,} bytes)"
+    if num_bytes >= 1024:
+        return f"{num_bytes / 1024:.1f} KiB ({num_bytes:,} bytes)"
+    return f"{num_bytes:,} bytes"
+
+
+def _approx_sqlite_footprint(db_path: Path) -> int:
+    """Sums the main SQLite file and any active WAL sidecar byte sizes."""
+    if str(db_path) == ":memory:":
+        return 0
+    total = db_path.stat().st_size if db_path.exists() else 0
+    wal = Path(f"{db_path}-wal")
+    if wal.exists():
+        total += wal.stat().st_size
+    return total
+
+
+def _print_export_summary(summary: ExportSummary) -> None:
+    """Prints human-readable `packrat export` metrics and recipient install instructions."""
+    dur = _lazy("format_duration")(summary.duration_sec)
+    repos_str = ", ".join(summary.exported_repos)
+    example_repo = (
+        summary.exported_repos[0] if summary.exported_repos else "<owner>/<name>"
+    )
+    print(f"Exported packrat database to {summary.dest_db_path} ({dur})")
+    print(f"  Schema version: {summary.schema_version}")
+    print(f"  Exported repos ({len(summary.exported_repos)}): {repos_str}")
+    print(
+        f"  Removed repos: items={summary.removed_items_repos}, "
+        f"mirror={summary.removed_mirror_repos}"
+    )
+    print(
+        f"  Remaining rows: chunks={summary.chunks_remaining:,}, "
+        f"embeddings={summary.embeddings_remaining:,}"
+    )
+    print(
+        f"  Size: {_format_byte_size(summary.source_bytes)} -> "
+        f"{_format_byte_size(summary.dest_bytes)}"
+    )
+    print("\nRecipient install commands:")
+    print("  packrat auto-sync off")
+    print(
+        "  rm -f ~/.local/share/packrat/repos.sqlite-wal "
+        "~/.local/share/packrat/repos.sqlite-shm"
+    )
+    print(
+        f"  cp {shlex.quote(summary.dest_db_path)} ~/.local/share/packrat/repos.sqlite"
+    )
+    print(f"  packrat repo set-path {example_repo} /path/to/local/checkout")
+    print("  packrat auto-sync on")
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Handles `packrat export`."""
+    store = _open_store(args.db, refresh_init_sql=False)
+    try:
+        repos = _select_mirror_repos(store, args.repo)
+        if not repos:
+            raise ValueError(NO_REPOS_MESSAGE.removeprefix("Error: ").strip())
+        progress_mode = getattr(args, "progress", "auto")
+        footprint = _approx_sqlite_footprint(store.db_path)
+        grace_sec = (
+            0.0
+            if progress_mode == "plain" or footprint >= _EXPORT_IMMEDIATE_PROGRESS_BYTES
+            else 2.0
+        )
+        reporter = _lazy("StderrProgressReporter")(
+            mode=progress_mode,
+            quiet=bool(getattr(args, "quiet", False) or getattr(args, "json", False)),
+            grace_sec=grace_sec,
+        )
+        repo_ids = [r.repo_id for r in repos] if _parse_repo_tokens(args.repo) else None
+        try:
+            summary = store.export_database(
+                Path(args.dest).expanduser(),
+                repo_ids=repo_ids,
+                force=bool(getattr(args, "force", False)),
+                reporter=reporter,
+            )
+        finally:
+            reporter.finish_phase()
+        if args.json:
+            print(json.dumps(asdict(summary), indent=2))
+            return 0
+        _print_export_summary(summary)
+        return 0
+    finally:
+        store.close()
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Dispatches `serve`, `watch`, `changes`, and `refresh` (see serve_cli.py).
 
@@ -1138,8 +1524,8 @@ def cmd_live(args: argparse.Namespace) -> int:
     """
     db_path = _resolve_db_path(args.db)
     if args.command_kind == "serve":
-        return cmd_serve(args, db_path)
-    store = PackratStore(db_path)
+        return _lazy("cmd_serve")(args, db_path)
+    store = _lazy("PackratStore")(db_path)
     try:
         return int(args.store_func(args, store))
     finally:
@@ -1162,12 +1548,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--repo", help="Filter by repository (<owner>/<name> or just <name>)."
     )
     p_status.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_status.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Also count rows of items-mode repositories (slower on large databases).",
+    )
     p_status.set_defaults(func=cmd_status)
 
     p_sync = sub.add_parser(
         "sync", help="Run incremental git diff-tree, GitHub, and vector sync."
     )
-    p_sync.add_argument("--repo", help="Sync only a specific repository.")
+    p_sync.add_argument(
+        "--repo",
+        action="append",
+        help="Sync only a specific repository (repeatable or comma-separated).",
+    )
     p_sync.add_argument(
         "--force", action="store_true", help="Force full re-index and bypass ETag."
     )
@@ -1207,7 +1603,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument(
         "--backfill-max-pages",
         type=int,
-        default=DEFAULT_BACKFILL_MAX_PAGES,
+        default=_DEFAULT_BACKFILL_MAX_PAGES,
         help="Safety cap on GraphQL pages per stream while backfilling history; "
         "an unfinished backfill resumes on the next sync.",
     )
@@ -1280,12 +1676,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="box",
         help="DuckDB output format.",
     )
+    p_sql.add_argument(
+        "--raw",
+        action="store_true",
+        help="Disable <untrusted_repo_content> wrapping of prose columns.",
+    )
     p_sql.set_defaults(func=cmd_sql)
 
     p_repo = sub.add_parser("repo", help="Manage tracked repositories.")
     repo_sub = p_repo.add_subparsers(dest="repo_action", required=True)
     p_repo_list = repo_sub.add_parser("list", help="List tracked repositories.")
     p_repo_list.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_repo_list.add_argument(
+        "--mode",
+        choices=("mirror", "items"),
+        default=None,
+        help="Only list repositories in this mode.",
+    )
     p_repo_list.set_defaults(func=cmd_repo)
 
     p_repo_add = repo_sub.add_parser("add", help="Register or update a repository.")
@@ -1375,19 +1782,70 @@ def build_parser() -> argparse.ArgumentParser:
     p_auto.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_auto.set_defaults(func=cmd_auto_sync)
 
-    add_live_parsers(sub, cmd_live)
+    p_export = sub.add_parser(
+        "export",
+        help="Export a scrubbed, vacuumed SQLite database snapshot for sharing.",
+    )
+    p_export.add_argument(
+        "dest",
+        help="Destination filesystem path for the exported SQLite database.",
+    )
+    p_export.add_argument(
+        "--repo",
+        action="append",
+        help="Export only specific mirror repository (<owner>/<name> or <name>; repeatable or comma-separated).",
+    )
+    p_export.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Overwrite destination file if it already exists.",
+    )
+    p_export.add_argument(
+        "--progress",
+        choices=("auto", "plain", "off"),
+        default="auto",
+        help="Progress display mode on stderr (default: auto).",
+    )
+    p_export.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output on stderr.",
+    )
+    p_export.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_export.set_defaults(func=cmd_export)
+
+    _lazy("add_live_parsers")(sub, cmd_live)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Main CLI dispatcher."""
+    """Main CLI dispatcher.
+
+    Exit codes: `0` success, `1` command failure, `2` usage or data error,
+    `3` (`EXIT_LOCKED_RETRY`) SQLite busy or locked; callers may retry.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (ValueError, SchemaTooNewError) as exc:
+    except (ValueError, _lazy("SchemaTooNewError")) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 2
+    except sqlite3.OperationalError as exc:
+        text = str(exc)
+        if "locked" in text.lower() or "busy" in text.lower():
+            sys.stderr.write(f"Error: packrat database is busy ({text}); retry.\n")
+            return int(_lazy("EXIT_LOCKED_RETRY"))
+        sys.stderr.write(f"Error: sqlite failure ({text}).\n")
+        return 1
+    except (_lazy("ExportIntegrityError"), sqlite3.DatabaseError, OSError) as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+    except KeyboardInterrupt:
+        sys.stderr.write("Error: interrupted.\n")
+        return 1
 
 
 if __name__ == "__main__":

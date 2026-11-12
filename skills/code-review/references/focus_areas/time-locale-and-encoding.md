@@ -11,7 +11,7 @@ Theme id: `time-locale-and-encoding`. Lane for merges: A.
 ## Failure modes
 
 1. Naive (zone-free) and timezone-aware timestamps, or local time and UTC, are mixed in comparisons, storage, or serialization.
-   Look at: `now()`, `DateTime`, `Date`, or timestamp parsing calls and the time zone they assume. Settles it: trace the time zone attached at creation, storage, and comparison sites; `Read` or `Deduction`.
+   Look at: `now()`, `DateTime`, `Date`, `zoneinfo.ZoneInfo` callers (catching `ZoneInfoNotFoundError` without `ValueError` on POSIX `TZ=:/path` strings), or timestamp parsers and the zone they assume. Settles it: trace the time zone and exception handling at creation, storage, and comparison sites; `Read` or `Deduction`.
 2. Adding 24 hours (or fixed seconds) in place of calendar day/month arithmetic produces wrong dates across DST transitions or month ends.
    Look at: duration math on wall-clock dates and month/year clamping logic. Settles it: trace the calculation on a DST spring-forward/fall-back day or on Jan 31 / Feb 29; `Deduction`.
 3. Using wall-clock time instead of a monotonic clock to measure elapsed duration or timeouts misbehaves when the system clock jumps.
@@ -24,6 +24,8 @@ Theme id: `time-locale-and-encoding`. Lane for merges: A.
    Look at: `open()`, `readAsString`, `InputStreamReader`, or subprocess pipes without `utf-8` specified. Settles it: read the I/O call signature and defaults; `Read`.
 7. Strings compared or hashed as keys or identifiers are not Unicode-normalized first, so visually identical NFC and NFD forms fail to match.
    Look at: user-supplied or filename strings used in equality checks, map keys, or deduplication sets. Settles it: check whether inputs pass through NFC/NFKC normalization before comparison; `Read`.
+8. Custom date formatters render the UTC offset written in the input string (`0` for `Z`) instead of the viewer's local zone, or support only specific token widths (`E` and `EEEE`, not `EEE`).
+   Look at: format pattern strings and the input ISO string's offset passed to `formatDate` or regex tokenizers. Settles it: read the formatter's token regex and timestamp parser; `Read`.
 
 ## Hypothesis templates
 
@@ -31,3 +33,5 @@ Theme id: `time-locale-and-encoding`. Lane for merges: A.
 - "Slicing `<string_var>` at index `<n>` in `<fn>` splits a multi-byte UTF-8 sequence or surrogate pair."
 - "Elapsed-time check in `<fn>` uses wall-clock `<clock_fn>`, which can go backward or jump on NTP adjustment."
 - "File open call at `<file:line>` omits an explicit UTF-8 encoding and falls back to the platform default."
+- "Passing UTC `Z` timestamp `<field>` to `<formatter>` renders UTC wall-clock fields under a local-time label, or uses unsupported token width `<token>`."
+- "`zoneinfo.ZoneInfo` wrapper `<fn>` catches `ZoneInfoNotFoundError` without catching `ValueError` on POSIX path `$TZ` values (`:/etc/localtime`)."

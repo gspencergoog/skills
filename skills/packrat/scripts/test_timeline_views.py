@@ -21,6 +21,7 @@ from models import (
     IssueRecord,
     PrRecord,
     ReviewRecord,
+    ReviewThreadRecord,
     TimelineEventRecord,
 )
 
@@ -208,6 +209,20 @@ class TimelineViewsTest(unittest.TestCase):
             ],
         )
 
+    def test_item_participants_uses_flat_participants_json(self) -> None:
+        rows = self._query(
+            "SELECT participant, role FROM v_item_participants "
+            "WHERE kind = 'pr' AND number = 2 AND role = 'inline_comment' "
+            "ORDER BY participant;"
+        )
+        self.assertEqual(
+            rows,
+            [
+                {"participant": "carol", "role": "inline_comment"},
+                {"participant": "erin", "role": "inline_comment"},
+            ],
+        )
+
 
 def _seed(store: PackratStore, repo_id: int) -> None:
     """Writes the PRs, reviews, timeline events, commits, and links the tests read."""
@@ -300,7 +315,20 @@ def _prs(repo_id: int) -> list[PrRecord]:
                 ),
             ),
         ),
-        pr(2, created_at=_at("08:00")),
+        pr(
+            2,
+            created_at=_at("08:00"),
+            review_threads=(
+                ReviewThreadRecord(
+                    thread_id="RT_flat",
+                    repo_id=repo_id,
+                    pr_number=2,
+                    reviewer="carol",
+                    comments_json="[]",
+                    participants_json='["carol", "erin"]',
+                ),
+            ),
+        ),
         pr(
             3,
             created_at=_at("09:00"),

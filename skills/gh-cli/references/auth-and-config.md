@@ -458,3 +458,9 @@ ______________________________________________________________________
    - If `gh` freezes waiting for input in background scripts or automated agent sessions, set `GH_PROMPT_DISABLED=1` or run `gh config set prompt disabled`.
 4. **Git Credential Helper Conflicts**:
    - If git continues prompting for HTTPS credentials after `gh auth setup-git`, check for competing credential helpers in `git config --show-origin --get-all credential.helper`.
+5. **Every Command Hangs on `Working...` After a Reboot (Linux Desktop Keyring)**:
+   - When `gh` stores its token in the desktop keyring (`hosts.yml` has no `oauth_token`), every command, including `gh auth status`, waits forever while the keyring is locked. This happens after a reboot until someone unlocks the keyring in the desktop session, which on a remote workstation means the remote desktop session. `curl https://api.github.com` still works, which rules out the network.
+   - Wrap diagnostic calls in `timeout` so they cannot hang the session, then ask the user to unlock the keyring or to run `gh auth login` again:
+     ```bash
+     timeout 15 gh auth status || echo "gh timed out: the keyring is probably locked"
+     ```

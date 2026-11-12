@@ -8,6 +8,7 @@ import unittest
 from progress import (
     NULL_REPORTER,
     StderrProgressReporter,
+    format_bytes,
     format_duration,
     format_eta,
     format_status_line,
@@ -38,6 +39,18 @@ class TestProgressReporter(unittest.TestCase):
         self.assertEqual(format_eta(10.0, 25, 100), "ETA 30s")
         self.assertEqual(format_eta(10.0, 100, 100), "")
         self.assertEqual(format_eta(10.0, 0, 100), "")
+        self.assertEqual(format_bytes(512), "512 B")
+        self.assertEqual(format_bytes(2048), "2.0 KiB")
+        self.assertEqual(format_bytes(5 * 1024 * 1024), "5.00 MiB")
+        self.assertEqual(format_bytes(8 * 1024**3), "8.00 GiB")
+
+        indeterminate = format_status_line(
+            "export", "vacuum", 0, None, 19.2, "compacting 8.00 GiB -> ~5.40 GiB live"
+        )
+        self.assertEqual(
+            indeterminate,
+            "[export] vacuum: compacting 8.00 GiB -> ~5.40 GiB live (19s)",
+        )
 
         line = format_status_line(
             "octo-org/widgets", "github prs", 250, 1000, 30.0, "page 10"

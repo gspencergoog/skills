@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError
@@ -591,6 +592,83 @@ class TestHotRefresher(unittest.TestCase):
         self.assertEqual([w.item_key for w in self.store.active_watches()], [KEY7])
         live = self._rows("SELECT item_key FROM v_pr_live")
         self.assertEqual(live, [(KEY7,)])
+
+    def test_unchanged_two_pr_sweep_skips_child_rewrites_and_repo_node_scans(
+        self,
+    ) -> None:
+        self.assertEqual(self.hot.refresh_hot([KEY7, KEY9]), [KEY7, KEY9])
+        self.transport.queries.clear()
+        with (
+            mock.patch.object(
+                self.store,
+                "find_repo_by_node_id",
+                wraps=self.store.find_repo_by_node_id,
+            ) as find_node_spy,
+            mock.patch.object(
+                self.store, "get_node_ids", wraps=self.store.get_node_ids
+            ) as get_nodes_spy,
+            mock.patch.object(
+                self.store, "upsert_pr_live", wraps=self.store.upsert_pr_live
+            ) as upsert_pr_spy,
+            mock.patch.object(
+                self.store,
+                "replace_review_requests",
+                wraps=self.store.replace_review_requests,
+            ) as req_spy,
+            mock.patch.object(
+                self.store,
+                "replace_latest_opinionated_reviews",
+                wraps=self.store.replace_latest_opinionated_reviews,
+            ) as op_rev_spy,
+            mock.patch.object(
+                self.store,
+                "replace_latest_reviews",
+                wraps=self.store.replace_latest_reviews,
+            ) as lat_rev_spy,
+            mock.patch.object(
+                self.store,
+                "replace_thread_activity",
+                wraps=self.store.replace_thread_activity,
+            ) as thread_spy,
+            mock.patch.object(
+                self.store,
+                "upsert_item_comments",
+                wraps=self.store.upsert_item_comments,
+            ) as comments_spy,
+            mock.patch.object(
+                self.store,
+                "touch_live_fetched_at",
+                wraps=self.store.touch_live_fetched_at,
+            ) as touch_spy,
+        ):
+            self.assertEqual(self.hot.refresh_hot([KEY7, KEY9]), [])
+            self.assertEqual(len(self.transport.queries), 1)
+            self.assertEqual(find_node_spy.call_count, 0)
+            self.assertEqual(get_nodes_spy.call_count, 0)
+            self.assertEqual(upsert_pr_spy.call_count, 0)
+            self.assertEqual(req_spy.call_count, 0)
+            self.assertEqual(op_rev_spy.call_count, 0)
+            self.assertEqual(lat_rev_spy.call_count, 0)
+            self.assertEqual(thread_spy.call_count, 0)
+            self.assertEqual(comments_spy.call_count, 0)
+            self.assertEqual(touch_spy.call_count, 1)
+
+    def test_single_page_check_transition_updates_checks_when_fingerprint_matches(
+        self,
+    ) -> None:
+        self.assertEqual(self.hot.refresh_hot([KEY7]), [KEY7])
+        updated_batch = copy.deepcopy(_fixture("hot_nodes_batch.json"))
+        contexts = updated_batch["data"]["pr0"]["commits"]["nodes"][0]["commit"][
+            "statusCheckRollup"
+        ]["contexts"]["nodes"]
+        contexts[0]["conclusion"] = "FAILURE"
+        self.transport.batch = updated_batch
+        self.assertEqual(self.hot.refresh_hot([KEY7]), [KEY7])
+        build_row = self._rows(
+            "SELECT conclusion FROM v_pr_checks WHERE item_key = ? AND name = 'build'",
+            KEY7,
+        )
+        self.assertEqual(build_row, [("FAILURE",)])
 
 
 if __name__ == "__main__":
