@@ -77,8 +77,11 @@ def discover_memory_root(
 
     candidates: list[Path] = [
         home / "memory" / "default",
+        home / ".gemini" / "antigravity" / "memory",
+        home / ".gemini" / "antigravity" / "knowledge",
         home / ".gemini" / "memory",
         work / ".agents" / "memory",
+        work / ".agent" / "memory",
         work / ".claude" / "memory",
     ]
     claude_projects = home / ".claude" / "projects"
@@ -152,6 +155,7 @@ def discover_promotion_targets(
         work / "agents" / "skills",
         work / "skills",
         work / ".agents" / "skills",
+        work / ".agent" / "skills",
         home / ".gemini" / "config" / "skills",
         home / ".claude" / "skills",
     ):

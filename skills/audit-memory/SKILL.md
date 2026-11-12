@@ -1,12 +1,12 @@
 ---
 name: audit-memory
 description: >-
-  Audits agent memory files across Jetski mfs, Claude Code, Gemini CLI, and
-  repo-local directories for primary-source veracity and promotes durable rules
-  into AGENTS.md, GEMINI.md, CLAUDE.md, user skills, or scripts with backup
-  snapshots and rollback. Use when asked to audit, verify, clean up, or
-  consolidate agent memories, check memory files for stale or false claims and
-  dead paths, promote #direct rules into instructions or skills, restore a
+  Audits agent memory files across Antigravity, Jetski mfs, Claude Code, Gemini
+  CLI, and repo-local directories for primary-source veracity and promotes
+  durable rules into AGENTS.md, GEMINI.md, CLAUDE.md, user skills, or scripts
+  with backup snapshots and rollback. Use when asked to audit, verify, clean up,
+  or consolidate agent memories, check memory files for stale or false claims
+  and dead paths, promote #direct rules into instructions or skills, restore a
   memory backup, or when the user runs /audit-memory. Don't use for mining
   conversation transcripts for repeated tool sequences or latency (use
   conversation-auditor). Flags: --veracity-only, --promote-only, --memory-dir,
@@ -44,7 +44,7 @@ python3 <skill-dir>/scripts/scan_memories.py \
   --output <scratch-dir>/memory_inventory.json
 ```
 
-`scripts/scan_memories.py` probes `--memory-dir`, `~/memory/default`, `~/.gemini/memory`, `<repo-root>/.agents/memory`, `<repo-root>/.claude/memory`, and `~/.claude/projects/*/memory` in order. It inspects `mfs status` when available and adds `~/memory/skills` (plus any read-only FUSE mount with over 10,000 entries) to `skipped_mounts`. It never traverses `~/memory/skills`.
+`scripts/scan_memories.py` probes `--memory-dir`, `~/memory/default`, `~/.gemini/antigravity/memory`, `~/.gemini/antigravity/knowledge`, `~/.gemini/memory`, `<repo-root>/.agents/memory`, `<repo-root>/.agent/memory`, `<repo-root>/.claude/memory`, and `~/.claude/projects/*/memory` in order. It inspects `mfs status` when available and adds `~/memory/skills` (plus any read-only FUSE mount with over 10,000 entries) to `skipped_mounts`. It never traverses `~/memory/skills`.
 
 The script also discovers writable promotion targets (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and user skill directories outside read-only FUSE symlinks). It groups memory files into balanced shards (`ceil(files / 3)`, up to 10 workers) based on list-bullet claim counts.
 
