@@ -196,6 +196,7 @@ class TickReport:
         deferred: Workers skipped or stopped for lack of budget.
         errors: Worker failures other than budget deferrals, as `worker: message`.
         upgrade_detected: Whether a schema, views, or scripts hash upgrade was detected.
+        yielded: Workers whose SQLite lock error was yielded to an external `sync.lock` holder.
         wal_checkpoint: `(busy, log, checkpointed)` from hourly `wal_checkpoint(TRUNCATE)`.
     """
 
@@ -215,6 +216,7 @@ class TickReport:
     pruned: bool = False
     deferred: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    yielded: list[str] = field(default_factory=list)
     upgrade_detected: bool = False
     wal_checkpoint: tuple[int, int, int] | None = None
 
@@ -452,6 +454,43 @@ class PackratService:
             self._deferred.discard(worker)
             self.log(f"{worker} resumed")
 
+    def _is_external_sync_lock_busy(self, exc: sqlite3.OperationalError) -> bool:
+        """Returns True when a lock error coincides with an external `sync.lock` holder.
+
+        An external holder is a `packrat import` or manual `packrat sync` run,
+        not this service process (which holds `sync.lock` around mirror runs)
+        and not its own backfill child. Such ticks are yielded rather than
+        counted as failures, so `v_service_health` keeps reporting real problems
+        while the service or its child holds the lock.
+        """
+        text = str(exc).lower()
+        if "locked" not in text and "busy" not in text:
+            return False
+        try:
+            with self.sync_lock() as info:
+                if info.acquired:
+                    return False
+                holder = info.holder_pid
+        except (OSError, ValueError):
+            return False
+        if holder == os.getpid():
+            return False
+        child_pid = self.child.pid if self.child is not None else None
+        if child_pid is not None and (holder is None or holder == child_pid):
+            return False
+        return True
+
+    def _note_sqlite_error(
+        self, worker: str, exc: sqlite3.OperationalError, report: TickReport
+    ) -> None:
+        """Records a SQLite error on `report`, or a yield when an external sync holds the lock."""
+        if self._is_external_sync_lock_busy(exc):
+            report.yielded.append(worker)
+            self.log(f"{worker} yielded: sync.lock held by another process ({exc})")
+            return
+        report.errors.append(f"{worker}: {exc}")
+        self.log(f"{worker} failed: {exc}")
+
     def _guarded(
         self, worker: str, report: TickReport, call: Callable[[], Any]
     ) -> tuple[bool, Any]:
@@ -472,8 +511,7 @@ class PackratService:
         except sqlite3.OperationalError as exc:
             if self._check_upgrade(report, force_db=True):
                 return False, None
-            report.errors.append(f"{worker}: {exc}")
-            self.log(f"{worker} failed: {exc}")
+            self._note_sqlite_error(worker, exc, report)
             return False, None
         self._note_ok(worker)
         return True, result
@@ -824,11 +862,10 @@ class PackratService:
         except sqlite3.OperationalError as exc:
             if self._check_upgrade(report, force_db=True):
                 return
-            report.errors.append(f"housekeeping: {exc}")
-            self.log(f"housekeeping failed: {exc}")
+            self._note_sqlite_error("housekeeping", exc, report)
         if report.errors:
             self._consecutive_failed_ticks += 1
-        else:
+        elif not report.yielded:
             self._consecutive_failed_ticks = 0
             self._last_ok_at = iso_at(now)
         self._beat(now, report)
@@ -865,9 +902,8 @@ class PackratService:
                 self._drain_requests(moment, report)
             self._requeue_failed(moment)
         except sqlite3.OperationalError as exc:
-            report.errors.append(f"sqlite: {exc}")
-            self.log(f"sqlite error during tick: {exc}")
-            self._check_upgrade(report, force_db=True)
+            if not self._check_upgrade(report, force_db=True):
+                self._note_sqlite_error("sqlite", exc, report)
         self._maybe_spawn_child(moment, report)
         self._housekeeping(moment, active, report)
         return report

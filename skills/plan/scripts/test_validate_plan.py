@@ -592,6 +592,7 @@ None.
         data = json.loads(buf.getvalue())
         self.assertTrue(data["valid"])
         self.assertEqual(data["errors"], [])
+        self.assertEqual(data["file_action_count"], 2)
         self.assertEqual(data["next_step"], NEXT_STEP_MESSAGE)
 
         quiet_buf = io.StringIO()

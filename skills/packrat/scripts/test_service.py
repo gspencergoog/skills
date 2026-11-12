@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -240,12 +241,19 @@ class ServiceHarness(unittest.TestCase):
         self.mirror = FakeMirror()
         self.budget = FakeBudget()
         self.lock_free = True
+        self.lock_holder_pid: int | None = None
+        self.lock_calls = 0
         self.children: list[FakeChild] = []
         self.logs: list[str] = []
 
     @contextlib.contextmanager
     def _lock(self) -> Iterator[SyncLockInfo]:
-        yield SyncLockInfo(acquired=self.lock_free, lock_path=Path("/tmp/sync.lock"))
+        self.lock_calls += 1
+        yield SyncLockInfo(
+            acquired=self.lock_free,
+            lock_path=Path("/tmp/sync.lock"),
+            holder_pid=None if self.lock_free else self.lock_holder_pid,
+        )
 
     def _spawn(self, argv: Sequence[str]) -> FakeChild:
         child = FakeChild(pid=4000 + len(self.children))
@@ -714,6 +722,181 @@ class TestHousekeepingAndChild(ServiceHarness):
         finally:
             if child.poll() is None:
                 child.terminate_group()
+
+
+class TestExternalSyncLockYield(ServiceHarness):
+    """Locked SQLite errors yield only while another process holds `sync.lock`."""
+
+    CHILD_PID = 4321
+    EXTERNAL_PID = 9876
+
+    def _locked(self) -> sqlite3.OperationalError:
+        return sqlite3.OperationalError("database is locked")
+
+    def _fail_prune(self, *, drift: bool = False) -> None:
+        def prune(now: float | None = None) -> dict[str, int]:
+            if drift:
+                self.store.schema_version += 1
+            raise self._locked()
+
+        self.store.prune = prune  # type: ignore[method-assign]
+
+    def _fail_hot_request(self) -> None:
+        self.store.requests = ["o/r#1"]
+        self.hot.raise_next = self._locked()
+
+    def _fail_active_watches(self) -> None:
+        def active_watches(now: float | None = None) -> list[WatchLease]:
+            raise self._locked()
+
+        self.store.active_watches = active_watches  # type: ignore[method-assign]
+
+    def _hold_externally(self) -> None:
+        self.lock_free = False
+        self.lock_holder_pid = self.EXTERNAL_PID
+
+    def _assert_yielded(self, svc: PackratService, worker: str) -> None:
+        report = svc.run_once(T0)
+        self.assertEqual(report.errors, [])
+        self.assertEqual(report.yielded, [worker])
+        self.assertEqual(svc._consecutive_failed_ticks, 0)
+        self.assertEqual(self.store.heartbeat_records[-1].consecutive_failed_ticks, 0)
+        self.assertTrue(
+            any(line.startswith(f"{worker} yielded") for line in self.logs), self.logs
+        )
+
+    def _assert_counted(self, svc: PackratService, worker: str) -> None:
+        report = svc.run_once(T0)
+        self.assertEqual(report.errors, [f"{worker}: database is locked"])
+        self.assertEqual(report.yielded, [])
+        self.assertEqual(svc._consecutive_failed_ticks, 1)
+        self.assertEqual(self.store.heartbeat_records[-1].consecutive_failed_ticks, 1)
+        self.assertFalse(any("yielded" in line for line in self.logs), self.logs)
+
+    def test_external_holder_yields_housekeeping_error(self) -> None:
+        self._hold_externally()
+        self._fail_prune()
+        self._assert_yielded(self.make(), "housekeeping")
+
+    def test_external_holder_yields_guarded_worker_error(self) -> None:
+        self._hold_externally()
+        self._fail_hot_request()
+        self._assert_yielded(self.make(), "hot")
+
+    def test_external_holder_yields_run_once_sqlite_error(self) -> None:
+        self._hold_externally()
+        self._fail_active_watches()
+        self._assert_yielded(self.make(), "sqlite")
+
+    def test_external_holder_yields_while_own_child_runs(self) -> None:
+        self._hold_externally()
+        self._fail_prune()
+        svc = self.make()
+        svc.child = FakeChild(pid=self.CHILD_PID)
+        self._assert_yielded(svc, "housekeeping")
+
+    def test_own_child_holding_lock_still_counts_failure(self) -> None:
+        for holder in (self.CHILD_PID, None):
+            with self.subTest(holder=holder):
+                self.setUp()
+                self.lock_free = False
+                self.lock_holder_pid = holder
+                self._fail_prune()
+                svc = self.make()
+                svc.child = FakeChild(pid=self.CHILD_PID)
+                self._assert_counted(svc, "housekeeping")
+
+    def test_own_child_holding_lock_counts_guarded_worker_failure(self) -> None:
+        self.lock_free = False
+        self.lock_holder_pid = self.CHILD_PID
+        self._fail_hot_request()
+        svc = self.make()
+        svc.child = FakeChild(pid=self.CHILD_PID)
+        self._assert_counted(svc, "hot")
+
+    def test_yielded_tick_keeps_prior_failure_count_and_last_ok_at(self) -> None:
+        import os
+
+        self.store.initial_heartbeat = ServiceHeartbeat(
+            pid=os.getpid(),
+            started_at=iso_at(T0 - 10),
+            beat_at=iso_at(T0 - 10),
+            version=format_service_version(),
+            last_ok_at=iso_at(T0 - 10),
+            consecutive_failed_ticks=2,
+        )
+        self._hold_externally()
+        self._fail_prune()
+        svc = self.make()
+        report = svc.run_once(T0)
+        self.assertEqual(report.errors, [])
+        self.assertEqual(report.yielded, ["housekeeping"])
+        self.assertEqual(svc._consecutive_failed_ticks, 2)
+        self.assertEqual(svc._last_ok_at, iso_at(T0 - 10))
+        beat = self.store.heartbeat_records[-1]
+        self.assertEqual(beat.consecutive_failed_ticks, 2)
+        self.assertEqual(beat.last_ok_at, iso_at(T0 - 10))
+
+    def test_lock_held_by_this_process_counts_failure(self) -> None:
+        import os
+
+        self.lock_free = False
+        self.lock_holder_pid = os.getpid()
+        self._fail_prune()
+        self._assert_counted(self.make(), "housekeeping")
+
+    def test_free_lock_counts_failure(self) -> None:
+        for worker, arrange in (
+            ("housekeeping", self._fail_prune),
+            ("hot", self._fail_hot_request),
+            ("sqlite", self._fail_active_watches),
+        ):
+            with self.subTest(worker=worker):
+                self.setUp()
+                arrange()
+                self._assert_counted(self.make(), worker)
+
+    def test_non_lock_error_counts_without_probing_sync_lock(self) -> None:
+        self._hold_externally()
+
+        def prune(now: float | None = None) -> dict[str, int]:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        self.store.prune = prune  # type: ignore[method-assign]
+        svc = self.make()
+        report = svc.run_once(T0)
+        self.assertEqual(report.errors, ["housekeeping: disk I/O error"])
+        self.assertEqual(svc._consecutive_failed_ticks, 1)
+        self.assertEqual(self.lock_calls, 0)
+
+    def test_upgrade_check_runs_before_lock_probe_in_housekeeping(self) -> None:
+        self._hold_externally()
+        self._fail_prune(drift=True)
+        svc = self.make()
+        report = svc.run_once(T0)
+        self.assertTrue(report.upgrade_detected)
+        self.assertEqual(report.errors, [])
+        self.assertEqual(self.lock_calls, 0)
+        self.assertEqual(svc._consecutive_failed_ticks, 0)
+        self.assertEqual(self.store.heartbeats, [])
+        self.assertFalse(any("yielded" in line for line in self.logs), self.logs)
+
+    def test_upgrade_check_runs_before_lock_probe_in_guarded_worker(self) -> None:
+        self._hold_externally()
+        self.store.requests = ["o/r#1"]
+
+        def refresh_hot(keys: Sequence[str]) -> list[str]:
+            self.store.schema_version += 1
+            raise self._locked()
+
+        self.hot.refresh_hot = refresh_hot  # type: ignore[method-assign]
+        svc = self.make()
+        report = svc.run_once(T0)
+        self.assertTrue(report.upgrade_detected)
+        self.assertEqual(report.errors, [])
+        self.assertEqual(self.lock_calls, 0)
+        self.assertEqual(svc._consecutive_failed_ticks, 0)
+        self.assertEqual(self.store.heartbeats, [])
 
 
 class FakeTimeline:

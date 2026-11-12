@@ -954,3 +954,101 @@ class ExportSummary:
     source_bytes: int
     dest_bytes: int
     duration_sec: float
+
+
+ImportDisposition = Literal[
+    "added",
+    "promoted",
+    "replaced",
+    "skipped_older",
+    "failed",
+    "not_attempted",
+]
+"""Per-repository outcome of `packrat import`."""
+
+
+@dataclass(frozen=True, order=True)
+class FreshnessKey:
+    """Comparable freshness of one mirrored repository's GitHub and git state.
+
+    Compared field by field: completed backfill streams first, then the newest
+    server-side item watermark, then whether a local git index exists. Local
+    poll clocks (`last_events_check_at`, `updated_at`) never take part.
+
+    Attributes:
+        done_backfills: Count (`0..3`) of non-null `*_backfill_done_at` streams.
+        sync_watermark: Newest normalized UTC item watermark, or `""` when unsynced.
+        has_git_index: `1` when `last_indexed_sha` is set, else `0`.
+    """
+
+    done_backfills: int
+    sync_watermark: str
+    has_git_index: int
+
+
+@dataclass(frozen=True)
+class ImportRepoOutcome:
+    """Per-repository outcome returned inside `ImportSummary`.
+
+    Attributes:
+        full_name: Source repository slug (`owner/name`).
+        disposition: What `packrat import` did with the repository.
+        dest_repo_id: Destination `repo_id`, or None when nothing was matched.
+        chunks_imported: `chunks` rows copied (or that would be copied in a preview).
+        embeddings_imported: `chunk_embeddings` rows copied (or previewed).
+        src_freshness: Freshness of the source snapshot.
+        dest_freshness: Freshness of the pre-existing destination mirror, if any.
+        preserved_local_git: Whether local git tables were kept on a GitHub-only source.
+        bound_local_path: Whether `--path` was (or would be) written to `repos.local_path`.
+        error: Error text for `failed` dispositions.
+    """
+
+    full_name: str
+    disposition: ImportDisposition
+    dest_repo_id: int | None
+    chunks_imported: int
+    embeddings_imported: int
+    src_freshness: FreshnessKey
+    dest_freshness: FreshnessKey | None = None
+    preserved_local_git: bool = False
+    bound_local_path: bool = False
+    error: str | None = None
+
+
+@dataclass(frozen=True)
+class ImportSummary:
+    """Metrics returned by `PackratStore.import_database` and `preview_import_database`.
+
+    Attributes:
+        source_db_path: Resolved filesystem path of the source SQLite database.
+        dest_db_path: Resolved filesystem path of the destination SQLite database.
+        source_schema_version: Schema version of the source database.
+        dest_schema_version: Schema version of the destination database.
+        dry_run: Whether this summary came from a read-only preview.
+        outcomes: One entry per selected source repository, in source order.
+        added_count: Repositories inserted as new `mirror` rows.
+        promoted_count: `items` stubs promoted to `mirror` in place.
+        replaced_count: Existing `mirror` repositories replaced with newer data.
+        skipped_older_count: Repositories left untouched because the source was older.
+        failed_count: Repositories whose transaction rolled back.
+        not_attempted_count: Repositories left after an aborted batch.
+        chunks_imported: Total `chunks` rows copied.
+        embeddings_imported: Total `chunk_embeddings` rows copied.
+        duration_sec: Total wall-clock duration in seconds.
+    """
+
+    source_db_path: str
+    dest_db_path: str
+    source_schema_version: int
+    dest_schema_version: int
+    dry_run: bool
+    outcomes: tuple[ImportRepoOutcome, ...]
+    added_count: int
+    promoted_count: int
+    replaced_count: int
+    skipped_older_count: int
+    failed_count: int = 0
+    not_attempted_count: int = 0
+    chunks_imported: int = 0
+    embeddings_imported: int = 0
+    duration_sec: float = 0.0

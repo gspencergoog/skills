@@ -9,23 +9,31 @@ description: >-
   independent review. Use when the user asks to plan, "create a plan", "make an
   implementation plan", or runs /plan, when a design session has settled on a
   direction, when a task spans several files or a migration, or when the user
-  wants steps laid out before code is written. Don't use for exploring options
-  before a direction is chosen (use design).
+  wants steps laid out before code is written. Flags: --auto, --out,
+  --workspace. Don't use for exploring options before a direction is chosen
+  (use design).
 ---
 
 # Implementation Plan
 
 Use this skill to produce actionable, wave-structured implementation plans for software tasks while keeping the target codebase strictly read-only.
 
+```text
+/plan [<task>] [--auto] [--out <path/to/plan.md>] [--workspace <path/to/workspace>]
+```
+
 ## Core Rules
 
 1. Guard the target repository as strictly read-only during planning. Never edit, add, or delete codebase files or run mutating commands (`git checkout`, `git stash`, `sed -i`, `rm`, `npm install`). The only permitted file creation is the plan artifact itself.
-2. Save the plan as a markdown artifact in `<conversation-artifact-dir>/implementation_plan.md` (or `<name>_plan.md`) using `write_file` (`write_to_file`).
+2. Save the plan as a markdown artifact in `<conversation-artifact-dir>/implementation_plan.md` (or `--out <path>`, such as `<conversation-artifact-dir>/plan_<n>_<slug>.md`) using `write_file` (`write_to_file`).
 3. Include `ArtifactMetadata` when creating or updating the plan artifact:
-   - Set `RequestFeedback: true` to display the interactive **"Proceed"** button in the UI.
-   - Set `UserFacing: true` to open the plan in the artifacts panel for inline comments.
+   - Set `RequestFeedback: true` in interactive mode to display the **"Proceed"** button in the UI (set `RequestFeedback: false` when `--auto` is active).
+   - Set `UserFacing: true` to open the plan in the artifacts panel for inspection or inline comments.
    - Set `Summary: "<multi-line summary>"` to describe the plan's scope and waves.
-4. Do not copy or re-summarize the full plan in chat. Output a concise message linking to the artifact, highlight key open questions or decisions, render the post-plan worksheet (Step 6), and stop to await user approval.
+4. Do not copy or re-summarize the full plan in chat. In interactive mode, output a concise message linking to the artifact, highlight key open questions or decisions, render the post-plan worksheet (Step 6), and stop to await user approval.
+5. **Unattended mode (`--auto`)**: When `--auto` is passed (for example when invoked by `/fix-something` or another autonomous workflow):
+   - Resolve non-blocking design choices from codebase evidence and record each choice with its rationale under `## Decisions`, writing `"None currently blocking."` under `## Open Questions` and `"None (auto-resolved under Decisions)."` under `Decisions needed from you` in `## At a glance`. If a genuine scope-blocking ambiguity cannot be resolved from the codebase, specification, or issue description, stop and report the blocker to the caller instead of guessing.
+   - Skip the interactive post-plan worksheet (Step 6.3) and **always** run Step 7 (Independent Review), folding all `"blocker"` and `"major"` reviewer findings into the plan in place and re-running `validate_plan.py` before returning control directly to the caller without pausing for **"Proceed"** (Step 7.6).
 
 ______________________________________________________________________
 
@@ -117,24 +125,26 @@ Resolve all reported validation errors before proceeding. A passing run ends wit
 
 ### 6. Present the Brief & Ask Post-Plan Questions
 
+When `--auto` is active, skip the interactive worksheet in Step 6.3 and proceed directly to Step 7 (Independent Review).
+
 1. Output a concise response in chat with a markdown link to the plan artifact. Highlight the At a glance points that need the user's attention: decisions, breaking changes, and risks.
 2. When `packrat_probe.py` returned a non-empty `user_note` for a GitHub repository (`"not_synced"` or `"unavailable"`), append that single-line note to the chat response. Omit the note when `status` is `"ready"` or `"not_github"`.
 3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 3 or fewer questions, `"pane"` otherwise; retry with `--layout list` if `render_a2ui` reports an unknown `ChoiceCards` component). The A2UI worksheet renders each `Q<n>` with `ChoiceCards` and ends with a review checkbox checked by default; the host question and Markdown fallbacks in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`) still list the review item first. Never ask the review question separately.
 4. When the answers arrive, move each answered question into `## Decisions` by hand, in your own words, and leave deferred questions in place. Re-run `validate_plan.py`.
 
-### 7. Independent Review (When the Review Is Requested)
+### 7. Independent Review (When Requested or When `--auto` Is Active)
 
-To prevent confirmation bias from the drafting steps, run this review when `review` is `true` or the fallback answer is Yes, per the review answer table in [post_plan_ui.md](references/post_plan_ui.md#21-post-plan-worksheet-dsl-only-no-template). Otherwise skip to step 5 below.
+To prevent confirmation bias from the drafting steps, run this review whenever `--auto` is active, or when `review` is `true` (or the fallback answer is Yes) per the review answer table in [post_plan_ui.md](references/post_plan_ui.md#21-post-plan-worksheet-dsl-only-no-template). Otherwise skip to step 5 below.
 
 1. Assemble the **Review Briefing Packet** using the template in [plan_quality_checklist.md](references/plan_quality_checklist.md), covering the goal, constraints, settled decisions (including the recorded Decisions), non-goals, focus areas, and paths. Keep the prompt under 10 KB. For plans or specs over 500 lines, stage chunks (`<= 35 KB`, `<= 700` lines) with `stage_markdown.py --split-chunks` and pass the chunk paths.
 2. Delegate the review using the highest available tier:
-   - **Tier 1 (Jetski Root Session with `swarm`)**: Spawn a read-only `plan-reviewer` worker via `swarm(action="add", name="plan-reviewer", workspace="inherit", brief=...)` and forbid helper workers. Wait for its board report, then stop it with `swarm(action="kill", name="plan-reviewer")`.
+   - **Tier 1 (Jetski Root Session with `swarm`)**: Spawn a read-only `plan-reviewer` worker (or `plan-rev-<n>` when reviewing multiple items in a session so roster names stay fresh without killing workers) via `swarm(action="add", name="plan-reviewer", workspace="inherit", brief=...)` and forbid helper workers. Wait for its board report, then stop it with `swarm(action="kill", name="plan-reviewer")` when appropriate.
    - **Tier 2 (Subagent Tool Available)**: Spawn one read-only subagent (`Agent` or `invoke_subagent` with a read-only research subagent or `self`, setting `enable_subagent_tools: false` and forbidding child subagents).
    - **Tier 3 (Already Inside a Subagent or Swarm Worker)**: Perform the checklist audit directly in-session without spawning further agents.
 3. The reviewer audits the plan against the workspace files and [plan_quality_checklist.md](references/plan_quality_checklist.md) and ends its report with a JSON findings array.
-4. With 3 or more findings, save the array to the scratch directory and render `plan_surfaces.py triage <findings.json>` as a `triage_matrix` before applying anything; with fewer, apply clear fixes directly. Apply the accepted findings and re-run `validate_plan.py`. If findings change a recorded decision or add questions, render a second worksheet with only the new or changed `Q<n>` items and no review item.
-5. For multi-wave plans, render `plan_surfaces.py overview <plan.md>` with `template: "plan_overview"` in the pane (skip it when `render_a2ui` is unavailable; the At a glance section already serves as the overview).
-6. **STOP and do not start executing changes.** Wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
+4. When `--auto` is active, apply all `"blocker"` and `"major"` findings (plus clear `"minor"` fixes) directly to the plan artifact and re-run `validate_plan.py`. In interactive mode, with 3 or more findings, save the array to the scratch directory and render `plan_surfaces.py triage <findings.json>` as a `triage_matrix` before applying anything; with fewer, apply clear fixes directly. Apply the accepted findings and re-run `validate_plan.py`. If findings change a recorded decision or add questions in interactive mode, render a second worksheet with only the new or changed `Q<n>` items and no review item.
+5. For multi-wave plans in interactive mode, render `plan_surfaces.py overview <plan.md>` with `template: "plan_overview"` in the pane (skip it when `--auto` is active or `render_a2ui` is unavailable; the At a glance section already serves as the overview).
+6. When `--auto` is active, return control immediately to the caller so execution can proceed from the validated, reviewed plan. In interactive mode, **STOP and do not start executing changes**: wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
 
 ### 8. After Proceed: Progress & Landing
 

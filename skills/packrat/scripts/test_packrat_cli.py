@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
+import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -1694,6 +1697,7 @@ class TestWave4Cli(unittest.TestCase):
 
         allowed = {
             "db_store.py",
+            "db_import.py",
             "live_store.py",
             "db_migrations.py",
             "db_schema.py",
@@ -1725,8 +1729,8 @@ class TestWave4Cli(unittest.TestCase):
         self.assertEqual(offenders, [])
 
 
-class TestExportCli(unittest.TestCase):
-    """Tests `packrat export` CLI flags, error exit codes, and recipient workflows."""
+class _PortabilityCliFixture(unittest.TestCase):
+    """Seeds a sender database shared by the `export` and `import` CLI tests."""
 
     def setUp(self) -> None:
         from embedder import DeterministicHashEmbedder, sync_repo_embeddings
@@ -1806,6 +1810,10 @@ class TestExportCli(unittest.TestCase):
         with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
             rc = packrat.main(["--db", str(target_db), *argv])
         return rc, out.getvalue(), err.getvalue()
+
+
+class TestExportCli(_PortabilityCliFixture):
+    """Tests `packrat export` CLI flags, error exit codes, and recipient workflows."""
 
     def test_export_default_human_and_json_schema(self) -> None:
         from db_migrations import LATEST_SCHEMA_VERSION
@@ -2123,6 +2131,258 @@ class TestExportCli(unittest.TestCase):
             )
         finally:
             recipient_store.close()
+
+
+class TestImportCli(_PortabilityCliFixture):
+    """End-to-end `packrat export -> packrat import` CLI tests."""
+
+    def setUp(self) -> None:
+        from models import PrRecord
+
+        super().setUp()
+        sender = packrat.PackratStore(self.db_path)
+        try:
+            sender.upsert_pull_requests(
+                [
+                    PrRecord(
+                        repo_id=self.widgets.repo_id,
+                        number=11,
+                        title="Refresh tokens before expiry",
+                        state="OPEN",
+                        updated_at="2026-11-10T01:00:00Z",
+                        head_sha="abc123",
+                    )
+                ]
+            )
+            sender.update_repo_sync_state(
+                self.widgets.repo_id, prs_watermark="2026-11-10T01:00:00Z"
+            )
+        finally:
+            sender.close()
+        self.src = self.tmp_path / "snapshot.sqlite"
+        rc, _, err = self._run("export", str(self.src), "--quiet")
+        self.assertEqual(rc, 0, err)
+        self.dest_dir = self.tmp_path / "recipient"
+        self.dest_dir.mkdir()
+        self.dest = self.dest_dir / "repos.sqlite"
+
+    def _seed_recipient(self) -> packrat.PackratStore:
+        """Creates the recipient DB with a local mirror repo and a watched items stub."""
+        store = packrat.PackratStore(self.dest)
+        store.register_repo("octo-org", "local", local_path="/tmp/recipient/local")
+        stub = store.ensure_items_repo("Octo-Org", "Widgets")
+        store.add_watch(
+            "monitor", "c1", ["Octo-Org/Widgets#10", "Octo-Org/Widgets#11"], 120, 900
+        )
+        store.write_init_sql()
+        self.stub_id = stub.repo_id
+        return store
+
+    def test_dry_run_writes_nothing_and_reports_named_freshness_keys(self) -> None:
+        missing = self.tmp_path / "nowhere" / "repos.sqlite"
+        rc, out, err = self._run("import", str(self.src), "--dry-run", "--json", db=missing)
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(
+            [o["disposition"] for o in payload["outcomes"]], ["added", "added"]
+        )
+        self.assertEqual(
+            sorted(payload["outcomes"][0]["src_freshness"]),
+            ["done_backfills", "has_git_index", "sync_watermark"],
+        )
+        self.assertFalse(missing.exists())
+        self.assertFalse(missing.parent.exists())
+
+        store = self._seed_recipient()
+        store.close()
+        init_sql = self.dest_dir / "init.sql"
+        before = (init_sql.stat().st_mtime_ns, self.dest.stat().st_size)
+        rc_e, out_e, err_e = self._run("import", str(self.src), "--dry-run", db=self.dest)
+        self.assertEqual(rc_e, 0, err_e)
+        self.assertIn("Dry run: would import", out_e)
+        self.assertIn("promoted  octo-org/widgets", out_e)
+        self.assertIn("added  octo-org/gadgets", out_e)
+        self.assertEqual(before, (init_sql.stat().st_mtime_ns, self.dest.stat().st_size))
+        check = packrat.PackratStore(self.dest)
+        try:
+            self.assertEqual(check.get_repo("Octo-Org/Widgets").mode, "items")
+        finally:
+            check.close()
+
+    def test_import_promotes_adds_skips_and_hands_off_to_readers(self) -> None:
+        store = self._seed_recipient()
+        store.close()
+        rc, out, err = self._run("import", str(self.src), "--progress", "off", db=self.dest)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("promoted  octo-org/widgets", out)
+        self.assertIn("added  octo-org/gadgets", out)
+
+        store = packrat.PackratStore(self.dest)
+        try:
+            local = store.get_repo("octo-org/local")
+            self.assertEqual(local.local_path, "/tmp/recipient/local")
+            widgets = store.get_repo("octo-org/widgets")
+            self.assertEqual(widgets.repo_id, self.stub_id)
+            self.assertEqual((widgets.full_name, widgets.mode), ("Octo-Org/Widgets", "mirror"))
+            self.assertIsNone(widgets.local_path)
+            self.assertEqual(len(store.active_watches(0.0)), 2)
+            queued = sorted(store.peek_refresh_requests())
+            self.assertEqual(queued, ["Octo-Org/Widgets#10", "Octo-Org/Widgets#11"])
+            rewritten = store.conn.execute(
+                "SELECT chunk_id FROM chunks WHERE repo_id = ?", (self.stub_id,)
+            ).fetchall()
+            self.assertEqual([r[0] for r in rewritten], ["Octo-Org/Widgets#issue:10"])
+        finally:
+            store.close()
+
+        rc_c, out_c, err_c = self._run("changes", "--since", "0", "--json", db=self.dest)
+        self.assertEqual(rc_c, 0, err_c)
+        feed = json.loads(out_c)["changes"]
+        pr_rows = [c for c in feed if c["kind"] == "pr"]
+        self.assertEqual([c["item_key"] for c in pr_rows], ["Octo-Org/Widgets#11"])
+        self.assertEqual(pr_rows[0]["fields"], ["pr", "checks", "reviews", "threads"])
+
+        with mock.patch("search_engine.get_default_embedder", return_value=self.embedder):
+            rc_s, out_s, err_s = self._run(
+                "search", "OAuth2 bearer token refresh", "--json", db=self.dest
+            )
+        self.assertEqual(rc_s, 0, err_s)
+        hits = json.loads(out_s)
+        self.assertEqual(hits[0]["chunk_id"], "Octo-Org/Widgets#issue:10")
+        self.assertIsNotNone(hits[0]["vector_rank"])
+
+        rc2, out2, _ = self._run("import", str(self.src), "--json", db=self.dest)
+        self.assertEqual(rc2, 0)
+        self.assertEqual(json.loads(out2)["skipped_older_count"], 2)
+        rc3, out3, _ = self._run(
+            "import", str(self.src), "--allow-older", "--json", db=self.dest
+        )
+        self.assertEqual(rc3, 0)
+        self.assertEqual(json.loads(out3)["replaced_count"], 2)
+
+    def test_repo_filters_and_path_binding(self) -> None:
+        checkout = self.tmp_path / "gadgets-checkout"
+        (checkout / ".git").mkdir(parents=True)
+        rc, out, err = self._run(
+            "import",
+            str(self.src),
+            "--repo",
+            "octo-org/legacy-gadgets",
+            "--path",
+            str(checkout),
+            "--json",
+            db=self.dest,
+        )
+        self.assertEqual(rc, 0, err)
+        payload = json.loads(out)
+        self.assertEqual([o["full_name"] for o in payload["outcomes"]], ["octo-org/gadgets"])
+        self.assertTrue(payload["outcomes"][0]["bound_local_path"])
+
+        # Skipped repositories still bind --path; the short name resolves too.
+        rc_skip, out_skip, err_skip = self._run(
+            "import", str(self.src), "--repo", "gadgets", "--path", str(checkout), db=self.dest
+        )
+        self.assertEqual(rc_skip, 0, err_skip)
+        self.assertIn("skipped_older  octo-org/gadgets", out_skip)
+        self.assertIn("bound --path", out_skip)
+        store = packrat.PackratStore(self.dest)
+        try:
+            self.assertEqual(store.get_repo("octo-org/gadgets").local_path, str(checkout.resolve()))
+            self.assertIsNone(store.get_repo("octo-org/widgets"))
+        finally:
+            store.close()
+
+        rc_multi, _, err_multi = self._run(
+            "import", str(self.src), "--path", str(checkout), db=self.dest
+        )
+        self.assertEqual(rc_multi, 2)
+        self.assertIn("single repository", err_multi)
+        rc_nogit, _, err_nogit = self._run(
+            "import", str(self.src), "--repo", "widgets", "--path", str(self.tmp_path), db=self.dest
+        )
+        self.assertEqual(rc_nogit, 2)
+        self.assertIn(".git", err_nogit)
+        rc_items, _, err_items = self._run(
+            "import", str(self.src), "--repo", "items-org/alpha", db=self.dest
+        )
+        self.assertEqual(rc_items, 2)
+        self.assertIn("not a mirror repository", err_items)
+
+    def test_preflight_runs_before_lock_and_lock_contention_exits_3(self) -> None:
+        import time as _time
+
+        from sync_runtime import SyncLockInfo, acquire_sync_lock
+
+        store = self._seed_recipient()
+        store.close()
+        with acquire_sync_lock(self.dest, mode="skip") as held:
+            self.assertTrue(held.acquired)
+            started = _time.monotonic()
+            rc, _, err = self._run("import", str(self.src), "--repo", "nope/nothing", db=self.dest)
+            self.assertEqual(rc, 2)
+            self.assertIn("nope/nothing", err)
+            self.assertLess(_time.monotonic() - started, 5.0)
+
+        busy = SyncLockInfo(acquired=False, lock_path=self.dest_dir / "sync.lock", holder_pid=4242)
+
+        @contextlib.contextmanager
+        def fake_lock(*_args: object, **_kwargs: object):
+            yield busy
+
+        with mock.patch("packrat.acquire_sync_lock", fake_lock):
+            rc_busy, _, err_busy = self._run("import", str(self.src), db=self.dest)
+        self.assertEqual(rc_busy, 3)
+        self.assertIn("pid 4242", err_busy)
+
+        too_new = self.tmp_path / "too_new.sqlite"
+        shutil.copyfile(self.src, too_new)
+        conn = sqlite3.connect(too_new)
+        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'x')")
+        conn.commit()
+        conn.close()
+        rc_new, _, err_new = self._run("import", str(too_new), db=self.dest)
+        self.assertEqual(rc_new, 2)
+        self.assertIn("newer", err_new)
+
+    def test_mid_batch_failure_prints_partial_summary_and_maps_cause(self) -> None:
+        import db_import
+
+        real_verify = db_import._verify_before_commit
+        calls: list[int] = []
+
+        def failing_verify(conn: sqlite3.Connection, dest_id: int) -> None:
+            calls.append(dest_id)
+            if len(calls) == 2:
+                raise sqlite3.OperationalError("database is locked")
+            real_verify(conn, dest_id)
+
+        with mock.patch.object(db_import, "_verify_before_commit", failing_verify):
+            rc, out, err = self._run("import", str(self.src), "--json", db=self.dest)
+        self.assertEqual(rc, 3)
+        self.assertIn("import stopped at octo-org/gadgets", err)
+        payload = json.loads(out)
+        self.assertEqual(
+            [(o["full_name"], o["disposition"]) for o in payload["outcomes"]],
+            [("octo-org/widgets", "added"), ("octo-org/gadgets", "failed")],
+        )
+        self.assertIn("database is locked", payload["outcomes"][1]["error"])
+        store = packrat.PackratStore(self.dest)
+        try:
+            self.assertIsNotNone(store.get_repo("octo-org/widgets"))
+            self.assertIsNone(store.get_repo("octo-org/gadgets"))
+        finally:
+            store.close()
+
+        with mock.patch.object(
+            db_import,
+            "_verify_before_commit",
+            side_effect=sqlite3.DatabaseError("boom"),
+        ):
+            rc_h, out_h, err_h = self._run("import", str(self.src), "--progress", "off", db=self.dest)
+        self.assertEqual(rc_h, 1)
+        self.assertIn("failed  octo-org/gadgets", out_h)
+        self.assertIn("boom", err_h)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,7 @@ The name comes from packrat middens: nests where packrats hoard material for tho
 | Refreshing local repository state at zero or minimal GitHub API rate-limit cost | `packrat sync` |
 | Keeping live PR state, checks, reviews, and notifications current in the background | `packrat serve` (installed by `packrat auto-sync on`) |
 | Reading live PR state from another tool (`/monitor`, `inflight`, a watchdog) | The SQLite reader views in [references/reader_contract.md](references/reader_contract.md), plus `packrat watch`, `packrat changes`, and `packrat refresh` |
-| Exporting and sharing a portable `repos.sqlite` snapshot across users or machines | `packrat export` |
+| Exporting or merging portable `repos.sqlite` snapshots across users or machines | `packrat export` and `packrat import` |
 
 ## Core CLI Commands
 
@@ -226,7 +226,14 @@ python3 <skill-dir>/scripts/packrat.py install-cli
 
    Overwriting an existing `<dest-sqlite-path>` requires `--force` (`-f`), which also unlinks any stale `<dest>-wal`, `<dest>-shm`, and `<dest>-journal` sidecars. Exporting onto an existing directory or onto the active source database (or its WAL sidecars) exits `2`. Storage, FTS5 integrity, or foreign-key check failures clean up `<dest>.tmp.<pid>` and exit `1`.
 
-   On the recipient machine, stop the background service and remove any local `-wal` and `-shm` sidecars before copying the snapshot into place:
+   On the recipient machine, run `packrat import` to merge the snapshot into an existing or empty database. This runs safely while `packrat serve` is active (see command 10):
+
+   ```bash
+   packrat import ~/Downloads/repos-portable.sqlite
+   packrat repo set-path <owner>/<name> /path/to/checkout   # optional; or pass --path on single-repo import
+   ```
+
+   On a fresh machine with no `packrat` database, you can also copy the file into place directly. Stop the service and remove any `-wal` and `-shm` sidecars first:
 
    ```bash
    packrat auto-sync off
@@ -236,6 +243,34 @@ python3 <skill-dir>/scripts/packrat.py install-cli
    packrat sync
    packrat auto-sync on
    ```
+
+10. Merge `mirror` repositories from another `repos.sqlite` snapshot without overwriting local state.
+
+    ```bash
+    # Preview per-repository dispositions and freshness keys read-only (zero disk writes)
+    python3 <skill-dir>/scripts/packrat.py import ~/Downloads/repos-portable.sqlite --dry-run
+
+    # Merge all mirror repositories from a snapshot into repos.sqlite
+    python3 <skill-dir>/scripts/packrat.py import ~/Downloads/repos-portable.sqlite
+
+    # Import one repository, bind its local checkout, and emit JSON metrics
+    python3 <skill-dir>/scripts/packrat.py import <src-sqlite-path> \
+      --repo <owner>/<name> --path /path/to/checkout --json
+
+    # Force replacement with an older or GitHub-only snapshot
+    python3 <skill-dir>/scripts/packrat.py import <src-sqlite-path> \
+      --repo octo-org/widgets --allow-older
+    ```
+
+    Full syntax: `packrat [--db <dest-sqlite-path>] import <src-sqlite-path> [--repo <owner>/<name> ...] [--path <local-checkout-dir>] [--allow-older] [--dry-run] [--progress {auto,plain,off}] [-q|--quiet] [--json]`. By default, `import` merges every `mirror` repository in `<src-sqlite-path>`. Repeatable or comma-separated `--repo` flags match `owner/name`, a source alias, or an unambiguous short name. Naming an `items` or unknown repository exits `2`, as do source schemas outside versions `11` through `13`.
+
+    Dispositions are `added` (new `mirror` row), `promoted` (in-place `items` promotion keeping `repo_id`, leases, and viewer sets), `replaced`, and `skipped_older` (exit `0`). Aborted batches also report `failed` and `not_attempted`. Mirrors compare `FreshnessKey(done_backfills, sync_watermark, has_git_index)`: completed issue, PR, and discussion backfills, newest server-side item watermark (never the local poll clock), then `has_git_index`. Pass `--allow-older` to replace older or equal targets, including the local git index.
+
+    GitHub-only sources (`last_indexed_sha` unset) keep local `commits`, `commit_files`, `indexed_files`, `code_symbols`, `doc_sections`, and git chunks unless `--allow-older` is set. Personal tables (`notifications`, `viewer_sets`, `watches`, `refresh_requests`, `changes`, `api_calls`, `service_heartbeat`), `items` repos, and source `repos.local_path` values are never imported. Existing destination `local_path` values stay intact. `--path` binds a checkout on a single-repo import even when `skipped_older` (multi-repo `--path` or a missing `.git` exits `2`).
+
+    `--dry-run` previews dispositions and freshness keys read-only: it skips `sync.lock` and disk checks, creates zero files, skips migrations, and skips `init.sql`. Migrate an older destination first by running any `packrat` command. Live runs check inputs and free disk (`2x` selected data) before taking `sync.lock`, then attach the source read-only. Each repo commits inside `BEGIN IMMEDIATE` after foreign-key and FTS5 checks, with `wal_checkpoint(PASSIVE)` between repos and `wal_checkpoint(TRUNCATE)` at the end.
+
+    `import` bumps `vector_cache_seq` so `vectors.*.mmap` caches rebuild on the next `packrat search`. On `promoted` and `replaced` repos, it queues `refresh_requests` and `pr` `changes` rows for leased and viewer-set items. Single-repo copies above `4.8 GiB` (`37.5 s/GiB`) warn on `stderr` and hold the write lock past `180s` (`packrat serve` yields cleanly). Failures roll back only the active repo and print partial outcomes (`--json` included): exit `0` ok, `2` usage/schema/preflight, `3` lock busy, `1` other.
 
 ## Repository modes
 

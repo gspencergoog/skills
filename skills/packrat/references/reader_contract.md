@@ -254,6 +254,14 @@ source. The `version` column names the running code; `packrat status` warns
 when it differs from the installed checkout, and `packrat auto-sync on`
 restarts the service onto the current code.
 
+`packrat import` copies repositories at about `37.5 s/GiB` inside
+per-repository `BEGIN IMMEDIATE` transactions. Importing a single repository
+above roughly `4.8 GiB` holds the WAL write lock past `180s`, and
+`packrat import` warns on `stderr` beforehand. During that copy,
+`packrat serve` yields its ticks without incrementing
+`consecutive_failed_ticks`, while `beat_age_s` may exceed `180`. Readers fall
+back to GitHub until `COMMIT` releases the lock and the service resumes.
+
 ### `v_watches`
 
 Every lease: `consumer`, `consumer_id`, `item_key`, `freshness_s`,
@@ -273,9 +281,10 @@ The GitHub API call log: `at`, `worker`, `resource` (`graphql` or `core`),
 
 ## Leases
 
-A reader leases the items it shows with `packrat watch add --consumer NAME
---id ID [--freshness SECONDS] [--ttl SECONDS] ITEM...` (defaults: freshness
-120 s, TTL 900 s). Both values must be at least 1; anything else exits `2`.
+A reader leases the items it shows with
+`packrat watch add --consumer NAME --id ID [--freshness SECONDS] [--ttl SECONDS] ITEM...`
+(defaults: freshness 120 s, TTL 900 s). Both values must be at least 1;
+anything else exits `2`.
 
 - `consumer` names the tool (`monitor`, `inflight`); `id` names the instance
   (for example a conversation hash), so two conversations don't remove each
@@ -337,6 +346,12 @@ any row has been pruned it returns `reset` instead.
 | `comments` | `["comments"]` |
 | `notification` | `["reason"]` |
 | `viewer` | `[<set_name>]`: the item entered or left that `v_viewer_items` set |
+
+On `promoted` or `replaced` repositories, `packrat import` queues
+`refresh_requests` for leased items and viewer-set PRs. For each matching pull
+request, it also appends a `pr` row with `fields` set to
+`["pr", "checks", "reviews", "threads"]`. Readers such as `/monitor` and
+`inflight` then reload the imported state right away.
 
 Timeline events (review requests, draft changes, force pushes, merges, and
 similar) are stored in `timeline_events` but don't write change-feed rows yet,

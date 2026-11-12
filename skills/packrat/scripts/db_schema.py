@@ -275,3 +275,55 @@ BACKFILL_COLUMN_DECLS: tuple[tuple[str, str, str], ...] = tuple(
     ("repos", col, "TEXT") for col in BACKFILL_COLUMNS
 )
 """Backfill columns that `repos` tables created by older packrat versions may lack."""
+
+REPO_GITHUB_TABLES: tuple[str, ...] = (
+    "issues",
+    "pull_requests",
+    "pr_files",
+    "reviews",
+    "review_threads",
+    "comments",
+    "discussions",
+    "issue_pr_links",
+    "timeline_events",
+    "timeline_dirty",
+    "pr_rollup",
+    "check_runs",
+    "review_requests",
+    "latest_opinionated_reviews",
+    "latest_reviews",
+    "thread_activity",
+)
+"""`repo_id`-keyed GitHub mirror and live PR tables replaced as a unit by `packrat import`."""
+
+REPO_GIT_TABLES: tuple[str, ...] = (
+    "commits",
+    "commit_files",
+    "indexed_files",
+    "code_symbols",
+    "doc_sections",
+)
+"""`repo_id`-keyed local git index tables that `packrat import` may keep on GitHub-only sources."""
+
+GIT_SOURCE_KINDS: tuple[str, ...] = ("commit", "code_symbol", "doc_section")
+"""`chunks.source_kind` values produced by the local git indexer."""
+
+PERSONAL_TABLES: tuple[str, ...] = (
+    "notifications",
+    "viewer_sets",
+    "watches",
+    "refresh_requests",
+    "changes",
+    "api_calls",
+    "service_heartbeat",
+)
+"""Per-user and per-machine runtime tables scrubbed by export and never imported."""
+
+REPO_STATE_KEY_PATTERNS: tuple[str, ...] = (
+    "signals_events:",
+    "events_last_id:",
+    "refetch_open_prs:",
+    "gap_cursor:",
+    "gap_floor:",
+)
+"""`service_state` key prefixes followed by a `repo_id` (and optionally `:<stream>`)."""

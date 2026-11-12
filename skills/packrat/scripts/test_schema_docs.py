@@ -8,6 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from db_migrations import (
+    IMPORT_ROW_FIXUPS,
+    LATEST_SCHEMA_VERSION,
+    MIN_IMPORT_SCHEMA_VERSION,
+)
+from db_schema import PERSONAL_TABLES, REPO_GIT_TABLES, REPO_GITHUB_TABLES
 from db_store import PackratStore
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
@@ -153,6 +159,43 @@ class TestSchemaDocs(unittest.TestCase):
             self.assertNotIn("Every table is partitioned by", doc)
             self.assertNotIn("All tables are partitioned by", doc)
         self.assertNotIn("has no leases view", self.schema_text)
+
+    def test_every_repo_id_table_has_exactly_one_portability_class(self) -> None:
+        """Checks that every `repo_id` table belongs to exactly one portability class."""
+        special = frozenset({"repos", "chunks", "repo_aliases"})
+        classes = (
+            frozenset(REPO_GITHUB_TABLES),
+            frozenset(REPO_GIT_TABLES),
+            frozenset(PERSONAL_TABLES),
+            special,
+        )
+        self.assertEqual(len(REPO_GITHUB_TABLES), len(classes[0]))
+        self.assertEqual(len(REPO_GIT_TABLES), len(classes[1]))
+        self.assertEqual(len(PERSONAL_TABLES), len(classes[2]))
+        self.assertEqual(sum(len(c) for c in classes), len(frozenset().union(*classes)))
+        for table in (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES, *special):
+            self.assertIn("repo_id", self.tables.get(table, set()), table)
+        for table in PERSONAL_TABLES:
+            self.assertIn(table, self.tables)
+        conn = self.store.conn
+        all_tables = [
+            str(r[0])
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        ]
+        for table in all_tables:
+            cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "repo_id" in cols:
+                matches = [cls_set for cls_set in classes if table in cls_set]
+                self.assertEqual(
+                    len(matches),
+                    1,
+                    f"{table} matched {len(matches)} portability classes",
+                )
+
+    def test_every_post_minimum_migration_declares_an_import_fixup(self) -> None:
+        """Checks that every migration past `MIN_IMPORT_SCHEMA_VERSION` declares a fixup."""
+        expected = set(range(MIN_IMPORT_SCHEMA_VERSION + 1, LATEST_SCHEMA_VERSION + 1))
+        self.assertEqual(set(IMPORT_ROW_FIXUPS), expected)
 
 
 if __name__ == "__main__":

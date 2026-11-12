@@ -27,7 +27,14 @@ if TYPE_CHECKING:
     from auto_sync import AutoSyncStatus
     from db_store import PackratStore
     from github_sync import GhAuthProbe
-    from models import ExportSummary, RepoConfig, SyncStats
+    from models import (
+        ExportSummary,
+        FreshnessKey,
+        ImportRepoOutcome,
+        ImportSummary,
+        RepoConfig,
+        SyncStats,
+    )
     from progress import ProgressReporter
     from rate_budget import RateBudget, RateSnapshot
     from sync_runtime import AutoSyncRunRecord, LockMode, SyncLockInfo
@@ -40,7 +47,11 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "SchemaTooNewError": ("db_migrations", "SchemaTooNewError"),
     "DEFAULT_DB_PATH": ("db_store", "DEFAULT_DB_PATH"),
     "ExportIntegrityError": ("db_store", "ExportIntegrityError"),
+    "ImportAbortedError": ("db_store", "ImportAbortedError"),
+    "ImportIntegrityError": ("db_store", "ImportIntegrityError"),
     "PackratStore": ("db_store", "PackratStore"),
+    "preview_import_database": ("db_store", "preview_import_database"),
+    "validate_import_preflight": ("db_store", "validate_import_preflight"),
     "ensure_onnx_model": ("embedder", "ensure_onnx_model"),
     "get_default_embedder": ("embedder", "get_default_embedder"),
     "get_default_embedder_model_id": ("embedder", "get_default_embedder_model_id"),
@@ -1465,17 +1476,171 @@ def _print_export_summary(summary: ExportSummary) -> None:
         f"  Size: {_format_byte_size(summary.source_bytes)} -> "
         f"{_format_byte_size(summary.dest_bytes)}"
     )
-    print("\nRecipient install commands:")
+    quoted_dest = shlex.quote(summary.dest_db_path)
+    print(
+        "\nRecipient commands (merge into an existing or new packrat DB, "
+        "safe while serve runs):"
+    )
+    if len(summary.exported_repos) == 1:
+        print(f"  packrat import {quoted_dest} --path /path/to/local/checkout")
+    else:
+        print(f"  packrat import {quoted_dest}")
+        print(f"  packrat repo set-path {example_repo} /path/to/local/checkout")
+    print("\nOr cold-start replace on a machine with no existing packrat DB:")
     print("  packrat auto-sync off")
     print(
         "  rm -f ~/.local/share/packrat/repos.sqlite-wal "
         "~/.local/share/packrat/repos.sqlite-shm"
     )
-    print(
-        f"  cp {shlex.quote(summary.dest_db_path)} ~/.local/share/packrat/repos.sqlite"
-    )
+    print(f"  cp {quoted_dest} ~/.local/share/packrat/repos.sqlite")
     print(f"  packrat repo set-path {example_repo} /path/to/local/checkout")
     print("  packrat auto-sync on")
+
+
+def _exit_code_for_import_cause(cause: BaseException | None) -> int:
+    """Maps the cause of an `ImportAbortedError` to a `packrat` exit code.
+
+    Returns `2` for usage or schema errors, `EXIT_LOCKED_RETRY` (`3`) for a
+    locked or busy `sqlite3.OperationalError`, and `1` for anything else
+    (other SQLite failures, integrity errors, I/O errors, interrupts).
+    """
+    if isinstance(cause, (ValueError, _lazy("SchemaTooNewError"))):
+        return 2
+    if isinstance(cause, sqlite3.OperationalError):
+        text = str(cause).lower()
+        if "locked" in text or "busy" in text:
+            return int(_lazy("EXIT_LOCKED_RETRY"))
+    return 1
+
+
+def _format_freshness(key: FreshnessKey) -> str:
+    """Formats a `FreshnessKey` as `<backfills>/<watermark>/<git|nogit>`."""
+    git = "git" if key.has_git_index else "nogit"
+    return f"{key.done_backfills}/{key.sync_watermark or '-'}/{git}"
+
+
+def _format_import_outcome(outcome: ImportRepoOutcome) -> str:
+    """Formats one `ImportRepoOutcome` as a single indented summary line."""
+    parts = [
+        f"  {outcome.disposition}",
+        outcome.full_name,
+        f"chunks={outcome.chunks_imported:,}",
+        f"embeddings={outcome.embeddings_imported:,}",
+        f"src={_format_freshness(outcome.src_freshness)}",
+    ]
+    if outcome.dest_freshness is not None:
+        parts.append(f"dest={_format_freshness(outcome.dest_freshness)}")
+    if outcome.preserved_local_git:
+        parts.append("kept local git index")
+    if outcome.bound_local_path:
+        parts.append("bound --path")
+    if outcome.error:
+        parts.append(f"error: {outcome.error}")
+    return "  ".join(parts)
+
+
+def _print_import_summary(summary: ImportSummary) -> None:
+    """Prints human-readable `packrat import` dispositions and row counts."""
+    dur = _lazy("format_duration")(summary.duration_sec)
+    verb = "Dry run: would import" if summary.dry_run else "Imported"
+    print(f"{verb} {summary.source_db_path} into {summary.dest_db_path} ({dur})")
+    print(
+        f"  Schema version: source={summary.source_schema_version}, "
+        f"dest={summary.dest_schema_version}"
+    )
+    print(
+        f"  Repos: added={summary.added_count}, promoted={summary.promoted_count}, "
+        f"replaced={summary.replaced_count}, "
+        f"skipped_older={summary.skipped_older_count}, "
+        f"failed={summary.failed_count}, "
+        f"not_attempted={summary.not_attempted_count}"
+    )
+    print(
+        f"  Rows: chunks={summary.chunks_imported:,}, "
+        f"embeddings={summary.embeddings_imported:,}"
+    )
+    for outcome in summary.outcomes:
+        print(_format_import_outcome(outcome))
+
+
+def _emit_import_summary(summary: ImportSummary, *, as_json: bool) -> None:
+    """Writes an `ImportSummary` to stdout as JSON or human-readable text."""
+    if as_json:
+        print(json.dumps(asdict(summary), indent=2))
+    else:
+        _print_import_summary(summary)
+
+
+def _run_locked_import(
+    args: argparse.Namespace,
+    src_path: Path,
+    repo_tokens: list[str] | None,
+) -> ImportSummary:
+    """Opens the destination store under `sync.lock` and runs `import_database`."""
+    progress_mode = getattr(args, "progress", "auto")
+    reporter = _lazy("StderrProgressReporter")(
+        mode=progress_mode,
+        quiet=bool(getattr(args, "quiet", False) or getattr(args, "json", False)),
+        grace_sec=0.0 if progress_mode == "plain" else 2.0,
+    )
+    store = _open_store(args.db, refresh_init_sql=True)
+    try:
+        return store.import_database(
+            src_path,
+            repo_tokens=repo_tokens,
+            local_path=args.path,
+            allow_older=bool(args.allow_older),
+            reporter=reporter,
+        )
+    finally:
+        reporter.finish_phase()
+        store.close()
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    """Handles `packrat import`.
+
+    `--dry-run` previews dispositions read-only without taking `sync.lock` or
+    touching the destination. Live runs validate the source, `--repo`,
+    `--path`, and free disk space before waiting on `sync.lock`, so bad
+    arguments exit `2` with no lock wait and no destination writes.
+    """
+    db_path = _resolve_db_path(args.db)
+    src_path = Path(args.src).expanduser()
+    repo_tokens = _parse_repo_tokens(args.repo) or None
+    as_json = bool(getattr(args, "json", False))
+    if args.dry_run:
+        summary = _lazy("preview_import_database")(
+            db_path,
+            src_path,
+            repo_tokens=repo_tokens,
+            local_path=args.path,
+            allow_older=bool(args.allow_older),
+        )
+        _emit_import_summary(summary, as_json=as_json)
+        return 0
+    _lazy("validate_import_preflight")(
+        db_path,
+        src_path,
+        repo_tokens=repo_tokens,
+        local_path=args.path,
+        check_disk=True,
+    )
+    with _lazy("acquire_sync_lock")(db_path, mode="wait") as lock_info:
+        if not lock_info.acquired:
+            sys.stderr.write(
+                "Error: packrat database is busy "
+                f"(sync.lock held by pid {lock_info.holder_pid}); retry.\n"
+            )
+            return int(_lazy("EXIT_LOCKED_RETRY"))
+        try:
+            summary = _run_locked_import(args, src_path, repo_tokens)
+        except _lazy("ImportAbortedError") as exc:
+            _emit_import_summary(exc.summary, as_json=as_json)
+            sys.stderr.write(f"Error: {exc}\n")
+            return _exit_code_for_import_cause(exc.__cause__)
+    _emit_import_summary(summary, as_json=as_json)
+    return 0
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -1816,6 +1981,48 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_export.set_defaults(func=cmd_export)
 
+    p_import = sub.add_parser(
+        "import",
+        help="Merge mirror repositories from another packrat SQLite file into this one.",
+    )
+    p_import.add_argument(
+        "src",
+        help="Source packrat SQLite file (for example, a `packrat export` snapshot).",
+    )
+    p_import.add_argument(
+        "--repo",
+        action="append",
+        help="Import only specific source mirror repository (<owner>/<name> or <name>; repeatable or comma-separated).",
+    )
+    p_import.add_argument(
+        "--path",
+        help="Bind a local git checkout to the single imported repository.",
+    )
+    p_import.add_argument(
+        "--allow-older",
+        action="store_true",
+        help="Replace a destination repository even when the source is not newer, including its local git index.",
+    )
+    p_import.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report dispositions without locking or writing the destination.",
+    )
+    p_import.add_argument(
+        "--progress",
+        choices=("auto", "plain", "off"),
+        default="auto",
+        help="Progress display mode on stderr (default: auto).",
+    )
+    p_import.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress progress output on stderr.",
+    )
+    p_import.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_import.set_defaults(func=cmd_import)
+
     _lazy("add_live_parsers")(sub, cmd_live)
     return parser
 
@@ -1840,7 +2047,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return int(_lazy("EXIT_LOCKED_RETRY"))
         sys.stderr.write(f"Error: sqlite failure ({text}).\n")
         return 1
-    except (_lazy("ExportIntegrityError"), sqlite3.DatabaseError, OSError) as exc:
+    except (
+        _lazy("ExportIntegrityError"),
+        _lazy("ImportIntegrityError"),
+        sqlite3.DatabaseError,
+        OSError,
+    ) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 1
     except KeyboardInterrupt:

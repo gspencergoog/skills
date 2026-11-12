@@ -798,6 +798,7 @@ def _print_json_results(
     warnings: list[ValidationIssue],
     is_valid: bool,
     quiet: bool = False,
+    file_action_count: int = 0,
 ) -> None:
     """Formats and prints JSON validation results."""
     output_payload: dict[str, Any] = {
@@ -805,6 +806,7 @@ def _print_json_results(
         "errors": [err.to_dict() for err in errors],
         "warnings": [warn.to_dict() for warn in warnings],
         "total_issues": len(issues),
+        "file_action_count": file_action_count,
     }
     if is_valid and not quiet:
         output_payload["next_step"] = NEXT_STEP_MESSAGE
@@ -834,7 +836,14 @@ def main(argv: list[str] | None = None) -> int:
     has_fatal_failure = bool(errors) or (args.strict and bool(warnings))
 
     if args.json:
-        _print_json_results(issues, errors, warnings, not has_fatal_failure, args.quiet)
+        _print_json_results(
+            issues,
+            errors,
+            warnings,
+            not has_fatal_failure,
+            args.quiet,
+            validator.doc.file_action_count,
+        )
     else:
         _print_human_results(issues, errors, warnings, args.strict, args.quiet)
 

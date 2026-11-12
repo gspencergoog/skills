@@ -2,24 +2,39 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import sqlite3
 import time
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 try:
+    from .db_import import (
+        ImportAbortedError,
+        ImportIntegrityError,
+        is_sqlite_path_alias,
+        mirror_freshness_key,
+        preview_import_database,
+        validate_import_preflight,
+    )
+    from .db_import import import_database as _import_database
     from .db_migrations import (
         CONNECTION_PRAGMAS,
         LATEST_SCHEMA_VERSION,
+        MIN_IMPORT_SCHEMA_VERSION,
         apply_migrations,
         read_schema_version,
     )
-    from .db_schema import ALL_BACKFILL_COLUMNS, BACKFILL_COLUMNS, SCHEMA_SQL
+    from .db_schema import (
+        ALL_BACKFILL_COLUMNS,
+        BACKFILL_COLUMNS,
+        PERSONAL_TABLES,
+        REPO_STATE_KEY_PATTERNS,
+        SCHEMA_SQL,
+    )
     from .live_store import LiveStoreMixin
     from .models import (
         BACKFILL_STREAMS,
@@ -31,6 +46,7 @@ try:
         DiscussionRecord,
         DocSectionRecord,
         ExportSummary,
+        ImportSummary,
         IssueRecord,
         PrRecord,
         RepoConfig,
@@ -46,21 +62,32 @@ try:
         quantize_u8_matrix,
     )
     from .progress import (
-        NULL_REPORTER,
         ProgressReporter,
+        SqlitePhaseProgress,
         format_bytes,
-        format_duration,
     )
 except ImportError:
+    from db_import import (  # type: ignore[no-redef]
+        ImportAbortedError,
+        ImportIntegrityError,
+        is_sqlite_path_alias,
+        mirror_freshness_key,
+        preview_import_database,
+        validate_import_preflight,
+    )
+    from db_import import import_database as _import_database  # type: ignore[no-redef]
     from db_migrations import (  # type: ignore[no-redef]
         CONNECTION_PRAGMAS,
         LATEST_SCHEMA_VERSION,
+        MIN_IMPORT_SCHEMA_VERSION,
         apply_migrations,
         read_schema_version,
     )
     from db_schema import (  # type: ignore[no-redef]
         ALL_BACKFILL_COLUMNS,
         BACKFILL_COLUMNS,
+        PERSONAL_TABLES,
+        REPO_STATE_KEY_PATTERNS,
         SCHEMA_SQL,
     )
     from live_store import LiveStoreMixin  # type: ignore[no-redef]
@@ -74,6 +101,7 @@ except ImportError:
         DiscussionRecord,
         DocSectionRecord,
         ExportSummary,
+        ImportSummary,
         IssueRecord,
         PrRecord,
         RepoConfig,
@@ -89,20 +117,26 @@ except ImportError:
         quantize_u8_matrix,
     )
     from progress import (  # type: ignore[no-redef]
-        NULL_REPORTER,
         ProgressReporter,
+        SqlitePhaseProgress,
         format_bytes,
-        format_duration,
     )
 
 __all__ = [
     "BACKFILL_COLUMNS",
     "DEFAULT_DB_PATH",
     "INIT_SQL_FILENAME",
+    "MIN_IMPORT_SCHEMA_VERSION",
     "SCHEMA_SQL",
     "ExportIntegrityError",
+    "ImportAbortedError",
+    "ImportIntegrityError",
     "PackratStore",
+    "is_sqlite_path_alias",
+    "mirror_freshness_key",
+    "preview_import_database",
     "render_init_sql",
+    "validate_import_preflight",
 ]
 
 
@@ -117,75 +151,27 @@ class ExportIntegrityError(sqlite3.DatabaseError):
     """Raised when an exported database fails FTS5 or foreign-key verification."""
 
 
-class _ExportProgress:
-    """Bridges SQLite backup/VM callbacks to `ProgressReporter` and `on_progress`."""
+_ExportProgress = SqlitePhaseProgress
+"""Phase tracker type used by the export helpers (see `progress.SqlitePhaseProgress`)."""
 
-    def __init__(
-        self,
-        reporter: ProgressReporter | None = None,
-        on_progress: Callable[[str], None] | None = None,
-    ) -> None:
-        self._reporter: ProgressReporter = (
-            reporter if reporter is not None else NULL_REPORTER
-        )
-        self._on_progress = on_progress
-        self._phase = ""
-        self._started = 0.0
-        self._detail = ""
 
-    def begin(
-        self,
-        phase: str,
-        *,
-        total: int | None = None,
-        detail: str = "",
-    ) -> None:
-        """Starts `phase`, notifies `on_progress`, and emits an initial update if due."""
-        if self._on_progress is not None:
-            self._on_progress(phase)
-        self._phase = phase
-        self._started = time.monotonic()
-        self._detail = detail
-        self._reporter.start_phase("export", phase, total=total)
-        if detail:
-            self._reporter.advance(0, total, detail=detail)
+def _export_progress(
+    reporter: ProgressReporter | None = None,
+    on_progress: Callable[[str], None] | None = None,
+) -> SqlitePhaseProgress:
+    """Builds the export phase tracker with the module's VM heartbeat interval."""
+    return SqlitePhaseProgress(
+        reporter, on_progress, group="export", vm_ops=_EXPORT_VM_PROGRESS_OPS
+    )
 
-    def advance_pages(self, done_pages: int, total_pages: int, page_size: int) -> None:
-        """Emits page and byte progress during `sqlite3.Connection.backup`."""
-        detail = (
-            f"{format_bytes(done_pages * page_size)} / "
-            f"{format_bytes(total_pages * page_size)}"
-        )
-        self._reporter.advance(done_pages, total_pages, detail=detail)
 
-    def step(self, detail: str) -> None:
-        """Updates the active sub-step label and emits a throttled progress line."""
-        self._detail = detail
-        self._reporter.advance(0, None, detail=detail)
-
-    def vm_tick(self) -> int:
-        """SQLite `set_progress_handler` callback; returns 0 to continue execution."""
-        self._reporter.advance(0, None, detail=self._detail)
-        return 0
-
-    def end(self, summary: str) -> None:
-        """Finishes the active phase, printing a summary line if progress was shown."""
-        elapsed = max(0.0, time.monotonic() - self._started)
-        if getattr(self._reporter, "has_emitted_in_phase", False):
-            self._reporter.finish_phase(
-                f"{self._phase} done: {summary} ({format_duration(elapsed)})"
-            )
-        else:
-            self._reporter.finish_phase()
-
-    @contextlib.contextmanager
-    def vm_heartbeat(self, conn: sqlite3.Connection) -> Iterator[None]:
-        """Installs `vm_tick` on `conn` for the duration of long SQLite statements."""
-        conn.set_progress_handler(self.vm_tick, _EXPORT_VM_PROGRESS_OPS)
-        try:
-            yield
-        finally:
-            conn.set_progress_handler(None, 0)
+def _repo_state_key_sql() -> tuple[str, str]:
+    """Builds `key LIKE` predicates for simple (`prefix:<id>`) and scoped (`prefix:<id>:<stream>`) keys."""
+    simple = [p for p in REPO_STATE_KEY_PATTERNS if not p.startswith("gap_")]
+    scoped = [p for p in REPO_STATE_KEY_PATTERNS if p.startswith("gap_")]
+    simple_sql = " OR ".join(f"key LIKE '{p}%'" for p in simple)
+    scoped_sql = " OR ".join(f"key LIKE '{p}%:%'" for p in scoped)
+    return simple_sql, scoped_sql
 
 
 def _unlink_sqlite_sidecars(db_file: Path) -> None:
@@ -233,7 +219,7 @@ def _compact_and_verify_export_conn(
     tracker: _ExportProgress | None = None,
 ) -> tuple[int, int, int]:
     """Compacts `dest_conn`, switches to DELETE journal mode, and verifies integrity."""
-    active = tracker if tracker is not None else _ExportProgress(None, on_progress)
+    active = tracker if tracker is not None else _export_progress(None, on_progress)
     dest_conn.isolation_level = None
     _ps, pre_bytes, live_bytes = _estimate_conn_sizes(dest_conn)
     vac_detail = (
@@ -2370,22 +2356,8 @@ class PackratStore(LiveStoreMixin):
 
     def _is_source_db_alias(self, resolved_dest: Path, raw_dest: Path) -> bool:
         """Returns whether `resolved_dest` or `raw_dest` aliases `self.db_path` or its sidecars."""
-        if str(self.db_path) == ":memory:":
-            return False
-        src_resolved = self.db_path.expanduser().resolve()
-        forbidden = (
-            src_resolved,
-            Path(f"{src_resolved}-wal"),
-            Path(f"{src_resolved}-shm"),
-            Path(f"{src_resolved}-journal"),
-        )
-        if resolved_dest in forbidden:
-            return True
-        if not raw_dest.exists():
-            return False
-        return any(
-            candidate.exists() and os.path.samefile(raw_dest, candidate)
-            for candidate in forbidden
+        return is_sqlite_path_alias(self.db_path, resolved_dest) or is_sqlite_path_alias(
+            self.db_path, raw_dest
         )
 
     def _validate_export_destination(
@@ -2490,32 +2462,21 @@ class PackratStore(LiveStoreMixin):
                     excl_params,
                 )
             tracker.step("step 3/5, clearing personal and session tables")
-            for table in (
-                "notifications",
-                "viewer_sets",
-                "watches",
-                "refresh_requests",
-                "changes",
-                "api_calls",
-                "service_heartbeat",
-            ):
+            for table in PERSONAL_TABLES:
                 dest_conn.execute(f"DELETE FROM {table}")
             dest_conn.execute("DELETE FROM sqlite_sequence WHERE name = 'changes'")
             tracker.step("step 4/5, filtering service_state")
+            simple_keys, scoped_keys = _repo_state_key_sql()
             dest_conn.execute(
                 f"""
                 DELETE FROM service_state
                 WHERE key != 'vector_cache_seq'
                   AND NOT (
-                    (
-                      key LIKE 'signals_events:%'
-                      OR key LIKE 'events_last_id:%'
-                      OR key LIKE 'refetch_open_prs:%'
-                    )
+                    ({simple_keys})
                     AND CAST(substr(key, instr(key, ':') + 1) AS INTEGER) IN ({kept_placeholders})
                   )
                   AND NOT (
-                    (key LIKE 'gap_cursor:%:%' OR key LIKE 'gap_floor:%:%')
+                    ({scoped_keys})
                     AND CAST(
                       substr(
                         key,
@@ -2582,7 +2543,7 @@ class PackratStore(LiveStoreMixin):
             if source_is_memory or not self.db_path.exists()
             else self.db_path.stat().st_size
         )
-        tracker = _ExportProgress(reporter=reporter, on_progress=on_progress)
+        tracker = _export_progress(reporter=reporter, on_progress=on_progress)
         tmp_path = resolved_dest.parent / f"{resolved_dest.name}.tmp.{os.getpid()}"
         _unlink_temp_export_files(tmp_path)
         dest_conn: sqlite3.Connection | None = None
@@ -2622,4 +2583,47 @@ class PackratStore(LiveStoreMixin):
             source_bytes=source_bytes,
             dest_bytes=dest_bytes,
             duration_sec=duration_sec,
+        )
+
+    def import_database(
+        self,
+        source_path: Path | str,
+        *,
+        repo_tokens: Sequence[str] | None = None,
+        local_path: str | None = None,
+        allow_older: bool = False,
+        reporter: ProgressReporter | None = None,
+        now: float | None = None,
+    ) -> ImportSummary:
+        """Merges selected `mirror` repositories from another packrat database into this one.
+
+        The caller must hold `sync.lock`. Each repository commits in its own
+        transaction, so a failure keeps the repositories imported before it.
+        See `db_import.import_database` for the full contract.
+
+        Args:
+            source_path: Filesystem path of the source `repos.sqlite`.
+            repo_tokens: Optional `--repo` tokens (`owner/name`, alias, or short name)
+                selecting source `mirror` repositories; all of them when None.
+            local_path: Optional checkout path bound to a single imported repository.
+            allow_older: Replace destination mirrors even when the source is not newer.
+            reporter: Optional `ProgressReporter` for live `stderr` progress.
+            now: Optional UNIX timestamp override for deterministic tests.
+
+        Returns:
+            An `ImportSummary` with one outcome per selected repository.
+
+        Raises:
+            ValueError: On invalid source, `--repo`, `--path`, alias, or disk-space preflight.
+            SchemaTooNewError: When the source schema is newer than this packrat.
+            ImportAbortedError: When a repository transaction fails after preflight.
+        """
+        return _import_database(
+            self,
+            source_path,
+            repo_tokens=repo_tokens,
+            local_path=local_path,
+            allow_older=allow_older,
+            reporter=reporter,
+            now=now,
         )

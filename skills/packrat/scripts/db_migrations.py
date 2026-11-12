@@ -604,14 +604,19 @@ def _extract_thread_participants(reviewer: object, comments_json: object) -> str
     return json.dumps(sorted(logins))
 
 
-def _backfill_review_thread_participants(conn: sqlite3.Connection) -> None:
-    """Populates `review_threads.participants_json` for pre-v12 rows."""
+def _backfill_review_thread_participants(
+    conn: sqlite3.Connection, repo_id: int | None = None
+) -> None:
+    """Populates `review_threads.participants_json` for pre-v12 rows (optionally one repo)."""
+    scope_sql, scope_params = _repo_scope("", repo_id)
     rows = conn.execute(
-        """
+        f"""
         SELECT thread_id, reviewer, comments_json FROM review_threads
         WHERE participants_json = '[]'
           AND ((reviewer IS NOT NULL AND reviewer <> '') OR comments_json <> '[]')
-        """
+          {scope_sql}
+        """,
+        scope_params,
     ).fetchall()
     if not rows:
         return
@@ -625,28 +630,44 @@ def _backfill_review_thread_participants(conn: sqlite3.Connection) -> None:
     )
 
 
-def migrate_0012_utc_indexes_and_health(conn: sqlite3.Connection) -> None:
-    """Normalizes UTC commit dates, adds node_id indexes, indexed_files, and health columns."""
-    _add_missing_columns(conn, V12_COLUMNS)
-    _execute_script(conn, V12_INDEXES_AND_TABLES_SQL)
+def _repo_scope(prefix: str, repo_id: int | None) -> tuple[str, tuple[int, ...]]:
+    """Returns an `AND <prefix>repo_id = ?` clause and params, or an empty pair."""
+    if repo_id is None:
+        return "", ()
+    return f" AND {prefix}repo_id = ?", (int(repo_id),)
+
+
+def apply_v12_repo_fixups(conn: sqlite3.Connection, repo_id: int | None = None) -> None:
+    """Applies Migration 12's idempotent row rewrites, optionally scoped to one repository.
+
+    Normalizes `commits.committed_at` and commit `chunks.updated_at` to UTC
+    `Z` form, backfills `review_threads.participants_json`, and deletes
+    `check_runs` whose `head_oid` no longer matches the PR's `head_sha`.
+    `packrat import` runs this on rows copied from pre-v12 sources.
+    """
     utc_glob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z"
+    scope_sql, scope_params = _repo_scope("", repo_id)
     conn.execute(
         f"""
         UPDATE commits
         SET committed_at = COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', committed_at), committed_at)
-        WHERE committed_at NOT GLOB '{utc_glob}'
-        """
+        WHERE committed_at NOT GLOB '{utc_glob}'{scope_sql}
+        """,
+        scope_params,
     )
     conn.execute(
         f"""
         UPDATE chunks
         SET updated_at = COALESCE(strftime('%Y-%m-%dT%H:%M:%SZ', updated_at), updated_at)
         WHERE source_kind = 'commit' AND updated_at <> '' AND updated_at NOT GLOB '{utc_glob}'
-        """
+          {scope_sql}
+        """,
+        scope_params,
     )
-    _backfill_review_thread_participants(conn)
+    _backfill_review_thread_participants(conn, repo_id)
+    check_scope_sql, check_scope_params = _repo_scope("check_runs.", repo_id)
     conn.execute(
-        """
+        f"""
         DELETE FROM check_runs
         WHERE EXISTS (
           SELECT 1 FROM pull_requests p
@@ -654,9 +675,17 @@ def migrate_0012_utc_indexes_and_health(conn: sqlite3.Connection) -> None:
             AND p.number = check_runs.pr_number
             AND p.head_sha IS NOT NULL
             AND p.head_sha <> check_runs.head_oid
-        )
-        """
+        ){check_scope_sql}
+        """,
+        check_scope_params,
     )
+
+
+def migrate_0012_utc_indexes_and_health(conn: sqlite3.Connection) -> None:
+    """Normalizes UTC commit dates, adds node_id indexes, indexed_files, and health columns."""
+    _add_missing_columns(conn, V12_COLUMNS)
+    _execute_script(conn, V12_INDEXES_AND_TABLES_SQL)
+    apply_v12_repo_fixups(conn)
 
 
 V13_TABLES_DDL = """
@@ -846,6 +875,22 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+MIN_IMPORT_SCHEMA_VERSION = 11
+"""Oldest source schema version that `packrat import` accepts."""
+
+RowFixup = Callable[[sqlite3.Connection, int], None]
+
+IMPORT_ROW_FIXUPS: dict[int, RowFixup | None] = {
+    12: apply_v12_repo_fixups,
+    13: None,
+}
+"""Per-migration row rewrites that `packrat import` replays on rows copied from older sources.
+
+Every version above `MIN_IMPORT_SCHEMA_VERSION` must have an entry: a callable
+that fixes one repository's rows in place, or `None` when the migration only
+touched tables that import never copies.
+"""
 
 
 def read_schema_version(conn: sqlite3.Connection) -> int:

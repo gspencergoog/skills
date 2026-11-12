@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
+import sqlite3
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Literal, Protocol, TextIO
 
 ProgressMode = Literal["auto", "plain", "off"]
+
+DEFAULT_SQLITE_VM_PROGRESS_OPS = 250_000
+"""SQLite VM opcode interval between `set_progress_handler` ticks in long statements."""
 
 
 def format_duration(seconds: float) -> str:
@@ -145,6 +150,86 @@ class NullReporter:
 
 
 NULL_REPORTER = NullReporter()
+
+
+class SqlitePhaseProgress:
+    """Bridges SQLite backup and VM progress callbacks to a `ProgressReporter`.
+
+    Shared by `packrat export` (`group="export"`) and `packrat import`
+    (`group="import"`), which label every phase line with that group.
+    """
+
+    def __init__(
+        self,
+        reporter: ProgressReporter | None = None,
+        on_progress: Callable[[str], None] | None = None,
+        *,
+        group: str = "export",
+        vm_ops: int = DEFAULT_SQLITE_VM_PROGRESS_OPS,
+    ) -> None:
+        self._reporter: ProgressReporter = (
+            reporter if reporter is not None else NULL_REPORTER
+        )
+        self._on_progress = on_progress
+        self._group = group
+        self._vm_ops = max(1, int(vm_ops))
+        self._phase = ""
+        self._started = 0.0
+        self._detail = ""
+
+    def begin(
+        self,
+        phase: str,
+        *,
+        total: int | None = None,
+        detail: str = "",
+    ) -> None:
+        """Starts `phase`, notifies `on_progress`, and emits an initial update if due."""
+        if self._on_progress is not None:
+            self._on_progress(phase)
+        self._phase = phase
+        self._started = time.monotonic()
+        self._detail = detail
+        self._reporter.start_phase(self._group, phase, total=total)
+        if detail:
+            self._reporter.advance(0, total, detail=detail)
+
+    def advance_pages(self, done_pages: int, total_pages: int, page_size: int) -> None:
+        """Emits page and byte progress during `sqlite3.Connection.backup`."""
+        detail = (
+            f"{format_bytes(done_pages * page_size)} / "
+            f"{format_bytes(total_pages * page_size)}"
+        )
+        self._reporter.advance(done_pages, total_pages, detail=detail)
+
+    def step(self, detail: str) -> None:
+        """Updates the active sub-step label and emits a throttled progress line."""
+        self._detail = detail
+        self._reporter.advance(0, None, detail=detail)
+
+    def vm_tick(self) -> int:
+        """SQLite `set_progress_handler` callback; returns 0 to continue execution."""
+        self._reporter.advance(0, None, detail=self._detail)
+        return 0
+
+    def end(self, summary: str) -> None:
+        """Finishes the active phase, printing a summary line if progress was shown."""
+        elapsed = max(0.0, time.monotonic() - self._started)
+        if getattr(self._reporter, "has_emitted_in_phase", False):
+            self._reporter.finish_phase(
+                f"{self._phase} done: {summary} ({format_duration(elapsed)})"
+            )
+        else:
+            self._reporter.finish_phase()
+
+    @contextlib.contextmanager
+    def vm_heartbeat(self, conn: sqlite3.Connection) -> Iterator[None]:
+        """Installs `vm_tick` on `conn` for the duration of long SQLite statements."""
+        conn.set_progress_handler(self.vm_tick, self._vm_ops)
+        try:
+            yield
+        finally:
+            conn.set_progress_handler(None, 0)
 
 
 def _resolve_effective_mode(
