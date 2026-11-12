@@ -26,6 +26,7 @@ npx skills add gspencergoog/skills --skill <skill-name>
 | :--- | :--- |
 | **[agy-debugger](skills/agy-debugger/SKILL.md)** | Tool call auditor and real-time debugger web UI for agent sessions. |
 | **[analyze-github-pr](skills/analyze-github-pr/SKILL.md)** | Fetches and summarizes GitHub PR descriptions, reviews, comments, and CI diagnostics. |
+| **[audit-memory](skills/audit-memory/SKILL.md)** | Audits agent memories for factual rot against primary sources and promotes durable rules into AGENTS.md or skills. |
 | **[branch-cleanup](skills/branch-cleanup/SKILL.md)** | Identifies and prunes merged local and remote git branches and worktrees. |
 | **[code-documentation](skills/code-documentation/SKILL.md)** | Writes and audits docstrings and comments across Dart, Python, and TypeScript. |
 | **[code-review](skills/code-review/SKILL.md)** | Multi-pass code review with evidence tiers, severity caps, and focus playbooks. |
