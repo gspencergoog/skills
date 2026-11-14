@@ -4,15 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import io
 import json
 import os
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import asdict
@@ -58,6 +61,15 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "sync_repo_embeddings": ("embedder", "sync_repo_embeddings"),
     "run_gh_command": ("gh_transport", "run_gh_command"),
     "sync_git_codebase": ("git_indexer", "sync_git_codebase"),
+    "check_remote": ("managed_git", "check_remote"),
+    "ensure_git": ("managed_git", "ensure_git"),
+    "fetch_git": ("managed_git", "fetch_git"),
+    "git_status": ("managed_git", "git_status"),
+    "move_git": ("managed_git", "move_git"),
+    "prune_orphans": ("managed_git", "prune_orphans"),
+    "remove_git": ("managed_git", "remove_git"),
+    "run_gc": ("managed_git", "run_gc"),
+    "validate_url": ("managed_git", "validate_url"),
     "DEFAULT_BACKFILL_MAX_PAGES": ("github_sync", "DEFAULT_BACKFILL_MAX_PAGES"),
     "GhAuthProbe": ("github_sync", "GhAuthProbe"),
     "probe_gh_auth": ("github_sync", "probe_gh_auth"),
@@ -85,10 +97,16 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "fold_timeline_stats": ("serve_cli", "fold_timeline_stats"),
     "format_service_status": ("serve_cli", "format_service_status"),
     "github_sync_stopped": ("serve_cli", "github_sync_stopped"),
+    "read_git_poll": ("serve_cli", "read_git_poll"),
     "service_status": ("serve_cli", "service_status"),
+    "write_git_poll": ("serve_cli", "write_git_poll"),
     "AutoSyncRunRecord": ("sync_runtime", "AutoSyncRunRecord"),
     "LockMode": ("sync_runtime", "LockMode"),
     "SyncLockInfo": ("sync_runtime", "SyncLockInfo"),
+    "SymbolParsers": ("symbol_parsers", "SymbolParsers"),
+    "add_parsers_parser": ("parsers_cli", "add_parsers_parser"),
+    "collect_parsers_status": ("parsers_cli", "collect_parsers_status"),
+    "format_parsers_status_line": ("parsers_cli", "format_parsers_status_line"),
     "acquire_sync_lock": ("sync_runtime", "acquire_sync_lock"),
     "write_auto_sync_run_state": ("sync_runtime", "write_auto_sync_run_state"),
     "sync_repo_timelines": ("timeline_sync", "sync_repo_timelines"),
@@ -118,6 +136,9 @@ INIT_SQL_FILENAME = "init.sql"
 
 SYNC_TIMELINE_MAX_BATCHES = 500
 """Timeline batches per pass in `packrat sync` (20 items each, not counting follow-up pages)."""
+
+BACKFILL_INCOMPLETE_TIMELINE_MAX_BATCHES = 25
+"""Timeline batch cap under `--backfill-only` while primary stream backfills are still incomplete."""
 
 _DEFAULT_BACKFILL_MAX_PAGES = 250
 
@@ -160,7 +181,9 @@ def _open_store(
 NO_REPOS_MESSAGE = (
     "Error: No repositories are registered in packrat.\n"
     "Register one with:\n"
-    "  packrat repo add <owner>/<name> --path /path/to/local/checkout\n"
+    "  packrat repo add <owner>/<name>\n"
+    "Or without a local clone:\n"
+    "  packrat repo add <owner>/<name> --github-only\n"
 )
 
 
@@ -245,7 +268,7 @@ def _select_mirror_repos(
             if not repo.is_mirror:
                 raise ValueError(
                     f"{repo.full_name} is in items mode; "
-                    f"run 'packrat repo add {repo.full_name}' to mirror it."
+                    f"run 'packrat repo add {repo.full_name} [--github-only]' to mirror it."
                 )
         return selected
     return [r for r in selected if r.is_mirror]
@@ -255,7 +278,7 @@ def _merge_sync_stats(
     repo_name: str,
     git_stats: SyncStats | None,
     gh_stats: SyncStats | None,
-    embedded_count: int,
+    embedding: Any,
     duration_sec: float = 0.0,
 ) -> dict[str, Any]:
     """Combines git, GitHub, and embedding sync metrics into a single dictionary."""
@@ -269,6 +292,9 @@ def _merge_sync_stats(
         combined.symbols_upserted = git_stats.symbols_upserted
         combined.doc_sections_upserted = git_stats.doc_sections_upserted
         combined.chunks_upserted += git_stats.chunks_upserted
+        combined.syntax_error_count = getattr(git_stats, "syntax_error_count", 0)
+        combined.dropped_symbol_count = getattr(git_stats, "dropped_symbol_count", 0)
+        combined.reparse_capped = bool(getattr(git_stats, "reparse_capped", False))
         combined.warnings.extend(git_stats.warnings)
         combined.errors.extend(git_stats.errors)
         if git_stats.skipped_reason:
@@ -287,7 +313,11 @@ def _merge_sync_stats(
         combined.errors.extend(gh_stats.errors)
         if gh_stats.skipped_reason:
             combined.skipped_reason = gh_stats.skipped_reason
-    combined.embeddings_updated = embedded_count
+    if hasattr(embedding, "embedded_count"):
+        combined.embeddings_updated = int(embedding.embedded_count)
+        combined.embed_capped = bool(getattr(embedding, "capped", False))
+    else:
+        combined.embeddings_updated = int(embedding)
     return asdict(combined)
 
 
@@ -396,12 +426,166 @@ def _format_rate_snapshot(snap: RateSnapshot, now: float) -> str:
     )
 
 
+def _format_human_size(num_bytes: int) -> str:
+    units = ("B", "KiB", "MiB", "GiB")
+    val = float(num_bytes)
+    for unit in units[:-1]:
+        if val < 1024.0:
+            return f"{val:.0f} {unit}" if unit == "B" else f"{val:.2f} {unit}"
+        val /= 1024.0
+    return f"{val:.2f} {units[-1]}"
+
+
+def _format_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _format_managed_git_line(
+    *,
+    cloning: bool,
+    exists: bool,
+    local_tip: str,
+    remote_tip: str,
+    fetched_at: Any,
+    last_error: str,
+    backoff: float,
+    size_bytes: int,
+    now: float,
+) -> tuple[str, str]:
+    if cloning:
+        return "cloning", "git=managed (cloning)"
+    if last_error and (not exists or backoff > now):
+        retry = max(0, int(backoff - now))
+        suffix = f", retry in {retry}s" if backoff > now else ""
+        return "error", f"git=managed (error: {last_error}{suffix})"
+    if not exists or not local_tip:
+        return "pending", "git=managed (pending clone)"
+    if remote_tip and remote_tip != local_tip:
+        return (
+            "behind",
+            f"git=managed (behind, tip {local_tip[:8]}, remote {remote_tip[:8]})",
+        )
+    remote_part = f", remote {remote_tip[:8]}" if remote_tip else ""
+    age_part = (
+        f", fetched {_format_age(max(0.0, now - float(fetched_at)))} ago"
+        if fetched_at
+        else ""
+    )
+    return (
+        "ready",
+        f"git=managed (ready, tip {local_tip[:8]}{remote_part}{age_part}, {_format_human_size(size_bytes)})",
+    )
+
+
+def _managed_git_status_payload(
+    store: PackratStore, repo: RepoConfig, now: float
+) -> dict[str, Any]:
+    root = store.git_root
+    disk = (
+        _lazy("git_status")(root, repo)
+        if root is not None
+        else {
+            "git_dir": None,
+            "exists": False,
+            "cloning": False,
+            "local_tip": "",
+            "size_bytes": 0,
+        }
+    )
+    poll = _lazy("read_git_poll")(store, repo.repo_id)
+    local_tip = str(disk.get("local_tip") or "")
+    remote_tip = str(poll.get("remote_sha") or "")
+    fetched_at = poll.get("fetched_at")
+    last_error = str(poll.get("last_error") or "")
+    backoff = float(poll.get("backoff_until") or 0.0)
+    size_bytes = int(disk.get("size_bytes") or 0)
+    state, line = _format_managed_git_line(
+        cloning=bool(disk.get("cloning")),
+        exists=bool(disk.get("exists")),
+        local_tip=local_tip,
+        remote_tip=remote_tip,
+        fetched_at=fetched_at,
+        last_error=last_error,
+        backoff=backoff,
+        size_bytes=size_bytes,
+        now=now,
+    )
+    return {
+        "git_source": "managed",
+        "git_url": repo.git_url,
+        "git_dir": disk.get("git_dir"),
+        "git_state": state,
+        "local_tip": local_tip or None,
+        "remote_tip": remote_tip or None,
+        "fetched_at": fetched_at,
+        "last_error": last_error or None,
+        "size_bytes": size_bytes,
+        "git_line": line,
+    }
+
+
+def _repo_git_status_payload(
+    store: PackratStore, repo: RepoConfig, now: float
+) -> dict[str, Any]:
+    """Computes `git_*` status fields and formatted `git=` line for one repo."""
+    if repo.git_source == "managed":
+        return _managed_git_status_payload(store, repo, now)
+    if repo.git_source == "none":
+        return {
+            "git_source": "none",
+            "git_url": None,
+            "git_dir": None,
+            "git_state": "none",
+            "local_tip": None,
+            "remote_tip": None,
+            "fetched_at": None,
+            "last_error": None,
+            "size_bytes": 0,
+            "git_line": "git=none",
+        }
+    p = Path(repo.local_path).expanduser() if repo.local_path else None
+    exists = bool(
+        p is not None
+        and p.exists()
+        and (
+            (p / ".git").exists()
+            or ((p / "HEAD").is_file() and (p / "objects").is_dir())
+        )
+    )
+    state = "ready" if exists else "missing"
+    line = (
+        f"git=path ({repo.local_path})"
+        if exists
+        else f"git=path ({repo.local_path}, missing)"
+    )
+    return {
+        "git_source": "path",
+        "git_url": None,
+        "git_dir": repo.local_path,
+        "git_state": state,
+        "local_tip": repo.last_indexed_sha,
+        "remote_tip": None,
+        "fetched_at": None,
+        "last_error": None,
+        "size_bytes": 0,
+        "git_line": line,
+    }
+
+
 def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> None:
     """Prints human-readable `packrat status` output to stdout."""
     print(f"Database: {payload['db_path']}")
     print(f"DuckDB init.sql: {payload['init_sql_path']}")
     print(f"Embedder: {payload['active_embedder']}")
     print(_format_auto_sync_mode(auto_sync))
+    if "parsers" in payload:
+        print(_lazy("format_parsers_status_line")(payload["parsers"]))
     last_line = _format_last_auto_sync(auto_sync.last_run)
     if last_line is not None:
         print(last_line)
@@ -418,6 +602,8 @@ def _print_status_text(payload: dict[str, Any], auto_sync: AutoSyncStatus) -> No
         c = item["counts"]
         sha_short = (item["last_indexed_sha"] or "none")[:10]
         print(f"\n[{item['full_name']}] (path={item['local_path']}, sha={sha_short})")
+        if "git_line" in item:
+            print(f"  {item['git_line']}")
         print(
             f"  GitHub: issues={c['issues']} prs={c['pull_requests']} "
             f"threads={c['review_threads']} comments={c['comments']} "
@@ -473,10 +659,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             "init_sql_path": str(init_sql_path),
             "active_embedder": embedder_id,
             "auto_sync": asdict(auto_sync),
+            "parsers": _lazy("collect_parsers_status")(store),
             "rate_budget": _rate_budget_payload(_rate_budget_for(store.db_path)),
             "service": _lazy("service_status")(store),
             "repos": [],
         }
+        now = time.time()
         for r in repos:
             counts = (
                 store.table_counts(r.repo_id)
@@ -496,6 +684,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                     "prs_watermark": r.prs_watermark,
                     "discussions_watermark": r.discussions_watermark,
                     "last_full_sweep_at": r.last_full_sweep_at,
+                    **_repo_git_status_payload(store, r, now),
                     "counts": counts,
                     "backfill": _backfill_summary(r),
                     "warnings": _backfill_warnings(r) + _timeline_warnings(store, r),
@@ -530,10 +719,13 @@ def _run_github_sync(
     """Runs the GitHub part of a repo sync, then its timeline pass.
 
     `--backfill-only` runs the backfill walks and then fetches timelines of
-    items never fetched before (`TimelineMode.BACKFILL`). Otherwise the full
-    delta sync runs, then every stale timeline (`TimelineMode.ALL`) and the
-    cross-reference queue. The timeline pass is skipped with `--no-timeline`
-    and after a GitHub sync that stopped for a locked keyring or a rate limit.
+    items never fetched before (`TimelineMode.BACKFILL`), capped to
+    `BACKFILL_INCOMPLETE_TIMELINE_MAX_BATCHES` while primary streams still have
+    pending history so open and recent items stay covered without starving
+    stream backfills. Otherwise the full delta sync runs, then every stale
+    timeline (`TimelineMode.ALL`) and the cross-reference queue. The timeline
+    pass is skipped with `--no-timeline` and after a GitHub sync that stopped
+    for a locked keyring or a rate limit.
     """
     backfill_only = bool(getattr(args, "backfill_only", False))
     if backfill_only:
@@ -557,13 +749,18 @@ def _run_github_sync(
     if getattr(args, "no_timeline", False) or _lazy("github_sync_stopped")(stats):
         return stats
     t_mode = _lazy("TimelineMode")
+    max_batches = (
+        BACKFILL_INCOMPLETE_TIMELINE_MAX_BATCHES
+        if backfill_only and stats.backfill_incomplete
+        else SYNC_TIMELINE_MAX_BATCHES
+    )
     timeline = _lazy("sync_repo_timelines")(
         store,
         store.get_repo(repo.full_name) or repo,
         mode=t_mode.BACKFILL if backfill_only else t_mode.ALL,
         runner=_lazy("run_gh_command"),
         budget=budget,
-        max_batches=SYNC_TIMELINE_MAX_BATCHES,
+        max_batches=max_batches,
         drain_xrefs=not backfill_only,
         reporter=reporter,
     )
@@ -581,6 +778,9 @@ def _sync_single_repo(
     budget: RateBudget | None = None,
     *,
     allow_download: bool = False,
+    parsers: Any = None,
+    max_reparse_files: int | None = None,
+    max_embed_chunks: int | None = None,
 ) -> dict[str, Any]:
     """Executes git, GitHub, and embedding sync for a single repository.
 
@@ -591,15 +791,18 @@ def _sync_single_repo(
     started = time.monotonic()
     git_stats: SyncStats | None = None
     gh_stats: SyncStats | None = None
+    prior_fp = repo.parser_fingerprint
 
     if not args.github_only:
         git_stats = _lazy("sync_git_codebase")(
             store,
             repo,
             force=args.force,
-            fetch=args.fetch,
+            fetch=bool(args.fetch and repo.git_source == "path"),
             max_commits=args.max_commits,
             reporter=active_reporter,
+            parsers=parsers,
+            max_reparse_files=max_reparse_files,
         )
     if not args.git_only:
         if gh_probe is not None and not gh_probe.ok:
@@ -609,17 +812,22 @@ def _sync_single_repo(
             gh_stats = _run_github_sync(
                 store, fresh_repo, args, active_reporter, budget
             )
-    embedded_count = _lazy("sync_repo_embeddings")(
+    embedding = _lazy("sync_repo_embeddings")(
         store,
         repo.repo_id,
         embedder=embedder,
+        max_chunks=max_embed_chunks,
         allow_download=allow_download,
         reporter=active_reporter,
         repo_label=repo.full_name,
     )
+    if getattr(embedding, "capped", False) and not args.github_only:
+        updated_repo = store.get_repo(repo.full_name)
+        if updated_repo is not None and updated_repo.parser_fingerprint != prior_fp:
+            store.set_parser_fingerprint(repo.repo_id, prior_fp)
     elapsed = max(0.0, time.monotonic() - started)
     return _merge_sync_stats(
-        repo.full_name, git_stats, gh_stats, embedded_count, duration_sec=elapsed
+        repo.full_name, git_stats, gh_stats, embedding, duration_sec=elapsed
     )
 
 
@@ -656,13 +864,17 @@ def _validate_git_sync_paths(
         return None
     git_only = bool(getattr(args, "git_only", False))
     for repo in repos:
-        if not repo.local_path:
+        if repo.git_source == "managed":
+            continue
+        if repo.git_source == "none" or not repo.local_path:
             if not git_only:
                 continue
             return (
-                f"Error: No local git worktree path is configured for '{repo.full_name}'.\n"
-                f"Configure it with:\n"
+                f"Error: No local git worktree path or managed clone is configured for '{repo.full_name}'.\n"
+                f"Configure one with:\n"
                 f"  packrat repo set-path {repo.full_name} /path/to/local/checkout\n"
+                f"Or switch to a managed clone:\n"
+                f"  packrat repo set-git {repo.full_name} managed\n"
                 f"Or sync GitHub metadata only with:\n"
                 f"  packrat sync --repo {repo.full_name} --github-only"
             )
@@ -695,6 +907,11 @@ def _format_skipped_sync_note(repo_full_name: str, skipped_reason: str) -> str:
         return (
             f"  note: no_local_path (bind a checkout with: "
             f"packrat repo set-path {repo_full_name} /path/to/checkout)"
+        )
+    if skipped_reason == "pending_clone":
+        return (
+            f"  note: pending_clone (run `packrat sync --repo {repo_full_name}` "
+            f"or `packrat git fetch --repo {repo_full_name}` to clone)"
         )
     return f"  note: {skipped_reason}"
 
@@ -949,6 +1166,51 @@ def _propagate_keyring_lock(
     return gh_probe
 
 
+DEFAULT_AUTO_MAX_REPARSE_FILES = 1500
+DEFAULT_AUTO_MAX_EMBED_CHUNKS = 15000
+
+
+def _resolve_auto_caps(
+    args: argparse.Namespace, *, is_auto: bool
+) -> tuple[int | None, int | None]:
+    """Resolves per-run `(max_reparse_files, max_embed_chunks)` caps."""
+    raw_reparse = getattr(args, "max_reparse_files", None)
+    raw_embed = getattr(args, "max_embed_chunks", None)
+    max_reparse = (
+        int(raw_reparse)
+        if raw_reparse is not None
+        else (DEFAULT_AUTO_MAX_REPARSE_FILES if is_auto else None)
+    )
+    max_embed = (
+        int(raw_embed)
+        if raw_embed is not None
+        else (DEFAULT_AUTO_MAX_EMBED_CHUNKS if is_auto else None)
+    )
+    return max_reparse, max_embed
+
+
+def _install_parser_signal_handlers(parsers: Any) -> dict[int, Any]:
+    """Installs main-thread SIGTERM/SIGINT handlers closing `parsers` cleanly."""
+    if threading.current_thread() is not threading.main_thread() or parsers is None:
+        return {}
+    previous: dict[int, Any] = {}
+
+    def _on_signal(signum: int, _frame: object) -> None:
+        parsers.close()
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        previous[int(sig)] = signal.getsignal(sig)
+        signal.signal(sig, _on_signal)
+    return previous
+
+
+def _restore_signal_handlers(previous: dict[int, Any]) -> None:
+    """Restores prior signal handlers saved by `_install_parser_signal_handlers`."""
+    for sig_val, handler in previous.items():
+        signal.signal(signal.Signals(sig_val), handler)
+
+
 def _sync_repos_under_lock(
     args: argparse.Namespace,
     db_path: Path,
@@ -982,22 +1244,44 @@ def _sync_repos_under_lock(
         embedder_id, embedder = _resolve_active_embedder_id(
             allow_download=allow_download, reporter=reporter
         )
+        max_reparse, max_embed = _resolve_auto_caps(args, is_auto=is_auto)
         results: list[dict[str, Any]] = []
-        for repo in repos:
-            res = _sync_single_repo_guarded(
-                store,
-                repo,
-                args,
-                embedder,
-                reporter=reporter,
-                gh_probe=gh_probe,
-                budget=budget,
-                allow_download=allow_download,
+        run_git = not getattr(args, "github_only", False) and not getattr(
+            args, "backfill_only", False
+        )
+        parsers_cm = (
+            _lazy("SymbolParsers")(
+                overrides=store.get_parser_overrides(), reporter=reporter
             )
-            results.append(res)
-            gh_probe = _propagate_keyring_lock(gh_probe, res)
-            if not args.json:
-                _print_repo_sync_summary(res, reporter)
+            if run_git
+            else contextlib.nullcontext(None)
+        )
+        with parsers_cm as parsers:
+            prev_signals = _install_parser_signal_handlers(parsers)
+            try:
+                for repo in repos:
+                    res = _sync_single_repo_guarded(
+                        store,
+                        repo,
+                        args,
+                        embedder,
+                        reporter=reporter,
+                        gh_probe=gh_probe,
+                        budget=budget,
+                        allow_download=allow_download,
+                        parsers=parsers,
+                        max_reparse_files=max_reparse,
+                        max_embed_chunks=max_embed,
+                    )
+                    results.append(res)
+                    gh_probe = _propagate_keyring_lock(gh_probe, res)
+                    if not args.json:
+                        _print_repo_sync_summary(res, reporter)
+                if parsers is not None:
+                    for parser_name, reason in parsers.unavailable().items():
+                        store.set_parser_unavailable_reason(parser_name, reason)
+            finally:
+                _restore_signal_handlers(prev_signals)
         reporter.clear_active_line()
 
         return _finalize_sync_run(
@@ -1013,6 +1297,183 @@ def _sync_repos_under_lock(
         store.close()
 
 
+def _record_pre_sync_git_poll(
+    db_path_str: str | None,
+    repo: RepoConfig,
+    *,
+    now: float,
+    checked_at: float | None = None,
+    fetched_at: float | None = None,
+    remote_sha: str | None = None,
+    remote_default_branch: str | None = None,
+    last_error: str | None = None,
+) -> RepoConfig:
+    """Persists pre-lock managed git metadata in short transactions outside `sync.lock`."""
+    store = _open_store(db_path_str, refresh_init_sql=False)
+    try:
+        if remote_default_branch and remote_default_branch != repo.default_branch:
+            store.set_repo_default_branch(repo.repo_id, remote_default_branch, now=now)
+        state = _lazy("read_git_poll")(store, repo.repo_id)
+        if checked_at is not None:
+            state["checked_at"] = checked_at
+        if fetched_at is not None:
+            state["fetched_at"] = fetched_at
+        if remote_sha is not None:
+            state["remote_sha"] = remote_sha
+        if remote_default_branch:
+            state["remote_default_branch"] = remote_default_branch
+        if last_error is not None:
+            state["last_error"] = last_error
+        _lazy("write_git_poll")(store, repo.repo_id, state, now=now)
+        return store.get_repo_by_id(repo.repo_id) or repo
+    finally:
+        store.close()
+
+
+def _pre_lock_update_branch(
+    args: argparse.Namespace,
+    repo: RepoConfig,
+    new_branch: str,
+    *,
+    now: float,
+    fetched_at: float | None,
+    remote_sha: str | None,
+    last_error: str,
+) -> RepoConfig:
+    if not new_branch or new_branch == repo.default_branch:
+        return repo
+    return _record_pre_sync_git_poll(
+        args.db,
+        repo,
+        now=now,
+        fetched_at=fetched_at,
+        remote_sha=remote_sha,
+        remote_default_branch=new_branch,
+        last_error=last_error,
+    )
+
+
+def _ensure_managed_clone_pre_lock(
+    args: argparse.Namespace,
+    repo: RepoConfig,
+    root: Path,
+    reporter: ProgressReporter,
+) -> None:
+    ens = _lazy("ensure_git")(root, repo, reporter=reporter)
+    now_done = time.time()
+    _record_pre_sync_git_poll(
+        args.db,
+        repo,
+        now=now_done,
+        checked_at=now_done,
+        fetched_at=now_done if not ens.error else None,
+        remote_sha=ens.new_tip or None,
+        remote_default_branch=ens.remote_default_branch or None,
+        last_error=ens.error,
+    )
+    if ens.error:
+        sys.stderr.write(
+            f"Warning: git clone/converge failed for {repo.full_name}: {ens.error}\n"
+        )
+
+
+def _sync_one_managed_repo_pre_lock(
+    args: argparse.Namespace,
+    repo: RepoConfig,
+    root: Path,
+    reporter: ProgressReporter,
+) -> None:
+    """Runs `ensure_git`, `check_remote`, and `fetch_git` for one repo outside `sync.lock`."""
+    disk = _lazy("git_status")(root, repo)
+    if not disk.get("exists") or disk.get("cloning") or not disk.get("local_tip"):
+        _ensure_managed_clone_pre_lock(args, repo, root, reporter)
+        return
+
+    now = time.time()
+    chk = _lazy("check_remote")(repo)
+    if chk.error or chk.timed_out:
+        err = chk.error or "ls-remote timed out"
+        _record_pre_sync_git_poll(
+            args.db, repo, now=now, checked_at=now, last_error=err
+        )
+        sys.stderr.write(
+            f"Warning: git remote check failed for {repo.full_name}: {err}\n"
+        )
+        return
+
+    repo = _pre_lock_update_branch(
+        args,
+        repo,
+        chk.remote_default_branch,
+        now=now,
+        fetched_at=None,
+        remote_sha=chk.new_tip or None,
+        last_error="",
+    )
+    up_to_date = (
+        chk.new_tip
+        and chk.new_tip == str(disk.get("local_tip") or "")
+        and (
+            not chk.remote_default_branch
+            or chk.remote_default_branch == repo.default_branch
+        )
+    )
+    if up_to_date:
+        _record_pre_sync_git_poll(
+            args.db,
+            repo,
+            now=now,
+            checked_at=now,
+            remote_sha=chk.new_tip,
+            last_error="",
+        )
+        return
+
+    fetched = _lazy("fetch_git")(root, repo, maintenance="auto")
+    now_done = time.time()
+    _record_pre_sync_git_poll(
+        args.db,
+        repo,
+        now=now_done,
+        checked_at=now,
+        fetched_at=now_done if not fetched.error else None,
+        remote_sha=fetched.new_tip or chk.new_tip or None,
+        remote_default_branch=fetched.remote_default_branch or None,
+        last_error=fetched.error,
+    )
+    if fetched.error:
+        sys.stderr.write(
+            f"Warning: git fetch failed for {repo.full_name}: {fetched.error}\n"
+        )
+
+
+def _sync_managed_repos_pre_lock(
+    args: argparse.Namespace,
+    reporter: ProgressReporter,
+) -> None:
+    """Clones/fetches due `managed` repositories before `sync.lock` is taken."""
+    if (
+        getattr(args, "github_only", False)
+        or getattr(args, "backfill_only", False)
+        or getattr(args, "no_fetch", False)
+    ):
+        return
+    store = _open_store(args.db, refresh_init_sql=False)
+    try:
+        try:
+            repos = _select_mirror_repos(store, args.repo)
+        except ValueError:
+            return
+        managed = [r for r in repos if r.git_source == "managed"]
+        root = store.git_root
+    finally:
+        store.close()
+    if root is None or not managed:
+        return
+    for repo in managed:
+        _sync_one_managed_repo_pre_lock(args, repo, root, reporter)
+
+
 def cmd_sync(args: argparse.Namespace) -> int:
     """Handles `packrat sync`."""
     started = time.monotonic()
@@ -1025,6 +1486,7 @@ def cmd_sync(args: argparse.Namespace) -> int:
         mode=getattr(args, "progress", "auto"),
         quiet=bool(getattr(args, "quiet", False)),
     )
+    _sync_managed_repos_pre_lock(args, reporter)
     with _lazy("acquire_sync_lock")(db_path, mode=lock_mode) as lock_info:
         if not lock_info.acquired:
             return _handle_contended_sync_lock(
@@ -1270,20 +1732,144 @@ def _split_full_name(full_name: str) -> tuple[str, str] | None:
     return owner, name
 
 
+def _resolve_repo_add_args(
+    args: argparse.Namespace, existing: RepoConfig | None
+) -> tuple[str, str | None, str | None, bool, bool]:
+    """Resolves `(git_source, local_path, git_url, update_binding, remove_old_git)` for `repo add`."""
+    raw_url = getattr(args, "url", None)
+    if getattr(args, "github_only", False):
+        if raw_url is not None:
+            raise ValueError("--url cannot be combined with --github-only.")
+        return "none", None, None, True, not getattr(args, "keep_git", False)
+    if getattr(args, "path", None):
+        if raw_url is not None:
+            raise ValueError("--url cannot be combined with --path.")
+        resolved = str(Path(args.path).expanduser().resolve())
+        return "path", resolved, None, True, not getattr(args, "keep_git", False)
+    if existing is not None and existing.git_source == "path" and raw_url is None:
+        return "path", existing.local_path, None, False, False
+    return "managed", None, raw_url, True, False
+
+
+def _resolve_set_git_args(
+    args: argparse.Namespace,
+) -> tuple[str, str | None, str | None, bool, bool]:
+    """Resolves `(git_source, local_path, git_url, remove_old_git, clone_now)` for `set-git`/`set-path`."""
+    mode = "path" if args.repo_action == "set-path" else str(args.git_mode)
+    raw_path = getattr(args, "path", None)
+    raw_url = getattr(args, "url", None)
+    clone_now = bool(getattr(args, "clone_now", False))
+    keep_git = bool(getattr(args, "keep_git", False))
+    if mode == "path":
+        if not raw_path:
+            raise ValueError("`repo set-git path` requires a local directory argument.")
+        if raw_url is not None or clone_now:
+            raise ValueError("--url and --clone-now apply only to `managed`.")
+        return (
+            "path",
+            str(Path(raw_path).expanduser().resolve()),
+            None,
+            not keep_git,
+            False,
+        )
+    if raw_path:
+        raise ValueError(f"Unexpected path argument for `repo set-git {mode}`.")
+    if mode == "none":
+        if raw_url is not None or clone_now:
+            raise ValueError("--url and --clone-now apply only to `managed`.")
+        return "none", None, None, not keep_git, False
+    return "managed", None, raw_url, False, clone_now
+
+
+def _clone_repo_outside_tx(
+    db_path_str: str | None,
+    root: Path | None,
+    rec: RepoConfig,
+    *,
+    mode: str = "auto",
+    quiet: bool = False,
+) -> int:
+    if root is None:
+        return 0
+    reporter = _lazy("StderrProgressReporter")(mode=mode, quiet=quiet)
+    try:
+        res = _lazy("ensure_git")(root, rec, reporter=reporter)
+    finally:
+        reporter.finish_phase()
+    now = time.time()
+    _record_pre_sync_git_poll(
+        db_path_str,
+        rec,
+        now=now,
+        fetched_at=now if not res.error else None,
+        remote_sha=res.new_tip or None,
+        remote_default_branch=res.remote_default_branch or None,
+        last_error=res.error,
+    )
+    if res.error:
+        sys.stderr.write(f"Error cloning {rec.full_name}: {res.error}\n")
+        return 1
+    return 0
+
+
 def _cmd_repo_register(store: PackratStore, args: argparse.Namespace) -> int:
-    """Handles `packrat repo add` and `packrat repo set-path`."""
+    """Handles `packrat repo add`, `packrat repo set-git`, and `packrat repo set-path`."""
     parts = _split_full_name(args.full_name)
     if parts is None:
         sys.stderr.write("Expected <owner>/<name> format.\n")
         return 2
-    resolved_path = str(Path(args.path).expanduser().resolve()) if args.path else None
+    existing = store.get_repo(f"{parts[0]}/{parts[1]}")
+    if args.repo_action == "add":
+        git_source, resolved_path, raw_url, update_binding, remove_old = (
+            _resolve_repo_add_args(args, existing)
+        )
+        clone_now = False
+        if (
+            existing is not None
+            and existing.git_source == "path"
+            and git_source == "path"
+            and not update_binding
+        ):
+            sys.stderr.write(
+                f"Note: keeping existing path binding for {existing.full_name} "
+                f"({existing.local_path}); use `repo set-git {existing.full_name} managed` to switch.\n"
+            )
+    else:
+        if existing is None and args.repo_action == "set-git":
+            sys.stderr.write(
+                f"Error: Repository '{args.full_name}' is not registered in packrat.\n"
+            )
+            return 2
+        git_source, resolved_path, raw_url, remove_old, clone_now = (
+            _resolve_set_git_args(args)
+        )
+        update_binding = True
+
     rec = store.register_repo(
         parts[0],
         parts[1],
         local_path=resolved_path,
-        default_branch=args.branch,
+        default_branch=args.branch or (existing.default_branch if existing else "main"),
+        git_source=git_source,  # type: ignore[arg-type]
+        git_url=raw_url,
+        update_binding=update_binding,
     )
-    print(f"Configured {rec.full_name} (repo_id={rec.repo_id}, path={rec.local_path})")
+    root = store.git_root
+    if (
+        remove_old
+        and existing is not None
+        and existing.git_source == "managed"
+        and root is not None
+    ):
+        _lazy("remove_git")(root, existing)
+    print(
+        f"Configured {rec.full_name} (repo_id={rec.repo_id}, "
+        f"git_source={rec.git_source}, path={rec.local_path})"
+    )
+    if clone_now and rec.git_source == "managed":
+        db_str = str(store.db_path)
+        store.close()
+        return _clone_repo_outside_tx(db_str, root, rec)
     return 0
 
 
@@ -1293,32 +1879,40 @@ def _cmd_repo_rename(store: PackratStore, args: argparse.Namespace) -> int:
     if parts is None:
         sys.stderr.write("Expected <owner>/<name> format for the new name.\n")
         return 2
+    old_repo = store.get_repo(args.full_name)
     try:
         rec = store.rename_repo(args.full_name, parts[0], parts[1])
     except ValueError as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 2
+    root = store.git_root
+    if old_repo is not None and old_repo.git_source == "managed" and root is not None:
+        _lazy("move_git")(root, old_repo, rec.owner, rec.name, clone_url=rec.clone_url)
     print(f"Renamed {args.full_name} to {rec.full_name} (repo_id={rec.repo_id})")
     return 0
 
 
 def _cmd_repo_remove(store: PackratStore, args: argparse.Namespace) -> int:
     """Handles `packrat repo remove`."""
+    existing = store.get_repo(args.full_name)
     if not store.remove_repo(args.full_name):
         sys.stderr.write(
             f"Error: Repository '{args.full_name}' is not registered in packrat.\n"
         )
         return 2
+    root = store.git_root
+    if existing is not None and existing.git_source == "managed" and root is not None:
+        _lazy("remove_git")(root, existing)
     print(f"Removed {args.full_name} and all of its synced data.")
     return 0
 
 
 def cmd_repo(args: argparse.Namespace) -> int:
-    """Handles `packrat repo {list,add,set-path,rename,remove}`."""
-    mutating = args.repo_action in ("add", "set-path", "rename", "remove")
+    """Handles `packrat repo {list,add,set-git,set-path,rename,remove}`."""
+    mutating = args.repo_action in ("add", "set-git", "set-path", "rename", "remove")
     store = _open_store(args.db, refresh_init_sql=mutating)
     try:
-        if args.repo_action in ("add", "set-path"):
+        if args.repo_action in ("add", "set-git", "set-path"):
             return _cmd_repo_register(store, args)
         if args.repo_action == "rename":
             return _cmd_repo_rename(store, args)
@@ -1334,12 +1928,117 @@ def cmd_repo(args: argparse.Namespace) -> int:
             return 0
         for r in repos:
             mode_note = "" if r.is_mirror else f"\tmode={r.mode}"
+            loc = r.local_path or (r.git_url or "-")
             print(
-                f"{r.full_name}\tbranch={r.default_branch}\tpath={r.local_path or '-'}{mode_note}"
+                f"{r.full_name}\tbranch={r.default_branch}\tgit={r.git_source}\tpath={loc}{mode_note}"
             )
         return 0
     finally:
         store.close()
+
+
+def _cmd_git_status(store: PackratStore, args: argparse.Namespace) -> int:
+    repos = _select_repos(store, getattr(args, "repo", None))
+    now = time.time()
+    entries = [
+        {"full_name": r.full_name, **_repo_git_status_payload(store, r, now)}
+        for r in repos
+    ]
+    if getattr(args, "json", False):
+        print(json.dumps(entries, indent=2))
+        return 0
+    for item in entries:
+        print(f"{item['full_name']}\t{item['git_line']}")
+    return 0
+
+
+def _cmd_git_prune(store: PackratStore, args: argparse.Namespace) -> int:
+    root = store.git_root
+    dry_run = bool(getattr(args, "dry_run", False))
+    paths = (
+        _lazy("prune_orphans")(root, store.list_repos(), dry_run=dry_run)
+        if root is not None
+        else []
+    )
+    if getattr(args, "json", False):
+        print(
+            json.dumps(
+                {"dry_run": dry_run, "pruned": [str(p) for p in paths]}, indent=2
+            )
+        )
+        return 0
+    verb = "Would prune" if dry_run else "Pruned"
+    for p in paths:
+        print(f"{verb} {p}")
+    if not paths:
+        print("No orphaned managed git directories found.")
+    return 0
+
+
+def _run_single_git_op(db_str: str, root: Path, repo: RepoConfig, op: str) -> Any:
+    if op != "fetch":
+        return _lazy("run_gc")(root, repo)
+    cloned = (root / repo.owner / f"{repo.name}.git").exists()
+    res = (
+        _lazy("fetch_git")(root, repo, maintenance="auto")
+        if cloned
+        else _lazy("ensure_git")(root, repo)
+    )
+    now = time.time()
+    _record_pre_sync_git_poll(
+        db_str,
+        repo,
+        now=now,
+        fetched_at=now if not res.error else None,
+        remote_sha=res.new_tip or None,
+        remote_default_branch=res.remote_default_branch or None,
+        last_error=res.error,
+    )
+    return res
+
+
+def _cmd_git_op(store: PackratStore, args: argparse.Namespace, op: str) -> int:
+    repos = [
+        r
+        for r in _select_repos(store, getattr(args, "repo", None))
+        if r.git_source == "managed"
+    ]
+    root = store.git_root
+    db_str = str(store.db_path)
+    store.close()
+    if root is None:
+        return 0
+    results = [
+        {"repo": r.full_name, **asdict(_run_single_git_op(db_str, root, r, op))}
+        for r in repos
+    ]
+    failed = any(item["error"] for item in results)
+    if getattr(args, "json", False):
+        print(json.dumps(results, indent=2))
+        return 1 if failed else 0
+    for item in results:
+        status = (
+            f"error: {item['error']}"
+            if item["error"]
+            else f"ok ({item['new_tip'][:8] or '-'})"
+        )
+        print(f"{item['repo']}\t{status}")
+    return 1 if failed else 0
+
+
+def cmd_git(args: argparse.Namespace) -> int:
+    """Handles `packrat git {status,fetch,gc,prune}`."""
+    store = _open_store(args.db, refresh_init_sql=False)
+    try:
+        action = args.git_action
+        if action == "status":
+            return _cmd_git_status(store, args)
+        if action == "prune":
+            return _cmd_git_prune(store, args)
+        return _cmd_git_op(store, args, action)
+    finally:
+        with contextlib.suppress(sqlite3.ProgrammingError):
+            store.close()
 
 
 def cmd_install_cli(args: argparse.Namespace) -> int:
@@ -1465,6 +2164,10 @@ def _print_export_summary(summary: ExportSummary) -> None:
     print(f"  Schema version: {summary.schema_version}")
     print(f"  Exported repos ({len(summary.exported_repos)}): {repos_str}")
     print(
+        f"  Managed git clones on import: {summary.managed_git_repos} repository(ies) "
+        "will clone on the recipient's first sync"
+    )
+    print(
         f"  Removed repos: items={summary.removed_items_repos}, "
         f"mirror={summary.removed_mirror_repos}"
     )
@@ -1481,10 +2184,10 @@ def _print_export_summary(summary: ExportSummary) -> None:
         "\nRecipient commands (merge into an existing or new packrat DB, "
         "safe while serve runs):"
     )
+    print(f"  packrat import {quoted_dest} --clone-now")
     if len(summary.exported_repos) == 1:
         print(f"  packrat import {quoted_dest} --path /path/to/local/checkout")
     else:
-        print(f"  packrat import {quoted_dest}")
         print(f"  packrat repo set-path {example_repo} /path/to/local/checkout")
     print("\nOr cold-start replace on a machine with no existing packrat DB:")
     print("  packrat auto-sync off")
@@ -1597,6 +2300,44 @@ def _run_locked_import(
         store.close()
 
 
+def _clone_imported_managed_repos(
+    args: argparse.Namespace,
+    summary: ImportSummary,
+) -> int:
+    """Clones imported `managed` repos after `_run_locked_import` released `sync.lock`."""
+    names = [
+        o.full_name
+        for o in summary.outcomes
+        if o.disposition in ("added", "promoted", "replaced")
+    ]
+    if not names:
+        return 0
+    store = _open_store(args.db, refresh_init_sql=False)
+    try:
+        root = store.git_root
+        targets = [
+            repo
+            for name in names
+            if (repo := store.get_repo(name)) is not None
+            and repo.git_source == "managed"
+        ]
+    finally:
+        store.close()
+    if root is None or not targets:
+        return 0
+    mode = getattr(args, "progress", "auto")
+    quiet = bool(getattr(args, "quiet", False) or getattr(args, "json", False))
+    failed = 0
+    for repo in targets:
+        rc = _clone_repo_outside_tx(args.db, root, repo, mode=mode, quiet=quiet)
+        if rc != 0:
+            failed += 1
+            sys.stderr.write(
+                f"  hint: run `packrat sync --repo {repo.full_name}` later to retry cloning.\n"
+            )
+    return 1 if failed else 0
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     """Handles `packrat import`.
 
@@ -1640,6 +2381,8 @@ def cmd_import(args: argparse.Namespace) -> int:
             sys.stderr.write(f"Error: {exc}\n")
             return _exit_code_for_import_cause(exc.__cause__)
     _emit_import_summary(summary, as_json=as_json)
+    if getattr(args, "clone_now", False):
+        return _clone_imported_managed_repos(args, summary)
     return 0
 
 
@@ -1745,8 +2488,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only GitHub history backfill walks (no events poll or incremental delta, "
         "which packrat serve owns), plus the git and embedding steps.",
     )
-    p_sync.add_argument(
-        "--fetch", action="store_true", help="Run git fetch on canonical remote first."
+    fetch_mode = p_sync.add_mutually_exclusive_group()
+    fetch_mode.add_argument(
+        "--fetch", action="store_true", help="Run git fetch on path checkouts first."
+    )
+    fetch_mode.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Skip pre-sync remote checks and fetches for managed repositories.",
     )
     p_sync.add_argument(
         "--auto",
@@ -1774,6 +2523,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sync.add_argument(
         "--max-commits", type=int, default=300, help="Max git commits to ingest."
+    )
+    p_sync.add_argument(
+        "--max-reparse-files",
+        type=int,
+        default=None,
+        help="Max files to re-parse per run (default: 1500 under --auto; unlimited otherwise).",
+    )
+    p_sync.add_argument(
+        "--max-embed-chunks",
+        type=int,
+        default=None,
+        help="Max chunks to embed per run (default: 15000 under --auto; unlimited otherwise).",
     )
     p_sync.add_argument(
         "--no-timeline",
@@ -1862,11 +2623,58 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_repo_add = repo_sub.add_parser("add", help="Register or update a repository.")
     p_repo_add.add_argument("full_name", help="Repository in <owner>/<name> format.")
-    p_repo_add.add_argument("--path", help="Local git checkout path.")
+    add_src = p_repo_add.add_mutually_exclusive_group()
+    add_src.add_argument(
+        "--path", help="Local git checkout path (uses git_source=path)."
+    )
+    add_src.add_argument(
+        "--github-only",
+        action="store_true",
+        help="Register without git clone or indexing (git_source=none).",
+    )
     p_repo_add.add_argument(
-        "--branch", default="main", help="Canonical default branch name."
+        "--url", help="Override clone URL for this workstation (managed mode)."
+    )
+    p_repo_add.add_argument(
+        "--keep-git",
+        action="store_true",
+        help="Keep any existing managed bare clone directory when switching to path or none.",
+    )
+    p_repo_add.add_argument(
+        "--branch", default=None, help="Canonical default branch name (default: main)."
     )
     p_repo_add.set_defaults(func=cmd_repo)
+
+    p_repo_set_git = repo_sub.add_parser(
+        "set-git",
+        help="Switch a repository between managed, path, and none git sources.",
+    )
+    p_repo_set_git.add_argument(
+        "full_name", help="Repository in <owner>/<name> format."
+    )
+    p_repo_set_git.add_argument(
+        "git_mode", choices=("managed", "path", "none"), help="Target git source mode."
+    )
+    p_repo_set_git.add_argument(
+        "path", nargs="?", help="Local git checkout path (required when mode is path)."
+    )
+    p_repo_set_git.add_argument(
+        "--url", help="Override clone URL for this workstation (managed mode)."
+    )
+    p_repo_set_git.add_argument(
+        "--clone-now",
+        action="store_true",
+        help="Clone immediately when switching to managed.",
+    )
+    p_repo_set_git.add_argument(
+        "--keep-git",
+        action="store_true",
+        help="Keep any existing managed bare clone directory when switching to path or none.",
+    )
+    p_repo_set_git.add_argument(
+        "--branch", default=None, help="Canonical default branch name."
+    )
+    p_repo_set_git.set_defaults(func=cmd_repo)
 
     p_repo_set = repo_sub.add_parser(
         "set-path", help="Configure the local git worktree path for a repository."
@@ -1874,7 +2682,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_repo_set.add_argument("full_name", help="Repository in <owner>/<name> format.")
     p_repo_set.add_argument("path", help="Local git checkout or worktree path.")
     p_repo_set.add_argument(
-        "--branch", default="main", help="Canonical default branch name."
+        "--keep-git",
+        action="store_true",
+        help="Keep any existing managed bare clone directory.",
+    )
+    p_repo_set.add_argument(
+        "--branch", default=None, help="Canonical default branch name."
     )
     p_repo_set.set_defaults(func=cmd_repo)
 
@@ -2004,6 +2817,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Replace a destination repository even when the source is not newer, including its local git index.",
     )
     p_import.add_argument(
+        "--clone-now",
+        action="store_true",
+        help="Clone imported managed repositories after commit and lock release.",
+    )
+    p_import.add_argument(
         "--dry-run",
         action="store_true",
         help="Report dispositions without locking or writing the destination.",
@@ -2023,6 +2841,37 @@ def build_parser() -> argparse.ArgumentParser:
     p_import.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_import.set_defaults(func=cmd_import)
 
+    p_git = sub.add_parser(
+        "git", help="Inspect and maintain packrat-managed bare clones."
+    )
+    git_sub = p_git.add_subparsers(dest="git_action", required=True)
+    p_git_status = git_sub.add_parser("status", help="Show managed clone status.")
+    p_git_status.add_argument("--repo", action="append", help="Filter repository.")
+    p_git_status.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_git_status.set_defaults(func=cmd_git)
+
+    p_git_fetch = git_sub.add_parser(
+        "fetch", help="Clone or fetch managed repositories without indexing."
+    )
+    p_git_fetch.add_argument("--repo", action="append", help="Filter repository.")
+    p_git_fetch.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_git_fetch.set_defaults(func=cmd_git)
+
+    p_git_gc = git_sub.add_parser("gc", help="Run git maintenance on managed clones.")
+    p_git_gc.add_argument("--repo", action="append", help="Filter repository.")
+    p_git_gc.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_git_gc.set_defaults(func=cmd_git)
+
+    p_git_prune = git_sub.add_parser(
+        "prune", help="Remove orphaned clone directories under git/."
+    )
+    p_git_prune.add_argument(
+        "--dry-run", action="store_true", help="List directories without deleting."
+    )
+    p_git_prune.add_argument("--json", action="store_true", help="Emit JSON output.")
+    p_git_prune.set_defaults(func=cmd_git)
+
+    _lazy("add_parsers_parser")(sub)
     _lazy("add_live_parsers")(sub, cmd_live)
     return parser
 

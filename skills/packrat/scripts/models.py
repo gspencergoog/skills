@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import struct
 import sys
@@ -39,13 +40,91 @@ UNTRUSTED_PROSE_COLUMNS: frozenset[str] = frozenset(
 )
 """Column names carrying untrusted external repository prose wrapped by `packrat sql`."""
 
-GIT_BACKFILL_COLUMNS: tuple[str, str] = (
+GIT_BACKFILL_COLUMNS: tuple[str, ...] = (
     "commits_backfill_cursor",
     "commits_backfill_done_at",
+    "parser_fingerprint",
 )
-"""Git commit history backfill cursor and completion columns on `repos`."""
+"""Git commit history backfill and symbol-parser fingerprint columns on `repos`."""
+
+CODE_EXTENSIONS: frozenset[str] = frozenset(
+    {
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".py",
+        ".dart",
+        ".go",
+        ".rs",
+        ".java",
+        ".kt",
+        ".swift",
+        ".c",
+        ".cc",
+        ".cpp",
+        ".h",
+        ".hpp",
+    }
+)
+"""Source code file extensions indexed into `code_symbols`."""
+
+MARKDOWN_EXTENSIONS: frozenset[str] = frozenset({".md", ".mdx"})
+"""Documentation file extensions indexed into `doc_sections`."""
+
+SCRIPTS_HASH_EXCLUDED_DIRS: frozenset[str] = frozenset(
+    {".build", ".dart_tool", "build", "__pycache__", "node_modules", "fixtures"}
+)
+"""Directory names skipped when hashing packrat's script and parser source trees."""
+
+SYMBOL_KINDS: tuple[str, ...] = (
+    "class",
+    "mixin",
+    "enum",
+    "enum_value",
+    "extension",
+    "extension_type",
+    "interface",
+    "protocol",
+    "struct",
+    "object",
+    "namespace",
+    "typedef",
+    "function",
+    "method",
+    "constructor",
+    "getter",
+    "setter",
+    "field",
+    "variable",
+)
+"""Canonical code symbol kinds accepted by `decode_symbol` and stored in `code_symbols`."""
+
+SymbolKind = Literal[
+    "class",
+    "mixin",
+    "enum",
+    "enum_value",
+    "extension",
+    "extension_type",
+    "interface",
+    "protocol",
+    "struct",
+    "object",
+    "namespace",
+    "typedef",
+    "function",
+    "method",
+    "constructor",
+    "getter",
+    "setter",
+    "field",
+    "variable",
+]
 
 RepoMode = Literal["mirror", "items"]
+GitSource = Literal["none", "path", "managed"]
 BackfillStream = Literal["issues", "prs", "discussions"]
 SourceKind = Literal[
     "issue", "pr", "discussion", "commit", "code_symbol", "doc_section"
@@ -97,15 +176,40 @@ def normalize_utc_iso(raw: str | None) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_PARSER_SOURCE_SUFFIXES = (".py", ".dart", ".swift", ".json", ".md")
+
+
+def _iter_parser_source_files(base: Path) -> list[tuple[str, Path]]:
+    """Collects `(rel_posix_path, path)` pairs for text sources under `base/parsers`."""
+    parsers_dir = base / "parsers"
+    if not parsers_dir.is_dir():
+        return []
+    found: list[tuple[str, Path]] = []
+    for root, dirnames, filenames in os.walk(parsers_dir):
+        dirnames[:] = sorted(
+            d
+            for d in dirnames
+            if d not in SCRIPTS_HASH_EXCLUDED_DIRS and not d.startswith(".")
+        )
+        root_path = Path(root)
+        for fname in sorted(filenames):
+            if not fname.endswith(_PARSER_SOURCE_SUFFIXES):
+                continue
+            path = root_path / fname
+            if path.is_file() and not path.is_symlink():
+                found.append((path.relative_to(base).as_posix(), path))
+    return found
+
+
 def compute_scripts_sha256(scripts_dir: Path | None = None) -> str:
-    """Computes a deterministic SHA-256 hex digest over packrat's runtime scripts and SQL files."""
+    """Computes a deterministic SHA-256 hex digest over packrat's runtime scripts and parser sources."""
     base = (
         Path(scripts_dir)
         if scripts_dir is not None
         else Path(__file__).resolve().parent
     )
     hasher = hashlib.sha256()
-    candidates: list[Path] = []
+    candidates: list[tuple[str, Path]] = []
     for path in base.iterdir():
         if not path.is_file():
             continue
@@ -115,9 +219,10 @@ def compute_scripts_sha256(scripts_dir: Path | None = None) -> str:
             and not name.startswith("test_")
             and not name.startswith("benchmark_")
         ):
-            candidates.append(path)
-    for path in sorted(candidates, key=lambda p: p.name):
-        hasher.update(path.name.encode("utf-8"))
+            candidates.append((name, path))
+    candidates.extend(_iter_parser_source_files(base))
+    for rel_name, path in sorted(candidates, key=lambda item: item[0]):
+        hasher.update(rel_name.encode("utf-8"))
         hasher.update(b"\0")
         hasher.update(path.read_bytes())
         hasher.update(b"\0")
@@ -302,7 +407,15 @@ class RepoConfig:
     discussions_backfill_done_at: str | None = None
     commits_backfill_cursor: str | None = None
     commits_backfill_done_at: str | None = None
+    parser_fingerprint: str | None = None
     mode: RepoMode = REPO_MODE_MIRROR
+    git_source: GitSource = "none"
+    git_url: str | None = None
+
+    @property
+    def clone_url(self) -> str:
+        """Returns the effective git clone URL for this repository."""
+        return self.git_url or f"https://github.com/{self.owner}/{self.name}.git"
 
     @property
     def is_mirror(self) -> bool:
@@ -516,6 +629,9 @@ class CodeSymbolRecord:
     sha: str
     docstring: str = ""
     blob_oid: str = ""
+    qualified_name: str = ""
+    parent: str = ""
+    visibility: str = ""
 
 
 @dataclass(frozen=True)
@@ -702,6 +818,10 @@ class SyncStats:
     doc_sections_upserted: int = 0
     chunks_upserted: int = 0
     embeddings_updated: int = 0
+    syntax_error_count: int = 0
+    dropped_symbol_count: int = 0
+    reparse_capped: bool = False
+    embed_capped: bool = False
     indexed_ref: str | None = None
     indexed_sha: str | None = None
     backfill_incomplete: list[str] = field(default_factory=list)
@@ -954,6 +1074,7 @@ class ExportSummary:
     source_bytes: int
     dest_bytes: int
     duration_sec: float
+    managed_git_repos: int = 0
 
 
 ImportDisposition = Literal[

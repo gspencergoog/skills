@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
@@ -1611,6 +1612,139 @@ def _resolve_active_embedder_and_first_page(
     return active_embedder, first_page, supports_paging
 
 
+@dataclass(frozen=True)
+class EmbeddingSyncResult:
+    """Result from `sync_repo_embeddings` including whether `max_chunks` capped the run."""
+
+    embedded_count: int
+    capped: bool = False
+
+
+def _slice_batch_for_cap(
+    batch: list[TextChunk],
+    total_embedded: int,
+    max_chunks: int | None,
+) -> tuple[list[TextChunk], bool]:
+    """Slices `batch` to `max_chunks` budget and returns `(sliced_batch, hit_cap)`."""
+    if max_chunks is None:
+        return batch, False
+    remaining = max_chunks - total_embedded
+    if remaining <= 0:
+        return [], True
+    if len(batch) > remaining:
+        return batch[:remaining], True
+    return batch, False
+
+
+def _probe_more_after_cap(
+    store: PackratStore,
+    repo_id: int | None,
+    model_id: str,
+    *,
+    batch_end: int,
+    page_len: int,
+    effective_page_size: int,
+    supports_paging: bool,
+    last_chunk_id: str,
+) -> bool:
+    """Returns True if more unembedded chunks remain past the current batch."""
+    if batch_end < page_len:
+        return True
+    probe, _ = _next_unembedded_page_if_needed(
+        store,
+        repo_id,
+        model_id,
+        current_page_len=page_len,
+        page_size=effective_page_size,
+        supports_paging=supports_paging,
+        last_chunk_id=last_chunk_id,
+    )
+    return bool(probe)
+
+
+def _resolve_total_pending(
+    store: PackratStore,
+    repo_id: int | None,
+    model_id: str,
+    *,
+    first_page_len: int,
+    effective_page_size: int,
+    supports_paging: bool,
+    max_chunks: int | None,
+) -> int | None:
+    """Computes the upfront pending chunk denominator for progress reporting."""
+    if not supports_paging or first_page_len < effective_page_size:
+        total_pending: int | None = first_page_len
+    else:
+        count_fn = getattr(store, "count_unembedded_chunks", None)
+        total_pending = (
+            int(count_fn(repo_id, model_id)) if callable(count_fn) else None
+        )
+    if total_pending is not None and max_chunks is not None:
+        total_pending = min(total_pending, max_chunks)
+    return total_pending
+
+
+def _sync_embedding_page(
+    store: PackratStore,
+    repo_id: int | None,
+    active_embedder: Embedder,
+    current_page: list[TextChunk],
+    *,
+    effective_batch_size: int,
+    effective_page_size: int,
+    supports_paging: bool,
+    max_chunks: int | None,
+    total_embedded: int,
+    total_pending: int | None,
+    now: str,
+    reporter: ProgressReporter,
+) -> tuple[list[TextChunk], bool, int, int | None, bool]:
+    """Embeds and persists all slices of one page, returning updated loop state."""
+    page_len = len(current_page)
+    last_chunk_id = max(ch.chunk_id for ch in current_page)
+    current_page.sort(key=lambda ch: len(ch.title) + len(ch.text))
+    next_page: list[TextChunk] = []
+    capped = False
+    for start in range(0, page_len, effective_batch_size):
+        raw_batch = current_page[start : start + effective_batch_size]
+        batch, capped = _slice_batch_for_cap(raw_batch, total_embedded, max_chunks)
+        if not batch:
+            return [], supports_paging, total_embedded, total_pending, True
+        batch_end = start + len(batch)
+        hit_page_end = batch_end >= page_len
+        if hit_page_end and not capped:
+            next_page, supports_paging = _next_unembedded_page_if_needed(
+                store,
+                repo_id,
+                active_embedder.model_id,
+                current_page_len=page_len,
+                page_size=effective_page_size,
+                supports_paging=supports_paging,
+                last_chunk_id=last_chunk_id,
+            )
+        elif max_chunks is not None and total_embedded + len(batch) >= max_chunks:
+            capped = _probe_more_after_cap(
+                store,
+                repo_id,
+                active_embedder.model_id,
+                batch_end=batch_end,
+                page_len=page_len,
+                effective_page_size=effective_page_size,
+                supports_paging=supports_paging,
+                last_chunk_id=last_chunk_id,
+            )
+        vectors = _embed_chunk_batch(active_embedder, batch)
+        records = _build_embedding_records(batch, vectors, active_embedder.model_id, now)
+        is_final_batch = capped or (hit_page_end and not next_page)
+        _upsert_embedding_batch(store, records, allow_seq_bump=is_final_batch)
+        total_embedded += len(records)
+        reporter.advance(total_embedded, total_pending)
+        if capped:
+            return [], supports_paging, total_embedded, total_pending, True
+    return next_page, supports_paging, total_embedded, total_pending, capped
+
+
 def sync_repo_embeddings(
     store: PackratStore,
     repo_id: int | None,
@@ -1618,12 +1752,15 @@ def sync_repo_embeddings(
     batch_size: int = 64,
     *,
     page_size: int = EMBEDDING_PAGE_SIZE,
+    max_chunks: int | None = None,
     model_dir: Path = DEFAULT_MODEL_DIR,
     allow_download: bool = False,
     reporter: ProgressReporter = NULL_REPORTER,
     repo_label: str = "packrat",
-) -> int:
+) -> EmbeddingSyncResult:
     """Incremental embedding sync: embeds only chunks whose content_sha256 has changed."""
+    if max_chunks is not None and max_chunks <= 0:
+        return EmbeddingSyncResult(embedded_count=0, capped=True)
     effective_batch_size = max(1, int(batch_size))
     effective_page_size = max(1, int(page_size))
     active_embedder, current_page, supports_paging = (
@@ -1638,43 +1775,39 @@ def sync_repo_embeddings(
         )
     )
     if active_embedder is None or not current_page:
-        return 0
+        return EmbeddingSyncResult(embedded_count=0, capped=False)
 
     now = utc_now_iso()
-    total_pending = len(current_page)
-    total_embedded = 0
-    reporter.start_phase(
-        repo_label,
-        f"embeddings ({active_embedder.model_id})",
-        total=total_pending,
+    total_pending = _resolve_total_pending(
+        store,
+        repo_id,
+        active_embedder.model_id,
+        first_page_len=len(current_page),
+        effective_page_size=effective_page_size,
+        supports_paging=supports_paging,
+        max_chunks=max_chunks,
     )
-    while current_page:
-        page_len = len(current_page)
-        last_chunk_id = max(ch.chunk_id for ch in current_page)
-        current_page.sort(key=lambda ch: len(ch.title) + len(ch.text))
-        next_page: list[TextChunk] = []
-        for start in range(0, page_len, effective_batch_size):
-            batch = current_page[start : start + effective_batch_size]
-            is_last_batch_in_page = start + effective_batch_size >= page_len
-            if is_last_batch_in_page:
-                next_page, supports_paging = _next_unembedded_page_if_needed(
-                    store,
-                    repo_id,
-                    active_embedder.model_id,
-                    current_page_len=page_len,
-                    page_size=effective_page_size,
-                    supports_paging=supports_paging,
-                    last_chunk_id=last_chunk_id,
-                )
-                total_pending += len(next_page)
-            vectors = _embed_chunk_batch(active_embedder, batch)
-            records = _build_embedding_records(
-                batch, vectors, active_embedder.model_id, now
+    total_embedded = 0
+    capped = False
+    reporter.start_phase(
+        repo_label, f"embeddings ({active_embedder.model_id})", total=total_pending
+    )
+    while current_page and not capped:
+        current_page, supports_paging, total_embedded, total_pending, capped = (
+            _sync_embedding_page(
+                store,
+                repo_id,
+                active_embedder,
+                current_page,
+                effective_batch_size=effective_batch_size,
+                effective_page_size=effective_page_size,
+                supports_paging=supports_paging,
+                max_chunks=max_chunks,
+                total_embedded=total_embedded,
+                total_pending=total_pending,
+                now=now,
+                reporter=reporter,
             )
-            is_final_batch = is_last_batch_in_page and not next_page
-            _upsert_embedding_batch(store, records, allow_seq_bump=is_final_batch)
-            total_embedded += len(records)
-            reporter.advance(total_embedded, total_pending)
-        current_page = next_page
+        )
     reporter.finish_phase()
-    return total_embedded
+    return EmbeddingSyncResult(embedded_count=total_embedded, capped=capped)

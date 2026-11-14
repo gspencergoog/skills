@@ -1,0 +1,19 @@
+{
+  "parser": "swift-syntax",
+  "protocol": 1,
+  "parser_ids": {
+    ".swift": "swift-syntax@1"
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "source_sha256": "f7d45e08dce7e827699af255b583a018f31927934d39c6771404cfb29a0138e4",
+      "built_at": "2026-11-13T20:38:12Z",
+      "built_on": "darwin-arm64"
+    },
+    "linux-x86_64": {
+      "source_sha256": "f7d45e08dce7e827699af255b583a018f31927934d39c6771404cfb29a0138e4",
+      "built_at": "2026-11-13T20:38:12Z",
+      "built_on": "darwin-arm64"
+    }
+  }
+}

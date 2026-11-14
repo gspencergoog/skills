@@ -126,7 +126,7 @@ class TestMigrations(unittest.TestCase):
         store = PackratStore(self.db_path)
         try:
             self.assertEqual(
-                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
             )
             self.assertEqual(read_schema_version(store.conn), LATEST_SCHEMA_VERSION)
             self.assertEqual(self._view_names(store), set(READER_VIEWS))
@@ -149,7 +149,7 @@ class TestMigrations(unittest.TestCase):
         store = PackratStore(self.db_path)
         try:
             self.assertEqual(
-                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+                store.applied_migrations, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
             )
             repo = store.get_repo("octo-org/widgets")
             assert repo is not None
@@ -247,7 +247,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'abc', 'build', 'CheckRun', 'FAILURE')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13])
+            self.assertEqual(apply_migrations(conn), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
             rows = conn.execute(
                 "SELECT item_key, run_key, name, conclusion FROM v_pr_checks"
             ).fetchall()
@@ -319,7 +319,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9, 10, 11, 12, 13])
+            self.assertEqual(store.applied_migrations, [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
             self.assertNotIn("vector_json", stale_init.read_text(encoding="utf-8"))
             self.assertIn("vector_u8", stale_init.read_text(encoding="utf-8"))
             seq_row = store.conn.execute(
@@ -342,7 +342,7 @@ class TestMigrations(unittest.TestCase):
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
             for version, migrate in db_migrations.MIGRATIONS[:5]:
                 db_migrations._run_migration(conn, version, migrate)
-            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9, 10, 11, 12, 13])
+            self.assertEqual(apply_migrations(conn), [6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
             conn.execute(
                 "INSERT INTO repos (owner, name, full_name, created_at, updated_at) "
                 "VALUES ('octo-org', 'widgets', 'octo-org/widgets', 'now', 'now')"
@@ -362,7 +362,7 @@ class TestMigrations(unittest.TestCase):
             conn.close()
 
     def test_migration_0007_adds_timeline_tables_columns_and_indexes(self) -> None:
-        self.assertEqual(LATEST_SCHEMA_VERSION, 13)
+        self.assertEqual(LATEST_SCHEMA_VERSION, 15)
         conn = sqlite3.connect(str(self.db_path))
         try:
             conn.executescript(db_migrations.CONNECTION_PRAGMAS)
@@ -374,8 +374,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.execute(OLD_PR_INSERT, (1, 7, "Add focus ring", "fix-focus"))
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [7, 8, 9, 10, 11, 12, 13])
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(apply_migrations(conn), [7, 8, 9, 10, 11, 12, 13, 14, 15])
+            self.assertEqual(read_schema_version(conn), 15)
             tables = {
                 str(r[0])
                 for r in conn.execute(
@@ -422,7 +422,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0007_timeline_events(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(read_schema_version(conn), 15)
 
             conn.execute(
                 "INSERT INTO timeline_events (event_id, repo_id, item_kind, item_number, "
@@ -458,7 +458,7 @@ class TestMigrations(unittest.TestCase):
                 "VALUES (1, 7, 'bob', 'User', 'CHANGES_REQUESTED', '2026-10-27T20:00:00Z')"
             )
             conn.commit()
-            self.assertEqual(apply_migrations(conn), [8, 9, 10, 11, 12, 13])
+            self.assertEqual(apply_migrations(conn), [8, 9, 10, 11, 12, 13, 14, 15])
             rows = conn.execute(
                 "SELECT item_key, author, author_type, state, submitted_at, commit_oid "
                 "FROM v_pr_latest_author_reviews"
@@ -507,8 +507,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [9, 10, 11, 12, 13])
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(apply_migrations(conn), [9, 10, 11, 12, 13, 14, 15])
+            self.assertEqual(read_schema_version(conn), 15)
             thread_rows = conn.execute(
                 "SELECT item_key, thread_id, participants_json FROM v_pr_threads"
             ).fetchall()
@@ -521,7 +521,7 @@ class TestMigrations(unittest.TestCase):
             conn.execute("BEGIN IMMEDIATE")
             db_migrations.migrate_0009_review_turn_signals(conn)
             conn.execute("COMMIT")
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(read_schema_version(conn), 15)
         finally:
             conn.close()
 
@@ -560,8 +560,8 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [10, 11, 12, 13])
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(apply_migrations(conn), [10, 11, 12, 13, 14, 15])
+            self.assertEqual(read_schema_version(conn), 15)
             fts_rows = conn.execute("SELECT rowid, chunk_id FROM chunks_fts").fetchall()
             self.assertEqual(fts_rows, [(5, "c5")])
             conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')")
@@ -622,8 +622,8 @@ class TestMigrations(unittest.TestCase):
             }
             self.assertIn("chunks_fts_content", before_tables)
 
-            self.assertEqual(apply_migrations(conn), [11, 12, 13])
-            self.assertEqual(read_schema_version(conn), 13)
+            self.assertEqual(apply_migrations(conn), [11, 12, 13, 14, 15])
+            self.assertEqual(read_schema_version(conn), 15)
             after_tables = {
                 str(r[0])
                 for r in conn.execute(
@@ -729,7 +729,7 @@ class TestMigrations(unittest.TestCase):
             )
             conn.commit()
 
-            self.assertEqual(apply_migrations(conn), [12, 13])
+            self.assertEqual(apply_migrations(conn), [12, 13, 14, 15])
             committed_at = conn.execute(
                 "SELECT committed_at FROM commits WHERE sha = 'sha1'"
             ).fetchone()[0]
@@ -798,7 +798,7 @@ class TestMigrations(unittest.TestCase):
 
         store = PackratStore(self.db_path)
         try:
-            self.assertEqual(store.applied_migrations, [13])
+            self.assertEqual(store.applied_migrations, [13, 14, 15])
             watches = store.active_watches(now=1_800_000_000.0)
             self.assertEqual(
                 [(w.consumer, w.item_key, w.freshness_s, w.lease_expires_at) for w in watches],
@@ -1074,6 +1074,195 @@ class TestDuckDbParity(unittest.TestCase):
             duckdb_rows = json.loads(res.stdout[res.stdout.index("[") :])
             duckdb_cols = {str(r["view_name"]): list(r["cols"]) for r in duckdb_rows}
             self.assertEqual(duckdb_cols, sqlite_cols)
+
+
+class TestMigration0014SymbolParsers(unittest.TestCase):
+    """Verifies schema v14 upgrade path, same-line symbol retention, Q1 rewrite, and fresh parity."""
+
+    def test_v13_to_v14_preserves_same_line_rows_rewrites_chunks_and_matches_fresh_columns(
+        self,
+    ) -> None:
+        from db_migrations import MIGRATIONS, _run_migration, apply_migrations, refresh_views
+        from models import EMBEDDING_DIM, l2_normalize
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            v13_db = tmp_path / "v13.sqlite"
+            conn = sqlite3.connect(str(v13_db))
+            try:
+                for ver, mig in MIGRATIONS[:13]:
+                    _run_migration(conn, ver, mig)
+                refresh_views(conn)
+                # Replace code_symbols with the true v13 DDL so the table rebuild runs.
+                conn.execute("DROP TABLE code_symbols")
+                conn.execute(
+                    """
+                    CREATE TABLE code_symbols (
+                      repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+                      file_path TEXT NOT NULL,
+                      symbol_name TEXT NOT NULL,
+                      kind TEXT NOT NULL,
+                      line_start INTEGER NOT NULL,
+                      line_end INTEGER NOT NULL,
+                      signature TEXT NOT NULL,
+                      docstring TEXT NOT NULL DEFAULT '',
+                      sha TEXT NOT NULL,
+                      blob_oid TEXT,
+                      PRIMARY KEY (repo_id, file_path, kind, symbol_name, line_start)
+                    )
+                    """
+                )
+                conn.execute(
+                    "CREATE INDEX idx_code_symbols_name ON code_symbols(repo_id, symbol_name)"
+                )
+                conn.execute(
+                    "INSERT INTO repos (repo_id, owner, name, full_name, mode, created_at, updated_at) "
+                    "VALUES (1, 'octo-org', 'widgets', 'octo-org/widgets', 'mirror', 'now', 'now')"
+                )
+                # Same-line getter & setter with identical symbol_name and line_start
+                conn.execute(
+                    "INSERT INTO code_symbols (repo_id, file_path, symbol_name, kind, line_start, line_end, signature, docstring, sha, blob_oid) VALUES "
+                    "(1, 'lib/w.dart', 'size', 'getter', 10, 10, 'int get size', '', 's1', 'b1'), "
+                    "(1, 'lib/w.dart', 'size', 'setter', 10, 10, 'set size(int v)', '', 's1', 'b1'), "
+                    "(1, 'lib/w.dart', 'Widget', 'class', 1, 20, 'class Widget', '', 's1', 'b1')"
+                )
+                conn.execute(
+                    "INSERT INTO indexed_files (repo_id, file_path, blob_oid, sha) VALUES "
+                    "(1, 'lib/w.dart', 'b1', 's1'), "
+                    "(1, 'README.md', 'b2', 's1')"
+                )
+                conn.execute(
+                    "INSERT INTO chunks (chunk_id, repo_id, source_kind, source_ref, file_path, title, content_sha256, is_untrusted, text, updated_at) VALUES "
+                    "('octo-org/widgets@symbol:lib/w.dart:Widget:1', 1, 'code_symbol', 'lib/w.dart#L1-L20', 'lib/w.dart', 'class Widget', 'h1', 0, 'Widget docs lookup token', 'now'), "
+                    "('octo-org/widgets@symbol:orphan.dart:Ghost:5', 1, 'code_symbol', 'orphan.dart#L5-L5', 'orphan.dart', 'class Ghost', 'h2', 0, 'orphan token', 'now')"
+                )
+                conn.execute(
+                    "INSERT INTO chunks_fts(rowid, chunk_id, source_kind, source_ref, title, text) "
+                    "SELECT rowid, chunk_id, source_kind, source_ref, title, text FROM chunks"
+                )
+                blob = bytes([128] * EMBEDDING_DIM)
+                conn.execute(
+                    "INSERT INTO chunk_embeddings (chunk_id, model_id, dim, scale, vector_u8, content_sha256, updated_at) "
+                    "VALUES ('octo-org/widgets@symbol:lib/w.dart:Widget:1', 'm', ?, 1.0, ?, 'h1', 'now')",
+                    (EMBEDDING_DIM, blob),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO service_state (key, value, updated_at) VALUES ('vector_cache_seq', '5', 'now')"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            store = PackratStore(v13_db)
+            try:
+                self.assertEqual(store.applied_migrations, [14, 15])
+                self.assertEqual(store.table_counts(1)["code_symbols"], 3)
+                chunk_ids = {
+                    str(r[0])
+                    for r in store.conn.execute("SELECT chunk_id FROM chunks").fetchall()
+                }
+                self.assertEqual(
+                    chunk_ids,
+                    {
+                        "octo-org/widgets@symbol:lib/w.dart:class:Widget:1",
+                        "octo-org/widgets@symbol:orphan.dart:Ghost:5",
+                    },
+                )
+                emb_row = store.conn.execute(
+                    "SELECT chunk_id FROM chunk_embeddings"
+                ).fetchone()
+                self.assertEqual(
+                    emb_row[0], "octo-org/widgets@symbol:lib/w.dart:class:Widget:1"
+                )
+                store.conn.execute(
+                    "INSERT INTO chunks_fts(chunks_fts) VALUES('integrity-check')"
+                )
+                fts_hit = store.conn.execute(
+                    "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'Widget'"
+                ).fetchone()
+                self.assertEqual(
+                    fts_hit[0], "octo-org/widgets@symbol:lib/w.dart:class:Widget:1"
+                )
+                self.assertGreater(int(store.get_state("vector_cache_seq") or "0"), 5)
+                self.assertEqual(
+                    store.get_indexed_files(1)["README.md"][1], "md-sections@1"
+                )
+                self.assertEqual(
+                    store.get_indexed_files(1)["lib/w.dart"][1], "regex@1"
+                )
+
+                upgraded_cols = {
+                    str(t[0]): {
+                        str(r[1])
+                        for r in store.conn.execute(f"PRAGMA table_info({t[0]})")
+                    }
+                    for t in store.conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND name NOT LIKE 'chunks_fts%' AND name NOT LIKE 'sqlite_%'"
+                    ).fetchall()
+                }
+            finally:
+                store.close()
+
+            fresh_db = tmp_path / "fresh.sqlite"
+            fresh_store = PackratStore(fresh_db)
+            try:
+                fresh_cols = {
+                    str(t[0]): {
+                        str(r[1])
+                        for r in fresh_store.conn.execute(f"PRAGMA table_info({t[0]})")
+                    }
+                    for t in fresh_store.conn.execute(
+                        "SELECT name FROM sqlite_master WHERE type = 'table' "
+                        "AND name NOT LIKE 'chunks_fts%' AND name NOT LIKE 'sqlite_%'"
+                    ).fetchall()
+                }
+            finally:
+                fresh_store.close()
+            self.assertEqual(upgraded_cols, fresh_cols)
+
+
+
+class TestMigration0015ManagedGit(unittest.TestCase):
+    """Verifies schema v15 upgrade path, silent backfill, CHECK constraint, and fresh parity."""
+
+    def test_v14_to_v15_backfills_git_source_silently_and_enforces_check(self) -> None:
+        from db_migrations import MIGRATIONS, _run_migration, read_schema_version, refresh_views
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            v14_db = tmp_path / "v14.sqlite"
+            conn = sqlite3.connect(str(v14_db))
+            try:
+                for ver, mig in MIGRATIONS[:14]:
+                    _run_migration(conn, ver, mig)
+                refresh_views(conn)
+                conn.execute(
+                    "INSERT INTO repos (repo_id, owner, name, full_name, local_path, last_indexed_sha, mode, created_at, updated_at) VALUES "
+                    "(1, 'octo', 'checkout', 'octo/checkout', '/src/checkout', 'sha1', 'mirror', 'now', 'now'), "
+                    "(2, 'flutter', 'flutter', 'flutter/flutter', NULL, 'sha2', 'mirror', 'now', 'now'), "
+                    "(3, 'octo', 'gh-only', 'octo/gh-only', NULL, NULL, 'mirror', 'now', 'now')"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf), mock.patch("sys.stderr", buf):
+                store = PackratStore(v14_db)
+            self.assertEqual(buf.getvalue(), "")
+            try:
+                self.assertEqual(read_schema_version(store.conn), 15)
+                self.assertEqual(store.applied_migrations, [15])
+                self.assertEqual(store.get_repo("octo/checkout").git_source, "path")  # type: ignore[union-attr]
+                self.assertEqual(store.get_repo("flutter/flutter").git_source, "managed")  # type: ignore[union-attr]
+                self.assertEqual(store.get_repo("octo/gh-only").git_source, "none")  # type: ignore[union-attr]
+                with self.assertRaises(sqlite3.IntegrityError):
+                    store.conn.execute(
+                        "UPDATE repos SET git_source = 'invalid' WHERE repo_id = 1"
+                    )
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

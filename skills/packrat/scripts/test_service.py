@@ -17,12 +17,15 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from gh_transport import BudgetDeferred, GhApiError
+from managed_git import GitResult
 from models import ServiceHeartbeat, WatchLease, iso_at
 from rate_budget import Priority
 from service import (
     BACKFILL_INTERVAL_S,
+    GIT_POLL_TICK_BUDGET_S,
     MAX_CHECK_LEASES_PER_TICK,
     MAX_REFRESH_ATTEMPTS,
+    SCOPED_CHILD_BACKOFF_S,
     SERVICE_VERSION,
     VIEWER_INTERVAL_S,
     PackratService,
@@ -39,6 +42,7 @@ class Dirty:
     hot: set[str] = field(default_factory=set)
     viewer: bool = False
     mirror_repos: set[int] = field(default_factory=set)
+    git_repos: set[int] = field(default_factory=set)
 
 
 class FakeStore:
@@ -244,6 +248,7 @@ class ServiceHarness(unittest.TestCase):
         self.lock_holder_pid: int | None = None
         self.lock_calls = 0
         self.children: list[FakeChild] = []
+        self.spawned_argvs: list[list[str]] = []
         self.logs: list[str] = []
 
     @contextlib.contextmanager
@@ -256,6 +261,7 @@ class ServiceHarness(unittest.TestCase):
         )
 
     def _spawn(self, argv: Sequence[str]) -> FakeChild:
+        self.spawned_argvs.append(list(argv))
         child = FakeChild(pid=4000 + len(self.children))
         self.children.append(child)
         return child
@@ -982,6 +988,207 @@ class TestTimelineWorker(ServiceHarness):
                 err.startswith("heartbeat: database is locked") for err in report.errors
             )
         )
+
+
+class FakeManagedGit:
+    def __init__(self, log: list[str]) -> None:
+        self.log = log
+        self.poll_queue: list[list[GitResult]] = []
+        self.fetch_results: dict[int, list[GitResult]] = {}
+        self.poll_calls: list[tuple[float, float]] = []
+        self.fetch_calls: list[tuple[list[int], float]] = []
+
+    def poll_remotes(self, now: float, *, budget_s: float) -> list[GitResult]:
+        self.log.append("git_poll")
+        self.poll_calls.append((now, budget_s))
+        if not self.poll_queue:
+            return []
+        batch = self.poll_queue.pop(0)
+        out: list[GitResult] = []
+        spent = 0.0
+        for res in batch:
+            if spent >= budget_s:
+                break
+            out.append(res)
+            spent += max(0.0, res.duration_s)
+        return out
+
+    def fetch(self, repo_ids: Sequence[int], *, budget_s: float) -> list[GitResult]:
+        self.log.append(f"git_fetch:{','.join(str(r) for r in repo_ids)}")
+        self.fetch_calls.append((list(repo_ids), budget_s))
+        out: list[GitResult] = []
+        spent = 0.0
+        for rid in repo_ids:
+            if spent >= budget_s:
+                break
+            queue = self.fetch_results.get(rid)
+            res = (
+                queue.pop(0)
+                if queue
+                else GitResult(rid, "old", "new", "main", 1.0)
+            )
+            out.append(res)
+            spent += max(0.0, res.duration_s)
+        return out
+
+
+class TestManagedGitAndScopedChild(ServiceHarness):
+    def make_with_git(
+        self,
+        *,
+        child_argv: Sequence[str] | None = ("backfill",),
+    ) -> tuple[PackratService, FakeManagedGit]:
+        git = FakeManagedGit(self.events)
+        svc = PackratService(
+            self.store,
+            self.signals,
+            self.hot,
+            self.viewer,
+            self.mirror,
+            child_argv,
+            clock=lambda: T0,
+            budget=self.budget,
+            sync_lock=self._lock,
+            spawn=self._spawn,
+            log=self.logs.append,
+            managed_git=git,
+            scoped_child_argv=lambda rids: [
+                "packrat.py",
+                "sync",
+                "--auto",
+                "--git-only",
+                "--no-fetch",
+                *(f"--repo={r}" for r in rids),
+            ],
+        )
+        return svc, git
+
+    def test_push_event_queues_fetch_and_spawns_ungated_scoped_child(self) -> None:
+        svc, git = self.make_with_git()
+        self.budget.allowed = {Priority.HOT}  # BACKFILL and VIEWER blocked
+        self.signals.events.append(Dirty(git_repos={7}))
+        git.fetch_results[7] = [GitResult(7, "aaa", "bbb", "main", 2.0)]
+
+        report = svc.run_once(T0)
+
+        self.assertEqual(report.git_polled, 0)
+        self.assertEqual(report.git_fetched, 1)
+        self.assertTrue(report.scoped_child_spawned)
+        self.assertFalse(report.child_spawned)
+        self.assertEqual(svc._pending_git, set())
+        self.assertEqual(svc._pending_index, set())
+        self.assertEqual(svc._next_child, 0.0)
+        self.assertEqual(self.lock_calls, 0)
+        self.assertEqual(
+            self.spawned_argvs,
+            [["packrat.py", "sync", "--auto", "--git-only", "--no-fetch", "--repo=7"]],
+        )
+        self.assertIn("scoped child 4000 started", self.logs)
+
+        # Reap scoped child on next tick; _next_child was untouched so backfill spawns once allowed.
+        self.children[0].code = 0
+        self.budget.allowed = set(Priority)
+        report2 = svc.run_once(T0 + 5)
+        self.assertEqual(report2.child_exit, 0)
+        self.assertIn("scoped child 4000 exited with 0", self.logs)
+        self.assertTrue(report2.child_spawned)
+        self.assertFalse(report2.scoped_child_spawned)
+        self.assertEqual(self.spawned_argvs[1], ["backfill"])
+
+        self.children[1].code = 0
+        report3 = svc.run_once(T0 + 10)
+        self.assertEqual(report3.child_exit, 0)
+        self.assertIn("backfill child 4001 exited with 0", self.logs)
+
+    def test_tick_budget_caps_poll_and_fetch_keeping_remainder_in_pending_git(
+        self,
+    ) -> None:
+        svc, git = self.make_with_git(child_argv=None)
+        # Tick 1: poll_remotes spends the entire 30 s budget; fetch is not called yet.
+        git.poll_queue.append(
+            [
+                GitResult(1, "a", "b", "main", 18.0),
+                GitResult(2, "c", "d", "main", 15.0),
+            ]
+        )
+        r1 = svc.run_once(T0)
+        self.assertEqual(r1.git_polled, 2)
+        self.assertEqual(r1.git_fetched, 0)
+        self.assertEqual(git.fetch_calls, [])
+        self.assertEqual(svc._pending_git, {1, 2})
+        self.assertFalse(r1.scoped_child_spawned)
+
+        # Tick 2: poll_remotes spends 10 s; remaining 20 s fetches repo 1 (22 s) and leaves repo 2.
+        git.poll_queue.append([GitResult(3, "x", "x", "main", 10.0)])
+        git.fetch_results[1] = [GitResult(1, "a", "b", "main", 22.0)]
+        git.fetch_results[2] = [GitResult(2, "c", "d", "main", 5.0)]
+        r2 = svc.run_once(T0 + 5)
+        self.assertEqual(git.fetch_calls[-1], ([1, 2], GIT_POLL_TICK_BUDGET_S - 10.0))
+        self.assertEqual(r2.git_fetched, 1)
+        self.assertEqual(svc._pending_git, {2})
+        self.assertTrue(r2.scoped_child_spawned)
+        self.assertEqual(
+            self.spawned_argvs[-1],
+            ["packrat.py", "sync", "--auto", "--git-only", "--no-fetch", "--repo=1"],
+        )
+
+        # Tick 3: repo 2 is fetched and indexed after the first scoped child exits.
+        self.children[0].code = 0
+        r3 = svc.run_once(T0 + 10)
+        self.assertEqual(r3.git_fetched, 1)
+        self.assertEqual(svc._pending_git, set())
+        self.assertTrue(r3.scoped_child_spawned)
+        self.assertEqual(
+            self.spawned_argvs[-1],
+            ["packrat.py", "sync", "--auto", "--git-only", "--no-fetch", "--repo=2"],
+        )
+
+    def test_fetch_timeout_and_error_handling(self) -> None:
+        svc, git = self.make_with_git(child_argv=None)
+        self.signals.events.append(Dirty(git_repos={4, 5}))
+        git.fetch_results[4] = [
+            GitResult(4, "a", "a", "main", 5.0, error="git fetch timed out", timed_out=True)
+        ]
+        git.fetch_results[5] = [
+            GitResult(5, "a", "a", "main", 1.0, error="auth or not found")
+        ]
+
+        report = svc.run_once(T0)
+        # Both timed-out (4) and errored (5) stay in _pending_git for retry.
+        self.assertEqual(svc._pending_git, {4, 5})
+        # Only timed-out (4) queues indexing so partial progress or local state is indexed.
+        self.assertTrue(report.scoped_child_spawned)
+        self.assertEqual(
+            self.spawned_argvs[-1],
+            ["packrat.py", "sync", "--auto", "--git-only", "--no-fetch", "--repo=4"],
+        )
+
+    def test_nonzero_scoped_child_exit_requeues_behind_backoff(self) -> None:
+        svc, git = self.make_with_git(child_argv=None)
+        self.signals.events.append(Dirty(git_repos={9}))
+        git.fetch_results[9] = [GitResult(9, "old", "new", "main", 1.0)]
+
+        r1 = svc.run_once(T0)
+        self.assertTrue(r1.scoped_child_spawned)
+        self.assertEqual(len(self.children), 1)
+
+        # Child fails with exit code 1 at T0 + 5.
+        self.children[0].code = 1
+        git.fetch_results[9] = []
+        r2 = svc.run_once(T0 + 5)
+        self.assertEqual(r2.child_exit, 1)
+        self.assertIn("scoped child 4000 exited with 1", self.logs)
+        # Does NOT tight-loop on the very next tick because backoff_until = (T0 + 5) + 600.
+        self.assertFalse(r2.scoped_child_spawned)
+        self.assertEqual(svc._pending_index, {9})
+
+        r3 = svc.run_once(T0 + 5 + SCOPED_CHILD_BACKOFF_S - 1)
+        self.assertFalse(r3.scoped_child_spawned)
+
+        r4 = svc.run_once(T0 + 5 + SCOPED_CHILD_BACKOFF_S)
+        self.assertTrue(r4.scoped_child_spawned)
+        self.assertEqual(len(self.children), 2)
+        self.assertEqual(svc._pending_index, set())
 
 
 if __name__ == "__main__":

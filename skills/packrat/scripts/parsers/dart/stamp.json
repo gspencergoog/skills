@@ -1,0 +1,19 @@
+{
+  "parser": "dart-analyzer",
+  "protocol": 1,
+  "parser_ids": {
+    ".dart": "dart-analyzer@1"
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "source_sha256": "cd62991e6773061f897f43ce9438206688b55818a91e8f0cad74d21934bdd9fd",
+      "built_at": "2026-11-13T20:38:12Z",
+      "built_on": "darwin-arm64"
+    },
+    "linux-x86_64": {
+      "source_sha256": "cd62991e6773061f897f43ce9438206688b55818a91e8f0cad74d21934bdd9fd",
+      "built_at": "2026-11-13T20:38:12Z",
+      "built_on": "darwin-arm64"
+    }
+  }
+}

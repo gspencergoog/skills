@@ -39,6 +39,11 @@ SELECT r.full_name AS repo, r.full_name AS repo_full_name, ds.*
 FROM kb.doc_sections ds
 JOIN kb.repos r ON r.repo_id = ds.repo_id;
 
+CREATE OR REPLACE VIEW v_indexed_files AS
+SELECT r.full_name AS repo, r.full_name AS repo_full_name, idx.*
+FROM kb.indexed_files idx
+JOIN kb.repos r ON r.repo_id = idx.repo_id;
+
 CREATE OR REPLACE VIEW v_chunk_vectors AS
 SELECT
   r.full_name AS repo,

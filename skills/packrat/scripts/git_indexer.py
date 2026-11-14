@@ -9,26 +9,34 @@ from __future__ import annotations
 
 import os
 import re
-import shlex
 import subprocess
-import urllib.parse
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 try:
-    from .blob_parsers import (
-        extract_content_entities,
-        parse_markdown_sections,
+    from .blob_parsers import parse_markdown_sections
+    from .git_cmd import (
+        _build_git_ssh_env,  # noqa: F401
+        _extract_remote_host,  # noqa: F401
+        build_git_ssh_env,
+        run_git_command,
     )
 except ImportError:
-    from blob_parsers import (  # type: ignore[no-redef]
-        extract_content_entities,
-        parse_markdown_sections,
+    from blob_parsers import parse_markdown_sections  # type: ignore[no-redef]
+    from git_cmd import (  # type: ignore[no-redef]
+        _build_git_ssh_env,  # noqa: F401
+        _extract_remote_host,  # noqa: F401
+        build_git_ssh_env,
+        run_git_command,
     )
+
+from dataclasses import dataclass
 
 from db_store import PackratStore
 from mentions import caching_resolver, extract_item_mentions
 from models import (
+    CODE_EXTENSIONS,
+    MARKDOWN_EXTENSIONS,
     CodeSymbolRecord,
     CommitFileRecord,
     CommitRecord,
@@ -41,33 +49,17 @@ from models import (
     utc_now_iso,
 )
 from progress import NULL_REPORTER, ProgressReporter
-from sync_runtime import run_bounded_subprocess
+from symbol_parsers import (
+    MARKDOWN_PARSER_ID,
+    REGEX_PARSER_ID,
+    ROUTING,
+    ParsedFile,
+    SymbolParsers,
+    split_lines,
+)
 
 MAX_INDEXED_BLOB_BYTES = 2 * 1024 * 1024
 _BLOB_BATCH_SIZE = 250
-
-CODE_EXTENSIONS: frozenset[str] = frozenset(
-    {
-        ".ts",
-        ".tsx",
-        ".js",
-        ".jsx",
-        ".mjs",
-        ".py",
-        ".dart",
-        ".go",
-        ".rs",
-        ".java",
-        ".kt",
-        ".swift",
-        ".c",
-        ".cc",
-        ".cpp",
-        ".h",
-        ".hpp",
-    }
-)
-MARKDOWN_EXTENSIONS: frozenset[str] = frozenset({".md", ".mdx"})
 _IGNORED_PATH_PARTS: frozenset[str] = frozenset(
     {
         "node_modules",
@@ -84,99 +76,13 @@ _IGNORED_PATH_PARTS: frozenset[str] = frozenset(
 _PR_NUMBER_IN_SUBJECT_RE = re.compile(r"\(#(\d+)\)\s*$")
 
 
-_SCP_REMOTE_RE = re.compile(r"^(?:[^:/\s]+@)?(?:\[([^\]]+)\]|([^@:/\s]+)):(.+)$")
-_BASE_BATCH_SSH_CMD = (
-    "ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new"
-)
-
-
-def _extract_remote_host(remote_url: str) -> str | None:
-    """Extracts the lowercase remote hostname from an SSH, HTTPS, or SCP-style git URL."""
-    cleaned = remote_url.strip()
-    if not cleaned:
-        return None
-    if "://" in cleaned:
-        return urllib.parse.urlsplit(cleaned).hostname
-    scp_match = _SCP_REMOTE_RE.match(cleaned)
-    if not scp_match:
-        return None
-    host = (scp_match.group(1) or scp_match.group(2) or "").lower()
-    rest = scp_match.group(3)
-    if len(host) == 1 and host.isalpha() and rest.startswith(("/", "\\")):
-        return None
-    return host or None
-
-
-def _build_git_ssh_env(
-    remote_url: str | None = None,
-    ssh_key_path: Path | None = None,
-) -> dict[str, str]:
-    """Builds non-interactive git and SSH environment variables for a remote URL.
-
-    Preserves a caller-supplied `GIT_SSH_COMMAND` when already set in the process
-    environment. Otherwise configures batch SSH flags and appends `-i <ssh_key_path>
-    -o IdentitiesOnly=yes` only when the remote host equals `github.com` and the
-    SSH key exists on disk.
-    """
-    env: dict[str, str] = {
-        "GIT_TERMINAL_PROMPT": "0",
-        "GCM_INTERACTIVE": "never",
-        "PAGER": "cat",
-    }
-    existing_ssh_cmd = os.environ.get("GIT_SSH_COMMAND", "").strip()
-    if existing_ssh_cmd:
-        env["GIT_SSH_COMMAND"] = os.environ["GIT_SSH_COMMAND"]
-        return env
-
-    ssh_cmd = _BASE_BATCH_SSH_CMD
-    key_path = (
-        ssh_key_path.expanduser()
-        if ssh_key_path is not None
-        else Path.home() / ".ssh" / "github"
-    )
-    if (
-        remote_url
-        and _extract_remote_host(remote_url) == "github.com"
-        and key_path.exists()
-    ):
-        ssh_cmd = f"{ssh_cmd} -i {shlex.quote(str(key_path))} -o IdentitiesOnly=yes"
-    env["GIT_SSH_COMMAND"] = ssh_cmd
-    return env
-
-
-def run_git_command(
-    repo_dir: Path,
-    args: Sequence[str],
-    timeout: int = 20,
-    extra_env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Executes git in repo_dir in a bounded process group with interactive prompts disabled.
-
-    Raises `subprocess.TimeoutExpired` when execution exceeds `timeout` after killing
-    the spawned process group.
-    """
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GCM_INTERACTIVE": "never",
-        "PAGER": "cat",
-    }
-    if extra_env:
-        env.update(extra_env)
-    cmd = ["git", "-C", str(repo_dir), "--no-pager", *args]
-    res = run_bounded_subprocess(cmd, env=env, timeout=timeout)
-    if res.timed_out:
-        raise subprocess.TimeoutExpired(
-            cmd,
-            timeout,
-            output=res.stdout,
-            stderr=res.stderr,
-        )
-    return subprocess.CompletedProcess(
-        args=cmd,
-        returncode=res.returncode,
-        stdout=res.stdout,
-        stderr=res.stderr,
+def _is_git_repository(repo_dir: Path) -> bool:
+    """Returns True when `repo_dir` is an existing git checkout or bare repository."""
+    if not repo_dir.is_dir():
+        return False
+    return (
+        run_git_command(repo_dir, ["rev-parse", "--git-dir"], timeout=10).returncode
+        == 0
     )
 
 
@@ -230,7 +136,7 @@ def _fetch_remote_ref(
     resolved_url = (
         _parse_remotes(repo_dir).get(rem_name) if remote_url is None else remote_url
     )
-    extra_env = _build_git_ssh_env(resolved_url)
+    extra_env = build_git_ssh_env(resolved_url)
     try:
         res = run_git_command(
             repo_dir,
@@ -254,6 +160,14 @@ def _fetch_remote_ref(
         reporter.warn(repo_full_name, msg)
 
 
+def _resolve_ref_commit(repo_dir: Path, ref: str) -> str | None:
+    """Resolves `ref` to its commit SHA in `repo_dir`, or None if missing."""
+    res = run_git_command(repo_dir, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
+    if res.returncode == 0 and res.stdout.strip():
+        return res.stdout.strip().splitlines()[0]
+    return None
+
+
 def resolve_canonical_ref(
     repo_dir: Path,
     repo: RepoConfig,
@@ -263,8 +177,14 @@ def resolve_canonical_ref(
     stats: SyncStats | None = None,
 ) -> tuple[str, str] | None:
     """Resolves the canonical main-repository ref and its commit SHA."""
-    if not repo_dir.exists() or not (repo_dir / ".git").exists():
+    if not _is_git_repository(repo_dir):
         return None
+    if repo.git_source == "managed":
+        branch = repo.default_branch or "main"
+        ref = f"refs/heads/{branch}"
+        sha = _resolve_ref_commit(repo_dir, ref)
+        return (ref, sha) if sha else None
+
     remotes = _parse_remotes(repo_dir)
     candidates = _candidate_canonical_refs(repo_dir, repo, remotes=remotes)
     if fetch and candidates and "/" in candidates[0]:
@@ -279,9 +199,9 @@ def resolve_canonical_ref(
         )
 
     for ref in candidates:
-        res = run_git_command(repo_dir, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
-        if res.returncode == 0 and res.stdout.strip():
-            return ref, res.stdout.strip().splitlines()[0]
+        sha = _resolve_ref_commit(repo_dir, ref)
+        if sha:
+            return ref, sha
     return None
 
 
@@ -748,11 +668,32 @@ def _extract_markdown_sections_from_blob(
                     title=c_title,
                     text=body_text[:3000],
                     content_sha256=compute_content_sha256(c_title, body_text[:3000]),
-                    is_untrusted=False,
+                    is_untrusted=True,
                     updated_at=now,
                 )
             )
     return sections, chunks
+
+
+_CHUNK_TEXT_CAP = 2500
+_CHUNK_DOCSTRING_CAP = 1500
+_CHUNK_PREVIEW_LINES = 36
+
+
+def _compose_symbol_chunk_text(
+    signature: str, docstring: str, body_preview: str
+) -> str:
+    """Formats chunk text (`signature` + `docstring` + body preview), trimming preview first."""
+    doc_trimmed = docstring.strip()[:_CHUNK_DOCSTRING_CAP]
+    header = f"{signature}\n\n{doc_trimmed}" if doc_trimmed else signature
+    if not body_preview:
+        return header[:_CHUNK_TEXT_CAP]
+    if len(header) >= _CHUNK_TEXT_CAP:
+        return header[:_CHUNK_TEXT_CAP]
+    budget = _CHUNK_TEXT_CAP - len(header) - 2
+    if budget <= 0:
+        return header[:_CHUNK_TEXT_CAP]
+    return f"{header}\n\n{body_preview[:budget]}"
 
 
 def _extract_code_symbols_from_blob(
@@ -760,27 +701,28 @@ def _extract_code_symbols_from_blob(
     sha: str,
     file_path: str,
     blob_text: str,
+    parsed: ParsedFile,
     blob_oid: str = "",
-) -> tuple[list[CodeSymbolRecord], list[TextChunk]]:
-    """Extracts AST symbol spans in memory using blob_parsers."""
-    entities = extract_content_entities(file_path, blob_text)
-    raw_lines = blob_text.splitlines()
+) -> tuple[list[CodeSymbolRecord], list[TextChunk], int]:
+    """Builds `CodeSymbolRecord` and `TextChunk` rows from a `ParsedFile`."""
+    raw_lines = split_lines(blob_text)
     now = utc_now_iso()
 
-    seen_keys: set[tuple[str, int]] = set()
+    seen_keys: set[tuple[str, str, int]] = set()
     symbols: list[CodeSymbolRecord] = []
     chunks: list[TextChunk] = []
-    for ent in entities:
-        sym_name = str(ent.get("name") or ent.get("entity_name") or "").strip()
-        l_start = int(ent.get("line_start") or ent.get("start_line") or 0)
-        l_end = int(ent.get("line_end") or ent.get("end_line") or l_start)
-        if not sym_name or l_start <= 0 or (sym_name, l_start) in seen_keys:
+    dup_dropped = 0
+    for sym in parsed.symbols:
+        key = (sym.kind, sym.qualified_name, sym.line_start)
+        if key in seen_keys:
+            dup_dropped += 1
             continue
-        seen_keys.add((sym_name, l_start))
-        kind = str(ent.get("kind") or ent.get("entity_kind") or "symbol")
-        signature = str(ent.get("signature") or sym_name)
+        seen_keys.add(key)
         snippet_lines = raw_lines[
-            max(0, l_start - 1) : min(len(raw_lines), min(l_end, l_start + 35))
+            max(0, sym.line_start - 1) : min(
+                len(raw_lines),
+                min(sym.line_end, sym.line_start + _CHUNK_PREVIEW_LINES - 1),
+            )
         ]
         body_preview = "\n".join(snippet_lines).strip()
 
@@ -788,33 +730,82 @@ def _extract_code_symbols_from_blob(
             CodeSymbolRecord(
                 repo_id=repo.repo_id,
                 file_path=file_path,
-                symbol_name=sym_name,
-                kind=kind,
-                line_start=l_start,
-                line_end=l_end,
-                signature=signature,
-                docstring="",
+                symbol_name=sym.name,
+                qualified_name=sym.qualified_name,
+                parent=sym.parent,
+                kind=sym.kind,
+                line_start=sym.line_start,
+                line_end=sym.line_end,
+                signature=sym.signature,
+                docstring=sym.docstring,
+                visibility=sym.visibility,
                 sha=sha,
                 blob_oid=blob_oid,
             )
         )
-        c_title = f"{kind} {sym_name} in {file_path}"
-        c_text = f"{signature}\n\n{body_preview}".strip()
+        c_title = f"{sym.kind} {sym.qualified_name} in {file_path}"
+        c_text = _compose_symbol_chunk_text(sym.signature, sym.docstring, body_preview)
         chunks.append(
             TextChunk(
-                chunk_id=f"{repo.full_name}@symbol:{file_path}:{sym_name}:{l_start}",
+                chunk_id=(
+                    f"{repo.full_name}@symbol:{file_path}:{sym.kind}:"
+                    f"{sym.qualified_name}:{sym.line_start}"
+                ),
                 repo_id=repo.repo_id,
                 source_kind="code_symbol",
-                source_ref=f"{file_path}#L{l_start}-L{l_end}",
+                source_ref=f"{file_path}#L{sym.line_start}-L{sym.line_end}",
                 file_path=file_path,
                 title=c_title,
-                text=c_text[:2500],
-                content_sha256=compute_content_sha256(c_title, c_text[:2500]),
-                is_untrusted=False,
+                text=c_text,
+                content_sha256=compute_content_sha256(c_title, c_text),
+                is_untrusted=bool(sym.docstring.strip()),
                 updated_at=now,
             )
         )
-    return symbols, chunks
+    return symbols, chunks, dup_dropped
+
+
+@dataclass(frozen=True)
+class IndexedBatch:
+    """Symbols, sections, chunks, and per-file parser IDs extracted from a file batch."""
+
+    symbols: list[CodeSymbolRecord]
+    sections: list[DocSectionRecord]
+    chunks: list[TextChunk]
+    parser_ids: dict[str, str]
+    syntax_error_count: int = 0
+    dropped_symbol_count: int = 0
+
+
+def _index_single_blob(
+    repo: RepoConfig,
+    target_sha: str,
+    file_path: str,
+    blob: str,
+    file_oid: str,
+    parsed_map: Mapping[str, ParsedFile],
+    batch: IndexedBatch,
+) -> tuple[int, int]:
+    """Extracts symbols or Markdown sections for one blob and appends them into `batch`."""
+    ext = Path(file_path).suffix.lower()
+    if ext in MARKDOWN_EXTENSIONS:
+        secs, chs = _extract_markdown_sections_from_blob(
+            repo, target_sha, file_path, blob, blob_oid=file_oid
+        )
+        batch.sections.extend(secs)
+        batch.chunks.extend(chs)
+        batch.parser_ids[file_path] = MARKDOWN_PARSER_ID
+        return 0, 0
+    if ext in CODE_EXTENSIONS:
+        parsed = parsed_map[file_path]
+        syms, chs, dup_dropped = _extract_code_symbols_from_blob(
+            repo, target_sha, file_path, blob, parsed, blob_oid=file_oid
+        )
+        batch.symbols.extend(syms)
+        batch.chunks.extend(chs)
+        batch.parser_ids[file_path] = parsed.parser_id
+        return parsed.syntax_error_count, parsed.dropped_symbol_count + dup_dropped
+    return 0, 0
 
 
 def index_files_at_sha(
@@ -823,13 +814,14 @@ def index_files_at_sha(
     target_sha: str,
     modified_files: Sequence[str],
     *,
+    parsers: SymbolParsers,
     reporter: ProgressReporter = NULL_REPORTER,
     blob_oids: Mapping[str, str] | None = None,
-) -> tuple[list[CodeSymbolRecord], list[DocSectionRecord], list[TextChunk]]:
-    """Extracts symbols, Markdown sections, and chunks for modified_files at target_sha."""
-    all_symbols: list[CodeSymbolRecord] = []
-    all_sections: list[DocSectionRecord] = []
-    all_chunks: list[TextChunk] = []
+) -> IndexedBatch:
+    """Extracts symbols, Markdown sections, and chunks for `modified_files` at `target_sha`."""
+    acc = IndexedBatch(symbols=[], sections=[], chunks=[], parser_ids={})
+    syntax_error_count = 0
+    dropped_symbol_count = 0
     total_files = len(modified_files)
     resolved_oids: dict[str, str] = dict(blob_oids) if blob_oids else {}
     reporter.start_phase(repo.full_name, "git files", total=total_files)
@@ -843,29 +835,36 @@ def index_files_at_sha(
             blob_oids=resolved_oids,
             resolved_oids=resolved_oids,
         )
+        code_blobs = {
+            p: b
+            for p in batch_paths
+            if (b := blobs.get(p)) and Path(p).suffix.lower() in CODE_EXTENSIONS
+        }
+        parsed_map = parsers.parse_batch(code_blobs) if code_blobs else {}
         for offset, file_path in enumerate(batch_paths, start=1):
-            idx = start + offset
             blob = blobs.get(file_path)
-            if not blob:
-                reporter.advance(idx, total_files, detail=file_path)
-                continue
-            file_oid = resolved_oids.get(file_path, "")
-            ext = Path(file_path).suffix.lower()
-            if ext in MARKDOWN_EXTENSIONS:
-                secs, chs = _extract_markdown_sections_from_blob(
-                    repo, target_sha, file_path, blob, blob_oid=file_oid
+            if blob:
+                se, ds = _index_single_blob(
+                    repo,
+                    target_sha,
+                    file_path,
+                    blob,
+                    resolved_oids.get(file_path, ""),
+                    parsed_map,
+                    acc,
                 )
-                all_sections.extend(secs)
-                all_chunks.extend(chs)
-            elif ext in CODE_EXTENSIONS:
-                syms, chs = _extract_code_symbols_from_blob(
-                    repo, target_sha, file_path, blob, blob_oid=file_oid
-                )
-                all_symbols.extend(syms)
-                all_chunks.extend(chs)
-            reporter.advance(idx, total_files, detail=file_path)
+                syntax_error_count += se
+                dropped_symbol_count += ds
+            reporter.advance(start + offset, total_files, detail=file_path)
     reporter.finish_phase()
-    return all_symbols, all_sections, all_chunks
+    return IndexedBatch(
+        symbols=acc.symbols,
+        sections=acc.sections,
+        chunks=acc.chunks,
+        parser_ids=acc.parser_ids,
+        syntax_error_count=syntax_error_count,
+        dropped_symbol_count=dropped_symbol_count,
+    )
 
 
 def _list_indexed_file_paths(store: PackratStore, repo_id: int) -> set[str]:
@@ -1002,6 +1001,31 @@ def _sync_commits_phase(
     return commits, chunks
 
 
+def _should_skip_indexed_path(
+    path: str,
+    blob_oid: str,
+    stored: tuple[str, str] | None,
+    parsers: SymbolParsers,
+) -> bool:
+    """Applies skip rule 2 with ratchet: unchanged blobs keep real-parser rows on outage."""
+    if not blob_oid or stored is None:
+        return False
+    stored_oid, stored_parser_id = stored
+    if stored_oid != blob_oid:
+        return False
+    expected_id = parsers.parser_id_for(path)
+    if stored_parser_id == expected_id:
+        return True
+    ext = Path(path).suffix.lower()
+    if (
+        ROUTING.get(ext) != "md-sections"
+        and expected_id == REGEX_PARSER_ID
+        and stored_parser_id not in ("", REGEX_PARSER_ID)
+    ):
+        return True
+    return False
+
+
 def _filter_unchanged_blob_paths(
     store: PackratStore,
     repo_id: int,
@@ -1009,16 +1033,29 @@ def _filter_unchanged_blob_paths(
     blob_oids: Mapping[str, str],
     *,
     force: bool,
+    parsers: SymbolParsers,
 ) -> tuple[str, ...]:
-    """Filters out paths whose git `blob_oid` already matches `indexed_files`."""
+    """Filters out paths whose `blob_oid` and active `parser_id` already match `indexed_files`."""
     if force or not tree_modified:
         return tree_modified
-    stored_oids = store.get_indexed_blob_oids(repo_id)
+    indexed_map = store.get_indexed_files(repo_id)
     return tuple(
         p
         for p in tree_modified
-        if not (blob_oids.get(p) and stored_oids.get(p) == blob_oids.get(p))
+        if not _should_skip_indexed_path(
+            p, blob_oids.get(p, ""), indexed_map.get(p), parsers
+        )
     )
+
+
+@dataclass(frozen=True)
+class _FilesPhaseResult:
+    symbols_upserted: int
+    sections_upserted: int
+    chunks_upserted: int
+    syntax_error_count: int
+    dropped_symbol_count: int
+    reparse_capped: bool
 
 
 def _sync_files_phase(
@@ -1029,15 +1066,18 @@ def _sync_files_phase(
     target_sha: str,
     *,
     force: bool,
+    fingerprint_mismatch: bool,
     ancestor_exists: bool,
+    parsers: SymbolParsers,
+    max_reparse_files: int | None,
     reporter: ProgressReporter,
-) -> tuple[list[CodeSymbolRecord], list[DocSectionRecord], list[TextChunk]]:
-    """Diffs tree blobs, skips unchanged `blob_oid`s, and updates the code/doc index."""
+) -> _FilesPhaseResult:
+    """Enumerates files, applies ratchet & cap, and commits index updates per 250-file batch."""
     tree_modified, deleted_files, blob_oids, is_full_tree = _collect_changed_files(
         repo_dir,
         old_sha,
         target_sha,
-        force=force,
+        force=(force or fingerprint_mismatch),
         ancestor_exists=ancestor_exists,
     )
     if is_full_tree:
@@ -1047,50 +1087,164 @@ def _sync_files_phase(
         deleted_files = tuple(sorted(set(deleted_files) | extra_deleted))
 
     modified_files = _filter_unchanged_blob_paths(
-        store, repo.repo_id, tree_modified, blob_oids, force=force
+        store, repo.repo_id, tree_modified, blob_oids, force=force, parsers=parsers
     )
-    symbols, sections, file_chunks = index_files_at_sha(
-        repo_dir,
-        repo,
-        target_sha,
-        modified_files,
-        reporter=reporter,
-        blob_oids=blob_oids,
+    reparse_capped = (
+        max_reparse_files is not None
+        and max_reparse_files >= 0
+        and len(modified_files) > max_reparse_files
     )
-    if modified_files or deleted_files:
+    if reparse_capped:
+        assert max_reparse_files is not None
+        modified_files = modified_files[:max_reparse_files]
+
+    if deleted_files:
         store.replace_code_index_for_files(
             repo_id=repo.repo_id,
-            changed_paths=modified_files,
+            changed_paths=(),
             deleted_paths=deleted_files,
-            symbols=symbols,
-            doc_sections=sections,
-            chunks=file_chunks,
+            symbols=(),
+            doc_sections=(),
+            chunks=(),
             reporter=reporter,
             repo_label=repo.full_name,
         )
-    indexed_rows = [
-        (p, blob_oids[p], target_sha) for p in tree_modified if blob_oids.get(p)
-    ]
-    if indexed_rows:
-        store.upsert_indexed_files(repo.repo_id, indexed_rows)
-    return symbols, sections, file_chunks
+
+    sym_total = sec_total = chunk_total = syn_err_total = dropped_total = 0
+    for start in range(0, len(modified_files), _BLOB_BATCH_SIZE):
+        batch_paths = modified_files[start : start + _BLOB_BATCH_SIZE]
+        batch = index_files_at_sha(
+            repo_dir,
+            repo,
+            target_sha,
+            batch_paths,
+            parsers=parsers,
+            reporter=reporter,
+            blob_oids=blob_oids,
+        )
+        store.replace_code_index_for_files(
+            repo_id=repo.repo_id,
+            changed_paths=batch_paths,
+            deleted_paths=(),
+            symbols=batch.symbols,
+            doc_sections=batch.sections,
+            chunks=batch.chunks,
+            reporter=reporter,
+            repo_label=repo.full_name,
+        )
+        indexed_rows = [
+            (
+                p,
+                blob_oids[p],
+                target_sha,
+                batch.parser_ids.get(p, parsers.parser_id_for(p)),
+            )
+            for p in batch_paths
+            if blob_oids.get(p)
+        ]
+        if indexed_rows:
+            store.upsert_indexed_files(repo.repo_id, indexed_rows)
+        sym_total += len(batch.symbols)
+        sec_total += len(batch.sections)
+        chunk_total += len(batch.chunks)
+        syn_err_total += batch.syntax_error_count
+        dropped_total += batch.dropped_symbol_count
+
+    return _FilesPhaseResult(
+        symbols_upserted=sym_total,
+        sections_upserted=sec_total,
+        chunks_upserted=chunk_total,
+        syntax_error_count=syn_err_total,
+        dropped_symbol_count=dropped_total,
+        reparse_capped=reparse_capped,
+    )
 
 
-def sync_git_codebase(
+def _resolve_ancestor(
+    repo_dir: Path, target_sha: str, raw_old_sha: str | None, *, force: bool
+) -> tuple[str | None, bool]:
+    """Resolves valid ancestor SHA and whether it exists in the local object store."""
+    if force or not raw_old_sha:
+        return None, False
+    exists = raw_old_sha == target_sha or _commit_exists(repo_dir, raw_old_sha)
+    return (raw_old_sha if exists else None), exists
+
+
+def _apply_files_phase_and_persist_state(
+    store: PackratStore,
+    repo_dir: Path,
+    repo: RepoConfig,
+    old_sha: str | None,
+    target_sha: str,
+    *,
+    force: bool,
+    fingerprint_mismatch: bool,
+    current_fp: str,
+    ancestor_exists: bool,
+    parsers: SymbolParsers,
+    max_reparse_files: int | None,
+    reporter: ProgressReporter,
+    stats: SyncStats,
+) -> None:
+    """Runs `_sync_files_phase` and persists `last_indexed_sha` and `parser_fingerprint` when clean."""
+    file_res = _sync_files_phase(
+        store,
+        repo_dir,
+        repo,
+        old_sha,
+        target_sha,
+        force=force,
+        fingerprint_mismatch=fingerprint_mismatch,
+        ancestor_exists=ancestor_exists,
+        parsers=parsers,
+        max_reparse_files=max_reparse_files,
+        reporter=reporter,
+    )
+    if not file_res.reparse_capped:
+        store.update_repo_sync_state(repo.repo_id, last_indexed_sha=target_sha)
+        if not parsers.unavailable() and repo.parser_fingerprint != current_fp:
+            store.set_parser_fingerprint(repo.repo_id, current_fp)
+    stats.symbols_upserted = file_res.symbols_upserted
+    stats.doc_sections_upserted = file_res.sections_upserted
+    stats.chunks_upserted += file_res.chunks_upserted
+    stats.syntax_error_count = file_res.syntax_error_count
+    stats.dropped_symbol_count = file_res.dropped_symbol_count
+    stats.reparse_capped = file_res.reparse_capped
+
+
+def _resolve_sync_repo_dir(
+    store: PackratStore, repo: RepoConfig
+) -> tuple[Path | None, str | None]:
+    """Resolves `repo`'s git directory or returns `(None, skipped_reason)`."""
+    if repo.git_source == "none":
+        return None, "no_local_path"
+    repo_dir = store.resolve_git_dir(repo)
+    if repo_dir is None:
+        return None, "no_local_path"
+    if repo.git_source == "managed" and not repo_dir.exists():
+        return None, "pending_clone"
+    if not _is_git_repository(repo_dir):
+        return None, f"missing_git_repo:{repo_dir}"
+    return repo_dir, None
+
+
+def _sync_with_resolved_parsers(
     store: PackratStore,
     repo: RepoConfig,
-    force: bool = False,
-    fetch: bool = False,
-    max_commits: int = 300,
-    reporter: ProgressReporter = NULL_REPORTER,
+    parsers: SymbolParsers,
+    *,
+    force: bool,
+    fetch: bool,
+    max_commits: int,
+    max_reparse_files: int | None,
+    reporter: ProgressReporter,
 ) -> SyncStats:
-    """Incrementally indexes canonical git commits, AST symbols, and Markdown sections."""
+    """Executes git commits and symbol/doc file indexing inside an active `SymbolParsers` session."""
     stats = SyncStats(repo_full_name=repo.full_name)
-    if not repo.local_path:
-        stats.skipped_reason = "no_local_path"
+    repo_dir, skipped_reason = _resolve_sync_repo_dir(store, repo)
+    if skipped_reason is not None or repo_dir is None:
+        stats.skipped_reason = skipped_reason
         return stats
-
-    repo_dir = Path(repo.local_path).expanduser()
     resolved = resolve_canonical_ref(
         repo_dir, repo, fetch=fetch, reporter=reporter, stats=stats
     )
@@ -1098,24 +1252,20 @@ def sync_git_codebase(
         stats.skipped_reason = f"missing_git_repo:{repo_dir}"
         return stats
 
-    ref_name, target_sha = resolved
-    stats.indexed_ref = ref_name
+    stats.indexed_ref, target_sha = resolved
     stats.indexed_sha = target_sha
-
+    current_fp = parsers.fingerprint()
+    fingerprint_mismatch = force or (repo.parser_fingerprint != current_fp)
     if (
-        not force
+        not fingerprint_mismatch
         and repo.last_indexed_sha == target_sha
         and not repo.commits_backfill_cursor
     ):
         return stats
 
-    raw_old_sha = None if force else repo.last_indexed_sha
-    ancestor_exists = bool(
-        raw_old_sha
-        and (raw_old_sha == target_sha or _commit_exists(repo_dir, raw_old_sha))
+    old_sha, ancestor_exists = _resolve_ancestor(
+        repo_dir, target_sha, repo.last_indexed_sha, force=force
     )
-    old_sha = raw_old_sha if ancestor_exists else None
-
     commits, commit_chunks = _sync_commits_phase(
         store,
         repo_dir,
@@ -1127,24 +1277,61 @@ def sync_git_codebase(
         max_commits=max_commits,
         stats=stats,
     )
+    stats.commits_upserted = len(commits)
+    stats.chunks_upserted = len(commit_chunks)
 
-    if force or old_sha != target_sha:
-        symbols, sections, file_chunks = _sync_files_phase(
+    if fingerprint_mismatch or old_sha != target_sha:
+        _apply_files_phase_and_persist_state(
             store,
             repo_dir,
             repo,
             old_sha,
             target_sha,
             force=force,
+            fingerprint_mismatch=fingerprint_mismatch,
+            current_fp=current_fp,
             ancestor_exists=ancestor_exists,
+            parsers=parsers,
+            max_reparse_files=max_reparse_files,
+            reporter=reporter,
+            stats=stats,
+        )
+    return stats
+
+
+def sync_git_codebase(
+    store: PackratStore,
+    repo: RepoConfig,
+    force: bool = False,
+    fetch: bool = False,
+    max_commits: int = 300,
+    reporter: ProgressReporter = NULL_REPORTER,
+    *,
+    parsers: SymbolParsers | None = None,
+    max_reparse_files: int | None = None,
+) -> SyncStats:
+    """Incrementally indexes canonical git commits, AST symbols, and Markdown sections."""
+    if parsers is not None:
+        return _sync_with_resolved_parsers(
+            store,
+            repo,
+            parsers,
+            force=force,
+            fetch=fetch,
+            max_commits=max_commits,
+            max_reparse_files=max_reparse_files,
             reporter=reporter,
         )
-        store.update_repo_sync_state(repo.repo_id, last_indexed_sha=target_sha)
-    else:
-        symbols, sections, file_chunks = [], [], []
-
-    stats.commits_upserted = len(commits)
-    stats.symbols_upserted = len(symbols)
-    stats.doc_sections_upserted = len(sections)
-    stats.chunks_upserted = len(commit_chunks) + len(file_chunks)
-    return stats
+    with SymbolParsers(
+        overrides=store.get_parser_overrides(), reporter=reporter
+    ) as local_parsers:
+        return _sync_with_resolved_parsers(
+            store,
+            repo,
+            local_parsers,
+            force=force,
+            fetch=fetch,
+            max_commits=max_commits,
+            max_reparse_files=max_reparse_files,
+            reporter=reporter,
+        )

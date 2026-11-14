@@ -439,7 +439,7 @@ class ProbePackratTests(unittest.TestCase):
             self.assertEqual(
                 res.user_note,
                 "Packrat context: skipped (octo-org/unregistered is not synced; run "
-                "`packrat repo add octo-org/unregistered && packrat sync --repo "
+                "`packrat repo add octo-org/unregistered --github-only && packrat sync --repo "
                 "octo-org/unregistered --github-only` for faster history lookups).",
             )
 

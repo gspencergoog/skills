@@ -17,7 +17,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Collection, Iterable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +29,12 @@ from gh_transport import (
     GhCommandResult,
     GhTransport,
     run_gh_command,
+)
+from managed_git import (
+    GitResult,
+    check_remote,
+    fetch_git,
+    git_status,
 )
 from models import (
     REPO_MODE_ITEMS,
@@ -221,6 +227,8 @@ _WRITE_PREFIXES = (
 _DRY_RUN_READS: frozenset[str] = frozenset(
     {
         "find_repo_by_node_id",
+        "git_root",
+        "resolve_git_dir",
         "get_node_ids",
         "get_live_fetched_at",
         "get_live_pr_fingerprints",
@@ -228,7 +236,8 @@ _DRY_RUN_READS: frozenset[str] = frozenset(
         "get_rollup_etags",
         "get_state",
         "get_gap_state",
-        "get_indexed_blob_oids",
+        "get_indexed_files",
+        "get_parser_overrides",
         "has_any_chunks",
         "query_fts_candidates",
         "read_all_embeddings_for_mmap",
@@ -478,6 +487,225 @@ def _raise_if_incomplete(results: Sequence[SyncStats]) -> None:
         raise GhApiError(0, f"mirror sync incomplete ({detail})")
 
 
+GIT_POLL_INTERVAL_S = 120.0
+GIT_BACKOFF_S = 600.0
+GIT_ERROR_LOG_INTERVAL_S = 3600.0
+
+
+def git_poll_key(repo_id: int) -> str:
+    """Returns the machine-local `service_state` key for a managed clone."""
+    return f"git_poll:{int(repo_id)}"
+
+
+def read_git_poll(store: Any, repo_id: int) -> dict[str, Any]:
+    """Reads `service_state['git_poll:<repo_id>']` JSON cleanly, or `{}`."""
+    raw = store.get_state(git_poll_key(repo_id))
+    if not raw:
+        return {}
+    try:
+        loaded = json.loads(raw)
+        return loaded if isinstance(loaded, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def write_git_poll(
+    store: Any, repo_id: int, data: dict[str, Any], *, now: float | None = None
+) -> None:
+    """Persists `service_state['git_poll:<repo_id>']` JSON."""
+    store.set_state(git_poll_key(repo_id), json.dumps(data, sort_keys=True), now=now)
+
+
+class ManagedGitAdapter:
+    """Implements `service.ManagedGit` using `managed_git` and `git_poll:<repo_id>` state."""
+
+    def __init__(
+        self,
+        store: Any,
+        *,
+        clock: Callable[[], float] = time.time,
+        extra_git_config: Sequence[str] = (),
+    ) -> None:
+        self._store = store
+        self._clock = clock
+        self._extra_git_config = tuple(extra_git_config)
+        self._last_err_log: dict[int, float] = {}
+
+    def _log_poll_error(self, repo: RepoConfig, error: str, now: float) -> None:
+        last = self._last_err_log.get(repo.repo_id)
+        if last is not None and (now - last) < GIT_ERROR_LOG_INTERVAL_S:
+            return
+        self._last_err_log[repo.repo_id] = now
+        sys.stderr.write(f"git poll failed for {repo.full_name}: {error}\n")
+
+    def _due_managed_repos(self, now: float) -> list[tuple[float, RepoConfig]]:
+        due: list[tuple[float, RepoConfig]] = []
+        for repo in self._store.list_repos("mirror"):
+            if repo.git_source != "managed":
+                continue
+            state = read_git_poll(self._store, repo.repo_id)
+            if float(state.get("backoff_until") or 0.0) > now:
+                continue
+            checked_at = float(state.get("checked_at") or 0.0)
+            if checked_at == 0.0 or (now - checked_at) >= GIT_POLL_INTERVAL_S:
+                due.append((checked_at, repo))
+        due.sort(key=lambda pair: (pair[0], pair[1].repo_id))
+        return due
+
+    def _poll_one(self, repo: RepoConfig, now: float, remaining: float) -> GitResult:
+        res = check_remote(
+            repo,
+            timeout_s=min(20, max(1, int(remaining))),
+            extra_git_config=self._extra_git_config,
+        )
+        root = self._store.git_root
+        local_info = (
+            git_status(root, repo)
+            if root is not None
+            else {"exists": False, "local_tip": ""}
+        )
+        old_tip = str(local_info.get("local_tip") or "")
+        state = read_git_poll(self._store, repo.repo_id)
+        state["checked_at"] = now
+        if res.error or res.timed_out:
+            err = res.error or "ls-remote timed out"
+            state["last_error"] = err
+            state["backoff_until"] = now + GIT_BACKOFF_S
+            self._log_poll_error(repo, err, now)
+        else:
+            state["remote_sha"] = res.new_tip
+            if res.remote_default_branch:
+                state["remote_default_branch"] = res.remote_default_branch
+            state["last_error"] = ""
+            state["backoff_until"] = 0.0
+        write_git_poll(self._store, repo.repo_id, state, now=now)
+        # Missing clone directory still requires fetch/clone when remote has refs.
+        needs_clone = (
+            not bool(local_info.get("exists")) and not res.error and not res.timed_out
+        )
+        eff_old = "" if needs_clone else old_tip
+        eff_new = res.new_tip or ("__init__" if needs_clone else "")
+        return GitResult(
+            repo.repo_id,
+            eff_old,
+            eff_new,
+            res.remote_default_branch,
+            res.duration_s,
+            res.error,
+            res.timed_out,
+        )
+
+    def poll_remotes(self, now: float, *, budget_s: float) -> list[GitResult]:
+        """Polls due managed remotes most-overdue-first within `budget_s`."""
+        deadline = time.monotonic() + max(0.0, budget_s)
+        results: list[GitResult] = []
+        for _, repo in self._due_managed_repos(now):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            results.append(self._poll_one(repo, now, remaining))
+        return results
+
+    def _fetch_one(
+        self, root: Path, repo: RepoConfig, remaining: float
+    ) -> GitResult | None:
+        now = self._clock()
+        state = read_git_poll(self._store, repo.repo_id)
+        discovered_branch = str(state.get("remote_default_branch") or "")
+        eff_repo = (
+            replace(repo, default_branch=discovered_branch)
+            if discovered_branch and discovered_branch != repo.default_branch
+            else repo
+        )
+        res = fetch_git(
+            root,
+            eff_repo,
+            timeout_s=max(1, int(remaining)),
+            maintenance="skip",
+            blocking_lock=False,
+            extra_git_config=self._extra_git_config,
+        )
+        if res.error == "repo lock held":
+            return None
+        if res.timed_out or res.error:
+            state["last_error"] = res.error or "fetch timed out"
+            state["backoff_until"] = now + GIT_BACKOFF_S
+        else:
+            state["fetched_at"] = now
+            state["remote_sha"] = res.new_tip
+            state["last_error"] = ""
+            state["backoff_until"] = 0.0
+        write_git_poll(self._store, repo.repo_id, state, now=now)
+        return res
+
+    def fetch(self, repo_ids: Sequence[int], *, budget_s: float) -> list[GitResult]:
+        """Fetches queued managed repositories under non-blocking repo locks."""
+        root = self._store.git_root
+        if root is None:
+            return []
+        deadline = time.monotonic() + max(0.0, budget_s)
+        results: list[GitResult] = []
+        for rid in repo_ids:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            repo = self._store.get_repo_by_id(int(rid))
+            if repo is None or repo.git_source != "managed":
+                continue
+            res = self._fetch_one(root, repo, remaining)
+            if res is not None:
+                results.append(res)
+        return results
+
+
+class DryRunManagedGit:
+    """No-op `ManagedGit` for `packrat serve --dry-run` recording intended calls."""
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+        self.calls: list[str] = []
+
+    def poll_remotes(self, now: float, *, budget_s: float) -> list[GitResult]:
+        del now, budget_s
+        for repo in self._store.list_repos("mirror"):
+            if repo.git_source == "managed":
+                self.calls.append(f"git ls-remote {repo.clone_url}")
+        return []
+
+    def fetch(self, repo_ids: Sequence[int], *, budget_s: float) -> list[GitResult]:
+        del budget_s
+        for rid in repo_ids:
+            self.calls.append(f"git fetch repo_id={rid}")
+        return []
+
+
+def scoped_child_argv(
+    db_path: Path, store: Any
+) -> Callable[[Sequence[int]], list[str]]:
+    """Builds the argv generator for ungated post-fetch git indexing children."""
+    script = Path(__file__).resolve().parent / "packrat.py"
+
+    def _build(repo_ids: Sequence[int]) -> list[str]:
+        cmd = [
+            sys.executable,
+            str(script),
+            "--db",
+            str(db_path),
+            "sync",
+            "--auto",
+            "--git-only",
+            "--no-fetch",
+        ]
+        for rid in repo_ids:
+            repo = store.get_repo_by_id(int(rid))
+            if repo is not None:
+                cmd.extend(["--repo", repo.full_name])
+        cmd.append("--json")
+        return cmd
+
+    return _build
+
+
 def backfill_child_argv(db_path: Path) -> list[str]:
     """Returns the command the service runs as its niced backfill child."""
     script = Path(__file__).resolve().parent / "packrat.py"
@@ -513,6 +741,12 @@ def build_service(
     transport = GhTransport(budget, store, runner=runner)
     hot = _lazy("HotRefresher")(transport, store)
     viewer = _lazy("ViewerSync")(transport, store, hot)
+    managed: Any = (
+        DryRunManagedGit(store) if runner is not None else ManagedGitAdapter(store)
+    )
+    scoped_builder = (
+        None if once or runner is not None else scoped_child_argv(db_path, store)
+    )
     return _lazy("PackratService")(
         store,
         _lazy("SignalPoller")(transport, store),
@@ -522,6 +756,8 @@ def build_service(
         None if once or runner is not None else backfill_child_argv(db_path),
         budget=budget,
         timeline=TimelineAdapter(store, transport, budget),
+        managed_git=managed,
+        scoped_child_argv=scoped_builder,
     )
 
 

@@ -3118,8 +3118,8 @@ class TestExportDatabase(unittest.TestCase):
         self.store.upsert_indexed_files(
             rid,
             [
-                ("src/mod.py", f"blobsym{rid}", f"commitsha{rid}"),
-                ("docs/guide.md", f"blobdoc{rid}", f"commitsha{rid}"),
+                ("src/mod.py", f"blobsym{rid}", f"commitsha{rid}", "py-ast@1"),
+                ("docs/guide.md", f"blobdoc{rid}", f"commitsha{rid}", "md-sections@1"),
             ],
         )
         vec = _unit_vector_for_repo(rid)
@@ -3832,6 +3832,93 @@ class TestExportDatabase(unittest.TestCase):
         self.assertIn("[export] verify: step 1/2, checking FTS5 index", progress_text)
         self.assertIn("[export] verify: step 2/2, checking foreign keys", progress_text)
         self.assertIn("[export] verify done:", progress_text)
+
+    def test_v14_indexed_files_overrides_and_export_keeps_fingerprint(self) -> None:
+        self.assertFalse(hasattr(self.store, "get_indexed_blob_oids"))
+        repo = self.store.register_repo("octo-org", "widgets", now=T0)
+        self.store.set_parser_fingerprint(repo.repo_id, ".py=py-ast@1", now=T0 + 1)
+        loaded = self.store.get_repo("octo-org/widgets")
+        assert loaded is not None
+        self.assertEqual(loaded.parser_fingerprint, ".py=py-ast@1")
+
+        self.store.upsert_indexed_files(
+            repo.repo_id,
+            [("lib/a.dart", "oid1", "sha1", "dart-analyzer@1")],
+        )
+        self.assertEqual(
+            self.store.get_indexed_files(repo.repo_id),
+            {"lib/a.dart": ("oid1", "dart-analyzer@1")},
+        )
+
+        self.store.set_parser_override("treesitter", "disabled", now=T0 + 2)
+        self.assertEqual(self.store.get_parser_overrides(), {"treesitter": "disabled"})
+        self.store.set_parser_unavailable_reason("dart-analyzer", "bad-banner", now=T0 + 2)
+        self.assertEqual(
+            self.store.get_parser_unavailable_reasons(),
+            {"dart-analyzer": "bad-banner"},
+        )
+
+        dest = self.tmp_dir / "fp_export.sqlite"
+        self.store.export_database(dest, now=T0 + 10)
+        with contextlib.closing(sqlite3.connect(str(dest))) as exp_conn:
+            fp = exp_conn.execute(
+                "SELECT parser_fingerprint FROM repos WHERE full_name = 'octo-org/widgets'"
+            ).fetchone()[0]
+            self.assertEqual(fp, ".py=py-ast@1")
+            ov = exp_conn.execute(
+                "SELECT key FROM service_state WHERE key LIKE 'parser_%'"
+            ).fetchall()
+            self.assertEqual(ov, [])
+
+        self.store.set_parser_override("treesitter", None)
+        self.assertEqual(self.store.get_parser_overrides(), {})
+
+    def test_v15_git_source_invariants_validation_remove_and_export(self) -> None:
+        r_path = self.store.register_repo("octo-org", "path-repo", local_path="/tmp/checkout", now=T0)
+        r_mgr = self.store.register_repo("octo-org", "managed-repo", git_source="managed", git_url="git@github.com:octo-org/managed-repo.git", now=T0)
+        r_none = self.store.register_repo("octo-org", "none-repo", now=T0)
+        self.assertEqual(r_path.git_source, "path")
+        self.assertEqual(self.store.resolve_git_dir(r_path), Path("/tmp/checkout"))
+        self.assertEqual(r_mgr.git_source, "managed")
+        self.assertEqual(self.store.resolve_git_dir(r_mgr), self.store.git_root / "octo-org" / "managed-repo.git")  # type: ignore[operator]
+        self.assertEqual(r_mgr.clone_url, "git@github.com:octo-org/managed-repo.git")
+        self.assertEqual(r_none.git_source, "none")
+        self.assertIsNone(self.store.resolve_git_dir(r_none))
+        self.assertEqual(r_none.clone_url, "https://github.com/octo-org/none-repo.git")
+
+        for r in (r_path, r_mgr, r_none):
+            self.assertEqual(r.git_source == "path", r.local_path is not None)
+
+        with self.assertRaises(ValueError):
+            self.store.register_repo("..", "widgets")
+        with self.assertRaises(ValueError):
+            self.store.register_repo("octo", "bad/name")
+        with self.assertRaises(ValueError):
+            self.store.register_repo("-octo", "widgets")
+        with self.assertRaises(ValueError):
+            self.store.register_repo("octo", "widgets", default_branch=".")
+        with self.assertRaises(ValueError):
+            self.store.register_repo("octo", "widgets", git_source="managed", git_url="--upload-pack=x")
+        with self.assertRaises(ValueError):
+            self.store.rename_repo("octo-org/none-repo", "..", "widgets")
+
+        self.store.set_state(f"git_poll:{r_mgr.repo_id}", '{"remote_sha":"abc"}', now=T0)
+        dest = self.tmp_dir / "v15_export.sqlite"
+        self.store.export_database(dest, now=T0 + 5)
+        with contextlib.closing(sqlite3.connect(str(dest))) as exp_conn:
+            exp_conn.row_factory = sqlite3.Row
+            rows = {r["full_name"]: r for r in exp_conn.execute("SELECT full_name, git_source, git_url, local_path FROM repos").fetchall()}
+            self.assertEqual(rows["octo-org/path-repo"]["git_source"], "managed")
+            self.assertIsNone(rows["octo-org/path-repo"]["local_path"])
+            self.assertIsNone(rows["octo-org/path-repo"]["git_url"])
+            self.assertEqual(rows["octo-org/managed-repo"]["git_source"], "managed")
+            self.assertIsNone(rows["octo-org/managed-repo"]["git_url"])
+            self.assertEqual(rows["octo-org/none-repo"]["git_source"], "none")
+            poll_rows = exp_conn.execute("SELECT key FROM service_state WHERE key LIKE 'git_poll:%'").fetchall()
+            self.assertEqual(poll_rows, [])
+
+        self.assertTrue(self.store.remove_repo("octo-org/managed-repo"))
+        self.assertIsNone(self.store.get_state(f"git_poll:{r_mgr.repo_id}"))
 
 
 if __name__ == "__main__":

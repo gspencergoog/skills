@@ -6,7 +6,7 @@ Content tables carry a `repo_id` column (foreign key to `repos.repo_id`, deleted
 
 | Table | Primary Key | Columns |
 | :--- | :--- | :--- |
-| `repos` | `repo_id` | `owner`, `name`, `full_name`, `mode` (`mirror` or `items`), `local_path`, `default_branch`, `events_etag`, `events_last_modified`, `poll_interval_sec`, `last_events_check_at`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_full_sweep_at`, `last_indexed_sha`, `created_at`, `updated_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at`, `commits_backfill_cursor`, `commits_backfill_done_at` (older commits still to index when a repository has more than one run's worth) |
+| `repos` | `repo_id` | `owner`, `name`, `full_name`, `mode` (`mirror` or `items`), `local_path`, `git_source` (`none`, `path`, or `managed`), `git_url`, `default_branch`, `events_etag`, `events_last_modified`, `poll_interval_sec`, `last_events_check_at`, `issues_watermark`, `prs_watermark`, `discussions_watermark`, `last_full_sweep_at`, `last_indexed_sha`, `parser_fingerprint`, `created_at`, `updated_at`, `issues_backfill_cursor`, `issues_backfill_done_at`, `prs_backfill_cursor`, `prs_backfill_done_at`, `discussions_backfill_cursor`, `discussions_backfill_done_at`, `commits_backfill_cursor`, `commits_backfill_done_at` (older commits still to index when a repository has more than one run's worth) |
 | `repo_aliases` | `alias_full_name` | `repo_id`, `created_at`. Former names of renamed or transferred repositories, so old item keys still resolve |
 | `schema_version` | `version` | `applied_at` |
 | `views_meta` | `id` (always `1`) | `views_sha256`, `views_version`. Identifies the installed reader views |
@@ -22,8 +22,8 @@ Content tables carry a `repo_id` column (foreign key to `repos.repo_id`, deleted
 | `commit_files` | `(repo_id, sha, file_path)` | `change_type`, `old_path`, `additions`, `deletions` |
 | `timeline_events` | `event_id` (GraphQL node id) | `repo_id`, `item_kind` (`pr` or `issue`), `item_number`, `event_type` (GraphQL `__typename`, such as `ReviewRequestedEvent`), `created_at`, `actor`, `actor_type`, `subject`, `subject_type`, `payload_json` |
 | `timeline_dirty` | `(repo_id, item_number)` | `reason` (`mention` or `commit`), `queued_at`. Items another item or commit mentioned, waiting for a cross-reference fetch |
-| `indexed_files` | `(repo_id, file_path)` | `blob_oid`, `sha`. The git blob each indexed file was parsed from, so unchanged blobs are skipped on the next index run |
-| `code_symbols` | `(repo_id, file_path, kind, symbol_name, line_start)` | `line_end`, `signature`, `docstring`, `sha`, `blob_oid` |
+| `indexed_files` | `(repo_id, file_path)` | `blob_oid`, `sha`, `parser_id`. The git blob and symbol parser recorded per indexed file so unchanged blobs with current parsers are skipped on the next index run |
+| `code_symbols` | `(repo_id, file_path, kind, qualified_name, line_start)` | `symbol_name`, `parent`, `line_end`, `signature`, `docstring`, `visibility`, `sha`, `blob_oid` |
 | `doc_sections` | `(repo_id, file_path, section_id)` | `level`, `heading`, `breadcrumb`, `anchor_slug`, `line_start`, `line_end`, `subtree_line_end`, `content`, `sha`, `blob_oid` |
 | `chunks` | `chunk_id` | `repo_id`, `source_kind`, `source_ref`, `file_path`, `item_number`, `title`, `text`, `content_sha256`, `is_untrusted`, `updated_at` |
 | `chunks_fts` | FTS5 virtual table | `chunk_id`, `source_kind`, `source_ref`, `title`, `text` (tokenized with `porter unicode61`) |
@@ -85,29 +85,29 @@ Tools that read live data (`/monitor`, `inflight`, the watchdog) open `repos.sql
 
 | Category | Tables / Keys | Export Disposition |
 | :--- | :--- | :--- |
-| Repository registry & schema metadata | `repos`, `repo_aliases`, `schema_version`, `views_meta` | Kept for selected `mirror` repositories (`mode = 'mirror'`). All `items`-mode repositories and unselected `mirror` repositories are dropped. `repos.local_path` is set to `NULL` on every exported row while preserving watermarks, backfill cursors, `events_etag`, `events_last_modified`, and `last_indexed_sha`. |
+| Repository registry & schema metadata | `repos`, `repo_aliases`, `schema_version`, `views_meta` | Kept for selected `mirror` repositories (`mode = 'mirror'`). All `items`-mode repositories and unselected `mirror` repositories are dropped. Every exported row clears `local_path = NULL` and `git_url = NULL`, and maps `git_source = 'path'` to `'managed'` (`'none'` stays `'none'`) while preserving watermarks, backfill cursors, `events_etag`, `events_last_modified`, and `last_indexed_sha`. |
 | Historical mirror content & git index | `issues`, `pull_requests`, `pr_files`, `reviews`, `review_threads`, `comments`, `issue_pr_links`, `discussions`, `commits`, `commit_files`, `timeline_events`, `timeline_dirty`, `indexed_files`, `code_symbols`, `doc_sections`, `chunks`, `chunks_fts`, `chunk_embeddings` | Kept for exported `mirror` repositories. For dropped repositories, external-content `chunks_fts` rows are cleared before `DELETE FROM repos WHERE repo_id NOT IN (...)` cascades across all 19 child tables. |
 | Live PR status tables | `pr_rollup`, `check_runs`, `review_requests`, `latest_opinionated_reviews`, `latest_reviews`, `thread_activity` | Kept for exported `mirror` repositories so `v_pr_live`, `v_pr_checks`, `v_pr_review_requests`, `v_pr_latest_reviews`, `v_pr_latest_author_reviews`, and `v_pr_threads` remain populated. Rows for `items` and excluded `mirror` repositories cascade-delete with `repos`. |
 | Personal, viewer, & runtime tables | `notifications`, `viewer_sets`, `watches`, `refresh_requests`, `changes`, `api_calls`, `service_heartbeat` | Scrubbed completely (`0` rows), along with `sqlite_sequence WHERE name = 'changes'` so the recipient change feed resets to `seq = 1`. |
 | Kept `service_state` keys | `signals_events:<id>`, `events_last_id:<id>`, `refetch_open_prs:<id>`, `gap_cursor:<id>:*`, `gap_floor:<id>:*`, `vector_cache_seq` | Preserved only when `<id>` matches an exported `mirror` `repo_id`. `vector_cache_seq` is incremented on the exported copy so recipient `vectors.*.mmap` sidecars rebuild on the next `packrat search`. |
-| Scrubbed `service_state` keys | `viewer_login`, `notifications_last_modified`, `viewer_set:*`, `node_id:*`, and keys for dropped `<id>` values | Cleared so the recipient's `packrat serve` polls unread notifications without a sender `If-Modified-Since` cutoff and populates `viewer_sets` for the recipient's GitHub login. |
+| Scrubbed `service_state` keys | `viewer_login`, `notifications_last_modified`, `viewer_set:*`, `node_id:*`, `git_poll:<id>`, and keys for dropped `<id>` values | Cleared so the recipient's `packrat serve` polls unread notifications without a sender `If-Modified-Since` cutoff, keeps clone state machine-local, and populates `viewer_sets` for the recipient's GitHub login. |
 
-Every exported `repos` row has `local_path = NULL`. Interactive `packrat sync` on the recipient machine skips local git indexing with a `no_local_path` note and syncs GitHub metadata and embeddings. Binding a local clone with `packrat repo set-path <owner>/<name> <checkout>` resumes incremental `git diff-tree` indexing from `last_indexed_sha`.
+Every exported `repos` row has `local_path = NULL` and `git_url = NULL`. Rows with git history export as `git_source = 'managed'`, so the recipient creates its own bare clone on the next sync (or right after import with `--clone-now`). Binding a local checkout with `packrat repo set-path <owner>/<name> <checkout>` switches that row back to `path` and resumes incremental `git diff-tree` indexing from `last_indexed_sha`.
 
-`packrat import <src-sqlite-path> [--repo ...] [--path ...] [--allow-older] [--dry-run]` checks the source, schema (`11`..`13`), `--repo`, `--path`, alias collisions, and free disk (`2x` selected data) before `sync.lock`. Under `sync.lock`, it attaches the source read-only (`?mode=ro` as `src_db`) and merges each `mirror` repository inside `BEGIN IMMEDIATE`. Each repository checks `PRAGMA foreign_key_check` and `chunks_fts` `integrity-check` before `COMMIT`, runs `PRAGMA wal_checkpoint(PASSIVE)` afterward, and ends the batch with `PRAGMA wal_checkpoint(TRUNCATE)`. Failures roll back only the active repository, while `--dry-run` inspects an existing destination via `?mode=ro` (or treats missing paths as empty).
+`packrat import <src-sqlite-path> [--repo ...] [--path ...] [--allow-older] [--clone-now] [--dry-run]` checks the source, schema (`11`..`15`), `--repo`, `--path`, alias collisions, and free disk (`2x` selected data) before `sync.lock`. Under `sync.lock`, it attaches the source read-only (`?mode=ro` as `src_db`) and merges each `mirror` repository inside `BEGIN IMMEDIATE`. Each repository checks `PRAGMA foreign_key_check` and `chunks_fts` `integrity-check` before `COMMIT`, runs `PRAGMA wal_checkpoint(PASSIVE)` afterward, and ends the batch with `PRAGMA wal_checkpoint(TRUNCATE)`. Failures roll back only the active repository, while `--dry-run` inspects an existing destination via `?mode=ro` (or treats missing paths as empty).
 
 Destination matching resolves `full_name` and `repo_aliases` case-insensitively (split matches exit `2`). Missing repositories are `added`, and local `items` stubs become `mirror` in place (`promoted`, keeping `dest_repo_id`, `watches`, and `viewer_sets`). Existing `mirror` rows compare `FreshnessKey(done_backfills, sync_watermark, has_git_index)`: completed issue/PR/discussion backfills (`0..3`), newest UTC item watermark (or `last_full_sweep_at`, never `last_events_check_at`), then `has_git_index`. Newer sources are `replaced`, while older or equal sources return `skipped_older` (exit `0`) unless `--allow-older` is set.
 
 | Category | Tables / Keys | Import Disposition |
 | :--- | :--- | :--- |
-| Repository registry & checkout paths | `repos`, `repo_aliases` | Upserted as `mode = 'mirror'` for `added`, `promoted`, and `replaced` repositories; source `items` rows and unselected repositories are ignored. Source `repos.local_path` is never copied; destination `local_path` is kept, and `--path` binds `local_path` on a single-repo import even when `skipped_older`. Source aliases (and the source slug on a rename or case change) merge into `repo_aliases` without shadowing local `repos.full_name` rows; `events_etag` and `events_last_modified` clear if the slug changed. |
+| Repository registry & checkout paths | `repos`, `repo_aliases` | Upserted as `mode = 'mirror'` for `added`, `promoted`, and `replaced` repositories; source `items` rows and unselected repositories are ignored. Source `local_path` and `git_url` are never copied; existing destination `path` checkouts and `managed` clones win over imported sources, `--path` overrides to `path` on single-repo imports even when `skipped_older`, and `none` or new rows take the source `git_source` (or infer `managed` from `last_indexed_sha` for pre-v15 snapshots). Source aliases merge into `repo_aliases` without shadowing local `repos.full_name` rows; `events_etag` and `events_last_modified` clear if the slug changed. |
 | GitHub mirror & live PR tables | `issues`, `pull_requests`, `pr_files`, `reviews`, `review_threads`, `comments`, `discussions`, `issue_pr_links`, `timeline_events`, `timeline_dirty`, `pr_rollup`, `check_runs`, `review_requests`, `latest_opinionated_reviews`, `latest_reviews`, `thread_activity` | Replaced as a unit (`WHERE repo_id = :dest_id`) for each `added`, `promoted`, or `replaced` repository. Untouched local repositories stay intact. |
 | Local git index tables | `commits`, `commit_files`, `indexed_files`, `code_symbols`, `doc_sections` (plus `last_indexed_sha`, `commits_backfill_cursor`, `commits_backfill_done_at` on `repos`) | Replaced when the source has `last_indexed_sha` set or `--allow-older` is passed. Kept intact (`preserved_local_git = true`) when importing a GitHub-only source (`last_indexed_sha IS NULL`) over a locally git-indexed repository without `--allow-older`. |
 | Chunks, FTS5, & embeddings | `chunks`, `chunks_fts`, `chunk_embeddings` | Replaced for all repository chunks on a full copy, or only non-git chunks (`source_kind NOT IN ('commit', 'code_symbol', 'doc_section')`) when keeping the local git index. External-content `chunks_fts` entries are deleted before `chunks` and rebuilt from the new `rowid`s. When source and destination slugs differ, `#`, `@`, and `:` prefixes on `chunk_embeddings`, `chunks` (`chunk_id`, `source_ref`), and `timeline_events` subjects are rewritten under deferred foreign keys. |
 | Personal, viewer, & runtime tables | `notifications`, `viewer_sets`, `watches`, `refresh_requests`, `changes`, `api_calls`, `service_heartbeat` | Never copied from the source; destination rows stay intact. |
-| `service_state` & reader handoff | `signals_events:<id>`, `events_last_id:<id>`, `refetch_open_prs:<id>`, `gap_cursor:<id>:*`, `gap_floor:<id>:*`, `vector_cache_seq`, `refresh_requests`, `changes` | Per-repository sync keys for `<dest_id>` are replaced from `<src_id>`, while global keys (`viewer_login`, `notifications_last_modified`, `viewer_set:*`, `node_id:*`) stay untouched and `vector_cache_seq` increments so `vectors.*.mmap` caches rebuild on the next `packrat search`. On `promoted` and `replaced` repositories, `import` queues `refresh_requests` for leased items and non-issue `viewer_sets` entries, and appends `changes` rows (`kind = 'pr'`, `fields = ["pr", "checks", "reviews", "threads"]`) for matching pull requests. |
+| `service_state` & reader handoff | `signals_events:<id>`, `events_last_id:<id>`, `refetch_open_prs:<id>`, `gap_cursor:<id>:*`, `gap_floor:<id>:*`, `vector_cache_seq`, `refresh_requests`, `changes` | Per-repository sync keys for `<dest_id>` are replaced from `<src_id>`, while machine-local (`git_poll:<id>`) and global keys (`viewer_login`, `notifications_last_modified`, `viewer_set:*`, `node_id:*`) stay untouched and `vector_cache_seq` increments so `vectors.*.mmap` caches rebuild on the next `packrat search`. On `promoted` and `replaced` repositories, `import` queues `refresh_requests` for leased items and non-issue `viewer_sets` entries, and appends `changes` rows (`kind = 'pr'`, `fields = ["pr", "checks", "reviews", "threads"]`) for matching pull requests. |
 
-Sources at schema versions `11` through `13` copy via `PRAGMA table_info` column intersection; schemas below `11` or above `13` exit `2`. Schema v11 sources missing `indexed_files` or `commits_backfill_*` columns default cleanly without schema errors. Pre-v12 sources also run repo-scoped Migration 12 fixups before `COMMIT`: UTC `Z` commit timestamps, `review_threads.participants_json` backfill, and stale `check_runs` cleanup.
+Sources at schema versions `11` through `15` copy via `PRAGMA table_info` column intersection; schemas below `11` or above `15` exit `2`. Schema v11 sources missing `indexed_files` or `commits_backfill_*` columns default cleanly without schema errors. Pre-v12 sources run repo-scoped Migration 12 fixups before `COMMIT`: UTC `Z` commit timestamps, `review_threads.participants_json` backfill, and stale `check_runs` cleanup. Pre-v14 sources also run repo-scoped Migration 14 fixups. They backfill `code_symbols.qualified_name`, mark `doc_section` and documented `code_symbol` chunks `is_untrusted = 1`, and clear `repos.parser_fingerprint`.
 
 ## DuckDB v2.0 Views and Macros (`~/.local/share/packrat/init.sql`)
 
@@ -116,7 +116,8 @@ When running `packrat sql "<query>"` (or `duckdb -batch -dark-mode -init ~/.loca
 - `v_pull_requests`: `kb.pull_requests` joined with `repo` (`r.full_name`).
 - `v_issues`: `kb.issues` joined with `repo` (`r.full_name`).
 - `v_review_threads`: `kb.review_threads` joined with `repo` (`r.full_name`).
-- `v_code_symbols`: `kb.code_symbols` joined with `repo` (`r.full_name`).
+- `v_code_symbols`: `kb.code_symbols` joined with `repo` (`r.full_name`), exposing `(repo, file_path, symbol_name, qualified_name, kind, parent, line_start, line_end, signature, docstring, visibility, sha, blob_oid)`.
+- `v_indexed_files`: `kb.indexed_files` joined with `repo` (`r.full_name`), exposing `(repo, file_path, blob_oid, sha, parser_id)` (`py-ast@1`, `treesitter@1`, `dart-analyzer@1`, `swift-syntax@1`, `md-sections@1`, or `regex@1`).
 - `v_doc_sections`: `kb.doc_sections` joined with `repo` (`r.full_name`).
 - `v_chunk_vectors`: `kb.chunks` joined with `kb.chunk_embeddings` and `repo` (`r.full_name`).
 - `v_file_hotspots`: per-file `commit_count`, `review_thread_count`, and `unresolved_thread_count`.
@@ -485,4 +486,42 @@ JOIN v_issues i ON i.repo = l.repo AND i.number = l.issue_number
 LEFT JOIN v_pull_requests p ON p.repo = l.repo AND p.number = l.pr_number
 WHERE l.repo = '<owner>/<name>' AND l.link_type = 'closed_by'
 ORDER BY i.closed_at DESC;
+```
+
+### 15. Query AST Symbol Docstrings and Parser Coverage
+
+Inspect which AST parser indexed the files in a repository:
+
+```sql
+SELECT
+  parser_id,
+  COUNT(*) AS files
+FROM v_indexed_files
+WHERE repo = '<owner>/<name>'
+GROUP BY parser_id
+ORDER BY files DESC;
+```
+
+Query public symbols that have docstrings in DuckDB:
+
+```sql
+SELECT
+  file_path,
+  kind,
+  qualified_name,
+  visibility,
+  signature,
+  LEFT(docstring, 160) AS docstring_excerpt
+FROM v_code_symbols
+WHERE repo = '<owner>/<name>'
+  AND visibility = 'public'
+  AND docstring <> ''
+ORDER BY file_path, line_start
+LIMIT 25;
+```
+
+Run hybrid BM25 and vector search restricted to `code_symbol` chunks (which embed both the declaration signature and the stripped docstring):
+
+```bash
+packrat search "lexical token stream lookahead" --repo <owner>/<name> --kind code_symbol
 ```

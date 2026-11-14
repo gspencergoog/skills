@@ -71,22 +71,30 @@ class DirtySet:
         hot: Item keys (`owner/name#number`) that need a hot refresh.
         viewer: Whether the viewer's search sets may have changed.
         mirror_repos: repo_ids whose `/events` feed changed.
+        git_repos: repo_ids whose default branch received a `PushEvent`.
     """
 
     hot: set[str] = field(default_factory=set)
     viewer: bool = False
     mirror_repos: set[int] = field(default_factory=set)
+    git_repos: set[int] = field(default_factory=set)
 
     def merge(self, other: DirtySet) -> DirtySet:
         """Adds everything in `other` to this set in place and returns self."""
         self.hot |= other.hot
         self.viewer = self.viewer or other.viewer
         self.mirror_repos |= other.mirror_repos
+        self.git_repos |= other.git_repos
         return self
 
     def is_empty(self) -> bool:
         """Returns True when no work is pending."""
-        return not self.hot and not self.viewer and not self.mirror_repos
+        return (
+            not self.hot
+            and not self.viewer
+            and not self.mirror_repos
+            and not self.git_repos
+        )
 
 
 def _poll_interval(
@@ -187,6 +195,20 @@ def _subject_type(entry: Mapping[str, Any]) -> str | None:
     subject = entry.get("subject")
     value = subject.get("type") if isinstance(subject, dict) else None
     return str(value) if value else None
+
+
+def _has_default_branch_push(
+    events: Iterable[Mapping[str, Any]], default_branch: str
+) -> bool:
+    """Returns True when any event is a `PushEvent` to `refs/heads/<default_branch>`."""
+    target_ref = f"refs/heads/{default_branch}"
+    for event in events:
+        if event.get("type") != "PushEvent":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, Mapping) and payload.get("ref") == target_ref:
+            return True
+    return False
 
 
 def _event_numbers(events: Iterable[Mapping[str, Any]]) -> set[int]:
@@ -443,6 +465,8 @@ class SignalPoller:
         )
         self._save_events_state(repo.repo_id, poll, now, last_event_id=newest_id)
         dirty.mirror_repos.add(repo.repo_id)
+        if _has_default_branch_push(new_events, repo.default_branch):
+            dirty.git_repos.add(repo.repo_id)
         for number in _event_numbers(new_events):
             key = format_item_key(repo.owner, repo.name, number).lower()
             if key in leased:

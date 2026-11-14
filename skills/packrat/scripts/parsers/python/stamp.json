@@ -1,0 +1,14 @@
+{
+  "parser": "py-ast",
+  "protocol": 1,
+  "parser_ids": {
+    ".py": "py-ast@1"
+  },
+  "platforms": {
+    "any": {
+      "source_sha256": "94b73dad29521d2841811ed218aab56f118ff319bfc28a85a5ccfe1832809340",
+      "built_at": "2026-11-13T19:22:00Z",
+      "built_on": "linux-x86_64"
+    }
+  }
+}

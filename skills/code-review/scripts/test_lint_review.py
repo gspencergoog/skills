@@ -1079,7 +1079,7 @@ Verdict: Minor revisions needed.
             # Ephemeral checkout `--github-only` variant and 0-chunk variant.
             "Tightens schema checks. "
             "Packrat context: skipped (octo-org/widgets is not synced; run "
-            "`packrat repo add octo-org/widgets && packrat sync --repo "
+            "`packrat repo add octo-org/widgets --github-only && packrat sync --repo "
             "octo-org/widgets --github-only` for faster history lookups). "
             "Verdict: Ready.": "Tightens schema checks.",
             "Cleans up CLI flags. "

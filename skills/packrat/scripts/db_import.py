@@ -119,9 +119,21 @@ _SQLITE_SIDECARS = ("-wal", "-shm", "-journal")
 _PREFIX_SEPARATORS = ("#", "@", ":")
 _CHANGE_FIELDS: tuple[str, ...] = ("pr", "checks", "reviews", "threads")
 _REPO_UPDATE_EXCLUDED = frozenset(
-    {"repo_id", "owner", "name", "full_name", "local_path", "mode", "created_at"}
+    {
+        "repo_id",
+        "owner",
+        "name",
+        "full_name",
+        "local_path",
+        "git_source",
+        "git_url",
+        "mode",
+        "created_at",
+    }
 )
-_REPO_INSERT_EXCLUDED = frozenset({"repo_id", "local_path", "mode"})
+_REPO_INSERT_EXCLUDED = frozenset(
+    {"repo_id", "local_path", "git_source", "git_url", "mode"}
+)
 _GIT_REPO_COLUMNS = frozenset({"last_indexed_sha", *GIT_BACKFILL_COLUMNS})
 _RESETTABLE_SYNC_COLUMNS = frozenset(
     {
@@ -206,7 +218,9 @@ class _ImportContext:
 # ----- path and connection helpers ------------------------------------------------
 
 
-def is_sqlite_path_alias(target_db_path: Path | str, candidate_path: Path | str) -> bool:
+def is_sqlite_path_alias(
+    target_db_path: Path | str, candidate_path: Path | str
+) -> bool:
     """Returns whether `candidate_path` names `target_db_path` or one of its sidecars."""
     target = str(target_db_path)
     if target == ":memory:":
@@ -273,13 +287,15 @@ def _existing_dir(path: Path) -> Path:
 def _field(repo: Mapping[str, Any] | sqlite3.Row | RepoConfig, name: str) -> Any:
     """Reads `name` from a dict, `sqlite3.Row`, or `RepoConfig`, returning None when absent."""
     if isinstance(repo, sqlite3.Row):
-        return repo[name] if name in repo.keys() else None
+        return repo[name] if name in repo.keys() else None  # noqa: SIM118
     if isinstance(repo, Mapping):
         return repo.get(name)
     return getattr(repo, name, None)
 
 
-def mirror_freshness_key(repo: Mapping[str, Any] | sqlite3.Row | RepoConfig) -> FreshnessKey:
+def mirror_freshness_key(
+    repo: Mapping[str, Any] | sqlite3.Row | RepoConfig,
+) -> FreshnessKey:
     """Computes the `FreshnessKey` that decides whether a source snapshot replaces a mirror."""
     done = sum(
         1 for stream in BACKFILL_STREAMS if _field(repo, f"{stream}_backfill_done_at")
@@ -320,7 +336,9 @@ def _evaluate(
 # ----- source and destination lookups ------------------------------------------------
 
 
-def _load_source_repos(src_conn: sqlite3.Connection, schema: str = "main") -> list[_SourceRepo]:
+def _load_source_repos(
+    src_conn: sqlite3.Connection, schema: str = "main"
+) -> list[_SourceRepo]:
     """Loads every `mirror` repository of the source with its aliases and chunk count."""
     aliases: dict[int, list[str]] = {}
     for row in src_conn.execute(
@@ -338,7 +356,7 @@ def _load_source_repos(src_conn: sqlite3.Connection, schema: str = "main") -> li
         f"SELECT * FROM {schema}.repos WHERE mode = ? ORDER BY repo_id",
         (REPO_MODE_MIRROR,),
     ):
-        data = {k: row[k] for k in row.keys()}
+        data = {k: row[k] for k in row.keys()}  # noqa: SIM118
         rid = int(data["repo_id"])
         repos.append(_SourceRepo(data, tuple(aliases.get(rid, ())), counts.get(rid, 0)))
     return repos
@@ -382,7 +400,9 @@ def _resolve_token(
         raise ValueError(
             f"Repository name '{token}' is ambiguous in the source ({names}); pass <owner>/<name>."
         )
-    raise ValueError(f"Repository '{token}' is not a mirror repository in the source database.")
+    raise ValueError(
+        f"Repository '{token}' is not a mirror repository in the source database."
+    )
 
 
 def _select_source_repos(
@@ -447,7 +467,11 @@ def _match_dest_repo(conn: sqlite3.Connection, src: _SourceRepo) -> sqlite3.Row 
 
 def _check_source_schema(src_conn: sqlite3.Connection, schema: str = "main") -> int:
     """Returns the source schema version, rejecting versions outside the supported range."""
-    version = read_schema_version(src_conn) if schema == "main" else _attached_schema_version(src_conn, schema)
+    version = (
+        read_schema_version(src_conn)
+        if schema == "main"
+        else _attached_schema_version(src_conn, schema)
+    )
     if version > LATEST_SCHEMA_VERSION:
         raise SchemaTooNewError(
             f"Import source schema version {version} is newer than this packrat supports "
@@ -472,7 +496,9 @@ def _attached_schema_version(conn: sqlite3.Connection, schema: str) -> int:
     return int(row[0]) if row and row[0] is not None else 0
 
 
-def _check_local_path(local_path: str | None, selected: Sequence[_SourceRepo]) -> str | None:
+def _check_local_path(
+    local_path: str | None, selected: Sequence[_SourceRepo]
+) -> str | None:
     """Validates `--path` cardinality and that it holds a git checkout; returns the resolved path."""
     if local_path is None:
         return None
@@ -507,7 +533,9 @@ def _source_size(source_path: Path) -> int:
     return total
 
 
-def selected_bytes_estimate(source_bytes: int, selected_chunks: int, total_chunks: int) -> int:
+def selected_bytes_estimate(
+    source_bytes: int, selected_chunks: int, total_chunks: int
+) -> int:
     """Estimates the source bytes attributable to the selected repositories."""
     share = max(selected_chunks / max(total_chunks, 1), MIN_SELECTED_SHARE)
     return int(source_bytes * min(share, 1.0))
@@ -539,7 +567,9 @@ def _run_preflight(
     try:
         version = _check_source_schema(src_conn)
         selected = _select_source_repos(src_conn, repo_tokens)
-        total_chunks = int(src_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0])
+        total_chunks = int(
+            src_conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        )
     finally:
         src_conn.close()
     resolved_local = _check_local_path(local_path, selected)
@@ -547,7 +577,9 @@ def _run_preflight(
     source_bytes = _source_size(source)
     if check_disk:
         selected_chunks = sum(r.chunk_count for r in selected)
-        _check_free_disk(dest, selected_bytes_estimate(source_bytes, selected_chunks, total_chunks))
+        _check_free_disk(
+            dest, selected_bytes_estimate(source_bytes, selected_chunks, total_chunks)
+        )
     return _Preflight(
         dest_path=dest,
         source_path=source,
@@ -599,12 +631,24 @@ def _summarize(
     started: float,
 ) -> ImportSummary:
     """Builds an `ImportSummary` by counting dispositions."""
-    counts = {d: 0 for d in ("added", "promoted", "replaced", "skipped_older", "failed", "not_attempted")}
+    counts = {
+        d: 0
+        for d in (
+            "added",
+            "promoted",
+            "replaced",
+            "skipped_older",
+            "failed",
+            "not_attempted",
+        )
+    }
     for outcome in outcomes:
         counts[outcome.disposition] += 1
     return ImportSummary(
         source_db_path=str(pre.source_path),
-        dest_db_path=str(pre.dest_path.resolve()) if pre.dest_path.exists() else str(pre.dest_path),
+        dest_db_path=str(pre.dest_path.resolve())
+        if pre.dest_path.exists()
+        else str(pre.dest_path),
         source_schema_version=pre.source_schema_version,
         dest_schema_version=dest_schema_version,
         dry_run=dry_run,
@@ -673,23 +717,33 @@ def preview_import_database(
     """
     started = time.monotonic()
     pre = _run_preflight(
-        dest_path, source_path, repo_tokens=repo_tokens, local_path=local_path, check_disk=False
+        dest_path,
+        source_path,
+        repo_tokens=repo_tokens,
+        local_path=local_path,
+        check_disk=False,
     )
     dest_conn, dest_version = _check_preview_dest(pre.dest_path)
     src_conn = _open_ro_sqlite(pre.source_path)
     outcomes: list[ImportRepoOutcome] = []
     try:
         for src in pre.selected:
-            dest_row = _match_dest_repo(dest_conn, src) if dest_conn is not None else None
+            dest_row = (
+                _match_dest_repo(dest_conn, src) if dest_conn is not None else None
+            )
             disposition, dest_key, preserve = _evaluate(src, dest_row, allow_older)
             chunks, embeddings = (
-                (0, 0) if disposition == "skipped_older" else _preview_counts(src_conn, src, preserve)
+                (0, 0)
+                if disposition == "skipped_older"
+                else _preview_counts(src_conn, src, preserve)
             )
             outcomes.append(
                 ImportRepoOutcome(
                     full_name=src.full_name,
                     disposition=disposition,
-                    dest_repo_id=int(dest_row["repo_id"]) if dest_row is not None else None,
+                    dest_repo_id=int(dest_row["repo_id"])
+                    if dest_row is not None
+                    else None,
                     chunks_imported=chunks,
                     embeddings_imported=embeddings,
                     src_freshness=mirror_freshness_key(src.row),
@@ -713,7 +767,9 @@ def preview_import_database(
 def _attach_source(conn: sqlite3.Connection, source_path: Path) -> None:
     """Attaches `source_path` read-only as `src_db` and verifies SQLite resolved the URI."""
     if conn.in_transaction:
-        raise ImportIntegrityError("Cannot attach the import source inside an open transaction.")
+        raise ImportIntegrityError(
+            "Cannot attach the import source inside an open transaction."
+        )
     conn.execute(f"ATTACH DATABASE ? AS {SRC_SCHEMA}", (_ro_uri(source_path),))
     attached = {
         str(row[1]): str(row[2] or "") for row in conn.execute("PRAGMA database_list")
@@ -754,6 +810,37 @@ def _chunk_scope(alias: str, preserve_git: bool) -> tuple[str, tuple[str, ...]]:
     return f" AND {alias}source_kind NOT IN ({marks})", tuple(GIT_SOURCE_KINDS)
 
 
+def _dest_git_binding(dest_row: sqlite3.Row) -> tuple[str, str | None] | None:
+    dest_local = dest_row["local_path"]
+    dest_source = (
+        str(dest_row["git_source"] or "none")
+        if "git_source" in dest_row.keys()  # noqa: SIM118
+        else "none"
+    )
+    if dest_source == "path" or dest_local is not None:
+        return "path", (None if dest_local is None else str(dest_local))
+    if dest_source == "managed":
+        return "managed", None
+    return None
+
+
+def _resolve_import_git_binding(
+    src: _SourceRepo,
+    dest_row: sqlite3.Row | None,
+    local_path: str | None,
+) -> tuple[str, str | None]:
+    """Determines `(git_source, local_path)` following destination-wins precedence."""
+    if local_path is not None:
+        return "path", local_path
+    existing = None if dest_row is None else _dest_git_binding(dest_row)
+    if existing is not None:
+        return existing
+    src_source = src.row.get("git_source")
+    if src_source in ("none", "managed", "path"):
+        return ("none" if src_source == "none" else "managed"), None
+    return ("managed" if src.row.get("last_indexed_sha") else "none"), None
+
+
 def _upsert_repo_row(
     conn: sqlite3.Connection,
     src: _SourceRepo,
@@ -767,29 +854,45 @@ def _upsert_repo_row(
     main_cols = _table_columns(conn, "main", "repos")
     src_cols = set(_table_columns(conn, SRC_SCHEMA, "repos"))
     cols = [c for c in main_cols if c in src_cols]
+    resolved_source, resolved_path = _resolve_import_git_binding(
+        src, dest_row, local_path
+    )
     if dest_row is None:
         keep = [c for c in cols if c not in _REPO_INSERT_EXCLUDED]
         cur = conn.execute(
-            f"INSERT INTO main.repos ({', '.join(keep)}, local_path, mode) "
-            f"SELECT {', '.join(keep)}, ?, ? FROM {SRC_SCHEMA}.repos WHERE repo_id = ?",
-            (local_path, REPO_MODE_MIRROR, src.repo_id),
+            f"INSERT INTO main.repos ({', '.join(keep)}, local_path, git_source, git_url, mode) "
+            f"SELECT {', '.join(keep)}, ?, ?, NULL, ? FROM {SRC_SCHEMA}.repos WHERE repo_id = ?",
+            (resolved_path, resolved_source, REPO_MODE_MIRROR, src.repo_id),
         )
         return int(cur.lastrowid or 0)
     dest_id = int(dest_row["repo_id"])
-    excluded = _REPO_UPDATE_EXCLUDED | (_GIT_REPO_COLUMNS if preserve_git else frozenset())
+    excluded = _REPO_UPDATE_EXCLUDED | (
+        _GIT_REPO_COLUMNS if preserve_git else frozenset()
+    )
     keep = [c for c in cols if c not in excluded]
     # Sync-state columns the older source lacks must not keep stale destination values.
     reset = [
-        c for c in main_cols
+        c
+        for c in main_cols
         if c in _RESETTABLE_SYNC_COLUMNS and c not in src_cols and c not in excluded
     ]
     reset_sql = "".join(f", {c} = NULL" for c in reset)
     conn.execute(
         f"UPDATE main.repos SET ({', '.join(keep)}) = "
         f"(SELECT {', '.join(keep)} FROM {SRC_SCHEMA}.repos WHERE repo_id = ?), "
-        f"mode = ?, local_path = COALESCE(?, local_path), updated_at = ?{reset_sql} "
+        f"mode = ?, local_path = ?, git_source = ?, "
+        f"git_url = CASE WHEN ? = 'managed' THEN git_url ELSE NULL END, "
+        f"updated_at = ?{reset_sql} "
         "WHERE repo_id = ?",
-        (src.repo_id, REPO_MODE_MIRROR, local_path, now_iso, dest_id),
+        (
+            src.repo_id,
+            REPO_MODE_MIRROR,
+            resolved_path,
+            resolved_source,
+            resolved_source,
+            now_iso,
+            dest_id,
+        ),
     )
     if str(dest_row["full_name"]) != src.full_name:
         conn.execute(
@@ -800,7 +903,11 @@ def _upsert_repo_row(
 
 
 def _upsert_aliases(
-    conn: sqlite3.Connection, src: _SourceRepo, dest_id: int, dest_full_name: str, now_iso: str
+    conn: sqlite3.Connection,
+    src: _SourceRepo,
+    dest_id: int,
+    dest_full_name: str,
+    now_iso: str,
 ) -> None:
     """Copies source aliases (and the source slug on renames) without shadowing other repos."""
     conn.execute(
@@ -829,7 +936,9 @@ def _upsert_aliases(
         )
 
 
-def _delete_repo_rows(conn: sqlite3.Connection, dest_id: int, preserve_git: bool) -> None:
+def _delete_repo_rows(
+    conn: sqlite3.Connection, dest_id: int, preserve_git: bool
+) -> None:
     """Deletes the destination repository's replaceable rows, FTS entries first."""
     scope, params = _chunk_scope("", preserve_git)
     conn.execute(
@@ -837,8 +946,12 @@ def _delete_repo_rows(conn: sqlite3.Connection, dest_id: int, preserve_git: bool
         f"(SELECT rowid FROM main.chunks WHERE repo_id = ?{scope})",
         (dest_id, *params),
     )
-    conn.execute(f"DELETE FROM main.chunks WHERE repo_id = ?{scope}", (dest_id, *params))
-    tables = REPO_GITHUB_TABLES if preserve_git else (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES)
+    conn.execute(
+        f"DELETE FROM main.chunks WHERE repo_id = ?{scope}", (dest_id, *params)
+    )
+    tables = (
+        REPO_GITHUB_TABLES if preserve_git else (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES)
+    )
     for table in tables:
         conn.execute(f"DELETE FROM main.{table} WHERE repo_id = ?", (dest_id,))
 
@@ -871,12 +984,20 @@ def _copy_repo_tables(
     conn: sqlite3.Connection, src_id: int, dest_id: int, preserve_git: bool
 ) -> tuple[int, int]:
     """Copies GitHub (and optionally git) tables, chunks, and embeddings; returns copied counts."""
-    tables = REPO_GITHUB_TABLES if preserve_git else (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES)
+    tables = (
+        REPO_GITHUB_TABLES if preserve_git else (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES)
+    )
     for table in tables:
         _copy_table(conn, table, src_id, dest_id)
     scope, params = _chunk_scope("", preserve_git)
     chunks = _copy_table(
-        conn, "chunks", src_id, dest_id, extra_where=scope, extra_params=params, verb="INSERT"
+        conn,
+        "chunks",
+        src_id,
+        dest_id,
+        extra_where=scope,
+        extra_params=params,
+        verb="INSERT",
     )
     cols = _shared_columns(conn, "chunk_embeddings")
     join_scope, join_params = _chunk_scope("c.", preserve_git)
@@ -909,18 +1030,36 @@ def _rewrite_prefixes(
         "UPDATE main.chunk_embeddings SET chunk_id = ? || substr(chunk_id, ?) "
         "WHERE chunk_id IN (SELECT chunk_id FROM main.chunks WHERE repo_id = ?) "
         f"AND {prefix_match.format(col='chunk_id')}",
-        (dest_full_name, plen + 1, dest_id, plen, src_full_name, plen + 1, *_PREFIX_SEPARATORS),
+        (
+            dest_full_name,
+            plen + 1,
+            dest_id,
+            plen,
+            src_full_name,
+            plen + 1,
+            *_PREFIX_SEPARATORS,
+        ),
     )
     for column in ("chunk_id", "source_ref"):
         conn.execute(
             f"UPDATE main.chunks SET {column} = ? || substr({column}, ?) "
             f"WHERE repo_id = ? AND {prefix_match.format(col=column)}",
-            (dest_full_name, plen + 1, dest_id, plen, src_full_name, plen + 1, *_PREFIX_SEPARATORS),
+            (
+                dest_full_name,
+                plen + 1,
+                dest_id,
+                plen,
+                src_full_name,
+                plen + 1,
+                *_PREFIX_SEPARATORS,
+            ),
         )
     ctx.store._rewrite_timeline_subjects_in_tx(src_full_name, dest_full_name)
 
 
-def _apply_row_fixups(conn: sqlite3.Connection, source_version: int, dest_id: int) -> None:
+def _apply_row_fixups(
+    conn: sqlite3.Connection, source_version: int, dest_id: int
+) -> None:
     """Replays every migration row fixup newer than the source schema on the imported rows."""
     for version in range(source_version + 1, LATEST_SCHEMA_VERSION + 1):
         fixup = IMPORT_ROW_FIXUPS.get(version)
@@ -992,7 +1131,14 @@ def _queue_reader_refresh(
 
 def _verify_before_commit(conn: sqlite3.Connection, dest_id: int) -> None:
     """Runs foreign-key and FTS5 integrity checks while the transaction can still roll back."""
-    tables = (*REPO_GITHUB_TABLES, *REPO_GIT_TABLES, "chunks", "chunk_embeddings", "repo_aliases", "refresh_requests")
+    tables = (
+        *REPO_GITHUB_TABLES,
+        *REPO_GIT_TABLES,
+        "chunks",
+        "chunk_embeddings",
+        "repo_aliases",
+        "refresh_requests",
+    )
     for table in tables:
         bad = conn.execute(f"PRAGMA main.foreign_key_check({table})").fetchone()
         if bad is not None:
@@ -1002,7 +1148,9 @@ def _verify_before_commit(conn: sqlite3.Connection, dest_id: int) -> None:
                 f"rowid {bad[1]} references a missing {bad[2]} row (may predate this import)."
             )
     try:
-        conn.execute("INSERT INTO main.chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)")
+        conn.execute(
+            "INSERT INTO main.chunks_fts(chunks_fts, rank) VALUES('integrity-check', 1)"
+        )
     except sqlite3.DatabaseError as exc:
         raise ImportIntegrityError(
             f"Import of repo_id {dest_id} left chunks_fts out of sync: {exc}"
@@ -1010,14 +1158,17 @@ def _verify_before_commit(conn: sqlite3.Connection, dest_id: int) -> None:
 
 
 def _bind_local_path(
-    conn: sqlite3.Connection, dest_row: sqlite3.Row | None, local_path: str | None, now_iso: str
+    conn: sqlite3.Connection,
+    dest_row: sqlite3.Row | None,
+    local_path: str | None,
+    now_iso: str,
 ) -> bool:
     """Binds `--path` on a skipped repository in its own short transaction."""
     if dest_row is None or local_path is None:
         return False
     with conn:
         conn.execute(
-            "UPDATE main.repos SET local_path = ?, updated_at = ? WHERE repo_id = ?",
+            "UPDATE main.repos SET local_path = ?, git_source = 'path', git_url = NULL, updated_at = ? WHERE repo_id = ?",
             (local_path, now_iso, int(dest_row["repo_id"])),
         )
     return True
@@ -1027,7 +1178,9 @@ def _warn_long_copy(ctx: _ImportContext, src: _SourceRepo) -> None:
     """Warns when one repository's copy will likely hold the write lock past the reader window."""
     if ctx.reporter is None:
         return
-    est_bytes = selected_bytes_estimate(ctx.pre.source_bytes, src.chunk_count, ctx.pre.total_chunks)
+    est_bytes = selected_bytes_estimate(
+        ctx.pre.source_bytes, src.chunk_count, ctx.pre.total_chunks
+    )
     est_sec = est_bytes / (1024**3) * IMPORT_SEC_PER_GIB
     if est_sec <= LONG_COPY_WARN_SEC:
         return
@@ -1048,16 +1201,25 @@ def _copy_repo_tx(
     """Copies one repository inside `BEGIN IMMEDIATE`; returns `(dest_id, chunks, embeddings)`."""
     conn = ctx.conn
     if conn.in_transaction:
-        raise ImportIntegrityError("A transaction was already open before BEGIN IMMEDIATE.")
+        raise ImportIntegrityError(
+            "A transaction was already open before BEGIN IMMEDIATE."
+        )
     now_iso = iso_at(ctx.now)
     tracker = ctx.tracker
     tracker.begin("copy", detail=f"{src.full_name}: step 1/6, repository row")
     conn.execute("BEGIN IMMEDIATE")
     with tracker.vm_heartbeat(conn):
         dest_id = _upsert_repo_row(
-            conn, src, dest_row, local_path=ctx.pre.local_path, preserve_git=preserve_git, now_iso=now_iso
+            conn,
+            src,
+            dest_row,
+            local_path=ctx.pre.local_path,
+            preserve_git=preserve_git,
+            now_iso=now_iso,
         )
-        dest_full_name = str(dest_row["full_name"]) if dest_row is not None else src.full_name
+        dest_full_name = (
+            str(dest_row["full_name"]) if dest_row is not None else src.full_name
+        )
         _upsert_aliases(conn, src, dest_id, dest_full_name, now_iso)
         if dest_row is not None:
             tracker.step(f"{src.full_name}: step 2/6, clearing replaced rows")
@@ -1086,7 +1248,9 @@ def _import_repo(ctx: _ImportContext, src: _SourceRepo) -> ImportRepoOutcome:
     disposition, dest_key, preserve = _evaluate(src, dest_row, ctx.allow_older)
     src_key = mirror_freshness_key(src.row)
     if disposition == "skipped_older":
-        bound = _bind_local_path(ctx.conn, dest_row, ctx.pre.local_path, iso_at(ctx.now))
+        bound = _bind_local_path(
+            ctx.conn, dest_row, ctx.pre.local_path, iso_at(ctx.now)
+        )
         return ImportRepoOutcome(
             full_name=src.full_name,
             disposition=disposition,
@@ -1098,7 +1262,9 @@ def _import_repo(ctx: _ImportContext, src: _SourceRepo) -> ImportRepoOutcome:
             bound_local_path=bound,
         )
     _warn_long_copy(ctx, src)
-    dest_id, chunks, embeddings = _copy_repo_tx(ctx, src, dest_row, disposition, preserve)
+    dest_id, chunks, embeddings = _copy_repo_tx(
+        ctx, src, dest_row, disposition, preserve
+    )
     return ImportRepoOutcome(
         full_name=src.full_name,
         disposition=disposition,
@@ -1172,7 +1338,11 @@ def import_database(
     """
     started = time.monotonic()
     pre = _run_preflight(
-        store.db_path, source_path, repo_tokens=repo_tokens, local_path=local_path, check_disk=True
+        store.db_path,
+        source_path,
+        repo_tokens=repo_tokens,
+        local_path=local_path,
+        check_disk=True,
     )
     conn = store.conn
     ctx = _ImportContext(
@@ -1194,7 +1364,10 @@ def import_database(
                 _rollback_quietly(conn)
                 partial = _summarize(
                     pre,
-                    [*ctx.outcomes, *_failed_outcomes(src, pre.selected[index + 1 :], str(exc))],
+                    [
+                        *ctx.outcomes,
+                        *_failed_outcomes(src, pre.selected[index + 1 :], str(exc)),
+                    ],
                     dest_schema_version=LATEST_SCHEMA_VERSION,
                     dry_run=False,
                     started=started,
@@ -1206,5 +1379,9 @@ def import_database(
     finally:
         _detach_source(conn)
     return _summarize(
-        pre, ctx.outcomes, dest_schema_version=LATEST_SCHEMA_VERSION, dry_run=False, started=started
+        pre,
+        ctx.outcomes,
+        dest_schema_version=LATEST_SCHEMA_VERSION,
+        dry_run=False,
+        started=started,
     )

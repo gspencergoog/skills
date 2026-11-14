@@ -368,8 +368,8 @@ def _seed_repo_git_rows(
     store.upsert_indexed_files(
         rid,
         [
-            ("src/mod.py", f"blobsym_{token}", sha),
-            ("docs/guide.md", f"blobdoc_{token}", sha),
+            ("src/mod.py", f"blobsym_{token}", sha, "py-ast@1"),
+            ("docs/guide.md", f"blobdoc_{token}", sha, "md-sections@1"),
         ],
     )
     store.set_commits_backfill_state(rid, cursor=None, done_at=committed_at, now=T0)
@@ -1886,6 +1886,143 @@ class TestImportDatabase(unittest.TestCase):
             hybrid_rrf_search(self.dest_store, "gadgets_boom", mode="fts"), []
         )
         self.assertIsNone(self.dest_store.get_repo("octo-org/sprockets"))
+
+    def test_import_v13_snapshot_resets_fingerprint_applies_v14_fixups_and_reindexes(
+        self,
+    ) -> None:
+        import subprocess
+
+        from db_migrations import MIGRATIONS, _run_migration, refresh_views
+        from git_indexer import sync_git_codebase
+        from parsers.python.symbol_parser import parse_python
+        from symbol_parsers import ParsedFile, ParsedSymbol, SymbolParsers
+
+        checkout = self.tmp_dir / "v13-import-work"
+        subprocess.run(["git", "init", "-b", "main", str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.name", "T"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.email", "t@e"], check=True)
+        (checkout / "mod.py").write_text(
+            'def greet() -> str:\n    """Say hi."""\n    return "hi"\n',
+            encoding="utf-8",
+        )
+        subprocess.run(["git", "-C", str(checkout), "add", "."], check=True)
+        subprocess.run(
+            ["git", "-C", str(checkout), "commit", "-m", "feat: add mod.py"], check=True
+        )
+        head_sha = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+        dest_w = self.dest_store.register_repo(
+            "octo-org", "widgets", local_path=str(checkout), now=T0
+        )
+        self.dest_store.set_parser_fingerprint(dest_w.repo_id, ".py=py-ast@1", now=T0)
+
+        v13_path = self.tmp_dir / "sources" / "legacy_v13.sqlite"
+        v13_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(v13_path))
+        try:
+            for ver, mig in MIGRATIONS[:13]:
+                _run_migration(conn, ver, mig)
+            refresh_views(conn)
+            conn.execute(
+                "INSERT INTO repos (repo_id, owner, name, full_name, mode, created_at, updated_at, last_indexed_sha, prs_watermark) "
+                "VALUES (1, 'octo-org', 'widgets', 'octo-org/widgets', 'mirror', ?, ?, ?, '2027-04-01T00:00:00Z')",
+                ("2027-01-01T00:00:00Z", "2027-04-01T00:00:00Z", head_sha),
+            )
+            conn.execute(
+                "INSERT INTO code_symbols (repo_id, file_path, symbol_name, kind, line_start, line_end, signature, docstring, sha, blob_oid) "
+                "VALUES (1, 'mod.py', 'greet', 'function', 1, 3, 'def greet() -> str', '', ?, 'oldblob')",
+                (head_sha,),
+            )
+            conn.execute(
+                "INSERT INTO indexed_files (repo_id, file_path, blob_oid, sha) "
+                "VALUES (1, 'mod.py', 'oldblob', ?), (1, 'README.md', 'docblob', ?)",
+                (head_sha, head_sha),
+            )
+            conn.execute(
+                "INSERT INTO chunks (chunk_id, repo_id, source_kind, source_ref, file_path, title, content_sha256, is_untrusted, text, updated_at) "
+                "VALUES ('octo-org/widgets@symbol:mod.py:greet:1', 1, 'code_symbol', 'mod.py#L1-L3', 'mod.py', 'function greet', 'csha', 0, 'def greet', 'now')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        summary = self.dest_store.import_database(v13_path, allow_older=True, now=T0 + 200)
+        self.assertEqual(summary.replaced_count, 1)
+
+        imported = self.dest_store.get_repo("octo-org/widgets")
+        assert imported is not None
+        self.assertIsNone(imported.parser_fingerprint)
+        idx_map = self.dest_store.get_indexed_files(imported.repo_id)
+        self.assertEqual(idx_map["mod.py"][1], "regex@1")
+        self.assertEqual(idx_map["README.md"][1], "md-sections@1")
+        rewritten = self.dest_store.conn.execute(
+            "SELECT chunk_id FROM chunks WHERE repo_id = ?", (imported.repo_id,)
+        ).fetchone()
+        self.assertEqual(
+            rewritten[0], "octo-org/widgets@symbol:mod.py:function:greet:1"
+        )
+
+        # Next sync sees parser_fingerprint NULL != py-ast@1 and re-indexes mod.py with docstrings
+        stats = sync_git_codebase(self.dest_store, imported)
+        self.assertEqual(stats.symbols_upserted, 1)
+        sym_row = self.dest_store.conn.execute(
+            "SELECT docstring FROM code_symbols WHERE repo_id = ? AND file_path = 'mod.py'",
+            (imported.repo_id,),
+        ).fetchone()
+        self.assertEqual(sym_row[0], "Say hi.")
+
+    def test_v15_import_git_source_precedence_and_local_git_poll_preservation(self) -> None:
+        src_db_path = Path(self.tmp_dir) / "v15_src.sqlite"
+        src_store = PackratStore(src_db_path)
+        try:
+            src_store.register_repo("octo", "keep-path", local_path="/sender/kp", now=T0)
+            src_store.register_repo("octo", "keep-mgr", git_source="managed", now=T0)
+            src_store.register_repo("octo", "from-none", git_source="none", now=T0)
+            src_store.register_repo("octo", "new-mgr", git_source="managed", git_url="git@github.com:octo/new-mgr.git", now=T0)
+            src_store.register_repo("octo", "override-path", git_source="managed", now=T0)
+            # Export nulls git_url and maps keep-path -> managed.
+            exported_path = Path(self.tmp_dir) / "v15_exp.sqlite"
+            src_store.export_database(exported_path, now=T0 + 1)
+        finally:
+            src_store.close()
+
+        d_path = self.dest_store.register_repo("octo", "keep-path", local_path="/dest/kp", now=T0)
+        d_mgr = self.dest_store.register_repo("octo", "keep-mgr", git_source="managed", git_url="git@github.com:octo/keep-mgr.git", now=T0)
+        self.dest_store.register_repo("octo", "from-none", git_source="managed", now=T0)
+        self.dest_store.set_state(f"git_poll:{d_mgr.repo_id}", '{"remote_sha":"local_sha"}', now=T0)
+
+        summary = self.dest_store.import_database(exported_path, allow_older=True, now=T0 + 10)
+        self.assertEqual(summary.added_count + summary.replaced_count, 5)
+        self.assertEqual(self.dest_store.get_repo("octo/keep-path").git_source, "path")  # type: ignore[union-attr]
+        self.assertEqual(self.dest_store.get_repo("octo/keep-path").local_path, "/dest/kp")  # type: ignore[union-attr]
+        # Destination managed binding wins even when source from-none was git_source='none'.
+        self.assertEqual(self.dest_store.get_repo("octo/from-none").git_source, "managed")  # type: ignore[union-attr]
+        # Destination git_url and git_poll:<id> survive import; source git_url never copies.
+        self.assertEqual(self.dest_store.get_repo("octo/keep-mgr").git_url, "git@github.com:octo/keep-mgr.git")  # type: ignore[union-attr]
+        self.assertEqual(self.dest_store.get_state(f"git_poll:{d_mgr.repo_id}"), '{"remote_sha":"local_sha"}')
+        self.assertEqual(self.dest_store.get_repo("octo/new-mgr").git_source, "managed")  # type: ignore[union-attr]
+        self.assertIsNone(self.dest_store.get_repo("octo/new-mgr").git_url)  # type: ignore[union-attr]
+
+        # Single-repo --path overrides any prior source/dest binding to path.
+        override_dir = Path(self.tmp_dir) / "override_co"
+        (override_dir / ".git").mkdir(parents=True)
+        self.dest_store.import_database(
+            exported_path,
+            repo_tokens=["octo/override-path"],
+            local_path=str(override_dir),
+            allow_older=True,
+            now=T0 + 20,
+        )
+        ov = self.dest_store.get_repo("octo/override-path")
+        assert ov is not None
+        self.assertEqual(ov.git_source, "path")
+        self.assertEqual(ov.local_path, str(override_dir.resolve()))
+        self.assertIsNone(d_path.git_url)
 
 
 if __name__ == "__main__":

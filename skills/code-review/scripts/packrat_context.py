@@ -506,7 +506,7 @@ def _build_code_review_note(
     if ephemeral:
         return (
             f"Packrat context: skipped ({repo} is not synced; run "
-            f"`packrat repo add {repo} && packrat sync --repo {repo} --github-only` "
+            f"`packrat repo add {repo} --github-only && packrat sync --repo {repo} --github-only` "
             "for faster history lookups)."
         )
     return (

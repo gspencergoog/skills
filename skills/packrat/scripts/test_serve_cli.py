@@ -277,7 +277,8 @@ class TestDryRunStoreWave4Forwarding(unittest.TestCase):
         "get_live_pr_fingerprints",
         "read_schema_and_views_version",
         "read_snapshot",
-        "get_indexed_blob_oids",
+        "get_indexed_files",
+        "get_parser_overrides",
         "has_any_chunks",
         "query_fts_candidates",
         "read_all_embeddings_for_mmap",
@@ -508,6 +509,82 @@ class TestWatchAddProbe(unittest.TestCase):
         calls, err = self._add("HTTP/2.0 200 OK\r\n\r\n{}")
         self.assertEqual(calls, [])
         self.assertNotIn("registered", err)
+
+
+class TestManagedGitAdapterAndDryRun(unittest.TestCase):
+    """Covers `ManagedGitAdapter`, `DryRunManagedGit`, `_DRY_RUN_READS`, and `scoped_child_argv`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="packrat-mgr-serve-"))
+        self.store = PackratStore(self.tmp / "repos.sqlite")
+
+    def tearDown(self) -> None:
+        self.store.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_adapter_polls_most_overdue_first_without_touching_repos_and_backs_off(self) -> None:
+        import subprocess
+        from serve_cli import ManagedGitAdapter, read_git_poll, scoped_child_argv
+
+        origin = self.tmp / "origin.git"
+        work = self.tmp / "work"
+        subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(origin)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", str(origin), str(work)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.name", "T"], check=True)
+        subprocess.run(["git", "-C", str(work), "config", "user.email", "t@e"], check=True)
+        subprocess.run(["git", "-C", str(work), "checkout", "-B", "trunk"], check=True, capture_output=True)
+        (work / "a.txt").write_text("hi\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(work), "add", "a.txt"], check=True)
+        subprocess.run(["git", "-C", str(work), "commit", "-m", "c1"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(work), "push", "-u", "origin", "trunk"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/trunk"], check=True)
+
+        repo = self.store.register_repo(
+            "octo",
+            "widgets",
+            default_branch="main",
+            git_source="managed",
+            update_binding=True,
+        )
+        with self.store.conn:
+            self.store.conn.execute(
+                "UPDATE repos SET git_url = ? WHERE repo_id = ?",
+                (origin.as_uri(), repo.repo_id),
+            )
+        adapter = ManagedGitAdapter(
+            self.store, extra_git_config=("-c", "protocol.file.allow=always")
+        )
+        results = adapter.poll_remotes(1000.0, budget_s=20.0)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].remote_default_branch, "trunk")
+        # Service tick records remote_default_branch in git_poll without writing repos.default_branch.
+        self.assertEqual(self.store.get_repo("octo/widgets").default_branch, "main")  # type: ignore[union-attr]
+        poll = read_git_poll(self.store, repo.repo_id)
+        self.assertEqual(poll["remote_default_branch"], "trunk")
+
+        # Missing repo triggers clean clone/fetch on `fetch()`.
+        fetched = adapter.fetch([repo.repo_id], budget_s=20.0)
+        self.assertEqual(len(fetched), 1)
+        self.assertEqual(fetched[0].error, "")
+
+        # Scoped child argv carries --git-only --no-fetch and repeatable --repo.
+        builder = scoped_child_argv(self.tmp / "repos.sqlite", self.store)
+        argv = builder([repo.repo_id])
+        self.assertIn("--git-only", argv)
+        self.assertIn("--no-fetch", argv)
+        self.assertIn("octo/widgets", argv)
+
+    def test_dry_run_managed_git_and_store_reads_run_no_subprocess(self) -> None:
+        from serve_cli import DryRunManagedGit
+
+        repo = self.store.register_repo("octo", "widgets", git_source="managed", update_binding=True)
+        dry_store = DryRunStore(self.store)
+        self.assertEqual(dry_store.resolve_git_dir(repo), self.store.resolve_git_dir(repo))
+        with mock.patch("git_cmd.run_git_command", side_effect=AssertionError("git called")):
+            dry_git = DryRunManagedGit(dry_store)
+            self.assertEqual(dry_git.poll_remotes(100.0, budget_s=10.0), [])
+            self.assertEqual(dry_git.fetch([repo.repo_id], budget_s=10.0), [])
+            self.assertTrue(dry_git.calls)
 
 
 if __name__ == "__main__":

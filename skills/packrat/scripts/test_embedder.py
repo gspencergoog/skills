@@ -136,19 +136,21 @@ class TestEmbedder(unittest.TestCase):
                 store.upsert_chunks(chunks)
 
                 embedder = DeterministicHashEmbedder()
-                first_count = sync_repo_embeddings(
+                first_res = sync_repo_embeddings(
                     store, repo.repo_id, embedder=embedder
                 )
-                self.assertEqual(first_count, 2)
+                self.assertEqual(first_res.embedded_count, 2)
+                self.assertFalse(first_res.capped)
 
                 # Second sync with identical content_sha256 must embed 0 chunks
                 with mock.patch.object(
                     embedder, "embed_chunks", wraps=embedder.embed_chunks
                 ) as spy:
-                    second_count = sync_repo_embeddings(
+                    second_res = sync_repo_embeddings(
                         store, repo.repo_id, embedder=embedder
                     )
-                    self.assertEqual(second_count, 0)
+                    self.assertEqual(second_res.embedded_count, 0)
+                    self.assertFalse(second_res.capped)
                     spy.assert_not_called()
 
                 # Modify only chunk 1's text & sha256; only 1 chunk should be re-embedded
@@ -174,10 +176,11 @@ class TestEmbedder(unittest.TestCase):
                         )
                     ]
                 )
-                third_count = sync_repo_embeddings(
+                third_res = sync_repo_embeddings(
                     store, repo.repo_id, embedder=embedder
                 )
-                self.assertEqual(third_count, 1)
+                self.assertEqual(third_res.embedded_count, 1)
+                self.assertFalse(third_res.capped)
 
                 emb = store.get_embedding("octo-org/widgets:symbol:src/a.ts:1")
                 self.assertIsNotNone(emb)
@@ -269,8 +272,48 @@ class TestEmbedder(unittest.TestCase):
                     reporter=spy,
                     repo_label="octo-org/widgets",
                 )
-                self.assertEqual(count, 5)
+                self.assertEqual(count.embedded_count, 5)
+                self.assertFalse(count.capped)
                 self.assertEqual(advances, [(2, 5), (4, 5), (5, 5)])
+            finally:
+                store.close()
+
+    def test_max_chunks_cap_stops_early_and_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                now = utc_now_iso()
+                store.upsert_chunks(
+                    [
+                        TextChunk(
+                            chunk_id=f"octo-org/widgets:symbol:src/c{i}.ts:1",
+                            repo_id=repo.repo_id,
+                            source_kind="code_symbol",
+                            source_ref=f"src/c{i}.ts#L1",
+                            file_path=f"src/c{i}.ts",
+                            item_number=None,
+                            title=f"Sym{i}",
+                            text=f"Body {i}",
+                            content_sha256=compute_content_sha256(f"Sym{i}", f"Body {i}"),
+                            is_untrusted=False,
+                            updated_at=now,
+                        )
+                        for i in range(5)
+                    ]
+                )
+                emb = DeterministicHashEmbedder()
+                first = sync_repo_embeddings(
+                    store, repo.repo_id, embedder=emb, batch_size=2, max_chunks=3
+                )
+                self.assertEqual(first.embedded_count, 3)
+                self.assertTrue(first.capped)
+
+                second = sync_repo_embeddings(
+                    store, repo.repo_id, embedder=emb, batch_size=2, max_chunks=3
+                )
+                self.assertEqual(second.embedded_count, 2)
+                self.assertFalse(second.capped)
             finally:
                 store.close()
 
@@ -353,7 +396,8 @@ class TestEmbedder(unittest.TestCase):
                         embedder=None,
                         model_dir=onnx_dir,
                     )
-                    self.assertEqual(count_empty, 0)
+                    self.assertEqual(count_empty.embedded_count, 0)
+                    self.assertFalse(count_empty.capped)
                     mock_onnx_cls.assert_not_called()
 
                     # 1 chunk already embedded with ARCTIC_MODEL_ID: still 0 pending -> no ONNX init
@@ -390,7 +434,8 @@ class TestEmbedder(unittest.TestCase):
                         embedder=None,
                         model_dir=onnx_dir,
                     )
-                    self.assertEqual(count_up_to_date, 0)
+                    self.assertEqual(count_up_to_date.embedded_count, 0)
+                    self.assertFalse(count_up_to_date.capped)
                     mock_onnx_cls.assert_not_called()
                 finally:
                     store.close()
@@ -462,13 +507,14 @@ class TestEmbedder(unittest.TestCase):
                 with mock.patch.object(
                     embedder, "embed_chunks", side_effect=record_batches
                 ):
-                    count = sync_repo_embeddings(
+                    res = sync_repo_embeddings(
                         store,
                         repo.repo_id,
                         embedder=embedder,
                         batch_size=2,
                     )
-                self.assertEqual(count, 4)
+                self.assertEqual(res.embedded_count, 4)
+                self.assertFalse(res.capped)
                 self.assertEqual(
                     observed_batches,
                     [["c2_short", "c4_short"], ["c1_long", "c3_long"]],
@@ -546,7 +592,7 @@ class TestEmbedder(unittest.TestCase):
                         store, "get_unembedded_chunks", side_effect=spy_get_unembedded
                     ),
                 ):
-                    count = sync_repo_embeddings(
+                    res = sync_repo_embeddings(
                         store,
                         repo.repo_id,
                         embedder=DeterministicHashEmbedder(),
@@ -554,7 +600,8 @@ class TestEmbedder(unittest.TestCase):
                         page_size=3,
                     )
 
-                self.assertEqual(count, 7)
+                self.assertEqual(res.embedded_count, 7)
+                self.assertFalse(res.capped)
                 # 7 chunks with page_size=3 -> pages of 3, 3, 1 (2 + 2 + 1 = 5 batches)
                 self.assertEqual(len(page_calls), 3)
                 self.assertEqual(page_calls[0], (3, None))
@@ -569,6 +616,210 @@ class TestEmbedder(unittest.TestCase):
                 self.assertEqual(
                     store.get_unembedded_chunks(repo.repo_id, DETERMINISTIC_MODEL_ID),
                     [],
+                )
+            finally:
+                store.close()
+
+    def test_multi_page_progress_constant_total_clamping_and_missing_count_fallback(
+        self,
+    ) -> None:
+        class SpyReporter:
+            def __init__(self) -> None:
+                self.starts: list[tuple[str, str, int | None]] = []
+                self.advances: list[tuple[int, int | None]] = []
+
+            def start_phase(
+                self, repo: str, phase: str, total: int | None = None
+            ) -> None:
+                self.starts.append((repo, phase, total))
+
+            def advance(
+                self, completed: int, total: int | None = None, *, detail: str = ""
+            ) -> None:
+                self.advances.append((completed, total))
+
+            def finish_phase(self, summary: str = "") -> None:
+                pass
+
+            def warn(self, repo: str, message: str) -> None:
+                pass
+
+            def error(self, repo: str, message: str) -> None:
+                pass
+
+            def clear_active_line(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PackratStore(Path(tmp) / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets")
+                now = utc_now_iso()
+                chunks = [
+                    TextChunk(
+                        chunk_id=f"octo-org/widgets:symbol:src/p{i:02d}.ts:1",
+                        repo_id=repo.repo_id,
+                        source_kind="code_symbol",
+                        source_ref=f"src/p{i:02d}.ts#L1",
+                        file_path=f"src/p{i:02d}.ts",
+                        item_number=None,
+                        title=f"Sym{i}",
+                        text=f"Body text for symbol {i}",
+                        content_sha256=compute_content_sha256(
+                            f"Sym{i}", f"Body text for symbol {i}"
+                        ),
+                        is_untrusted=False,
+                        updated_at=now,
+                    )
+                    for i in range(7)
+                ]
+                store.upsert_chunks(chunks)
+                self.assertEqual(
+                    store.count_unembedded_chunks(repo.repo_id, DETERMINISTIC_MODEL_ID),
+                    7,
+                )
+                self.assertEqual(
+                    store.count_unembedded_chunks(None, DETERMINISTIC_MODEL_ID),
+                    7,
+                )
+
+                # 1. Small single-page sync (len(current_page) < page_size) does not call count_unembedded_chunks
+                with mock.patch.object(
+                    store,
+                    "count_unembedded_chunks",
+                    wraps=store.count_unembedded_chunks,
+                ) as spy_count:
+                    spy_small = SpyReporter()
+                    res_small = sync_repo_embeddings(
+                        store,
+                        repo.repo_id,
+                        embedder=DeterministicHashEmbedder(),
+                        batch_size=4,
+                        page_size=10,
+                        max_chunks=4,
+                        reporter=spy_small,
+                        repo_label="octo-org/widgets",
+                    )
+                    spy_count.assert_not_called()
+                self.assertEqual(res_small.embedded_count, 4)
+                self.assertTrue(res_small.capped)
+                self.assertEqual(spy_small.starts[0][2], 4)
+                self.assertEqual(spy_small.advances, [(4, 4)])
+
+                # Re-dirty all 7 chunks and test max_chunks clamping across multiple pages (7 pending, page_size=3, max_chunks=4 -> total=4)
+                v1_chunks = [
+                    TextChunk(
+                        chunk_id=ch.chunk_id,
+                        repo_id=ch.repo_id,
+                        source_kind=ch.source_kind,
+                        source_ref=ch.source_ref,
+                        file_path=ch.file_path,
+                        item_number=ch.item_number,
+                        title=ch.title,
+                        text=ch.text + " v1",
+                        content_sha256=compute_content_sha256(ch.title, ch.text + " v1"),
+                        is_untrusted=ch.is_untrusted,
+                        updated_at=now,
+                    )
+                    for ch in chunks
+                ]
+                store.upsert_chunks(v1_chunks)
+                spy_clamped = SpyReporter()
+                res_clamped = sync_repo_embeddings(
+                    store,
+                    repo.repo_id,
+                    embedder=DeterministicHashEmbedder(),
+                    batch_size=2,
+                    page_size=3,
+                    max_chunks=4,
+                    reporter=spy_clamped,
+                    repo_label="octo-org/widgets",
+                )
+                self.assertEqual(res_clamped.embedded_count, 4)
+                self.assertTrue(res_clamped.capped)
+                self.assertEqual(spy_clamped.starts[0][2], 4)
+                self.assertEqual(
+                    spy_clamped.advances, [(2, 4), (3, 4), (4, 4)]
+                )
+
+                # Re-dirty all 7 chunks by bumping content_sha256
+                updated_chunks = [
+                    TextChunk(
+                        chunk_id=ch.chunk_id,
+                        repo_id=ch.repo_id,
+                        source_kind=ch.source_kind,
+                        source_ref=ch.source_ref,
+                        file_path=ch.file_path,
+                        item_number=ch.item_number,
+                        title=ch.title,
+                        text=ch.text + " v2",
+                        content_sha256=compute_content_sha256(ch.title, ch.text + " v2"),
+                        is_untrusted=ch.is_untrusted,
+                        updated_at=now,
+                    )
+                    for ch in chunks
+                ]
+                store.upsert_chunks(updated_chunks)
+
+                # 2. Multi-page full run (7 pending, page_size=3, batch_size=2): constant total=7 across all 3 pages
+                spy_full = SpyReporter()
+                res_full = sync_repo_embeddings(
+                    store,
+                    repo.repo_id,
+                    embedder=DeterministicHashEmbedder(),
+                    batch_size=2,
+                    page_size=3,
+                    reporter=spy_full,
+                    repo_label="octo-org/widgets",
+                )
+                self.assertEqual(res_full.embedded_count, 7)
+                self.assertFalse(res_full.capped)
+                self.assertEqual(spy_full.starts[0][2], 7)
+                self.assertEqual(
+                    spy_full.advances,
+                    [(2, 7), (3, 7), (5, 7), (6, 7), (7, 7)],
+                )
+
+                # 3. Store double lacking count_unembedded_chunks falls back to total=None when paging
+                class PagingDoubleWithoutCount:
+                    def get_unembedded_chunks(
+                        self,
+                        repo_id: int | None,
+                        model_id: str,
+                        *,
+                        limit: int | None = None,
+                        after_chunk_id: str | None = None,
+                    ) -> list[TextChunk]:
+                        del repo_id, model_id, limit
+                        if after_chunk_id is None:
+                            return updated_chunks[:3]
+                        if after_chunk_id == updated_chunks[2].chunk_id:
+                            return updated_chunks[3:5]
+                        return []
+
+                    def upsert_embeddings(
+                        self,
+                        records: list[StoredEmbeddingRecord],
+                        *,
+                        allow_seq_bump: bool = True,
+                    ) -> None:
+                        del records, allow_seq_bump
+
+                spy_no_count = SpyReporter()
+                res_no_count = sync_repo_embeddings(
+                    PagingDoubleWithoutCount(),  # type: ignore[arg-type]
+                    repo.repo_id,
+                    embedder=DeterministicHashEmbedder(),
+                    batch_size=2,
+                    page_size=3,
+                    reporter=spy_no_count,
+                    repo_label="octo-org/widgets",
+                )
+                self.assertEqual(res_no_count.embedded_count, 5)
+                self.assertEqual(spy_no_count.starts[0][2], None)
+                self.assertEqual(
+                    spy_no_count.advances,
+                    [(2, None), (3, None), (5, None)],
                 )
             finally:
                 store.close()

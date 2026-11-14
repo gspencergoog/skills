@@ -31,6 +31,9 @@ VALUE_TOKENS = frozenset(
         # Enumerated values and prose that happen to be backticked lowercase words.
         "mirror",
         "items",
+        "none",
+        "path",
+        "managed",
         "issue",
         "pr",
         "closes",

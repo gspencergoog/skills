@@ -620,10 +620,7 @@ def _backfill_review_thread_participants(
     ).fetchall()
     if not rows:
         return
-    updates = [
-        (_extract_thread_participants(r[1], r[2]), str(r[0]))
-        for r in rows
-    ]
+    updates = [(_extract_thread_participants(r[1], r[2]), str(r[0])) for r in rows]
     conn.executemany(
         "UPDATE review_threads SET participants_json = ? WHERE thread_id = ?",
         updates,
@@ -645,7 +642,9 @@ def apply_v12_repo_fixups(conn: sqlite3.Connection, repo_id: int | None = None) 
     `check_runs` whose `head_oid` no longer matches the PR's `head_sha`.
     `packrat import` runs this on rows copied from pre-v12 sources.
     """
-    utc_glob = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z"
+    utc_glob = (
+        "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z"
+    )
     scope_sql, scope_params = _repo_scope("", repo_id)
     conn.execute(
         f"""
@@ -782,7 +781,9 @@ def _parse_migration_item_key(
 def migrate_0013_normalize_live_state_keys(conn: sqlite3.Connection) -> None:
     """Normalizes `watches`, `viewer_sets`, and `refresh_requests` to `(repo_id, item_number)`."""
     if "repo_id" in _table_columns(conn, "watches"):
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)"
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_watches_repo_item ON watches(repo_id, item_number)"
         )
@@ -812,7 +813,14 @@ def migrate_0013_normalize_live_state_keys(conn: sqlite3.Connection) -> None:
                   freshness_s = MIN(watches_v13.freshness_s, excluded.freshness_s),
                   lease_expires_at = MAX(watches_v13.lease_expires_at, excluded.lease_expires_at)
                 """,
-                (str(row[0]), str(row[1]), parsed[0], parsed[1], int(row[3]), str(row[4])),
+                (
+                    str(row[0]),
+                    str(row[1]),
+                    parsed[0],
+                    parsed[1],
+                    int(row[3]),
+                    str(row[4]),
+                ),
             )
     for row in viewer_rows:
         parsed = _parse_migration_item_key(conn, row[1], cache, now_iso)
@@ -846,7 +854,9 @@ def migrate_0013_normalize_live_state_keys(conn: sqlite3.Connection) -> None:
     conn.execute("DROP VIEW IF EXISTS v_service_health")
     conn.execute("DROP TABLE watches")
     conn.execute("ALTER TABLE watches_v13 RENAME TO watches")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_watches_expiry ON watches(lease_expires_at)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_watches_repo_item ON watches(repo_id, item_number)"
     )
@@ -854,6 +864,184 @@ def migrate_0013_normalize_live_state_keys(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE viewer_sets_v13 RENAME TO viewer_sets")
     conn.execute("DROP TABLE refresh_requests")
     conn.execute("ALTER TABLE refresh_requests_v13 RENAME TO refresh_requests")
+
+
+V14_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("repos", "parser_fingerprint", "TEXT"),
+    ("indexed_files", "parser_id", "TEXT NOT NULL DEFAULT 'regex@1'"),
+)
+
+V14_CODE_SYMBOLS_DDL = """
+DROP TABLE IF EXISTS code_symbols_v14;
+CREATE TABLE code_symbols_v14 (
+  repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+  file_path TEXT NOT NULL,
+  symbol_name TEXT NOT NULL,
+  qualified_name TEXT NOT NULL DEFAULT '',
+  parent TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,
+  line_start INTEGER NOT NULL,
+  line_end INTEGER NOT NULL,
+  signature TEXT NOT NULL,
+  docstring TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT '',
+  sha TEXT NOT NULL,
+  blob_oid TEXT,
+  PRIMARY KEY (repo_id, file_path, kind, qualified_name, line_start)
+);
+"""
+
+
+def _rewrite_v14_chunk_ids(conn: sqlite3.Connection, repo_id: int | None = None) -> int:
+    """Rewrites pre-v14 symbol `chunk_id`s in place on `chunk_embeddings` and `chunks`."""
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    conn.execute("DROP TABLE IF EXISTS temp.chunk_id_map")
+    conn.execute(
+        "CREATE TEMP TABLE chunk_id_map (old_id TEXT PRIMARY KEY, new_id TEXT NOT NULL)"
+    )
+    scope_sql, scope_params = _repo_scope("cs.", repo_id)
+    conn.execute(
+        f"""
+        INSERT INTO temp.chunk_id_map (old_id, new_id)
+        SELECT
+          r.full_name || '@symbol:' || cs.file_path || ':' || cs.symbol_name || ':' || cs.line_start AS old_id,
+          MIN(
+            r.full_name || '@symbol:' || cs.file_path || ':' || cs.kind || ':'
+            || cs.qualified_name || ':' || cs.line_start
+          ) AS new_id
+        FROM code_symbols cs
+        JOIN repos r ON r.repo_id = cs.repo_id
+        WHERE 1 = 1{scope_sql}
+        GROUP BY old_id
+        """,
+        scope_params,
+    )
+    emb_cur = conn.execute(
+        """
+        UPDATE chunk_embeddings
+        SET chunk_id = (
+          SELECT m.new_id FROM temp.chunk_id_map m WHERE m.old_id = chunk_embeddings.chunk_id
+        )
+        WHERE chunk_id IN (SELECT old_id FROM temp.chunk_id_map)
+        """
+    )
+    chk_cur = conn.execute(
+        """
+        UPDATE chunks
+        SET chunk_id = (
+          SELECT m.new_id FROM temp.chunk_id_map m WHERE m.old_id = chunks.chunk_id
+        )
+        WHERE chunk_id IN (SELECT old_id FROM temp.chunk_id_map)
+        """
+    )
+    conn.execute("DROP TABLE temp.chunk_id_map")
+    return int(emb_cur.rowcount or 0) + int(chk_cur.rowcount or 0)
+
+
+def apply_v14_symbol_fixups(
+    conn: sqlite3.Connection, repo_id: int | None = None
+) -> None:
+    """Applies Migration 14's idempotent row fixups, optionally scoped to one repository."""
+    scope_sql, scope_params = _repo_scope("", repo_id)
+    conn.execute(
+        f"""
+        UPDATE indexed_files
+        SET parser_id = 'md-sections@1'
+        WHERE (file_path LIKE '%.md' OR file_path LIKE '%.mdx')
+          AND parser_id = 'regex@1'{scope_sql}
+        """,
+        scope_params,
+    )
+    conn.execute(
+        f"""
+        UPDATE code_symbols
+        SET qualified_name = symbol_name
+        WHERE qualified_name = ''{scope_sql}
+        """,
+        scope_params,
+    )
+    _rewrite_v14_chunk_ids(conn, repo_id)
+
+
+def migrate_0014_symbol_parsers(conn: sqlite3.Connection) -> None:
+    """Adds v14 parser tracking columns and rebuilds `code_symbols` on `(kind, qualified_name)`."""
+    conn.execute("PRAGMA defer_foreign_keys = ON")
+    _add_missing_columns(conn, V14_COLUMNS)
+    conn.execute(
+        """
+        UPDATE indexed_files
+        SET parser_id = 'md-sections@1'
+        WHERE (file_path LIKE '%.md' OR file_path LIKE '%.mdx')
+          AND parser_id = 'regex@1'
+        """
+    )
+    if "qualified_name" not in _table_columns(conn, "code_symbols"):
+        _execute_script(conn, V14_CODE_SYMBOLS_DDL)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO code_symbols_v14 (
+              repo_id, file_path, symbol_name, qualified_name, parent, kind,
+              line_start, line_end, signature, docstring, visibility, sha, blob_oid
+            )
+            SELECT
+              repo_id, file_path, symbol_name, symbol_name, '', kind,
+              line_start, line_end, signature, COALESCE(docstring, ''), '', sha,
+              blob_oid
+            FROM code_symbols
+            """
+        )
+        conn.execute("DROP TABLE code_symbols")
+        conn.execute("ALTER TABLE code_symbols_v14 RENAME TO code_symbols")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_code_symbols_name "
+            "ON code_symbols(repo_id, symbol_name)"
+        )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_symbols_qualified "
+        "ON code_symbols(repo_id, qualified_name)"
+    )
+    conn.execute(
+        "UPDATE code_symbols SET qualified_name = symbol_name WHERE qualified_name = ''"
+    )
+    rewritten = _rewrite_v14_chunk_ids(conn)
+    if (
+        rewritten
+        and conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'service_state'"
+        ).fetchone()
+    ):
+        conn.execute(
+            """
+            INSERT INTO service_state (key, value, updated_at)
+            VALUES ('vector_cache_seq', '1', '')
+            ON CONFLICT(key) DO UPDATE SET
+              value = CAST(CAST(service_state.value AS INTEGER) + 1 AS TEXT)
+            """
+        )
+
+
+V15_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    (
+        "repos",
+        "git_source",
+        "TEXT NOT NULL DEFAULT 'none' CHECK (git_source IN ('none', 'path', 'managed'))",
+    ),
+    ("repos", "git_url", "TEXT"),
+)
+
+
+def migrate_0015_managed_git(conn: sqlite3.Connection) -> None:
+    """Adds `git_source` and `git_url` columns and backfills existing repositories."""
+    _add_missing_columns(conn, V15_COLUMNS)
+    conn.execute(
+        """
+        UPDATE repos SET git_source = CASE
+            WHEN local_path IS NOT NULL THEN 'path'
+            WHEN last_indexed_sha IS NOT NULL THEN 'managed'
+            ELSE 'none'
+        END
+        """
+    )
 
 
 Migration = Callable[[sqlite3.Connection], None]
@@ -872,6 +1060,8 @@ MIGRATIONS: tuple[tuple[int, Migration], ...] = (
     (11, migrate_0011_external_content_chunks_fts),
     (12, migrate_0012_utc_indexes_and_health),
     (13, migrate_0013_normalize_live_state_keys),
+    (14, migrate_0014_symbol_parsers),
+    (15, migrate_0015_managed_git),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1][0]
@@ -884,6 +1074,8 @@ RowFixup = Callable[[sqlite3.Connection, int], None]
 IMPORT_ROW_FIXUPS: dict[int, RowFixup | None] = {
     12: apply_v12_repo_fixups,
     13: None,
+    14: apply_v14_symbol_fixups,
+    15: None,
 }
 """Per-migration row rewrites that `packrat import` replays on rows copied from older sources.
 

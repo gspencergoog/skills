@@ -198,13 +198,17 @@ CREATE TABLE IF NOT EXISTS code_symbols (
   repo_id INTEGER NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
   file_path TEXT NOT NULL,
   symbol_name TEXT NOT NULL,
+  qualified_name TEXT NOT NULL DEFAULT '',
+  parent TEXT NOT NULL DEFAULT '',
   kind TEXT NOT NULL,
   line_start INTEGER NOT NULL,
   line_end INTEGER NOT NULL,
   signature TEXT NOT NULL,
   docstring TEXT NOT NULL DEFAULT '',
+  visibility TEXT NOT NULL DEFAULT '',
   sha TEXT NOT NULL,
-  PRIMARY KEY (repo_id, file_path, kind, symbol_name, line_start)
+  blob_oid TEXT,
+  PRIMARY KEY (repo_id, file_path, kind, qualified_name, line_start)
 );
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(repo_id, symbol_name);
 

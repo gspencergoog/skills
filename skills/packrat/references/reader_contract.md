@@ -66,7 +66,7 @@ the canonical `item_key` from `v_pr_basic`, `v_pr_live`, or `packrat changes`.
 
 | Mode | Meaning |
 | :--- | :--- |
-| `mirror` | Registered with `packrat repo add`. Full PR, issue, and discussion history is backfilled and kept current, so branch-name queries (stack discovery) see every PR. |
+| `mirror` | Registered with `packrat repo add` (`git_source`: `managed` bare clone under `~/.local/share/packrat/git/<owner>/<name>.git` by default, `--path` checkout, or `--github-only` for `none`). Full PR, issue, and discussion history is backfilled and kept current, so branch-name queries (stack discovery) see every PR. |
 | `items` | Created automatically by the first lease, notification, or viewer search for a repository nobody registered. Only watched, notified, or viewer items are stored. Don't infer that a PR doesn't exist because it's missing. |
 
 ## Views

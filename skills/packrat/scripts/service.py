@@ -30,12 +30,17 @@ from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from gh_transport import BudgetDeferred, GhApiError
 from models import WatchLease, compute_scripts_sha256, iso_at
 from rate_budget import Priority
 from sync_runtime import SyncLockInfo, acquire_sync_lock
+
+try:
+    from .managed_git import GitResult
+except ImportError:
+    from managed_git import GitResult  # type: ignore[no-redef]
 
 SERVICE_VERSION = "packrat-serve/2"
 """Version prefix written to `service_heartbeat.version`."""
@@ -59,8 +64,12 @@ VIEWER_INTERVAL_S = 15 * 60
 """Interval of the viewer refresh when no signal asks for one sooner."""
 MIRROR_MIN_INTERVAL_S = 120
 """Minimum spacing between mirror runs."""
+GIT_POLL_TICK_BUDGET_S = 30.0
+"""Maximum wall-clock seconds spent polling and fetching managed git remotes per tick."""
 BACKFILL_INTERVAL_S = 600
 """Minimum spacing between backfill child spawns."""
+SCOPED_CHILD_BACKOFF_S = 600
+"""Backoff seconds applied when a scoped indexing child exits non-zero or fails to spawn."""
 PRUNE_INTERVAL_S = 3600
 """Interval between `store.prune()` calls."""
 MAX_CHECK_LEASES_PER_TICK = 20
@@ -81,11 +90,20 @@ _BUDGET_RESOURCE = "graphql"
 
 
 class DirtySignals(Protocol):
-    """What a signal poll found: items to refresh hot, viewer sets, and mirror repos."""
+    """What a signal poll found: items to refresh hot, viewer sets, mirror and git repos."""
 
     hot: set[str]
     viewer: bool
     mirror_repos: set[int]
+    git_repos: set[int]
+
+
+class ManagedGit(Protocol):
+    """Managed bare git remote poller and fetcher."""
+
+    def poll_remotes(self, now: float, *, budget_s: float) -> list[GitResult]: ...
+
+    def fetch(self, repo_ids: Sequence[int], *, budget_s: float) -> list[GitResult]: ...
 
 
 class SignalSource(Protocol):
@@ -172,6 +190,7 @@ class ChildProcess(Protocol):
 
 SyncLockFactory = Callable[[], AbstractContextManager[SyncLockInfo]]
 ChildSpawner = Callable[[Sequence[str]], ChildProcess]
+ScopedChildArgv = Callable[[Sequence[int]], Sequence[str]]
 
 
 @dataclass
@@ -188,10 +207,13 @@ class TickReport:
         checks_polled: Number of leases whose check runs were polled.
         viewer_ran: Whether the viewer refresh ran.
         timeline_ran: Whether the `items`-repo timeline refresh ran.
+        git_polled: Number of managed git remotes polled via `ls-remote`.
+        git_fetched: Number of managed git clones fetched.
         mirror_ran: Whether a mirror run happened.
         mirror_skipped_locked: Whether a due mirror run was skipped for `sync.lock`.
         child_spawned: Whether a backfill child was started.
-        child_exit: Exit code of a backfill child reaped this tick.
+        scoped_child_spawned: Whether an ungated scoped git indexing child was started.
+        child_exit: Exit code of a child process reaped this tick.
         pruned: Whether `store.prune()` ran.
         deferred: Workers skipped or stopped for lack of budget.
         errors: Worker failures other than budget deferrals, as `worker: message`.
@@ -209,9 +231,12 @@ class TickReport:
     checks_polled: int = 0
     viewer_ran: bool = False
     timeline_ran: bool = False
+    git_polled: int = 0
+    git_fetched: int = 0
     mirror_ran: bool = False
     mirror_skipped_locked: bool = False
     child_spawned: bool = False
+    scoped_child_spawned: bool = False
     child_exit: int | None = None
     pruned: bool = False
     deferred: list[str] = field(default_factory=list)
@@ -346,6 +371,7 @@ class _Dirty:
     hot: set[str] = field(default_factory=set)
     viewer: bool = False
     mirror_repos: set[int] = field(default_factory=set)
+    git_repos: set[int] = field(default_factory=set)
 
     def add(self, found: DirtySignals | None) -> None:
         if found is None:
@@ -353,6 +379,7 @@ class _Dirty:
         self.hot |= set(found.hot)
         self.viewer = self.viewer or bool(found.viewer)
         self.mirror_repos |= set(found.mirror_repos)
+        self.git_repos |= set(getattr(found, "git_repos", None) or ())
 
 
 class PackratService:
@@ -374,6 +401,8 @@ class PackratService:
         log: Callable[[str], None] = _stderr_log,
         tick_s: float = TICK_S,
         timeline: TimelineRefresh | None = None,
+        managed_git: ManagedGit | None = None,
+        scoped_child_argv: ScopedChildArgv | None = None,
     ) -> None:
         """Initializes the scheduler; nothing runs until `run()` or `run_once()`.
 
@@ -393,6 +422,9 @@ class PackratService:
             tick_s: Seconds between ticks in `run()`.
             timeline: Timeline refresh for `items` repositories, run at
                 `VIEWER` priority every `VIEWER_INTERVAL_S`; None skips it.
+            managed_git: Managed bare git remote poller and fetcher; None skips git polls.
+            scoped_child_argv: Builder returning the ungated scoped indexing child argv for
+                a sequence of `repo_id`s; None disables scoped child spawns.
         """
         self.store = store
         self.signals = signals
@@ -407,7 +439,12 @@ class PackratService:
         self.log = log
         self.tick_s = tick_s
         self.timeline = timeline
+        self.managed_git = managed_git
+        self.scoped_child_argv = scoped_child_argv
         self.child: ChildProcess | None = None
+        self._child_kind: Literal["backfill", "scoped"] | None = None
+        self._scoped_repo_ids: list[int] = []
+        self._scoped_backoff_until: dict[int, float] = {}
         self._next_signals = 0.0
         self._next_viewer = 0.0
         self._next_timeline = 0.0
@@ -415,6 +452,8 @@ class PackratService:
         self._next_child = 0.0
         self._last_mirror: float | None = None
         self._pending_mirror: set[int] = set()
+        self._pending_git: set[int] = set()
+        self._pending_index: set[int] = set()
         self._last_hot: dict[str, float] = {}
         self._last_checks: dict[str, float] = {}
         self._deferred: set[str] = set()
@@ -687,6 +726,48 @@ class PackratService:
         report.timeline_ran = ok
         self._next_timeline = now + VIEWER_INTERVAL_S
 
+    def _run_git_poll(self, now: float, dirty: _Dirty, report: TickReport) -> None:
+        """Polls due managed git remotes and fetches queued repos within a 30 s tick budget."""
+        self._pending_git |= dirty.git_repos
+        managed_git = self.managed_git
+        if managed_git is None:
+            return
+        ok, polled = self._guarded(
+            "git",
+            report,
+            lambda: managed_git.poll_remotes(now, budget_s=GIT_POLL_TICK_BUDGET_S),
+        )
+        if not ok:
+            return
+        polled_list = list(polled or [])
+        report.git_polled = len(polled_list)
+        for res in polled_list:
+            if not res.error and not res.timed_out and res.new_tip != res.old_tip:
+                self._pending_git.add(res.repo_id)
+        spent = sum(max(0.0, res.duration_s) for res in polled_list)
+        remaining = GIT_POLL_TICK_BUDGET_S - spent
+        if not self._pending_git or remaining <= 0:
+            return
+        targets = sorted(self._pending_git)
+        ok, fetched = self._guarded(
+            "git",
+            report,
+            lambda: managed_git.fetch(targets, budget_s=remaining),
+        )
+        if not ok:
+            return
+        fetched_list = list(fetched or [])
+        report.git_fetched = len(fetched_list)
+        self._apply_fetch_results(fetched_list)
+
+    def _apply_fetch_results(self, fetched: Sequence[GitResult]) -> None:
+        """Updates `_pending_git` and `_pending_index` from `fetch()` outcomes."""
+        for res in fetched:
+            if not res.timed_out and not res.error:
+                self._pending_git.discard(res.repo_id)
+            if res.timed_out or (not res.error and res.new_tip != res.old_tip):
+                self._pending_index.add(res.repo_id)
+
     def _mirror_due(self, now: float) -> bool:
         if not self._pending_mirror:
             return False
@@ -714,20 +795,73 @@ class PackratService:
             self._pending_mirror.difference_update(repos)
             report.mirror_ran = True
 
-    # ----- backfill child ------------------------------------------------------------
+    # ----- backfill and scoped child -------------------------------------------------
 
-    def _reap_child(self, report: TickReport) -> None:
+    def _reap_child(self, report: TickReport, now: float | None = None) -> None:
         if self.child is None:
             return
         code = self.child.poll()
         if code is None:
             return
+        moment = self.clock() if now is None else now
+        kind = self._child_kind or "backfill"
         report.child_exit = code
-        self.log(f"backfill child {self.child.pid} exited with {code}")
+        self.log(f"{kind} child {self.child.pid} exited with {code}")
+        if kind == "scoped":
+            self._handle_scoped_child_exit(code, moment)
         self.child = None
+        self._child_kind = None
+        self._scoped_repo_ids = []
+
+    def _handle_scoped_child_exit(self, code: int, now: float) -> None:
+        if code == 0:
+            for repo_id in self._scoped_repo_ids:
+                self._scoped_backoff_until.pop(repo_id, None)
+            return
+        until = now + SCOPED_CHILD_BACKOFF_S
+        for repo_id in self._scoped_repo_ids:
+            self._scoped_backoff_until[repo_id] = until
+            self._pending_index.add(repo_id)
+
+    def _ready_scoped_repo_ids(self, now: float) -> list[int]:
+        return sorted(
+            rid
+            for rid in self._pending_index
+            if self._scoped_backoff_until.get(rid, 0.0) <= now
+        )
+
+    def _maybe_spawn_scoped_child(self, now: float, report: TickReport) -> bool:
+        if self.scoped_child_argv is None or not self._pending_index:
+            return False
+        ready_ids = self._ready_scoped_repo_ids(now)
+        if not ready_ids:
+            return False
+        argv = list(self.scoped_child_argv(ready_ids))
+        self._pending_index.difference_update(ready_ids)
+        if not argv:
+            return False
+        try:
+            self.child = self.spawn(argv)
+        except OSError as exc:
+            until = now + SCOPED_CHILD_BACKOFF_S
+            for repo_id in ready_ids:
+                self._scoped_backoff_until[repo_id] = until
+                self._pending_index.add(repo_id)
+            report.errors.append(f"scoped: {exc}")
+            self.log(f"scoped spawn failed: {exc}")
+            return True
+        self._child_kind = "scoped"
+        self._scoped_repo_ids = ready_ids
+        report.scoped_child_spawned = True
+        self.log(f"scoped child {self.child.pid} started")
+        return True
 
     def _maybe_spawn_child(self, now: float, report: TickReport) -> None:
-        if self.child_argv is None or self.child is not None or now < self._next_child:
+        if self.child is not None:
+            return
+        if self._maybe_spawn_scoped_child(now, report):
+            return
+        if self.child_argv is None or now < self._next_child:
             return
         list_repos = getattr(self.store, "list_repos", None)
         if list_repos is not None and not list_repos("mirror"):
@@ -741,15 +875,19 @@ class PackratService:
             report.errors.append(f"backfill: {exc}")
             self.log(f"backfill spawn failed: {exc}")
         else:
+            self._child_kind = "backfill"
+            self._scoped_repo_ids = []
             report.child_spawned = True
             self.log(f"backfill child {self.child.pid} started")
         self._next_child = now + BACKFILL_INTERVAL_S
 
     def stop_child(self) -> None:
-        """Terminates the backfill child's process group, if one is running."""
+        """Terminates the backfill or scoped child's process group, if one is running."""
         if self.child is not None and self.child.poll() is None:
             self.child.terminate_group()
         self.child = None
+        self._child_kind = None
+        self._scoped_repo_ids = []
 
     # ----- housekeeping and the loop -------------------------------------------------
 
@@ -880,7 +1018,7 @@ class PackratService:
         """
         moment = self.clock() if now is None else now
         report = TickReport(at=moment)
-        self._reap_child(report)
+        self._reap_child(report, moment)
         active: list[WatchLease] = []
         try:
             self._drain_requests(moment, report)
@@ -897,6 +1035,7 @@ class PackratService:
             self._run_timeline(moment, report)
             if report.viewer_ran or report.timeline_ran:
                 self._drain_requests(moment, report)
+            self._run_git_poll(moment, dirty, report)
             self._run_mirror(moment, dirty, report)
             if report.mirror_ran:
                 self._drain_requests(moment, report)

@@ -36,6 +36,15 @@ try:
         SCHEMA_SQL,
     )
     from .live_store import LiveStoreMixin
+    from .managed_git import (
+        git_dir as managed_git_dir,
+    )
+    from .managed_git import (
+        git_root_for_db,
+        validate_branch,
+        validate_slug,
+        validate_url,
+    )
     from .models import (
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
@@ -46,6 +55,7 @@ try:
         DiscussionRecord,
         DocSectionRecord,
         ExportSummary,
+        GitSource,
         ImportSummary,
         IssueRecord,
         PrRecord,
@@ -91,6 +101,15 @@ except ImportError:
         SCHEMA_SQL,
     )
     from live_store import LiveStoreMixin  # type: ignore[no-redef]
+    from managed_git import (  # type: ignore[no-redef]
+        git_dir as managed_git_dir,
+    )
+    from managed_git import (
+        git_root_for_db,
+        validate_branch,
+        validate_slug,
+        validate_url,
+    )
     from models import (  # type: ignore[no-redef]
         BACKFILL_STREAMS,
         EMBEDDING_DIM,
@@ -101,6 +120,7 @@ except ImportError:
         DiscussionRecord,
         DocSectionRecord,
         ExportSummary,
+        GitSource,
         ImportSummary,
         IssueRecord,
         PrRecord,
@@ -295,6 +315,8 @@ def _row_to_repo(row: sqlite3.Row) -> RepoConfig:
         updated_at=str(row["updated_at"] or ""),
         **{col: row[col] for col in ALL_BACKFILL_COLUMNS},
         mode=str(row["mode"] or "mirror"),
+        git_source=str(row["git_source"] or "none"),  # type: ignore[arg-type]
+        git_url=row["git_url"],
     )
 
 
@@ -449,6 +471,24 @@ class PackratStore(LiveStoreMixin):
         """Returns the default `init.sql` path adjacent to `db_path`."""
         return self.db_path.parent / INIT_SQL_FILENAME
 
+    @property
+    def git_root(self) -> Path | None:
+        """Returns `<db_path.parent>/git` or None for `:memory:` stores."""
+        return (
+            None if str(self.db_path) == ":memory:" else git_root_for_db(self.db_path)
+        )
+
+    def resolve_git_dir(self, repo: RepoConfig) -> Path | None:
+        """Returns the directory to index for `repo`, or None when `git_source == 'none'`."""
+        if repo.git_source == "managed":
+            root = self.git_root
+            return (
+                None if root is None else managed_git_dir(root, repo.owner, repo.name)
+            )
+        if repo.git_source == "path" and repo.local_path:
+            return Path(repo.local_path).expanduser()
+        return None
+
     def close(self) -> None:
         """Closes the underlying SQLite connection."""
         self.conn.close()
@@ -521,6 +561,10 @@ class PackratStore(LiveStoreMixin):
                 "DELETE FROM chunks_fts WHERE rowid IN (SELECT rowid FROM chunks WHERE repo_id = ?)",
                 (repo.repo_id,),
             )
+            self.conn.execute(
+                "DELETE FROM service_state WHERE key = ?",
+                (f"git_poll:{repo.repo_id}",),
+            )
             self._delete_repo_live_logs_in_tx(repo.full_name)
             self.conn.execute("DELETE FROM repos WHERE repo_id = ?", (repo.repo_id,))
             self._bump_vector_cache_seq_in_tx()
@@ -555,6 +599,8 @@ class PackratStore(LiveStoreMixin):
             new_owner, resolved_name = new_owner_or_full_name.split("/", 1)
         else:
             new_owner, resolved_name = new_owner_or_full_name, new_name
+        new_owner = validate_slug(new_owner, "owner")
+        resolved_name = validate_slug(resolved_name, "name")
         repo = self.get_repo(old_full_name)
         if repo is None:
             raise ValueError(
@@ -605,6 +651,108 @@ class PackratStore(LiveStoreMixin):
             raise RuntimeError(f"Failed to load repository {new_full_name}")
         return renamed
 
+    @staticmethod
+    def _next_repo_binding(
+        existing: RepoConfig,
+        *,
+        local_path: str | None,
+        git_source: GitSource | None,
+        git_url: str | None,
+        inferred_source: GitSource,
+        update_binding: bool,
+    ) -> tuple[GitSource, str | None, str | None]:
+        if update_binding:
+            next_path = local_path if inferred_source == "path" else None
+            next_url = (
+                git_url
+                if (inferred_source == "managed" and git_url is not None)
+                else (existing.git_url if inferred_source == "managed" else None)
+            )
+            return inferred_source, next_path, next_url
+        if local_path is not None:
+            return "path", local_path, None
+        if git_source is None:
+            return existing.git_source, existing.local_path, existing.git_url
+        next_path = existing.local_path if git_source == "path" else None
+        kept_url = existing.git_url if git_source == "managed" else None
+        return git_source, next_path, git_url if git_url is not None else kept_url
+
+    def _update_existing_repo_row(
+        self,
+        existing: RepoConfig,
+        *,
+        local_path: str | None,
+        default_branch: str,
+        git_source: GitSource | None,
+        git_url: str | None,
+        inferred_source: GitSource,
+        update_binding: bool,
+        now_iso: str,
+    ) -> None:
+        next_source, next_path, next_url = self._next_repo_binding(
+            existing,
+            local_path=local_path,
+            git_source=git_source,
+            git_url=git_url,
+            inferred_source=inferred_source,
+            update_binding=update_binding,
+        )
+        self.conn.execute(
+            """
+            UPDATE repos SET
+              local_path = ?,
+              git_source = ?,
+              git_url = ?,
+              default_branch = COALESCE(?, default_branch),
+              mode = 'mirror',
+              updated_at = ?
+            WHERE repo_id = ?
+            """,
+            (
+                next_path,
+                next_source,
+                next_url,
+                default_branch or existing.default_branch,
+                now_iso,
+                existing.repo_id,
+            ),
+        )
+
+    def _insert_new_repo_row(
+        self,
+        *,
+        owner: str,
+        name: str,
+        full_name: str,
+        local_path: str | None,
+        default_branch: str,
+        inferred_source: GitSource,
+        git_url: str | None,
+        now_iso: str,
+    ) -> None:
+        insert_path = local_path if inferred_source == "path" else None
+        insert_url = git_url if inferred_source == "managed" else None
+        self.conn.execute(
+            """
+            INSERT INTO repos (
+              owner, name, full_name, local_path, git_source, git_url,
+              default_branch, created_at, updated_at, mode
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mirror')
+            """,
+            (
+                owner,
+                name,
+                full_name,
+                insert_path,
+                inferred_source,
+                insert_url,
+                default_branch or "main",
+                now_iso,
+                now_iso,
+            ),
+        )
+
     def register_repo(
         self,
         owner: str,
@@ -612,6 +760,9 @@ class PackratStore(LiveStoreMixin):
         local_path: str | None = None,
         default_branch: str = "main",
         *,
+        git_source: GitSource | None = None,
+        git_url: str | None = None,
+        update_binding: bool = False,
         now: float | None = None,
     ) -> RepoConfig:
         """Inserts or updates a tracked repository configuration.
@@ -622,45 +773,69 @@ class PackratStore(LiveStoreMixin):
         stored casing, so a repo auto-created from a notification in GitHub's
         canonical case is promoted rather than duplicated.
         """
+        owner = validate_slug(owner, "owner")
+        name = validate_slug(name, "name")
+        default_branch = validate_branch(default_branch) if default_branch else ""
+        if git_url is not None:
+            git_url = validate_url(git_url)
+
         now_iso = iso_at(now)
         full_name = f"{owner}/{name}"
         existing = self.get_repo(full_name)
+        inferred_source: GitSource = (
+            git_source
+            if git_source is not None
+            else ("path" if local_path is not None else "none")
+        )
+        if (
+            inferred_source == "path"
+            and not local_path
+            and (existing is None or update_binding)
+        ):
+            raise ValueError("git_source='path' requires a local_path directory.")
+
         with self.conn:
             if existing is not None:
-                self.conn.execute(
-                    """
-                    UPDATE repos SET
-                      local_path = COALESCE(?, local_path),
-                      default_branch = COALESCE(?, default_branch),
-                      mode = 'mirror',
-                      updated_at = ?
-                    WHERE repo_id = ?
-                    """,
-                    (local_path, default_branch, now_iso, existing.repo_id),
+                self._update_existing_repo_row(
+                    existing,
+                    local_path=local_path,
+                    default_branch=default_branch,
+                    git_source=git_source,
+                    git_url=git_url,
+                    inferred_source=inferred_source,
+                    update_binding=update_binding,
+                    now_iso=now_iso,
                 )
             else:
-                self.conn.execute(
-                    """
-                    INSERT INTO repos (
-                      owner, name, full_name, local_path, default_branch, created_at, updated_at,
-                      mode
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'mirror')
-                    """,
-                    (
-                        owner,
-                        name,
-                        full_name,
-                        local_path,
-                        default_branch,
-                        now_iso,
-                        now_iso,
-                    ),
+                self._insert_new_repo_row(
+                    owner=owner,
+                    name=name,
+                    full_name=full_name,
+                    local_path=local_path,
+                    default_branch=default_branch,
+                    inferred_source=inferred_source,
+                    git_url=git_url,
+                    now_iso=now_iso,
                 )
         repo = self.get_repo(full_name)
         if repo is None:
             raise RuntimeError(f"Failed to load repository {full_name}")
         return repo
+
+    def set_repo_default_branch(
+        self,
+        repo_id: int,
+        default_branch: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        """Persists a validated `repos.default_branch` update."""
+        validated = validate_branch(default_branch)
+        with self.conn:
+            self.conn.execute(
+                "UPDATE repos SET default_branch = ?, updated_at = ? WHERE repo_id = ?",
+                (validated, iso_at(now), int(repo_id)),
+            )
 
     def update_repo_sync_state(
         self,
@@ -709,6 +884,97 @@ class PackratStore(LiveStoreMixin):
                     repo_id,
                 ),
             )
+
+    def set_parser_fingerprint(
+        self, repo_id: int, fingerprint: str | None, *, now: float | None = None
+    ) -> None:
+        """Persists `repos.parser_fingerprint` (including clearing it to NULL)."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE repos SET parser_fingerprint = ?, updated_at = ? WHERE repo_id = ?",
+                (fingerprint, iso_at(now), repo_id),
+            )
+
+    def get_parser_overrides(self) -> dict[str, str]:
+        """Returns `{parser_name: state}` entries from `service_state`."""
+        prefix = "parser_override:"
+        rows = self.conn.execute(
+            "SELECT key, value FROM service_state WHERE key LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+        return {str(r["key"]).removeprefix(prefix): str(r["value"]) for r in rows}
+
+    def set_parser_override(
+        self, parser: str, state: str | None, *, now: float | None = None
+    ) -> None:
+        """Sets or clears `service_state['parser_override:<parser>']`."""
+        key = f"parser_override:{parser}"
+        with self.conn:
+            if state is None:
+                self.conn.execute("DELETE FROM service_state WHERE key = ?", (key,))
+            else:
+                self.conn.execute(
+                    """
+                    INSERT INTO service_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value = excluded.value,
+                      updated_at = excluded.updated_at
+                    """,
+                    (key, state, iso_at(now)),
+                )
+
+    def get_parser_unavailable_reasons(self) -> dict[str, str]:
+        """Returns `{parser_name: reason}` recorded for workers that became unavailable."""
+        prefix = "parser_unavailable:"
+        rows = self.conn.execute(
+            "SELECT key, value FROM service_state WHERE key LIKE ?",
+            (f"{prefix}%",),
+        ).fetchall()
+        return {str(r["key"]).removeprefix(prefix): str(r["value"]) for r in rows}
+
+    def set_parser_unavailable_reason(
+        self, parser: str, reason: str | None, *, now: float | None = None
+    ) -> None:
+        """Persists or clears `service_state['parser_unavailable:<parser>']`."""
+        key = f"parser_unavailable:{parser}"
+        with self.conn:
+            if reason is None:
+                self.conn.execute("DELETE FROM service_state WHERE key = ?", (key,))
+            else:
+                self.conn.execute(
+                    """
+                    INSERT INTO service_state (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                      value = excluded.value,
+                      updated_at = excluded.updated_at
+                    """,
+                    (key, reason, iso_at(now)),
+                )
+
+    def downgrade_parser_index(
+        self, parser_ids: Sequence[str], extensions: Sequence[str]
+    ) -> int:
+        """Clears `indexed_files.parser_id` and `repos.parser_fingerprint` to downgrade on next sync."""
+        if not parser_ids and not extensions:
+            return 0
+        with self.conn:
+            self.conn.execute("UPDATE repos SET parser_fingerprint = NULL")
+            clauses: list[str] = []
+            params: list[Any] = []
+            if parser_ids:
+                marks = ", ".join("?" for _ in parser_ids)
+                clauses.append(f"parser_id IN ({marks})")
+                params.extend(parser_ids)
+            for ext in extensions:
+                clauses.append("lower(file_path) LIKE ?")
+                params.append(f"%{ext.lower()}")
+            where_sql = " OR ".join(clauses)
+            cur = self.conn.execute(
+                f"DELETE FROM indexed_files WHERE {where_sql}", params
+            )
+            return int(cur.rowcount or 0)
 
     def set_backfill_state(
         self,
@@ -1581,27 +1847,33 @@ class PackratStore(LiveStoreMixin):
     _FILE_BATCH_SIZE = 400
     _WRITE_BATCH_SIZE = 1000
 
-    def get_indexed_blob_oids(self, repo_id: int) -> dict[str, str]:
-        """Returns `{file_path: blob_oid}` recorded for `repo_id` in `indexed_files`."""
+    def get_indexed_files(self, repo_id: int) -> dict[str, tuple[str, str]]:
+        """Returns `{file_path: (blob_oid, parser_id)}` recorded for `repo_id` in `indexed_files`."""
         rows = self.conn.execute(
-            "SELECT file_path, blob_oid FROM indexed_files WHERE repo_id = ?",
+            "SELECT file_path, blob_oid, parser_id FROM indexed_files WHERE repo_id = ?",
             (repo_id,),
         ).fetchall()
-        return {str(r["file_path"]): str(r["blob_oid"]) for r in rows}
+        return {
+            str(r["file_path"]): (str(r["blob_oid"]), str(r["parser_id"])) for r in rows
+        }
 
     def upsert_indexed_files(
-        self, repo_id: int, files: Sequence[tuple[str, str, str]]
+        self, repo_id: int, files: Sequence[tuple[str, str, str, str]]
     ) -> None:
-        """Upserts `(file_path, blob_oid, sha)` entries in `indexed_files`."""
+        """Upserts `(file_path, blob_oid, sha, parser_id)` entries in `indexed_files`."""
         if not files:
             return
         with self.conn:
             self.conn.executemany(
                 """
-                INSERT OR REPLACE INTO indexed_files (repo_id, file_path, blob_oid, sha)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO indexed_files (
+                  repo_id, file_path, blob_oid, sha, parser_id
+                ) VALUES (?, ?, ?, ?, ?)
                 """,
-                [(repo_id, path, blob_oid, sha) for path, blob_oid, sha in files],
+                [
+                    (repo_id, path, blob_oid, sha, parser_id)
+                    for path, blob_oid, sha, parser_id in files
+                ],
             )
 
     def _delete_code_index_for_paths_in_tx(
@@ -1662,20 +1934,23 @@ class PackratStore(LiveStoreMixin):
         self.conn.executemany(
             """
             INSERT OR REPLACE INTO code_symbols (
-              repo_id, file_path, symbol_name, kind,
-              line_start, line_end, signature, docstring, sha, blob_oid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              repo_id, file_path, symbol_name, qualified_name, parent, kind,
+              line_start, line_end, signature, docstring, visibility, sha, blob_oid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
                     s.repo_id,
                     s.file_path,
                     s.symbol_name,
+                    s.qualified_name or s.symbol_name,
+                    s.parent,
                     s.kind,
                     s.line_start,
                     s.line_end,
                     s.signature,
                     s.docstring,
+                    s.visibility,
                     s.sha,
                     s.blob_oid or None,
                 )
@@ -2059,6 +2334,21 @@ class PackratStore(LiveStoreMixin):
             is not None
         )
 
+    def count_unembedded_chunks(self, repo_id: int | None, model_id: str) -> int:
+        """Returns the count of chunks whose content_sha256 or model_id differs from chunk_embeddings."""
+        sql = """
+        SELECT COUNT(*)
+        FROM chunks c
+        LEFT JOIN chunk_embeddings ce ON ce.chunk_id = c.chunk_id
+        WHERE (ce.chunk_id IS NULL OR ce.content_sha256 <> c.content_sha256 OR ce.model_id <> ?)
+        """
+        params: list[Any] = [model_id]
+        if repo_id is not None:
+            sql += " AND c.repo_id = ?"
+            params.append(repo_id)
+        row = self.conn.execute(sql, params).fetchone()
+        return int(row[0]) if row else 0
+
     def get_unembedded_chunks(
         self,
         repo_id: int | None,
@@ -2356,9 +2646,9 @@ class PackratStore(LiveStoreMixin):
 
     def _is_source_db_alias(self, resolved_dest: Path, raw_dest: Path) -> bool:
         """Returns whether `resolved_dest` or `raw_dest` aliases `self.db_path` or its sidecars."""
-        return is_sqlite_path_alias(self.db_path, resolved_dest) or is_sqlite_path_alias(
-            self.db_path, raw_dest
-        )
+        return is_sqlite_path_alias(
+            self.db_path, resolved_dest
+        ) or is_sqlite_path_alias(self.db_path, raw_dest)
 
     def _validate_export_destination(
         self,
@@ -2490,7 +2780,14 @@ class PackratStore(LiveStoreMixin):
             )
             self._bump_vector_cache_seq_in_tx(now, conn=dest_conn)
             tracker.step("step 5/5, clearing local checkout paths")
-            dest_conn.execute("UPDATE repos SET local_path = NULL")
+            dest_conn.execute(
+                """
+                UPDATE repos
+                SET local_path = NULL,
+                    git_url = NULL,
+                    git_source = CASE WHEN git_source = 'none' THEN 'none' ELSE 'managed' END
+                """
+            )
         tracker.end(
             f"kept {len(kept_ids)} mirror repo(s), removed {len(excluded_ids)} repo(s)"
         )
@@ -2583,6 +2880,7 @@ class PackratStore(LiveStoreMixin):
             source_bytes=source_bytes,
             dest_bytes=dest_bytes,
             duration_sec=duration_sec,
+            managed_git_repos=sum(1 for r in kept_repos if r.git_source != "none"),
         )
 
     def import_database(

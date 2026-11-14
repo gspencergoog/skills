@@ -1,0 +1,24 @@
+{
+  "parser": "treesitter",
+  "protocol": 1,
+  "parser_ids": {
+    ".c": "treesitter@1",
+    ".cc": "treesitter@1",
+    ".cpp": "treesitter@1",
+    ".h": "treesitter@1",
+    ".hpp": "treesitter@1",
+    ".js": "treesitter@1",
+    ".jsx": "treesitter@1",
+    ".kt": "treesitter@1",
+    ".mjs": "treesitter@1",
+    ".ts": "treesitter@1",
+    ".tsx": "treesitter@1"
+  },
+  "platforms": {
+    "any": {
+      "source_sha256": "59cbd2a6f1ed64648431a2d0a7e356cafb509bb83f884219b5ea7d35f86ded69",
+      "built_at": "2026-11-13T19:58:28Z",
+      "built_on": "linux-x86_64"
+    }
+  }
+}

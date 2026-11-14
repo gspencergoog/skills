@@ -132,13 +132,20 @@ class _SignalsTestCase(unittest.TestCase):
 
 class TestDirtySet(unittest.TestCase):
     def test_merge_unions_in_place(self) -> None:
-        a = DirtySet(hot={"o/r#1"}, mirror_repos={1})
-        b = DirtySet(hot={"o/r#2"}, viewer=True, mirror_repos={2})
+        a = DirtySet(hot={"o/r#1"}, mirror_repos={1}, git_repos={10})
+        b = DirtySet(hot={"o/r#2"}, viewer=True, mirror_repos={2}, git_repos={20})
         self.assertIs(a.merge(b), a)
         self.assertEqual(
-            a, DirtySet(hot={"o/r#1", "o/r#2"}, viewer=True, mirror_repos={1, 2})
+            a,
+            DirtySet(
+                hot={"o/r#1", "o/r#2"},
+                viewer=True,
+                mirror_repos={1, 2},
+                git_repos={10, 20},
+            ),
         )
         self.assertTrue(DirtySet().is_empty())
+        self.assertFalse(DirtySet(git_repos={1}).is_empty())
         self.assertFalse(a.is_empty())
 
 
@@ -447,6 +454,76 @@ class TestPollRepoEvents(_SignalsTestCase):
             self.store.get_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}"),
             "101",
         )
+
+    def test_push_event_on_default_branch_populates_git_repos(self) -> None:
+        feature_push = [
+            {
+                "id": "200",
+                "type": "PushEvent",
+                "payload": {"ref": "refs/heads/feature-branch"},
+            }
+        ]
+        default_push = [
+            {
+                "id": "201",
+                "type": "PushEvent",
+                "payload": {"ref": f"refs/heads/{self.repo.default_branch}"},
+            },
+            {
+                "id": "200",
+                "type": "PushEvent",
+                "payload": {"ref": "refs/heads/feature-branch"},
+            },
+        ]
+        follow_up_issue = [
+            {
+                "id": "202",
+                "type": "IssuesEvent",
+                "payload": {"issue": {"number": 12}},
+            },
+            *default_push,
+        ]
+        runner = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(feature_push),
+                            headers=['ETag: "sig-a"', "X-Poll-Interval: 60"],
+                        )
+                    ),
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(default_push),
+                            headers=['ETag: "sig-b"', "X-Poll-Interval: 60"],
+                        )
+                    ),
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(follow_up_issue),
+                            headers=['ETag: "sig-c"', "X-Poll-Interval: 60"],
+                        )
+                    ),
+                ]
+            }
+        )
+        poller = self.poller(runner)
+
+        dirty1 = poller.poll_repo_events(NOW)
+        self.assertEqual(dirty1.mirror_repos, {self.repo.repo_id})
+        self.assertEqual(dirty1.git_repos, set())
+
+        dirty2 = poller.poll_repo_events(NOW + 61)
+        self.assertEqual(dirty2.mirror_repos, {self.repo.repo_id})
+        self.assertEqual(dirty2.git_repos, {self.repo.repo_id})
+
+        # Old PushEvent past last_event_id is not re-processed on subsequent polls.
+        dirty3 = poller.poll_repo_events(NOW + 122)
+        self.assertEqual(dirty3.mirror_repos, {self.repo.repo_id})
+        self.assertEqual(dirty3.git_repos, set())
 
 
 class TestPollCheckRuns(_SignalsTestCase):

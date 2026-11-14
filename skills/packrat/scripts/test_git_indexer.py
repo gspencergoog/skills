@@ -456,7 +456,7 @@ class TestGitIndexer(unittest.TestCase):
                 )
                 with (
                     mock.patch.dict(os.environ, clean_env, clear=True),
-                    mock.patch("git_indexer.Path.home", return_value=fake_home),
+                    mock.patch("git_cmd.Path.home", return_value=fake_home),
                     mock.patch("git_indexer.run_git_command", side_effect=spy_run_git),
                 ):
                     resolved = resolve_canonical_ref(work_dir, repo, fetch=True)
@@ -541,7 +541,7 @@ class TestGitIndexer(unittest.TestCase):
                     "octo-org", "widgets", local_path=str(work_dir)
                 )
                 with mock.patch(
-                    "git_indexer.run_bounded_subprocess", side_effect=fake_bounded
+                    "git_cmd.run_bounded_subprocess", side_effect=fake_bounded
                 ):
                     stats = sync_git_codebase(
                         store,
@@ -971,9 +971,9 @@ class TestGitIndexer(unittest.TestCase):
                     "octo-org", "widgets", local_path=str(work_dir)
                 )
                 sync_git_codebase(store, repo)
-                indexed_oids = store.get_indexed_blob_oids(repo.repo_id)
+                indexed_files = store.get_indexed_files(repo.repo_id)
                 self.assertEqual(
-                    set(indexed_oids.keys()),
+                    set(indexed_files.keys()),
                     {"unchanged.py", "changed.py", "removed.py"},
                 )
 
@@ -1016,6 +1016,293 @@ class TestGitIndexer(unittest.TestCase):
                         ("unchanged.py", "stay_same"),
                         ("changed.py", "after_change"),
                     },
+                )
+            finally:
+                store.close()
+
+    def test_v14_reindex_rules_ratchet_batches_caps_and_chunks(self) -> None:
+        import stat
+
+        from parsers.stamps import PlatformStamp, Stamp, binary_name, host_platform, write_stamp
+        from symbol_parsers import SymbolParsers
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            work_dir = tmp_path / "work"
+            subprocess.run(["git", "init", "-b", "main", str(work_dir)], check=True)
+            _git(work_dir, "config", "user.name", "Test Author")
+            _git(work_dir, "config", "user.email", "author@example.com")
+
+            (work_dir / "a.py").write_text(
+                'def alpha() -> int:\n    """Alpha docstring."""\n    return 1\n',
+                encoding="utf-8",
+            )
+            (work_dir / "b.py").write_text(
+                "def beta() -> int:\n    return 2\n",
+                encoding="utf-8",
+            )
+            (work_dir / "w.dart").write_text(
+                "class WidgetBox {}\n",
+                encoding="utf-8",
+            )
+            (work_dir / "README.md").write_text(
+                "# Title\n\nSome markdown docs.\n",
+                encoding="utf-8",
+            )
+            _git(work_dir, "add", ".")
+            _git(work_dir, "commit", "-m", "feat: initial")
+            sha_1 = _git(work_dir, "rev-parse", "HEAD")
+
+            scripts_dir = tmp_path / "scripts"
+            py_dir = scripts_dir / "parsers" / "python"
+            py_dir.mkdir(parents=True)
+            (py_dir / "symbol_parser.py").write_text(
+                (Path(__file__).resolve().parent / "parsers" / "python" / "symbol_parser.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            write_stamp(
+                py_dir,
+                Stamp(parser="py-ast", protocol=1, parser_ids={".py": "py-ast@1"}, platforms={}),
+            )
+
+            dart_dir = scripts_dir / "parsers" / "dart"
+            dart_dir.mkdir(parents=True)
+            host = host_platform()
+            dart_bin = dart_dir / binary_name("dart-analyzer", host)
+            dart_bin.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, sys\n"
+                'print(json.dumps({"ready": True, "parser": "dart-analyzer", "protocol": 1, "parser_ids": {".dart": "dart-analyzer@1"}}), flush=True)\n'
+                "for line in sys.stdin:\n"
+                "    req = json.loads(line)\n"
+                '    print(json.dumps({"id": req["id"], "symbols": [{"kind": "class", "name": "WidgetBox", "qualified_name": "WidgetBox", "parent": "", "signature": "class WidgetBox", "docstring": "Dart widget docstring", "line_start": 1, "line_end": 1, "visibility": "public"}], "syntax_error_count": 0}), flush=True)\n',
+                encoding="utf-8",
+            )
+            dart_bin.chmod(dart_bin.stat().st_mode | stat.S_IXUSR)
+            write_stamp(
+                dart_dir,
+                Stamp(
+                    parser="dart-analyzer",
+                    protocol=1,
+                    parser_ids={".dart": "dart-analyzer@1"},
+                    platforms={host: PlatformStamp(source_sha256="x", built_at="now", built_on=host)},
+                ),
+            )
+
+            store = PackratStore(tmp_path / "repos.sqlite")
+            try:
+                repo = store.register_repo("octo-org", "widgets", local_path=str(work_dir))
+
+                # 1. Capped sync (`max_reparse_files=2`): commits batch cleanly and leaves parser_fingerprint NULL.
+                with SymbolParsers(scripts_dir=scripts_dir, overrides={}) as p_cap:
+                    capped_stats = sync_git_codebase(
+                        store, repo, parsers=p_cap, max_reparse_files=2
+                    )
+                self.assertTrue(capped_stats.reparse_capped)
+                repo_after_cap = store.get_repo("octo-org/widgets")
+                assert repo_after_cap is not None
+                self.assertIsNone(repo_after_cap.parser_fingerprint)
+                self.assertEqual(len(store.get_indexed_files(repo.repo_id)), 2)
+
+                # 2. Uncapped sync finishes remaining files via ls-tree even though HEAD SHA matches, writes fingerprint.
+                with SymbolParsers(scripts_dir=scripts_dir, overrides={}) as p_full:
+                    full_stats = sync_git_codebase(store, repo_after_cap, parsers=p_full)
+                    expected_fp = p_full.fingerprint()
+                self.assertFalse(full_stats.reparse_capped)
+                repo_done = store.get_repo("octo-org/widgets")
+                assert repo_done is not None
+                self.assertEqual(repo_done.last_indexed_sha, sha_1)
+                self.assertEqual(repo_done.parser_fingerprint, expected_fp)
+
+                idx_map = store.get_indexed_files(repo.repo_id)
+                self.assertEqual(idx_map["README.md"][1], "md-sections@1")
+                self.assertEqual(idx_map["a.py"][1], "py-ast@1")
+                self.assertEqual(idx_map["w.dart"][1], "dart-analyzer@1")
+
+                # Check chunk composition and `is_untrusted`: True for docstring & doc_section, False for empty docstring
+                chunk_rows = {
+                    str(r["chunk_id"]): (int(r["is_untrusted"]), str(r["text"]), str(r["title"]))
+                    for r in store.conn.execute(
+                        "SELECT chunk_id, is_untrusted, text, title FROM chunks WHERE repo_id = ?",
+                        (repo.repo_id,),
+                    ).fetchall()
+                }
+                alpha_row = chunk_rows["octo-org/widgets@symbol:a.py:function:alpha:1"]
+                beta_row = chunk_rows["octo-org/widgets@symbol:b.py:function:beta:1"]
+                doc_row = chunk_rows["octo-org/widgets@doc:README.md:1"]
+                self.assertEqual(alpha_row[0], 1)
+                self.assertIn("Alpha docstring.", alpha_row[1])
+                self.assertEqual(alpha_row[2], "function alpha in a.py")
+                self.assertEqual(beta_row[0], 0)
+                self.assertEqual(doc_row[0], 1)
+
+                # 3. Ratchet: disable dart-analyzer WITHOUT --reindex -> fingerprint mismatches, ls-tree runs, w.dart is NOT downgraded!
+                with SymbolParsers(
+                    scripts_dir=scripts_dir, overrides={"dart-analyzer": "disabled"}
+                ) as p_dis:
+                    dis_stats = sync_git_codebase(store, repo_done, parsers=p_dis)
+                self.assertEqual(dis_stats.symbols_upserted, 0)
+                self.assertEqual(
+                    store.get_indexed_files(repo.repo_id)["w.dart"][1], "dart-analyzer@1"
+                )
+
+                # 4. disable --reindex (`downgrade_parser_index`) clears w.dart indexed_files row -> next sync downgrades to regex@1.
+                store.downgrade_parser_index(["dart-analyzer@1"], [".dart"])
+                repo_downgrade = store.get_repo("octo-org/widgets")
+                assert repo_downgrade is not None
+                self.assertIsNone(repo_downgrade.parser_fingerprint)
+                with SymbolParsers(
+                    scripts_dir=scripts_dir, overrides={"dart-analyzer": "disabled"}
+                ) as p_dis2:
+                    down_stats = sync_git_codebase(store, repo_downgrade, parsers=p_dis2)
+                self.assertGreaterEqual(down_stats.symbols_upserted, 1)
+                self.assertEqual(
+                    store.get_indexed_files(repo.repo_id)["w.dart"][1], "regex@1"
+                )
+            finally:
+                store.close()
+
+    def test_managed_bare_clone_end_to_end_and_skip_fetch(self) -> None:
+        from dataclasses import replace
+        from managed_git import ensure_git, fetch_git
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            source_dir = tmp_path / "source"
+            subprocess.run(["git", "init", "-b", "main", str(source_dir)], check=True)
+            _git(source_dir, "config", "user.name", "Test Author")
+            _git(source_dir, "config", "user.email", "author@example.com")
+            (source_dir / "lib.py").write_text(
+                "def greet(name: str) -> str:\n    return f'hi {name}'\n",
+                encoding="utf-8",
+            )
+            (source_dir / "README.md").write_text(
+                "# Managed Repo\n\nBare clone docs.\n",
+                encoding="utf-8",
+            )
+            _git(source_dir, "add", ".")
+            _git(source_dir, "commit", "-m", "feat: initial managed commit (#7)")
+            sha_1 = _git(source_dir, "rev-parse", "HEAD")
+
+            store = PackratStore(tmp_path / "state" / "repos.sqlite")
+            try:
+                repo = store.register_repo(
+                    "octo-org",
+                    "managed-widgets",
+                    git_source="managed",
+                )
+                local_repo = replace(repo, git_url=source_dir.as_uri())
+                managed_dir = store.resolve_git_dir(repo)
+                assert managed_dir is not None
+                self.assertFalse(managed_dir.exists())
+
+                pending_stats = sync_git_codebase(store, repo, fetch=True)
+                self.assertEqual(pending_stats.skipped_reason, "pending_clone")
+                self.assertIsNone(pending_stats.indexed_sha)
+
+                assert store.git_root is not None
+                clone_res = ensure_git(
+                    store.git_root,
+                    local_repo,
+                    extra_git_config=("-c", "protocol.file.allow=always"),
+                )
+                self.assertEqual(clone_res.error, "")
+                self.assertTrue(managed_dir.is_dir())
+                self.assertFalse((managed_dir / ".git").exists())
+
+                with mock.patch("git_indexer._fetch_remote_ref") as mock_fetch:
+                    resolved = resolve_canonical_ref(managed_dir, repo, fetch=True)
+                    stats_1 = sync_git_codebase(store, repo, fetch=True)
+
+                mock_fetch.assert_not_called()
+                self.assertEqual(resolved, ("refs/heads/main", sha_1))
+                self.assertIsNone(stats_1.skipped_reason)
+                self.assertEqual(stats_1.indexed_ref, "refs/heads/main")
+                self.assertEqual(stats_1.indexed_sha, sha_1)
+                self.assertEqual(stats_1.commits_upserted, 1)
+                self.assertGreaterEqual(stats_1.symbols_upserted, 1)
+                self.assertEqual(stats_1.doc_sections_upserted, 1)
+
+                (source_dir / "lib.py").write_text(
+                    "def greet(name: str) -> str:\n    return f'hi {name}'\n\n"
+                    "def farewell() -> str:\n    return 'bye'\n",
+                    encoding="utf-8",
+                )
+                _git(source_dir, "add", "lib.py")
+                _git(source_dir, "commit", "-m", "feat: add farewell (#8)")
+                sha_2 = _git(source_dir, "rev-parse", "HEAD")
+
+                fetch_res = fetch_git(
+                    store.git_root,
+                    local_repo,
+                    maintenance="skip",
+                    extra_git_config=("-c", "protocol.file.allow=always"),
+                )
+                self.assertEqual(fetch_res.error, "")
+                repo_after_1 = store.get_repo("octo-org/managed-widgets")
+                assert repo_after_1 is not None
+
+                with mock.patch("git_indexer._fetch_remote_ref") as mock_fetch_2:
+                    stats_2 = sync_git_codebase(store, repo_after_1, fetch=True)
+
+                mock_fetch_2.assert_not_called()
+                self.assertEqual(stats_2.indexed_ref, "refs/heads/main")
+                self.assertEqual(stats_2.indexed_sha, sha_2)
+                self.assertEqual(stats_2.commits_upserted, 1)
+                sym_names = {
+                    r["symbol_name"]
+                    for r in store.conn.execute(
+                        "SELECT symbol_name FROM code_symbols WHERE repo_id = ?",
+                        (repo.repo_id,),
+                    ).fetchall()
+                }
+                self.assertEqual(sym_names, {"greet", "farewell"})
+            finally:
+                store.close()
+
+    def test_sync_skipped_reasons_no_local_path_and_missing_git_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            not_a_repo = tmp_path / "not-a-repo"
+            not_a_repo.mkdir()
+            absent_path = tmp_path / "absent-repo"
+
+            store = PackratStore(tmp_path / "state" / "repos.sqlite")
+            try:
+                repo_none = store.register_repo("octo-org", "no-git")
+                self.assertEqual(repo_none.git_source, "none")
+                stats_none = sync_git_codebase(store, repo_none)
+                self.assertEqual(stats_none.skipped_reason, "no_local_path")
+
+                repo_non_git = store.register_repo(
+                    "octo-org", "plain-dir", local_path=str(not_a_repo)
+                )
+                self.assertIsNone(resolve_canonical_ref(not_a_repo, repo_non_git))
+                stats_non_git = sync_git_codebase(store, repo_non_git)
+                self.assertEqual(
+                    stats_non_git.skipped_reason, f"missing_git_repo:{not_a_repo}"
+                )
+
+                repo_absent = store.register_repo(
+                    "octo-org", "absent-dir", local_path=str(absent_path)
+                )
+                stats_absent = sync_git_codebase(store, repo_absent)
+                self.assertEqual(
+                    stats_absent.skipped_reason, f"missing_git_repo:{absent_path}"
+                )
+
+                repo_corrupt_mgr = store.register_repo(
+                    "octo-org",
+                    "corrupt-managed",
+                    git_source="managed",
+                    git_url="https://github.com/octo-org/corrupt-managed.git",
+                )
+                managed_dir = store.resolve_git_dir(repo_corrupt_mgr)
+                assert managed_dir is not None
+                managed_dir.mkdir(parents=True)
+                stats_corrupt = sync_git_codebase(store, repo_corrupt_mgr)
+                self.assertEqual(
+                    stats_corrupt.skipped_reason, f"missing_git_repo:{managed_dir}"
                 )
             finally:
                 store.close()
