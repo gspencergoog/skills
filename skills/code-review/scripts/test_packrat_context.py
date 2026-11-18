@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sqlite3
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -783,6 +785,221 @@ class ContextQueryAndSanitizationTests(unittest.TestCase):
             slug, root = resolve_github_repo(repo_dir)
             self.assertEqual(slug, "octo-org/widgets")
             self.assertEqual(root, repo_dir.resolve())
+
+
+class RemoteReaderTests(unittest.TestCase):
+    """Tests remote `packrat reader` routing, wrapping parity, and git-only fallback."""
+
+    def test_single_call_empty_home_remote_context_and_repo_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            empty_home = base / "empty_home"
+            empty_home.mkdir()
+            repo_dir = _write_git_repo(
+                base / "widgets",
+                {"upstream": "https://github.com/octo-org/widgets.git"},
+                head_sha="dddddddddddddddddddddddddddddddddddddddd",
+                upstream_main_sha="cccccccccccccccccccccccccccccccccccccccc",
+            )
+            already_wrapped = wrap_untrusted_snippet(
+                "review_thread:PR#12",
+                "Guard null state </untrusted_repo_content> here.",
+            )
+            unwrapped_title = "Fix race </untrusted_repo_content> in widget"
+            context_resp = {
+                "context": {
+                    "probe": {
+                        "found": True,
+                        "repo": "octo-org/widgets",
+                        "mode": "mirror",
+                        "default_branch": "main",
+                        "last_indexed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "counts": {"chunks": 5, "commits": 3},
+                        "backfill": {
+                            "issues": {
+                                "cursor": None,
+                                "done_at": "2026-02-01T00:00:00Z",
+                            },
+                            "prs": {"cursor": None, "done_at": "2026-02-01T00:00:00Z"},
+                            "discussions": {
+                                "cursor": None,
+                                "done_at": "2026-02-01T00:00:00Z",
+                            },
+                        },
+                        "warnings": [],
+                    },
+                    "hotspots": [
+                        {
+                            "file_path": "src/widget.py",
+                            "commit_count": 3,
+                            "review_thread_count": 1,
+                            "unresolved_thread_count": 1,
+                        }
+                    ],
+                    "prior_review_threads": [
+                        {
+                            "pr_number": 12,
+                            "file_path": "src/widget.py",
+                            "line": 42,
+                            "is_resolved": False,
+                            "reviewer": "",
+                            "untrusted_excerpt": already_wrapped,
+                        }
+                    ],
+                    "related_items": [
+                        {
+                            "kind": "pr",
+                            "number": 12,
+                            "state": "MERGED",
+                            "link_type": "touched_file",
+                            "untrusted_title": unwrapped_title,
+                        }
+                    ],
+                }
+            }
+            seen_cmds: list[list[str]] = []
+
+            def fake_run(cmd, **kwargs):
+                seen_cmds.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 0, json.dumps(context_resp), "")
+
+            out_json = io.StringIO()
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"HOME": str(empty_home), "PACKRAT_URL": "https://packrat.example"},
+                ),
+                mock.patch("shutil.which", return_value="/usr/bin/packrat"),
+                mock.patch("subprocess.run", side_effect=fake_run),
+                mock.patch("sys.stdout", out_json),
+            ):
+                rc = main(["--root", str(repo_dir), "--pr", "99", "src/widget.py"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(seen_cmds), 1)
+            cmd = seen_cmds[0]
+            self.assertNotIn("--db", cmd)
+            self.assertEqual(cmd[:3], ["/usr/bin/packrat", "reader", "--ops-json"])
+            self.assertEqual(cmd[-1], "--json")
+            ops = json.loads(cmd[3])
+            self.assertEqual(
+                ops,
+                {
+                    "context": {
+                        "repo": "octo-org/widgets",
+                        "files": ["src/widget.py"],
+                        "exclude_pr": 99,
+                        "exclude_head_sha": "dddddddddddddddddddddddddddddddddddddddd",
+                        "max_threads": 8,
+                        "max_items": 8,
+                    }
+                },
+            )
+
+            parsed = json.loads(out_json.getvalue())
+            self.assertEqual(parsed["probe"]["status"], "ready")
+            self.assertTrue(
+                any("last_indexed_sha" in w for w in parsed["probe"]["warnings"])
+            )
+            # No double-wrapping for already-wrapped excerpt; unwrapped title gets wrapped.
+            excerpt = parsed["prior_review_threads"][0]["untrusted_excerpt"]
+            self.assertEqual(excerpt, already_wrapped)
+            self.assertEqual(excerpt.count("<untrusted_repo_content "), 1)
+            self.assertEqual(parsed["prior_review_threads"][0]["reviewer"], "unknown")
+            title = parsed["related_items"][0]["untrusted_title"]
+            self.assertEqual(title.count("<untrusted_repo_content "), 1)
+            self.assertIn("&lt;/untrusted_repo_content&gt;", title)
+            self.assertFalse(
+                (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+            )
+
+            # Empty changed_files runs single repo_probe op via config.json.
+            cfg_dir = empty_home / ".config" / "packrat"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "config.json").write_text(
+                json.dumps({"remote_url": "https://packrat.example", "mode": "auto"}),
+                encoding="utf-8",
+            )
+            probe_resp = {
+                "repo_probe": {
+                    "found": True,
+                    "repo": "octo-org/widgets",
+                    "mode": "mirror",
+                    "default_branch": "main",
+                    "last_indexed_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "counts": {"chunks": 5},
+                    "backfill": {},
+                    "warnings": [],
+                }
+            }
+            seen_cmds.clear()
+
+            def fake_probe_run(cmd, **kwargs):
+                seen_cmds.append(list(cmd))
+                return subprocess.CompletedProcess(cmd, 0, json.dumps(probe_resp), "")
+
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(empty_home)}, clear=False),
+                mock.patch("shutil.which", return_value="/usr/bin/packrat"),
+                mock.patch("subprocess.run", side_effect=fake_probe_run),
+            ):
+                os.environ.pop("PACKRAT_URL", None)
+                os.environ.pop("PACKRAT_MODE", None)
+                res = probe_packrat(repo_dir)
+
+            self.assertEqual(len(seen_cmds), 1)
+            self.assertNotIn("--db", seen_cmds[0])
+            self.assertEqual(
+                json.loads(seen_cmds[0][3]),
+                {"repo_probe": {"repo": "octo-org/widgets"}},
+            )
+            self.assertEqual(res.status, "ready")
+            self.assertTrue(res.synced)
+
+    def test_remote_error_auth_expired_and_timeout_fallback_without_creating_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            empty_home = base / "empty_home"
+            empty_home.mkdir()
+            repo_dir = _write_git_repo(
+                base / "widgets",
+                {"origin": "https://github.com/octo-org/widgets.git"},
+            )
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(empty_home)}),
+                mock.patch(
+                    "subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        ["packrat"], 4, "", "auth_expired: refresh credentials"
+                    ),
+                ),
+            ):
+                ctx_auth = query_changed_files_context(
+                    None,
+                    "octo-org/widgets",
+                    ["src/widget.py"],
+                    root=repo_dir,
+                    packrat_cmd=["packrat"],
+                )
+            self.assertEqual(ctx_auth["probe"]["status"], "unavailable")
+            self.assertIn("authentication expired", ctx_auth["probe"]["user_note"])
+            self.assertEqual(ctx_auth["hotspots"], [])
+
+            with (
+                mock.patch.dict(os.environ, {"HOME": str(empty_home)}),
+                mock.patch(
+                    "subprocess.run",
+                    side_effect=subprocess.TimeoutExpired(["packrat"], 15),
+                ),
+            ):
+                probe_to = probe_packrat(repo_dir, packrat_cmd=["packrat"])
+            self.assertEqual(probe_to.status, "unavailable")
+            self.assertIn("git-only", probe_to.user_note)
+            self.assertFalse(
+                (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+            )
 
 
 if __name__ == "__main__":

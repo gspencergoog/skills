@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -33,14 +34,24 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from gh_transport import BudgetDeferred, GhApiError
-from models import WatchLease, compute_scripts_sha256, iso_at
+from models import (
+    RepoConfig,
+    ServerConfig,
+    WatchLease,
+    compute_scripts_sha256,
+    iso_at,
+)
 from rate_budget import Priority
 from sync_runtime import SyncLockInfo, acquire_sync_lock
 
 try:
-    from .managed_git import GitResult
+    from .managed_git import GitResult, git_dir, remove_git
 except ImportError:
-    from managed_git import GitResult  # type: ignore[no-redef]
+    from managed_git import (  # type: ignore[no-redef]
+        GitResult,
+        git_dir,
+        remove_git,
+    )
 
 SERVICE_VERSION = "packrat-serve/2"
 """Version prefix written to `service_heartbeat.version`."""
@@ -364,6 +375,57 @@ def _earliest_lease_expiry(leases: Iterable[WatchLease]) -> str | None:
     return min(expiries) if expiries else None
 
 
+def disk_usage_stats(path: Path) -> tuple[int, float]:
+    """Returns `(free_bytes, used_pct)` for the filesystem holding `path`."""
+    probe = Path(path)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    usage = shutil.disk_usage(probe)
+    used_pct = round((usage.used / usage.total) * 100.0, 2) if usage.total > 0 else 0.0
+    return int(usage.free), used_pct
+
+
+def reconcile_server_config(
+    store: Any, config: ServerConfig, *, now: float | None = None
+) -> list[RepoConfig]:
+    """Registers seed `config.repos` in `store` without blocking on cold clones."""
+    del now
+    registered: list[RepoConfig] = []
+    for spec in config.repos:
+        owner, name = spec.full_name.split("/", 1)
+        existing = store.get_repo(spec.full_name, include_pending_delete=True)
+        if existing is not None and spec.full_name.lower() in {
+            r.full_name.lower() for r in store.list_repos()
+        }:
+            branch = spec.default_branch or existing.default_branch or "main"
+        elif existing is not None:
+            # Skip re-seeding a repo currently queued for pending deletion.
+            continue
+        else:
+            branch = spec.default_branch or "main"
+        repo = store.register_repo(
+            owner=owner,
+            name=name,
+            local_path=None,
+            default_branch=branch,
+            git_source=spec.git_source,
+            git_url=spec.git_url,
+        )
+        registered.append(repo)
+    return registered
+
+
+def _default_rebuild_mmap(store: Any) -> None:
+    if getattr(store, "default_cache_dir", None) is None:
+        return
+    try:
+        from search_engine import rebuild_vector_mmap_cache
+    except ImportError:
+        return
+    with contextlib.suppress(OSError, sqlite3.Error, ValueError, RuntimeError):
+        rebuild_vector_mmap_cache(store)
+
+
 @dataclass
 class _Dirty:
     """Union of `DirtySignals` gathered during one tick."""
@@ -403,6 +465,11 @@ class PackratService:
         timeline: TimelineRefresh | None = None,
         managed_git: ManagedGit | None = None,
         scoped_child_argv: ScopedChildArgv | None = None,
+        personal_store: Any | None = None,
+        server_config: ServerConfig | None = None,
+        transport_for_owner: Callable[[str], Any] | None = None,
+        remove_git_fn: Callable[[Any], Any] | None = None,
+        rebuild_mmap_fn: Callable[[Any], None] | None = None,
     ) -> None:
         """Initializes the scheduler; nothing runs until `run()` or `run_once()`.
 
@@ -441,6 +508,11 @@ class PackratService:
         self.timeline = timeline
         self.managed_git = managed_git
         self.scoped_child_argv = scoped_child_argv
+        self.personal_store = personal_store
+        self.server_config = server_config
+        self.transport_for_owner = transport_for_owner
+        self._remove_git_fn = remove_git_fn
+        self._rebuild_mmap_fn = rebuild_mmap_fn or _default_rebuild_mmap
         self.child: ChildProcess | None = None
         self._child_kind: Literal["backfill", "scoped"] | None = None
         self._scoped_repo_ids: list[int] = []
@@ -459,6 +531,8 @@ class PackratService:
         self._deferred: set[str] = set()
         self._requeue: list[str] = []
         self._request_attempts: dict[str, int] = {}
+        self._user_requeue: list[tuple[str, str]] = []
+        self._user_request_attempts: dict[tuple[str, str], int] = {}
         self._next_watch_expiry: str | None = None
         versions = _read_store_versions(store)
         self._has_version_reader = versions is not None
@@ -468,6 +542,8 @@ class PackratService:
         self._version_string = format_service_version(self._startup_scripts_sha)
         self._last_ok_at, self._consecutive_failed_ticks = _init_heartbeat_health(store)
         self._last_db_token = _store_db_token(store)
+        self._pending_delete_checked_token: Any = object()
+        self._has_known_pending_deletes = False
 
     def _default_sync_lock(self) -> AbstractContextManager[SyncLockInfo]:
         db_path = getattr(self.store, "db_path", None)
@@ -515,9 +591,7 @@ class PackratService:
         if holder == os.getpid():
             return False
         child_pid = self.child.pid if self.child is not None else None
-        if child_pid is not None and (holder is None or holder == child_pid):
-            return False
-        return True
+        return not (child_pid is not None and (holder is None or holder == child_pid))
 
     def _note_sqlite_error(
         self, worker: str, exc: sqlite3.OperationalError, report: TickReport
@@ -568,8 +642,31 @@ class PackratService:
 
     # ----- workers -------------------------------------------------------------------
 
-    def _refresh_hot(self, keys: list[str], now: float, report: TickReport) -> bool:
-        ok, changed = self._guarded("hot", report, lambda: self.hot.refresh_hot(keys))
+    def _call_hot_refresh(
+        self, keys: list[str], transport: Any | None = None
+    ) -> list[str]:
+        if transport is None:
+            return self.hot.refresh_hot(keys)
+        try:
+            return self.hot.refresh_hot(keys, transport=transport)  # type: ignore[call-arg]
+        except TypeError:
+            return self.hot.refresh_hot(keys)
+
+    def _refresh_hot(
+        self,
+        keys: list[str],
+        now: float,
+        report: TickReport,
+        *,
+        transport: Any | None = None,
+    ) -> bool:
+        ok, changed = self._guarded(
+            "hot", report, lambda: self._call_hot_refresh(keys, transport=transport)
+        )
+        if not ok and transport is not None:
+            ok, changed = self._guarded(
+                "hot", report, lambda: self._call_hot_refresh(keys, transport=None)
+            )
         if not ok:
             return False
         for key in keys:
@@ -577,12 +674,53 @@ class PackratService:
         report.changed.extend(k for k in changed or [] if k not in report.changed)
         return True
 
+    def _group_user_refresh_pairs(
+        self, pairs: Sequence[tuple[str, str]], requested: list[str]
+    ) -> dict[str, list[str]]:
+        by_owner: dict[str, list[str]] = {}
+        for owner_id, key in pairs:
+            owner_list = by_owner.setdefault(owner_id, [])
+            if key not in owner_list:
+                owner_list.append(key)
+            if key not in requested:
+                requested.append(key)
+        return by_owner
+
+    def _record_owner_refresh_result(
+        self, owner_id: str, owner_keys: Sequence[str], ok: bool
+    ) -> None:
+        if ok:
+            for k in owner_keys:
+                self._user_request_attempts.pop((owner_id, k), None)
+            return
+        for k in owner_keys:
+            pair = (owner_id, k)
+            if pair not in self._user_requeue:
+                self._user_requeue.append(pair)
+
+    def _drain_user_requests(self, now: float, report: TickReport) -> None:
+        if self.personal_store is None:
+            return
+        pairs = self.personal_store.take_user_refresh_requests()
+        if not pairs:
+            return
+        by_owner = self._group_user_refresh_pairs(pairs, report.requested)
+        for owner_id, owner_keys in by_owner.items():
+            tx = (
+                self.transport_for_owner(owner_id)
+                if self.transport_for_owner is not None
+                else None
+            )
+            ok = self._refresh_hot(owner_keys, now, report, transport=tx)
+            self._record_owner_refresh_result(owner_id, owner_keys, ok)
+
     def _drain_requests(self, now: float, report: TickReport) -> None:
         """Serves queued refresh requests; called at the start and again mid-tick.
 
         Failed keys are held until the end of the tick (`_requeue_failed`), so
         one bad key is retried once per tick, not by every drain.
         """
+        self._drain_user_requests(now, report)
         keys = list(dict.fromkeys(self.store.take_refresh_requests()))
         if not keys:
             return
@@ -593,8 +731,28 @@ class PackratService:
         else:
             self._requeue.extend(k for k in keys if k not in self._requeue)
 
+    def _requeue_user_failed(self, now: float) -> None:
+        if self.personal_store is None or not self._user_requeue:
+            self._user_requeue = []
+            return
+        keep: list[tuple[str, str]] = []
+        for pair in self._user_requeue:
+            attempts = self._user_request_attempts.get(pair, 0) + 1
+            if attempts >= MAX_REFRESH_ATTEMPTS:
+                self._user_request_attempts.pop(pair, None)
+                self.log(
+                    f"user refresh of {pair[1]} ({pair[0]}) dropped after {attempts} attempts"
+                )
+                continue
+            self._user_request_attempts[pair] = attempts
+            keep.append(pair)
+        self._user_requeue = []
+        if keep:
+            self.personal_store.requeue_user_refresh_requests(keep, now)
+
     def _requeue_failed(self, now: float) -> None:
         """Re-queues this tick's failed refresh requests, dropping repeat failures."""
+        self._requeue_user_failed(now)
         keep: list[str] = []
         for key in self._requeue:
             attempts = self._request_attempts.get(key, 0) + 1
@@ -612,9 +770,19 @@ class PackratService:
         if now < self._next_signals:
             return
         report.signals_polled = True
-        ok, found = self._guarded(
-            "signals", report, lambda: self.signals.poll_notifications(now)
-        )
+        poll_user_fn = getattr(self.signals, "poll_user_notifications", None)
+        if self.personal_store is not None and poll_user_fn is not None:
+            ok, found = self._guarded(
+                "signals",
+                report,
+                lambda: poll_user_fn(
+                    self.personal_store, self.transport_for_owner, now
+                ),
+            )
+        else:
+            ok, found = self._guarded(
+                "signals", report, lambda: self.signals.poll_notifications(now)
+            )
         if ok:
             dirty.add(found)
         ok, found = self._guarded(
@@ -707,9 +875,53 @@ class PackratService:
             return
         if not self._gate("viewer", Priority.VIEWER, now, report):
             return
-        ok, _ = self._guarded("viewer", report, self.viewer.refresh_viewer)
+        sync_all_fn = getattr(self.viewer, "sync_all_users", None)
+        if self.personal_store is not None and sync_all_fn is not None:
+            ok, _ = self._guarded(
+                "viewer",
+                report,
+                lambda: sync_all_fn(
+                    self.personal_store, self.transport_for_owner, now=now
+                ),
+            )
+        else:
+            ok, _ = self._guarded("viewer", report, self.viewer.refresh_viewer)
         report.viewer_ran = ok
         self._next_viewer = now + VIEWER_INTERVAL_S
+
+    def _is_disk_high_water(self) -> bool:
+        if self.server_config is None:
+            return False
+        db_path = getattr(self.store, "db_path", None)
+        if db_path is None or str(db_path) == ":memory:":
+            return False
+        _, used_pct = disk_usage_stats(Path(db_path))
+        return used_pct >= float(self.server_config.disk_high_water_pct)
+
+    def _filter_git_targets_for_disk(
+        self, targets: list[int], report: TickReport
+    ) -> list[int]:
+        if not self._is_disk_high_water():
+            return targets
+        git_root = getattr(self.store, "git_root", None)
+        get_by_id = getattr(self.store, "get_repo_by_id", None)
+        if git_root is None or get_by_id is None:
+            return targets
+        allowed: list[int] = []
+        skipped_cold = False
+        for rid in targets:
+            repo = get_by_id(rid)
+            if repo is None:
+                continue
+            if git_dir(git_root, repo.owner, repo.name).is_dir():
+                allowed.append(rid)
+            else:
+                skipped_cold = True
+        if skipped_cold:
+            self._note_deferred(
+                "git_clone", report, "disk usage above disk_high_water_pct"
+            )
+        return allowed
 
     def _run_timeline(self, now: float, report: TickReport) -> None:
         """Refreshes `items`-repo timelines every `VIEWER_INTERVAL_S` at `VIEWER` priority.
@@ -748,7 +960,9 @@ class PackratService:
         remaining = GIT_POLL_TICK_BUDGET_S - spent
         if not self._pending_git or remaining <= 0:
             return
-        targets = sorted(self._pending_git)
+        targets = self._filter_git_targets_for_disk(sorted(self._pending_git), report)
+        if not targets:
+            return
         ok, fetched = self._guarded(
             "git",
             report,
@@ -797,6 +1011,60 @@ class PackratService:
 
     # ----- backfill and scoped child -------------------------------------------------
 
+    def _drain_pending_deletes(self, report: TickReport) -> None:
+        pending_fn = getattr(self.store, "pending_delete_repo_ids", None)
+        if pending_fn is None:
+            return
+        current_token = _store_db_token(self.store)
+        if (
+            not self._has_known_pending_deletes
+            and current_token is not None
+            and current_token == self._pending_delete_checked_token
+        ):
+            return
+        pending_ids = pending_fn()
+        if not pending_ids:
+            self._has_known_pending_deletes = False
+            self._pending_delete_checked_token = current_token
+            return
+        self._has_known_pending_deletes = True
+        with self.sync_lock() as lock:
+            if not lock.acquired:
+                return
+            for rid in sorted(pending_ids):
+                self._execute_pending_delete(rid, report)
+            self._rebuild_mmap_fn(self.store)
+        remaining = pending_fn()
+        self._has_known_pending_deletes = bool(remaining)
+        if not remaining:
+            self._pending_delete_checked_token = _store_db_token(self.store)
+
+    def _execute_pending_delete(self, repo_id: int, report: TickReport) -> None:
+        get_by_id = getattr(self.store, "get_repo_by_id", None)
+        remove_repo_fn = getattr(self.store, "remove_repo", None)
+        if get_by_id is None or remove_repo_fn is None:
+            return
+        repo = get_by_id(repo_id, include_pending_delete=True)
+        if repo is None:
+            clear_fn = getattr(self.store, "clear_repo_pending_delete", None)
+            if clear_fn is not None:
+                clear_fn(repo_id)
+            return
+        try:
+            if self._remove_git_fn is not None:
+                self._remove_git_fn(repo)
+            else:
+                git_root = getattr(self.store, "git_root", None)
+                if git_root is not None and repo.git_source == "managed":
+                    remove_git(git_root, repo, blocking_lock=True)
+            remove_repo_fn(repo.full_name)
+            self._pending_mirror.discard(repo_id)
+            self._pending_git.discard(repo_id)
+            self._pending_index.discard(repo_id)
+        except (OSError, sqlite3.Error, ValueError, RuntimeError) as exc:
+            report.errors.append(f"delete:{repo.full_name}: {exc}")
+            self.log(f"pending delete failed for {repo.full_name}: {exc}")
+
     def _reap_child(self, report: TickReport, now: float | None = None) -> None:
         if self.child is None:
             return
@@ -809,6 +1077,8 @@ class PackratService:
         self.log(f"{kind} child {self.child.pid} exited with {code}")
         if kind == "scoped":
             self._handle_scoped_child_exit(code, moment)
+        elif code == 0:
+            self._rebuild_mmap_fn(self.store)
         self.child = None
         self._child_kind = None
         self._scoped_repo_ids = []
@@ -817,6 +1087,7 @@ class PackratService:
         if code == 0:
             for repo_id in self._scoped_repo_ids:
                 self._scoped_backoff_until.pop(repo_id, None)
+            self._rebuild_mmap_fn(self.store)
             return
         until = now + SCOPED_CHILD_BACKOFF_S
         for repo_id in self._scoped_repo_ids:
@@ -862,6 +1133,12 @@ class PackratService:
         if self._maybe_spawn_scoped_child(now, report):
             return
         if self.child_argv is None or now < self._next_child:
+            return
+        if self._is_disk_high_water():
+            self._note_deferred(
+                "backfill", report, "disk usage above disk_high_water_pct"
+            )
+            self._next_child = now + BACKFILL_INTERVAL_S
             return
         list_repos = getattr(self.store, "list_repos", None)
         if list_repos is not None and not list_repos("mirror"):
@@ -940,7 +1217,13 @@ class PackratService:
             )
         except TypeError:
             self.store.write_heartbeat(os.getpid(), self._version_string, beat_at)
+        prev_token = self._last_db_token
         self._last_db_token = _store_db_token(self.store)
+        if (
+            not self._has_known_pending_deletes
+            and self._pending_delete_checked_token == prev_token
+        ):
+            self._pending_delete_checked_token = self._last_db_token
 
     def _beat(self, now: float, report: TickReport | None = None) -> None:
         """Writes the heartbeat stamped with the later of `now` and the clock."""
@@ -991,6 +1274,8 @@ class PackratService:
         try:
             if self._should_prune_watches(now):
                 self.store.prune_expired_watches(now)
+                if self.personal_store is not None:
+                    self.personal_store.prune_expired_watches(now)
                 self._next_watch_expiry = _earliest_lease_expiry(active)
             if prune_due:
                 self.store.prune(now)
@@ -1021,8 +1306,11 @@ class PackratService:
         self._reap_child(report, moment)
         active: list[WatchLease] = []
         try:
+            self._drain_pending_deletes(report)
             self._drain_requests(moment, report)
-            active = self.store.active_watches(moment)
+            active = list(self.store.active_watches(moment))
+            if self.personal_store is not None:
+                active.extend(self.personal_store.active_watches(moment))
             self._update_watch_expiry_cache(active)
             leases = _leases_by_key(active)
             dirty = _Dirty()

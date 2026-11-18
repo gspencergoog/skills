@@ -5,10 +5,25 @@ sidecar, the monitor watchdog) use to read live GitHub data from `packrat`.
 Readers depend only on what this page describes. Tables, columns, and modules
 that it doesn't mention can change without notice.
 
-- Readers query the SQLite **views** listed below, never the tables behind them.
+- Readers query either the `packrat reader` JSON batch command (`POST /api/v1/reader/batch` in remote mode) or the SQLite **views** listed below, never the tables behind them.
 - Readers never write to `repos.sqlite`. They lease items and request refreshes
   through the `packrat` CLI (`packrat watch`, `packrat refresh`, `packrat
-  changes`), which the service owns.
+  changes`), which routes to the active local or remote service.
+
+## Batch CLI & HTTP v1 interface (`packrat reader`)
+
+Tools that support zero-local-DB remote mode (`/monitor`, `inflight`, `code-review`, `plan`, `pr-reviewer-recommendation`) invoke `packrat reader --ops-json '<json>' --json` (omitting `--db` on the default database path so `~/.config/packrat/config.json` `remote` and `auto` routing apply). Both local `packrat reader` and `POST /api/v1/reader/batch` accept the same `ops` object and return one key per requested operation:
+
+- `health`: `true` returns the `v_service_health` fields (`pid`, `beat_age_s`, `viewer_login`, `consecutive_failed_ticks`, rate-limit columns), plus `viewer_sets_synced_at` (`{set_name: synced_at}` for sets that have synced).
+- `viewer_items`: `true` or `{"sets": ["authored", "review_requested", ...]}` returns `[{"set_name", "item_key", "first_seen_at", "last_seen_at", "state", "updated_at"}]`.
+- `items`: `{"keys": ["owner/name#1", ...], "include_live": true, "include_basic": true, "include_issues": true, "include_mentions": true}` returns `{"pr_live", "checks", "review_requests", "latest_reviews", "latest_author_reviews", "threads", "comments", "pr_basic", "issue_basic", "notifications"}` (each `pr_live` row includes server-computed `age_s`).
+- `known_keys`: `{"keys": [...]}` maps each present key to its canonical `owner/name#number`.
+- `stack_neighbors`: `{"keys": [...]}` maps each key to its open stack list (`[parent..., key, child...]`) or `null` when not in a `mirror` repository.
+- `repo_probe`: `{"repo": "owner/name"}` returns registration, `default_branch`, `last_indexed_sha`, table `counts`, `backfill` status, and `warnings`.
+- `context`: `{"repo": "owner/name", "files": [...], "exclude_pr": 42, "exclude_head_sha": "..."}` returns `probe`, `hotspots`, `prior_review_threads`, and `related_items` with `<untrusted_repo_content>` wrapping.
+- `review_signals`: `{"repo": "owner/name", "target_pr": 42, "files": [...]}` returns historical review events, thread events, `target_pr_files`, and commit-to-login maps.
+
+When remote authentication expires, `packrat reader`, `watch`, `changes`, and `refresh` exit non-zero with `[auth_expired]` on `stderr`; readers fall back to direct `gh` polling or cached state.
 
 ## Database location and read-only access
 
@@ -216,6 +231,7 @@ The authenticated user's current sets: `set_name`, `item_key`,
 | Set | Members |
 | :--- | :--- |
 | `authored` | PRs the user wrote, open or recently merged/closed, updated in the last 7 days |
+| `authored_open` | Open PRs the user wrote, drafts included, any age |
 | `review_requested` | Open PRs that request the user's review, any age |
 | `reviewed` | Open PRs reviewed by the user (excluding self-authored PRs), any age |
 | `issues` | Issues that involve the user, open or closed, updated in the last 7 days |
@@ -246,6 +262,7 @@ Always exactly one row.
 | `viewer_login` | text | the authenticated GitHub user; `NULL` until the first viewer refresh |
 | `last_ok_at` | text | when the last tick finished without errors; `NULL` if none has |
 | `consecutive_failed_ticks` | integer | ticks that ended with an error since the last clean one (`0` when healthy) |
+| `viewer_sets_synced_json` | text | JSON object mapping each synced viewer set name to its last sync timestamp (`'{}'` before the first sync) |
 
 **Stale or degraded service:** treat the service as down when the row's
 `beat_age_s` is `NULL` or greater than `180`, or when
@@ -364,7 +381,7 @@ so don't look for a `timeline` kind.
 | Leased PR fields, reviews, threads | under `freshness` after a signal; at most `max(freshness, 600)` s without one |
 | Leased PR checks | under `freshness` (check-run and status ETags are polled per lease) |
 | Notifications | 60 s, or GitHub's `X-Poll-Interval` |
-| Viewer sets | 15 min, sooner after a notification |
+| Viewer sets | 15 min, sooner after a notification or when you open a PR in a mirror repository |
 | Mirror repositories (`v_pr_basic`) | about 2 min after an `/events` change |
 
 When the GitHub budget runs low, the service defers mirror and backfill work

@@ -1,10 +1,11 @@
 """The packrat service's `viewer` worker: the viewer's own PRs, review requests, and issues.
 
-`ViewerSync` runs four GitHub searches (ported from `inflight`'s
+`ViewerSync` runs five GitHub searches (ported from `inflight`'s
 `SEARCH_QUERY`) and records their members in the `viewer_sets` table:
 
 - `authored`: PRs the viewer wrote (open, merged, or closed), updated within
   the lookback window, so recently merged PRs stay on the board.
+- `authored_open`: open PRs the viewer wrote, drafts included, of any age.
 - `review_requested`: open PRs that request the viewer's review. No lookback
   applies, because a pending request stays actionable however old the PR is.
 - `reviewed`: open PRs that the viewer has reviewed (excluding the viewer's own
@@ -33,7 +34,13 @@ from typing import Any, Protocol
 from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError
 from hot_sync import item_comments_from_graphql
-from models import IssueRecord, ItemCommentRecord, RepoConfig, format_item_key
+from models import (
+    IssueRecord,
+    ItemCommentRecord,
+    PendingDeleteError,
+    RepoConfig,
+    format_item_key,
+)
 from rate_budget import Priority
 
 LOGGER = logging.getLogger(__name__)
@@ -69,12 +76,14 @@ VIEWER_LEASE_TTL_S = 1800
 """Lease lifetime in seconds: two 15-minute viewer intervals, so one missed run keeps it."""
 
 SET_AUTHORED = "authored"
+SET_AUTHORED_OPEN = "authored_open"
 SET_REVIEW_REQUESTED = "review_requested"
 SET_REVIEWED = "reviewed"
 SET_ISSUES = "issues"
 
 _ALIAS_TO_SET: dict[str, str] = {
     "authored": SET_AUTHORED,
+    "authoredOpen": SET_AUTHORED_OPEN,
     "reviewRequested": SET_REVIEW_REQUESTED,
     "reviewed": SET_REVIEWED,
     "issues": SET_ISSUES,
@@ -83,6 +92,7 @@ _ALIAS_TO_SET: dict[str, str] = {
 
 _ALIAS_VARIABLES: dict[str, tuple[str, str, str]] = {
     "authored": ("authored", "afterAuthored", "withAuthored"),
+    "authoredOpen": ("authoredOpen", "afterAuthoredOpen", "withAuthoredOpen"),
     "reviewRequested": ("reviewReq", "afterReview", "withReview"),
     "reviewed": ("reviewed", "afterReviewed", "withReviewed"),
     "issues": ("issues", "afterIssues", "withIssues"),
@@ -91,14 +101,19 @@ _ALIAS_VARIABLES: dict[str, tuple[str, str, str]] = {
 
 SEARCH_QUERY = """
 query PackratViewerSearch(
-  $authored: String!, $reviewReq: String!, $reviewed: String!, $issues: String!, $first: Int!,
-  $afterAuthored: String, $afterReview: String, $afterReviewed: String, $afterIssues: String,
-  $withAuthored: Boolean!, $withReview: Boolean!, $withReviewed: Boolean!, $withIssues: Boolean!
+  $authored: String!, $authoredOpen: String!, $reviewReq: String!, $reviewed: String!, $issues: String!, $first: Int!,
+  $afterAuthored: String, $afterAuthoredOpen: String, $afterReview: String, $afterReviewed: String, $afterIssues: String,
+  $withAuthored: Boolean!, $withAuthoredOpen: Boolean!, $withReview: Boolean!, $withReviewed: Boolean!, $withIssues: Boolean!
 ) {
   rateLimit { cost remaining limit resetAt }
   viewer { login }
   authored: search(type: ISSUE, query: $authored, first: $first, after: $afterAuthored)
     @include(if: $withAuthored) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ...PrKey }
+  }
+  authoredOpen: search(type: ISSUE, query: $authoredOpen, first: $first, after: $afterAuthoredOpen)
+    @include(if: $withAuthoredOpen) {
     pageInfo { hasNextPage endCursor }
     nodes { ...PrKey }
   }
@@ -119,11 +134,11 @@ query PackratViewerSearch(
   }
 }
 fragment PrKey on PullRequest {
-  id number state repository { nameWithOwner }
+  id number state repository { nameWithOwner isPrivate }
 }
 fragment IssueFields on Issue {
   id number title body state url createdAt updatedAt closedAt
-  repository { nameWithOwner }
+  repository { nameWithOwner isPrivate }
   author { login }
   authorAssociation
   labels(first: 20) { nodes { name } }
@@ -207,14 +222,31 @@ def lookback_date(lookback_days: int, now: float) -> str:
 
 
 def search_strings(lookback_days: int, now: float | None = None) -> dict[str, str]:
-    """Builds the four search strings, keyed by search alias."""
+    """Builds the five search strings, keyed by search alias."""
     moment = time.time() if now is None else now
     since = f"updated:>={lookback_date(lookback_days, moment)}"
     return {
         "authored": f"is:pr author:@me archived:false {since}",
+        "authoredOpen": "is:pr is:open author:@me archived:false",
         "reviewRequested": "is:pr is:open review-requested:@me archived:false",
         "reviewed": "is:pr is:open reviewed-by:@me -author:@me archived:false",
         "issues": f"is:issue involves:@me archived:false {since}",
+    }
+
+
+def search_strings_for_user(
+    github_login: str, lookback_days: int, now: float | None = None
+) -> dict[str, str]:
+    """Builds public-only viewer search strings for a named `github_login`."""
+    clean = github_login.strip().lstrip("@")
+    moment = time.time() if now is None else now
+    since = f"updated:>={lookback_date(lookback_days, moment)}"
+    return {
+        "authored": f"is:pr author:{clean} is:public archived:false {since}",
+        "authoredOpen": f"is:pr is:open author:{clean} is:public archived:false",
+        "reviewRequested": f"is:pr is:open review-requested:{clean} is:public archived:false",
+        "reviewed": f"is:pr is:open reviewed-by:{clean} -author:{clean} is:public archived:false",
+        "issues": f"is:issue involves:{clean} is:public archived:false {since}",
     }
 
 
@@ -241,6 +273,7 @@ class ViewerSync:
         *,
         clock: Callable[[], float] = time.time,
         page_size: int = SEARCH_PAGE_SIZE,
+        forbid_private: bool = False,
     ) -> None:
         """Initializes the worker.
 
@@ -250,6 +283,7 @@ class ViewerSync:
             hot: Refresher for full PR fields of newly seen PRs.
             clock: Returns the current time in epoch seconds.
             page_size: Initial search page size; halved on server errors.
+            forbid_private: Skip private repository items before registering `items` repos.
         """
         self._transport = transport
         self._store = store
@@ -258,6 +292,7 @@ class ViewerSync:
         self._initial_page_size = page_size
         self._page_size = page_size
         self._clean_pages = 0
+        self._forbid_private = forbid_private
         self._repo_cache: dict[str, RepoConfig] = {}
 
     def refresh_viewer(
@@ -287,27 +322,7 @@ class ViewerSync:
             self._store.set_state(
                 VIEWER_LOGIN_STATE_KEY, result.viewer_login, now=moment
             )
-        pending_node_ids: dict[str, str] = {}
-        authored_keys, authored_open = self._pr_keys(
-            result.nodes["authored"], pending_node_ids
-        )
-        review_keys, review_open = self._pr_keys(
-            result.nodes["reviewRequested"], pending_node_ids
-        )
-        reviewed_keys, reviewed_open = self._pr_keys(
-            result.nodes["reviewed"], pending_node_ids
-        )
-        self._sync_pr_node_ids(pending_node_ids)
-        open_prs: set[str] = set()
-        open_prs.update(authored_open)
-        open_prs.update(review_open)
-        open_prs.update(reviewed_open)
-        sets = {
-            SET_AUTHORED: authored_keys,
-            SET_REVIEW_REQUESTED: review_keys,
-            SET_REVIEWED: reviewed_keys,
-            SET_ISSUES: self._store_issues(result.nodes["issues"]),
-        }
+        sets, open_prs = self._extract_sets_and_open_prs(result)
         changed: set[str] = set()
         new_prs: set[str] = set()
         for set_name, keys in sets.items():
@@ -321,15 +336,123 @@ class ViewerSync:
         self._refresh_new_prs(sorted(new_prs | unleased))
         return sorted(changed)
 
+    def _extract_sets_and_open_prs(
+        self, result: _SearchResult
+    ) -> tuple[dict[str, set[str]], set[str]]:
+        pending_node_ids: dict[str, str] = {}
+        authored_keys, authored_open = self._pr_keys(
+            result.nodes["authored"], pending_node_ids
+        )
+        authored_open_keys, authored_open_prs = self._pr_keys(
+            result.nodes["authoredOpen"], pending_node_ids
+        )
+        review_keys, review_open = self._pr_keys(
+            result.nodes["reviewRequested"], pending_node_ids
+        )
+        reviewed_keys, reviewed_open = self._pr_keys(
+            result.nodes["reviewed"], pending_node_ids
+        )
+        self._sync_pr_node_ids(pending_node_ids)
+        open_prs = authored_open | authored_open_prs | review_open | reviewed_open
+        sets = {
+            SET_AUTHORED: authored_keys,
+            SET_AUTHORED_OPEN: authored_open_keys,
+            SET_REVIEW_REQUESTED: review_keys,
+            SET_REVIEWED: reviewed_keys,
+            SET_ISSUES: self._store_issues(result.nodes["issues"]),
+        }
+        return sets, open_prs
+
+    def sync_all_users(
+        self,
+        personal_store: Any,
+        transport_for_owner: Callable[[str], GraphqlTransport | None] | None = None,
+        *,
+        lookback_days: int = 7,
+        now: float | None = None,
+    ) -> list[str]:
+        """Refreshes public viewer sets across all active `PersonalStore` identities."""
+        moment = self._clock() if now is None else now
+        self._repo_cache = {}
+        changed: set[str] = set()
+        for ident in personal_store.active_identities(within_days=7, now=moment):
+            user_tx = (
+                transport_for_owner(ident.owner_id)
+                if transport_for_owner is not None
+                else None
+            )
+            changed.update(
+                self._sync_one_user(
+                    ident, personal_store, user_tx, lookback_days, moment
+                )
+            )
+        return sorted(changed)
+
+    def _search_user_with_fallback(
+        self,
+        strings: Mapping[str, str],
+        user_tx: GraphqlTransport | None,
+    ) -> tuple[_SearchResult, GraphqlTransport | None]:
+        if user_tx is not None:
+            try:
+                return self._search_all(strings, transport=user_tx), user_tx
+            except (BudgetDeferred, GhApiError) as exc:
+                LOGGER.info(
+                    "user token viewer search failed (%s); falling back to server transport",
+                    exc,
+                )
+        return self._search_all(strings, transport=self._transport), None
+
+    def _sync_one_user(
+        self,
+        ident: Any,
+        personal_store: Any,
+        user_tx: GraphqlTransport | None,
+        lookback_days: int,
+        moment: float,
+    ) -> set[str]:
+        strings = search_strings_for_user(ident.github_login, lookback_days, moment)
+        result, effective_tx = self._search_user_with_fallback(strings, user_tx)
+        sets, open_prs = self._extract_sets_and_open_prs(result)
+        changed: set[str] = set()
+        new_prs: set[str] = set()
+        for set_name, keys in sets.items():
+            added, removed = personal_store.replace_viewer_set(
+                ident.github_login, set_name, sorted(keys), now=moment
+            )
+            changed.update(added, removed)
+            if set_name != SET_ISSUES:
+                new_prs.update(added)
+        unleased = self._update_personal_leases(
+            personal_store, ident.owner_id, open_prs, moment
+        )
+        self._refresh_new_prs_for_owner(
+            sorted(new_prs | unleased),
+            personal_store,
+            ident.owner_id,
+            effective_tx,
+            moment,
+        )
+        return changed
+
     # ----- search -----------------------------------------------------------------
 
-    def _search_all(self, strings: Mapping[str, str]) -> _SearchResult:
+    def _search_all(
+        self,
+        strings: Mapping[str, str],
+        *,
+        transport: GraphqlTransport | None = None,
+    ) -> _SearchResult:
         """Pages every search until none has a next page, or the page cap is hit."""
         self._page_size = self._initial_page_size
         self._clean_pages = 0
         result = _SearchResult()
         for _ in range(MAX_SEARCH_PAGES):
-            result.absorb(self._search_page(strings, result.cursors, result.active))
+            result.absorb(
+                self._search_page(
+                    strings, result.cursors, result.active, transport=transport
+                )
+            )
             if not any(result.active.values()):
                 return result
         LOGGER.warning("viewer search stopped at the %d-page cap", MAX_SEARCH_PAGES)
@@ -349,8 +472,11 @@ class ViewerSync:
         strings: Mapping[str, str],
         cursors: Mapping[str, str | None],
         active: Mapping[str, bool],
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> dict[str, Any]:
         """Runs one search page, halving the page size on server errors down to 5."""
+        active_transport = self._transport if transport is None else transport
         while True:
             variables: dict[str, Any] = {"first": self._page_size}
             for alias, (query_var, cursor_var, flag_var) in _ALIAS_VARIABLES.items():
@@ -358,7 +484,7 @@ class ViewerSync:
                 variables[cursor_var] = cursors[alias]
                 variables[flag_var] = active[alias]
             try:
-                payload = self._transport.graphql(
+                payload = active_transport.graphql(
                     SEARCH_QUERY,
                     variables,
                     worker=WORKER_NAME,
@@ -410,6 +536,12 @@ class ViewerSync:
     def _node_key(self, node: Mapping[str, Any]) -> tuple[int, str] | None:
         """Returns `(repo_id, canonical_key)` for a search node, registering its repo."""
         repo = node.get("repository") or {}
+        if (
+            self._forbid_private
+            and isinstance(repo, Mapping)
+            and repo.get("isPrivate") is True
+        ):
+            return None
         full_name = repo.get("nameWithOwner") if isinstance(repo, dict) else None
         number = node.get("number")
         if (
@@ -418,7 +550,10 @@ class ViewerSync:
             or not isinstance(number, int)
         ):
             return None
-        config = self._resolve_repo_for_node(full_name, node.get("id"))
+        try:
+            config = self._resolve_repo_for_node(full_name, node.get("id"))
+        except PendingDeleteError:
+            return None
         return config.repo_id, format_item_key(config.owner, config.name, number)
 
     def _sync_pr_node_ids(self, pending_node_ids: Mapping[str, str]) -> None:
@@ -501,6 +636,42 @@ class ViewerSync:
             self._store.remove_watch(VIEWER_CONSUMER, VIEWER_CONSUMER_ID, sorted(stale))
         return stale
 
+    def _update_personal_leases(
+        self, personal_store: Any, owner_id: str, pr_keys: set[str], now: float
+    ) -> set[str]:
+        """Leases `owner_id`'s open PRs in `personal_store` and drops stale viewer leases."""
+        if pr_keys:
+            personal_store.add_watch(
+                owner_id,
+                VIEWER_CONSUMER,
+                owner_id,
+                sorted(pr_keys),
+                VIEWER_FRESHNESS_S,
+                VIEWER_LEASE_TTL_S,
+                now=now,
+            )
+        stale = {
+            w.item_key
+            for w in personal_store.active_watches(now=now, owner_id=owner_id)
+            if w.consumer == VIEWER_CONSUMER and w.consumer_id == owner_id
+        } - pr_keys
+        if stale:
+            personal_store.remove_watch(
+                owner_id, VIEWER_CONSUMER, owner_id, sorted(stale)
+            )
+        return stale
+
+    def _call_hot_refresh(
+        self, keys: Sequence[str], transport: GraphqlTransport | None = None
+    ) -> None:
+        if transport is None:
+            self._hot.refresh_hot(keys)
+            return
+        try:
+            self._hot.refresh_hot(keys, transport=transport)  # type: ignore[call-arg]
+        except TypeError:
+            self._hot.refresh_hot(keys)
+
     def _refresh_new_prs(self, keys: Sequence[str]) -> None:
         """Fetches full fields for PRs new to the viewer sets or just unleased.
 
@@ -517,6 +688,27 @@ class ViewerSync:
                 "viewer hot refresh of %d PRs queued for retry: %s", len(keys), exc
             )
             self._store.request_refresh(keys)
+
+    def _refresh_new_prs_for_owner(
+        self,
+        keys: Sequence[str],
+        personal_store: Any,
+        owner_id: str,
+        transport: GraphqlTransport | None,
+        now: float,
+    ) -> None:
+        if not keys:
+            return
+        try:
+            self._call_hot_refresh(keys, transport=transport)
+        except (BudgetDeferred, GhApiError) as exc:
+            LOGGER.info(
+                "user viewer hot refresh of %d PRs queued for %s: %s",
+                len(keys),
+                owner_id,
+                exc,
+            )
+            personal_store.request_refresh(owner_id, keys, now=now)
 
 
 def _issue_record(repo_id: int, node: Mapping[str, Any]) -> IssueRecord:

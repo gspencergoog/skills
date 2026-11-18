@@ -31,8 +31,9 @@ The name comes from packrat middens: nests where packrats hoard material for tho
 | PR lifecycle questions (reviews before any review request, review request latency, ready-to-merge time) and which PRs closed an issue | `packrat sql` (`v_pr_lifecycle`, `v_review_request_latency`, `v_issue_pr_links`) |
 | Refreshing local repository state at zero or minimal GitHub API rate-limit cost | `packrat sync` |
 | Keeping live PR state, checks, reviews, and notifications current in the background | `packrat serve` (installed by `packrat auto-sync on`) |
-| Reading live PR state from another tool (`/monitor`, `inflight`, a watchdog) | The SQLite reader views in [references/reader_contract.md](references/reader_contract.md), plus `packrat watch`, `packrat changes`, and `packrat refresh` |
-| Exporting or merging portable `repos.sqlite` snapshots across users or machines | `packrat export` and `packrat import` |
+| Reading live PR state or historical context from another tool (`/monitor`, `inflight`, `code-review`, `plan`, `pr-reviewer-recommendation`) | `packrat reader` JSON batches (or the SQLite reader views in [references/reader_contract.md](references/reader_contract.md) when local), plus `packrat watch`, `packrat changes`, and `packrat refresh` |
+| Querying a shared multi-user HTTP v1 `packrat` server or combining local and remote mirrors | `--mode {local,remote,auto}`, `--remote`, `--remote-url`, `packrat sql --with-remote`, `packrat auth link`, and `~/.config/packrat/config.json` |
+| Exporting or merging portable `repos.sqlite` snapshots across users or machines | `packrat export [--remote]` and `packrat import` |
 
 ## Core CLI Commands
 
@@ -143,6 +144,14 @@ python3 <skill-dir>/scripts/packrat.py install-cli
 
    Prose columns in the result (`title`, `body`, `text`, `message`, `answer_body`, `docstring`, `content`, `payload_json`) come from GitHub and are wrapped in `<untrusted_repo_content source="...">` tags in every output format. Pass `--raw` to get DuckDB's unwrapped output, for example when piping into another tool.
 
+   When combining local repositories with a remote `packrat` server, pass repeatable `--with-remote <alias>="<sql>"` flags. Each remote subquery runs with `"raw": true` over `/api/v1/sql` and materializes as a local DuckDB temporary view (including typed 0-row views when a subquery matches nothing), while outer prose columns remain wrapped unless `--raw` is passed:
+
+   ```bash
+   python3 <skill-dir>/scripts/packrat.py sql \
+     --with-remote remote_prs="SELECT item_key, author, state FROM v_pull_requests WHERE repo = 'octo-org/widgets' LIMIT 50" \
+     "SELECT r.item_key, r.author, r.state FROM remote_prs r ORDER BY r.item_key;"
+   ```
+
 6. Run the live GitHub service. `packrat serve` is a long-running process that keeps leased PRs, the viewer's own PRs and issues, notifications, and mirror repositories current. Each GitHub call is checked against the shared rate budget first (see [Rate budget](#rate-budget)).
 
    ```bash
@@ -164,14 +173,23 @@ python3 <skill-dir>/scripts/packrat.py install-cli
    - Polls notifications every 60 seconds (or GitHub's `X-Poll-Interval`) and repository `/events` for `mirror` repositories.
    - Polls check-run and status ETags for each lease whose `freshness` has elapsed.
    - Refreshes leased PRs when a signal arrives, and at least every `max(freshness, 600)` seconds without one.
-   - Refreshes the viewer's authored PRs, review requests, reviewed PRs, and issues every 15 minutes, or sooner after a notification.
+   - Refreshes the viewer's authored PRs, review requests, reviewed PRs, and issues every 15 minutes, or sooner after a notification or when the viewer opens a PR in a `mirror` repository.
    - Fetches timeline events for stored items in `items` repositories every 15 minutes, right after the viewer refresh (the `timeline` worker, at `VIEWER` priority).
    - Syncs a `mirror` repository at most every 2 minutes after its `/events` feed changes, including new timeline events for updated items and items queued by mentions.
    - Writes the heartbeat, drops expired leases, and prunes old change-feed, API-call, and notification rows once an hour.
 
-7. Lease items, read the change feed, and request refreshes. Readers use these commands instead of writing to the database.
+    To host a multi-user HTTP v1 server in-process alongside the scheduler, pass `--http-listen HOST:PORT`, optional `--personal-db PATH`, optional `--server-config PATH`, and `--trust-edge-proxy` when fronted by an authenticating reverse proxy that signs `X-Packrat-Edge-Sig`.
+
+7. Lease items, read the change feed, run typed reader batches, and request refreshes. Readers use these commands instead of writing to the database.
 
    ```bash
+   # Execute typed reader operations in a single JSON batch (local read-only SQLite or remote /api/v1/reader/batch)
+   python3 <skill-dir>/scripts/packrat.py reader --health --viewer-items authored review_requested --json
+   python3 <skill-dir>/scripts/packrat.py reader --ops-json '{"repo_probe": {"repo": "octo-org/widgets"}}' --json
+
+   # Link caller identity on a remote server (verified when forward_gh_token sends a Bearer token)
+   python3 <skill-dir>/scripts/packrat.py auth link --github-user <login> --json
+
    # Lease PRs for one consumer instance (defaults: --freshness 120, --ttl 900)
    python3 <skill-dir>/scripts/packrat.py watch add --consumer monitor --id <conversation-hash> \
      --freshness 120 --ttl 900 <owner>/<name>#123 <owner>/<name>#124
@@ -252,6 +270,8 @@ python3 <skill-dir>/scripts/packrat.py install-cli
    packrat auto-sync on
    ```
 
+    To download a scrubbed per-repository snapshot from a remote server, pass `--remote` with a single `--repo <owner>/<name>` flag (`packrat export <dest> --repo <owner>/<name> --remote`), then merge it locally with `packrat import <dest>`.
+
 10. Merge `mirror` repositories from another `repos.sqlite` snapshot without overwriting local state.
 
     ```bash
@@ -306,6 +326,25 @@ python3 <skill-dir>/scripts/packrat.py install-cli
     Each parser populates `code_symbols` with the symbol kind, parent, `qualified_name`, `visibility`, `signature`, and `docstring`. Supported kinds are `class`, `struct`, `interface`, `enum`, `enum_value`, `mixin`, `extension`, `extension_type`, `protocol`, `actor`, `type_alias`, `function`, `method`, `constructor`, `getter`, `setter`, `property`, `field`, `constant`, `variable`, and `namespace`. In Python files, nested `def` and `class` declarations inside functions or methods are omitted so only module-level and class-body symbols enter the table.
 
     To build all four native binaries on one machine, run `packrat parsers build --all-platforms` on an Apple Silicon Mac. The Mac needs the `swift.org` toolchain and the Swift Static Linux SDK (`x86_64-swift-linux-musl`). That command compiles `packrat-dart-darwin-arm64`, `packrat-dart-linux-x86_64`, `packrat-swift-darwin-arm64`, and `packrat-swift-linux-x86_64`, warms the `treesitter` `uv` environment, and updates both `stamp.json` files.
+
+## Remote & Hybrid Routing (`local | remote | auto`)
+
+Client commands (`status`, `search`, `sql`, `reader`, `repo list|add|remove`, `watch`, `changes`, `refresh`, `export`, and `auth link`) accept `--mode {local,remote,auto}`, `--remote`, `--local`, and `--remote-url <url>` either before or after the subcommand name. Configuration loads from `~/.config/packrat/config.json`, overridden by `PACKRAT_MODE`, `PACKRAT_URL`, and CLI flags (passing a non-default `--db <path>` forces `local` unless `--remote` or `--remote-url` is also passed):
+
+```json
+{
+  "mode": "auto",
+  "remote_url": "https://packrat.example.com",
+  "http_cmd": ["my-auth-http-helper"],
+  "forward_gh_token": false,
+  "github_user": "octocat"
+}
+```
+
+- `local` queries only `repos.sqlite` (opening read-only via `?mode=ro` without creating files when absent).
+- `remote` sends requests to `remote_url` (`/api/v1/*`).
+- `auto` (the default when `remote_url` is set) fans out `search` across local and remote mirrors (picking one winner per `(repo, tier)` watermark), routes `sql` locally when every referenced repository is mirrored locally and remotely otherwise, and pins one live target (`local` when `beat_age_s <= 180`, else `remote`) per session for `reader`, `watch`, `changes`, and `refresh`.
+- When `http_cmd` is configured, `packrat` writes `{"method", "url", "headers", "body"?, "timeout_s", "output_path"?}` as JSON to the helper's `stdin` (keeping bearer tokens out of process arguments) and reads `{"status", "headers", "body" | "bytes_written"}` from `stdout`. When `http_cmd` is omitted, `packrat` falls back to stdlib HTTPS/HTTP.
 
 ## Repository modes
 

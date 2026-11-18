@@ -21,10 +21,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 try:
-    from .git_cmd import build_git_ssh_env, run_git_command
+    from .git_cmd import (
+        build_git_ssh_env,
+        resolve_allowed_git_protocols,
+        run_git_command,
+    )
     from .models import RepoConfig
 except ImportError:
-    from git_cmd import build_git_ssh_env, run_git_command  # type: ignore[no-redef]
+    from git_cmd import (  # type: ignore[no-redef]
+        build_git_ssh_env,
+        resolve_allowed_git_protocols,
+        run_git_command,
+    )
     from models import RepoConfig  # type: ignore[no-redef]
 
 _SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
@@ -79,10 +87,14 @@ def validate_branch(branch: str) -> str:
     return branch
 
 
-def _validate_url_with_scheme(url: str) -> str:
+def _validate_url_with_scheme(url: str, allowed_set: set[str]) -> str:
     parsed = urllib.parse.urlsplit(url)
     has_path = bool(parsed.path and parsed.path != "/")
     if parsed.scheme == "https":
+        if "https" not in allowed_set:
+            raise ValueError(
+                f"HTTPS git URLs are disabled by allowed_git_protocols: {url!r}."
+            )
         if (
             not parsed.hostname
             or parsed.username is not None
@@ -95,6 +107,10 @@ def _validate_url_with_scheme(url: str) -> str:
             raise ValueError(f"HTTPS git URL must include repository path: {url!r}.")
         return url
     if parsed.scheme == "ssh":
+        if "ssh" not in allowed_set:
+            raise ValueError(
+                f"SSH git URLs are disabled by allowed_git_protocols: {url!r}."
+            )
         if not parsed.hostname or not has_path:
             raise ValueError(f"SSH git URL must include host and path: {url!r}.")
         return url
@@ -103,8 +119,12 @@ def _validate_url_with_scheme(url: str) -> str:
     )
 
 
-def validate_url(url: str) -> str:
-    """Validates `git_url` as HTTPS (no userinfo), SSH URL, or SCP-style SSH path."""
+def validate_url(
+    url: str,
+    *,
+    allowed_schemes: Sequence[str] | None = None,
+) -> str:
+    """Validates `git_url` against `allowed_schemes` (HTTPS, SSH URL, or SCP path)."""
     if (
         not isinstance(url, str)
         or not url
@@ -112,11 +132,16 @@ def validate_url(url: str) -> str:
         or _has_control_or_space(url)
     ):
         raise ValueError(f"Invalid git URL {url!r}.")
+    allowed_set = set(resolve_allowed_git_protocols(allowed_schemes))
     if "://" in url:
-        return _validate_url_with_scheme(url)
+        return _validate_url_with_scheme(url, allowed_set)
     if not _SCP_URL_RE.match(url):
         raise ValueError(
             f"Invalid git URL {url!r}; expected https://, ssh://, or user@host:path."
+        )
+    if "ssh" not in allowed_set:
+        raise ValueError(
+            f"SSH git URLs are disabled by allowed_git_protocols: {url!r}."
         )
     return url
 

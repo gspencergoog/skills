@@ -1,16 +1,16 @@
 ---
 name: monitor
 description: >-
-  Watches GitHub pull requests or the user's review queue for review status, CI
-  completions, merge conflicts, review assignment, and stack changes, updating
-  a live stack_board A2UI pane from a background daemon and waking the agent via
-  agentapi to fix CI failures and conflicts on the user's pull requests. Use
-  when the user runs /monitor, asks to watch or babysit a pull request, stack,
-  or review queue, wants automatic CI or conflict fixes, or asks to be notified
-  when a pull request is ready to merge. Flags: --reviews, --wake-on-review,
-  --stale-days, --mute, --unmute, --stack, --actionable-only, --until, --events,
-  --timeout, --once, --no-a2ui, --daemon, --source. Don't use for reviewing a
-  pull request (use pr-review) or addressing comments once (use
+  Watches GitHub pull requests, all of the user's open pull requests, or the
+  review queue for reviews, CI results, merge conflicts, and stack changes,
+  updating a live stack_board A2UI pane from a background daemon and waking the
+  agent via agentapi to fix CI failures and conflicts. Use when the user runs
+  /monitor, asks to watch or babysit a pull request, stack, all their open pull
+  requests, or review queue, wants automatic CI or conflict fixes, or asks to be
+  told when a pull request is ready to merge. Flags: --mine, --wake, --reviews,
+  --wake-on-review, --stale-days, --mute, --unmute, --stack, --actionable-only,
+  --until, --events, --timeout, --once, --no-a2ui, --daemon, --source. Don't use
+  for reviewing a pull request (use pr-review) or addressing comments once (use
   pr-feedback-handler).
 ---
 
@@ -28,22 +28,33 @@ A full refresh of every watched pull request runs every `--sweep` interval (defa
 - waits on `packrat changes --wait` (timeout equal to `--debounce`) instead of polling notifications and GraphQL, and re-reads only the changed pull requests from `packrat`'s read-only views,
 - turns a `control.jsonl` `pushed_sha` into `packrat refresh`,
 - expands `--stack` from `packrat`'s mirror for repositories registered with `packrat repo add`, and uses the `gh pr list` walk for other repositories,
-- falls back to direct GitHub polling for the rest of the run if the service goes stale, logging it once.
+- falls back to direct GitHub polling for the rest of the run, logging it once, if the heartbeat goes stale. A failed `packrat` command does the same. The heartbeat is stale when it is missing or over 180 seconds old. On the default database path, the daemon reads it every 60 seconds, at the cost of one `packrat reader` call. On an explicit `--packrat-db` file, it reads it before every wait.
 
 `--source packrat` exits with an error when the service isn't running; `--source github` never reads `packrat`. The payload's `source` field and the board subtitle (`via packrat`, or `via GitHub (packrat unavailable)` after a fallback) show which source is in use. `packrat` stores neither assignees nor the head commit's committer, so those keep their last known values in `packrat` mode. Remediation still calls `gh` directly in every mode: `gh run rerun`, `gh run view --log-failed`, pushes, and review replies.
 
-On every refresh, `monitor_prs.py` writes `<conversation-scratch-dir>/monitor/board.a2ui` and replaces the `stack_board` surface directly in the `a2ui-pane` store, streaming live badge and CI ETA updates to the open pane at zero LLM tokens. It replaces one file per conversation, `<a2ui-pane-plugin-data>/conversations/<conversationId>/monitor.jsonl`, which always holds a single `createSurface` line with the full board. It never appends. When launched with `--daemon`, it runs as a persistent background process, handles flaky-check reminder logic, and wakes the conversation via `agentapi send-message` whenever actionable events occur on `mine: true` pull requests.
+`--mine` needs `packrat` and never falls back to GitHub. It treats `--source auto` as `--source packrat`. It exits 1 at startup when the service isn't running or has never synced the `authored_open` viewer set, and the error names `packrat auto-sync on`.
+
+Mid-run, `--mine` reads the service health every 60 seconds on either database path. The service is unhealthy when its heartbeat is missing or over 180 seconds old, or when 3 or more ticks in a row have failed. When it is unhealthy or a `packrat` command fails, the board keeps its last rows under a `packrat stale since HH:MM UTC` badge.
+
+While the source is stale, no event fires and no row leaves the board. Once the service is healthy again, the badge reads `catching up` until `packrat` has refetched every watched pull request (at most 10 minutes). Then the board is live again.
+
+On every refresh, `monitor_prs.py` writes `<conversation-scratch-dir>/monitor/board.a2ui` and replaces the `stack_board` surface directly in the `a2ui-pane` store, streaming live badge and CI ETA updates to the open pane at zero LLM tokens. It replaces one file per conversation, `<a2ui-pane-plugin-data>/conversations/<conversationId>/monitor.jsonl`, which always holds a single `createSurface` line with the full board. It never appends. When launched with `--daemon`, it runs as a persistent background process, handles flaky-check reminder logic, and wakes the conversation via `agentapi send-message` whenever actionable events occur on `mine: true` pull requests. The review queue and `--mine` modes are the exceptions: they run silent unless `--wake-on-review` or `--wake` is passed (see Step 1).
 
 Read [references/action_policy.md](references/action_policy.md) before acting on any event, [references/output_schema.md](references/output_schema.md) for the JSON payload contract, CLI flags, event kinds, and exit codes, and [references/daemon_protocol.md](references/daemon_protocol.md) for the control file protocol.
 
 ## 1. Resolve Target Pull Requests or Review Queue
 
-Choose between author mode (explicit pull request targets) and reviewer mode (`--reviews`):
+Choose between author mode (explicit pull request targets), my open PRs mode (`--mine`), and reviewer mode (`--reviews`):
 
 - **Author / explicit targets mode (default)**: Pass the target pull requests explicitly on the `monitor_prs.py` command line. Never rely on the script to guess targets from the current git branch:
   1. Include every pull request the user names in their prompt (`owner/repo#123`, a pull request URL, or `#123` with `--repo owner/repo`).
   2. Add every open pull request already discussed or created in the current conversation.
   3. Pass `--stack` when the user asks to watch a stack or when any target pull request is part of a branch stack.
+- **My open PRs mode (`--mine`)**: Pass `--mine` with no pull request arguments when the user asks to watch every open pull request they authored (`/monitor --mine`).
+  1. The watched set follows the user's open and draft pull requests as they change. A new pull request joins the board when `packrat` sees it, and a merged or closed one leaves on the tick that sees it. Pass `--repo owner/repo` to limit the set to one repository.
+  2. The mode reads only from `packrat` (see the data source section above) and never polls or searches GitHub. It rejects positional pull requests, `--reviews`, `--stack`, `--source github`, and any `--until` other than `none`, which is its default. `--actionable-only` has no effect.
+  3. The board is titled `My Open PRs (N)`, where `N` counts every open pull request. It shows the 60 most recently updated ones, sorted by repository, stack, and number. Its subtitle lists the counts and the pull requests that left in the last 24 hours.
+  4. `--mine --daemon` updates the pane, `last.json`, and `events.jsonl` in the background without waking the conversation. Pass `--wake` only when the user asks to be told about CI failures, conflicts, reviews, and merges in chat.
 - **Review queue mode (`--reviews`)**: Pass `--reviews` (with no positional pull request arguments) when the user asks to watch their incoming review queue (`/monitor --reviews`).
   1. Omit `--repo` to watch open review requests and active reviews across all repositories, or pass `--repo owner/repo` to scope the queue to a single repository.
   2. Under `--reviews`, `--until` defaults to `none` so an empty or all-closed queue keeps watching for new review requests.
@@ -61,7 +72,7 @@ Store all monitor files inside the conversation scratch directory:
 
 ## 2. Initial Snapshot and Live Pane Setup
 
-Before starting the background daemon (and after pushing a fix), run a single pass with `--once`. Replace `<PR_1> <PR_2>` with `--reviews` for the review queue:
+Before starting the background daemon (and after pushing a fix), run a single pass with `--once`. Replace `<PR_1> <PR_2>` with `--reviews` for the review queue, or with `--mine` for all of the user's open pull requests:
 
 ```bash
 python3 <skill-dir>/scripts/monitor_prs.py \
@@ -75,7 +86,7 @@ python3 <skill-dir>/scripts/monitor_prs.py \
 
 1. When `a2ui-pane` is installed, `--conversation-id` creates or replaces the `stack_board` surface (`surfaceId: "monitor"`) directly in the store. When it creates the board, it also deletes any other surfaces (such as a prior `git-stack` or `progress_board` card) so `"monitor"` is the sole board in the pane. `payload.a2ui.store_status` reports the result:
    - `written`: the board file was replaced (`store_updated` is `true`).
-   - `unchanged`: the board already shows the same pull requests. Only the status timestamp differs, so nothing was written.
+   - `unchanged`: the board already shows the same pull requests. Only the status timestamp differs, so nothing was written. Under `--mine`, a new title, subtitle, or source badge is always written.
    - `dismissed`: the user closed the board (or pressed **Acknowledge**, which removes it), and this tick had no actionable event. The board stays gone until an actionable event, a `--once` pass, or the first sync of a newly started process. Do not re-render it.
    - `unavailable`: there is no store, the lock timed out, or a legacy flat store has not been migrated yet.
 
@@ -107,11 +118,11 @@ python3 <skill-dir>/scripts/monitor_prs.py \
 1. If `convo` is on `PATH`, update conversation status: `convo --waiting "Watching <short PR list>"`.
 2. The daemon acquires `<scratch>/monitor/daemon.lock`, writes `<scratch>/monitor/armed.json`, and begins background polling.
 3. If the daemon is already running (exit code 4), another process owns the lock; do not spawn a duplicate.
-4. End your turn. The daemon will wake the conversation via `agentapi send-message` whenever actionable events are detected on pull requests you own.
+4. End your turn. The daemon will wake the conversation via `agentapi send-message` whenever actionable events are detected on pull requests you own. Under `--mine` without `--wake` (and `--reviews` without `--wake-on-review`), it never wakes the conversation; the pane and `events.jsonl` keep updating in the background.
 
 ## 4. Remediate in the Main Agent and Acknowledge
 
-When the daemon wakes the conversation, read `<conversation-scratch-dir>/monitor/last.json`:
+When the daemon wakes the conversation, read `<conversation-scratch-dir>/monitor/last.json`. A `--mine` daemon wakes it only when started with `--wake`, and a batch may include `pr_added` and `pr_removed` events, which need no action:
 
 1. Follow [references/action_policy.md](references/action_policy.md) for each event on pull requests where `mine` is `true`.
 2. When remediating:

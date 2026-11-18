@@ -17,32 +17,50 @@ CREATE OR REPLACE MACRO kb_cosine(v_u8, scale, q_vec) AS
 CREATE OR REPLACE VIEW v_pull_requests AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, p.*
 FROM kb.pull_requests p
-JOIN kb.repos r ON r.repo_id = p.repo_id;
+JOIN kb.repos r ON r.repo_id = p.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_issues AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, i.*
 FROM kb.issues i
-JOIN kb.repos r ON r.repo_id = i.repo_id;
+JOIN kb.repos r ON r.repo_id = i.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_review_threads AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, rt.*
 FROM kb.review_threads rt
-JOIN kb.repos r ON r.repo_id = rt.repo_id;
+JOIN kb.repos r ON r.repo_id = rt.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_code_symbols AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, cs.*
 FROM kb.code_symbols cs
-JOIN kb.repos r ON r.repo_id = cs.repo_id;
+JOIN kb.repos r ON r.repo_id = cs.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_doc_sections AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, ds.*
 FROM kb.doc_sections ds
-JOIN kb.repos r ON r.repo_id = ds.repo_id;
+JOIN kb.repos r ON r.repo_id = ds.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_indexed_files AS
 SELECT r.full_name AS repo, r.full_name AS repo_full_name, idx.*
 FROM kb.indexed_files idx
-JOIN kb.repos r ON r.repo_id = idx.repo_id;
+JOIN kb.repos r ON r.repo_id = idx.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_chunk_vectors AS
 SELECT
@@ -62,7 +80,10 @@ SELECT
   ce.vector_u8
 FROM kb.chunks c
 JOIN kb.repos r ON r.repo_id = c.repo_id
-JOIN kb.chunk_embeddings ce ON ce.chunk_id = c.chunk_id;
+JOIN kb.chunk_embeddings ce ON ce.chunk_id = c.chunk_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_file_hotspots AS
 SELECT
@@ -76,6 +97,9 @@ FROM kb.commit_files cf
 JOIN kb.repos r ON r.repo_id = cf.repo_id
 LEFT JOIN kb.review_threads rt
   ON rt.repo_id = cf.repo_id AND rt.file_path = cf.file_path
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+)
 GROUP BY r.full_name, cf.file_path;
 
 CREATE OR REPLACE VIEW v_item_participants AS
@@ -96,6 +120,7 @@ SELECT DISTINCT
 FROM (
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -114,6 +139,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -133,6 +159,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -153,6 +180,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'issue' AS kind,
     i.number AS number,
     i.title AS title,
@@ -173,6 +201,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -192,6 +221,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -217,6 +247,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'pr' AS kind,
     p.number AS number,
     p.title AS title,
@@ -243,6 +274,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'issue' AS kind,
     i.number AS number,
     i.title AS title,
@@ -261,6 +293,7 @@ FROM (
 
   SELECT
     r.full_name AS repo,
+    r.repo_id AS repo_id,
     'discussion' AS kind,
     d.number AS number,
     d.title AS title,
@@ -278,7 +311,11 @@ FROM (
   FROM kb.discussions d
   JOIN kb.repos r ON r.repo_id = d.repo_id
 )
-WHERE participant IS NOT NULL AND participant <> '';
+WHERE participant IS NOT NULL
+  AND participant <> ''
+  AND NOT EXISTS (
+    SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(repo_id AS VARCHAR)
+  );
 
 -- Live GitHub data (schema version 2). These mirror the SQLite reader views in
 -- views.sql, rewritten in DuckDB SQL: DuckDB cannot evaluate the SQLite views
@@ -293,7 +330,10 @@ SELECT
   p.created_at, p.updated_at, p.merged_at, p.closed_at,
   p.base_ref, p.head_ref, p.head_sha, p.head_repo_owner, p.is_cross_repository, p.body
 FROM kb.pull_requests p
-JOIN kb.repos r ON r.repo_id = p.repo_id;
+JOIN kb.repos r ON r.repo_id = p.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_issue_basic AS
 SELECT
@@ -303,7 +343,10 @@ SELECT
   i.number, i.title, i.state, i.url, i.author, i.labels_json, i.assignees_json,
   i.created_at, i.updated_at, i.closed_at, i.body
 FROM kb.issues i
-JOIN kb.repos r ON r.repo_id = i.repo_id;
+JOIN kb.repos r ON r.repo_id = i.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_item_comments AS
 SELECT item_key, kind, comment_id, author, author_type, created_at
@@ -318,6 +361,9 @@ FROM (
   FROM kb.comments c
   JOIN kb.repos r ON r.repo_id = c.repo_id
   WHERE c.parent_kind IN ('pr', 'issue')
+    AND NOT EXISTS (
+      SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+    )
 )
 WHERE rn <= 10;
 
@@ -338,7 +384,10 @@ FROM kb.pull_requests p
 JOIN kb.repos r ON r.repo_id = p.repo_id
 LEFT JOIN kb.pr_rollup ro
   ON ro.repo_id = p.repo_id AND ro.pr_number = p.number AND ro.head_oid = p.head_sha
-WHERE p.live_fetched_at IS NOT NULL;
+WHERE p.live_fetched_at IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+  );
 
 CREATE OR REPLACE VIEW v_pr_checks AS
 SELECT
@@ -348,19 +397,28 @@ SELECT
 FROM kb.check_runs c
 JOIN kb.pull_requests p
   ON p.repo_id = c.repo_id AND p.number = c.pr_number AND p.head_sha = c.head_oid
-JOIN kb.repos r ON r.repo_id = c.repo_id;
+JOIN kb.repos r ON r.repo_id = c.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_pr_review_requests AS
 SELECT r.full_name || '#' || q.pr_number AS item_key, q.reviewer, q.reviewer_kind,
   q.requested_at AS requested_at
 FROM kb.review_requests q
-JOIN kb.repos r ON r.repo_id = q.repo_id;
+JOIN kb.repos r ON r.repo_id = q.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_pr_latest_reviews AS
 SELECT r.full_name || '#' || o.pr_number AS item_key, o.author, o.author_type, o.state,
   o.submitted_at
 FROM kb.latest_opinionated_reviews o
-JOIN kb.repos r ON r.repo_id = o.repo_id;
+JOIN kb.repos r ON r.repo_id = o.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_pr_latest_author_reviews AS
 SELECT
@@ -373,14 +431,20 @@ SELECT
   lr.submitted_at,
   lr.commit_oid
 FROM kb.latest_reviews lr
-JOIN kb.repos r ON r.repo_id = lr.repo_id;
+JOIN kb.repos r ON r.repo_id = lr.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_pr_threads AS
 SELECT r.full_name || '#' || t.pr_number AS item_key, t.thread_id, t.is_resolved,
   t.is_outdated, t.last_author, t.last_author_type, t.last_at,
   t.participants_json AS participants_json
 FROM kb.thread_activity t
-JOIN kb.repos r ON r.repo_id = t.repo_id;
+JOIN kb.repos r ON r.repo_id = t.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_viewer_items AS
 SELECT
@@ -389,7 +453,10 @@ SELECT
   v.first_seen_at,
   v.last_seen_at
 FROM kb.viewer_sets v
-JOIN kb.repos r ON r.repo_id = v.repo_id;
+JOIN kb.repos r ON r.repo_id = v.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_notifications AS
 SELECT thread_id, reason, subject_type, item_key, updated_at, unread, seen_at
@@ -404,7 +471,10 @@ SELECT
   w.lease_expires_at,
   w.lease_expires_at > strftime(now() AT TIME ZONE 'UTC', '%Y-%m-%dT%H:%M:%SZ') AS active
 FROM kb.watches w
-JOIN kb.repos r ON r.repo_id = w.repo_id;
+JOIN kb.repos r ON r.repo_id = w.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 CREATE OR REPLACE VIEW v_changes AS
 SELECT seq, item_key, kind, fields, "at" FROM kb.changes;
@@ -437,7 +507,16 @@ SELECT
     AS active_leases,
   (SELECT value FROM kb.service_state WHERE key = 'viewer_login') AS viewer_login,
   h.last_ok_at AS last_ok_at,
-  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks
+  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks,
+  COALESCE(
+    CAST(
+      (SELECT json_group_object(substr(key, 12), value)
+       FROM kb.service_state
+       WHERE starts_with(key, 'viewer_set:') AND length(key) > 11 AND value IS NOT NULL)
+      AS VARCHAR
+    ),
+    '{}'
+  ) AS viewer_sets_synced_json
 FROM (SELECT 1 AS one) AS anchor
 LEFT JOIN kb.service_heartbeat h ON h.id = 1;
 
@@ -450,7 +529,10 @@ SELECT
   r.full_name || '#' || t.item_number AS item_key,
   t.*
 FROM kb.timeline_events t
-JOIN kb.repos r ON r.repo_id = t.repo_id;
+JOIN kb.repos r ON r.repo_id = t.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 -- Every submitted review, from `kb.reviews` and timeline `PullRequestReview`
 -- events, one row per review id (the timeline event_id is the review node id).
@@ -499,7 +581,10 @@ SELECT
 FROM merged m
 JOIN kb.repos r ON r.repo_id = m.repo_id
 LEFT JOIN kb.pull_requests p ON p.repo_id = m.repo_id AND p.number = m.pr_number
-WHERE COALESCE(m.state, '') <> 'PENDING';
+WHERE COALESCE(m.state, '') <> 'PENDING'
+  AND NOT EXISTS (
+    SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+  );
 
 CREATE OR REPLACE VIEW v_pr_timeline AS
 SELECT repo, pr_number, repo || '#' || pr_number AS item_key, "at", event_type, actor,
@@ -516,7 +601,11 @@ FROM (
     t.subject_type
   FROM kb.timeline_events t
   JOIN kb.repos r ON r.repo_id = t.repo_id
-  WHERE t.item_kind = 'pr' AND t.event_type <> 'PullRequestReview'
+  WHERE t.item_kind = 'pr'
+    AND t.event_type <> 'PullRequestReview'
+    AND NOT EXISTS (
+      SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+    )
 
   UNION ALL
 
@@ -545,6 +634,9 @@ FROM (
   FROM kb.comments c
   JOIN kb.repos r ON r.repo_id = c.repo_id
   WHERE c.parent_kind = 'pr'
+    AND NOT EXISTS (
+      SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+    )
 )
 ORDER BY repo, pr_number, "at";
 
@@ -614,6 +706,9 @@ base AS (
   LEFT JOIN ev_agg a ON a.repo_id = p.repo_id AND a.pr_number = p.number
   LEFT JOIN human h ON h.repo_id = p.repo_id AND h.pr_number = p.number
   LEFT JOIN pushes fp ON fp.repo_id = p.repo_id AND fp.pr_number = p.number
+  WHERE NOT EXISTS (
+    SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+  )
 )
 SELECT
   *,
@@ -684,7 +779,10 @@ SELECT
 FROM reqs q
 JOIN kb.repos r ON r.repo_id = q.repo_id
 LEFT JOIN removals rm ON rm.event_id = q.event_id
-LEFT JOIN first_reviews fr ON fr.event_id = q.event_id;
+LEFT JOIN first_reviews fr ON fr.event_id = q.event_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+);
 
 -- Strongest evidence per (repo, issue, PR): closed_by > closes > xref >
 -- references. Adds closed_by for issues closed by a commit that belongs to a
@@ -730,4 +828,7 @@ WHERE NOT EXISTS (
   SELECT 1 FROM kb.pull_requests p
   WHERE p.repo_id = k.repo_id AND p.number = k.issue_number
 )
+  AND NOT EXISTS (
+    SELECT 1 FROM kb.service_state s WHERE s.key = 'pending_delete:' || CAST(r.repo_id AS VARCHAR)
+  )
 GROUP BY r.full_name, k.issue_number, k.pr_number;

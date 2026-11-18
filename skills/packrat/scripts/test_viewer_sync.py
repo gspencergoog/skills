@@ -15,6 +15,7 @@ from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError, RateLimited
 from live_store import iso_at
 from models import REPO_MODE_ITEMS, REPO_MODE_MIRROR
+from personal_store import PersonalStore
 from rate_budget import Priority
 from viewer_sync import (
     SEARCH_QUERY,
@@ -25,6 +26,7 @@ from viewer_sync import (
     ViewerSync,
     lookback_date,
     search_strings,
+    search_strings_for_user,
 )
 
 T0 = 1_800_000_000.0
@@ -74,6 +76,7 @@ def _page(
     issues: Sequence[Any] = (),
     cursors: Mapping[str, str] | None = None,
     reviewed: Sequence[Any] = (),
+    authored_open: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Builds one search payload; `cursors` maps an alias to its next-page cursor."""
     cursors = cursors or {}
@@ -81,6 +84,7 @@ def _page(
         "data": {
             "rateLimit": {"cost": 1},
             "authored": _conn(authored, cursors.get("authored")),
+            "authoredOpen": _conn(authored_open, cursors.get("authoredOpen")),
             "reviewRequested": _conn(review, cursors.get("reviewRequested")),
             "reviewed": _conn(reviewed, cursors.get("reviewed")),
             "issues": _conn(issues, cursors.get("issues")),
@@ -361,6 +365,9 @@ class TestViewerSync(unittest.TestCase):
             week["authored"], "is:pr author:@me archived:false updated:>=2027-01-08"
         )
         self.assertEqual(
+            week["authoredOpen"], "is:pr is:open author:@me archived:false"
+        )
+        self.assertEqual(
             week["issues"], "is:issue involves:@me archived:false updated:>=2027-01-08"
         )
         self.assertEqual(
@@ -372,8 +379,13 @@ class TestViewerSync(unittest.TestCase):
         )
         self.assertIn("updated:>=2026-12-16", month["authored"])
         self.assertIn("updated:>=2026-12-16", month["issues"])
+        self.assertEqual(search_strings(30, T0)["authoredOpen"], month["authoredOpen"])
         self.assertEqual(search_strings(30, T0)["reviewRequested"], month["reviewReq"])
         self.assertEqual(search_strings(30, T0)["reviewed"], month["reviewed"])
+        self.assertEqual(
+            search_strings_for_user("@alice", 7, T0)["authoredOpen"],
+            "is:pr is:open author:alice is:public archived:false",
+        )
 
     def test_keys_use_registered_repo_casing(self) -> None:
         self.store.register_repo("Octo-Org", "Widgets")
@@ -600,6 +612,63 @@ class TestViewerSync(unittest.TestCase):
         self.assertEqual(sync.refresh_viewer(), ["me/app#1", "me/app#2", "me/app#3"])
         sizes = [c["variables"]["first"] for c in transport.calls]
         self.assertEqual(sizes, [20, 10, 5, 10, 20])
+
+    def test_authored_open_tracks_idle_open_prs_leases_and_change_rows(self) -> None:
+        sync, _ = self._sync(
+            _page(
+                authored=[_pr("me/app", 1)],
+                authored_open=[_pr("me/app", 1), _pr("me/app", 8)],
+            ),
+            _page(
+                authored=[_pr("me/app", 1)],
+                authored_open=[_pr("me/app", 1)],
+            ),
+        )
+        changed = sync.refresh_viewer(now=T0)
+        self.assertEqual(changed, ["me/app#1", "me/app#8"])
+        self.assertEqual(
+            self._viewer_items(),
+            {
+                "authored": ["me/app#1"],
+                "authored_open": ["me/app#1", "me/app#8"],
+            },
+        )
+        self.assertEqual(self._leases(T0), ["me/app#1", "me/app#8"])
+        self.assertEqual(self.hot.calls, [["me/app#1", "me/app#8"]])
+        rows = self.store.conn.execute(
+            "SELECT item_key, kind, fields FROM v_changes WHERE item_key = 'me/app#8'"
+        ).fetchall()
+        self.assertEqual(
+            [(r["item_key"], r["kind"], json.loads(r["fields"])) for r in rows],
+            [("me/app#8", "viewer", ["authored_open"])],
+        )
+
+        changed2 = sync.refresh_viewer(now=T0 + 60)
+        self.assertEqual(changed2, ["me/app#8"])
+        self.assertEqual(self._leases(T0 + 60), ["me/app#1"])
+
+    def test_multi_user_sync_stores_authored_open_and_leases_members(self) -> None:
+        personal = PersonalStore(self.tmp_dir / "personal.sqlite")
+        try:
+            personal.link_identity("alice@example.com", "alice", verified=True, now=T0)
+            sync, _ = self._sync(
+                _page(
+                    authored=[_pr("me/app", 1)],
+                    authored_open=[_pr("me/app", 1), _pr("me/app", 8)],
+                )
+            )
+            changed = sync.sync_all_users(personal, now=T0)
+            self.assertEqual(changed, ["me/app#1", "me/app#8"])
+            items = personal.viewer_items_for_login("alice", sets=["authored_open"])
+            self.assertEqual([r["item_key"] for r in items], ["me/app#1", "me/app#8"])
+            leases = [
+                w.item_key
+                for w in personal.active_watches(now=T0, owner_id="alice@example.com")
+                if w.consumer == VIEWER_CONSUMER
+            ]
+            self.assertEqual(leases, ["me/app#1", "me/app#8"])
+        finally:
+            personal.close()
 
 
 if __name__ == "__main__":

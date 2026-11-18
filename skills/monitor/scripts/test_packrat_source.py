@@ -8,7 +8,8 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from collections.abc import Callable, Iterator
+import unittest.mock
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import redirect_stderr
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -18,8 +19,13 @@ from typing import Any
 from models import ViewerReview, parse_pr_ref
 from normalize import _thread_participants, normalize_pr
 from packrat_source import (
+    DEFAULT_PACKRAT_DB,
     PackratError,
     PackratSource,
+    ServiceHealth,
+    SubprocessPackrat,
+    ViewerSetUnavailable,
+    _is_default_db_path,
     available,
     gh_config_user,
     heartbeat_age,
@@ -29,18 +35,44 @@ from testing import FIXTURES_DIR, load_fixture
 # ----- helpers shared with test_monitor_prs.py ---------------------------------------
 
 
-def make_packrat_db(path: Path, beat_age_s: int | None = 5, viewer: str | None = "alice") -> Path:
-    """Creates a database with the contract views (as tables) and a service heartbeat."""
+def make_packrat_db(
+    path: Path,
+    beat_age_s: int | None = 5,
+    viewer: str | None = "alice",
+    synced_sets: Mapping[str, str] | None = None,
+) -> Path:
+    """Creates a database with the contract views (as tables) and a service heartbeat.
+
+    `synced_sets` maps each viewer set that has synced to its sync time. It fills
+    `v_service_health.viewer_sets_synced_json`, which is `'{}'` without it.
+    """
     conn = sqlite3.connect(path)
     conn.executescript((FIXTURES_DIR / "packrat_views.sql").read_text(encoding="utf-8"))
     conn.execute(
-        "INSERT INTO v_service_health (pid, beat_age_s, viewer_login, active_leases) "
-        "VALUES (4242, ?, ?, 0)",
-        (beat_age_s, viewer),
+        "INSERT INTO v_service_health "
+        "(pid, beat_age_s, viewer_login, active_leases, viewer_sets_synced_json) "
+        "VALUES (4242, ?, ?, 0, ?)",
+        (beat_age_s, viewer, json.dumps(dict(synced_sets or {}))),
     )
     conn.commit()
     conn.close()
     return path
+
+
+def set_synced_sets(path: Path, synced_sets: Mapping[str, str]) -> None:
+    """Replaces the viewer set sync times that the service health row reports."""
+    with _db(path) as conn:
+        conn.execute(
+            "UPDATE v_service_health SET viewer_sets_synced_json = ?",
+            (json.dumps(dict(synced_sets)),),
+        )
+
+
+def set_failed_ticks(path: Path, ticks: int) -> None:
+    with _db(path) as conn:
+        conn.execute(
+            "UPDATE v_service_health SET consecutive_failed_ticks = ?", (ticks,)
+        )
 
 
 def set_heartbeat(path: Path, beat_age_s: int | None) -> None:
@@ -68,7 +100,11 @@ def _check_row(key: str, head: str, node: dict[str, Any]) -> tuple[Any, ...]:
 
 def _requested_at_map(pr: dict[str, Any], repo: str) -> dict[str, str]:
     owner = repo.split("/")[0]
-    nodes = ((pr.get("timelineItems") or {}).get("nodes") or []) if isinstance(pr, dict) else []
+    nodes = (
+        ((pr.get("timelineItems") or {}).get("nodes") or [])
+        if isinstance(pr, dict)
+        else []
+    )
     out: dict[str, str] = {}
     for node in nodes:
         if not isinstance(node, dict) or not node.get("createdAt"):
@@ -141,7 +177,9 @@ def _db(path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _live_row(key: str, repo: str, mode: str, pr: dict[str, Any], **extra: Any) -> dict[str, Any]:
+def _live_row(
+    key: str, repo: str, mode: str, pr: dict[str, Any], **extra: Any
+) -> dict[str, Any]:
     commit = _head_commit(pr)
     rollup = commit.get("statusCheckRollup") or {}
     auto = pr.get("autoMergeRequest")
@@ -167,7 +205,9 @@ def _live_row(key: str, repo: str, mode: str, pr: dict[str, Any], **extra: Any) 
 def _insert(conn: sqlite3.Connection, table: str, row: dict[str, Any]) -> None:
     cols = ",".join(row)
     marks = ",".join("?" for _ in row)
-    conn.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({marks})", list(row.values()))
+    conn.execute(
+        f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({marks})", list(row.values())
+    )
 
 
 def _author_review_rows(
@@ -194,7 +234,12 @@ def _author_review_rows(
 
 
 def _insert_pr_relations(
-    conn: sqlite3.Connection, key: str, repo: str, number: int, head: str, pr: dict[str, Any]
+    conn: sqlite3.Connection,
+    key: str,
+    repo: str,
+    number: int,
+    head: str,
+    pr: dict[str, Any],
 ) -> None:
     contexts = _head_commit(pr).get("statusCheckRollup") or {}
     req_map = _requested_at_map(pr, repo)
@@ -203,7 +248,10 @@ def _insert_pr_relations(
         "item_key, head_oid, run_key, kind, name, status, conclusion, "
         "details_url, started_at, completed_at, is_required, workflow_run_id"
         ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        [_check_row(key, head, n) for n in (contexts.get("contexts") or {}).get("nodes", [])],
+        [
+            _check_row(key, head, n)
+            for n in (contexts.get("contexts") or {}).get("nodes", [])
+        ],
     )
     conn.executemany(
         "INSERT INTO v_pr_review_requests (item_key, reviewer, reviewer_kind, requested_at) "
@@ -348,7 +396,10 @@ class FakePackratCli:
 
 
 def change(seq: int, *keys: str) -> dict[str, Any]:
-    rows = [{"seq": seq, "item_key": k, "kind": "pr", "fields": ["state"], "at": "x"} for k in keys]
+    rows = [
+        {"seq": seq, "item_key": k, "kind": "pr", "fields": ["state"], "at": "x"}
+        for k in keys
+    ]
     return {"seq": seq, "changes": rows}
 
 
@@ -382,6 +433,50 @@ class TestAvailability(PackratDbCase):
         self.assertFalse(available(bare))
 
 
+class TestServiceHealth(PackratDbCase):
+    def test_thresholds(self) -> None:
+        self.assertTrue(ServiceHealth(180, 2, {}).healthy)
+        self.assertFalse(ServiceHealth(181, 0, {}).heartbeat_fresh)
+        self.assertFalse(ServiceHealth(None, 0, {}).heartbeat_fresh)
+        stuck = ServiceHealth(3, 3, {})
+        self.assertTrue(stuck.heartbeat_fresh)
+        self.assertFalse(stuck.healthy)
+
+    def test_fixture_file_without_new_columns_reads_zero_and_empty(self) -> None:
+        # A database written by a service that predates `consecutive_failed_ticks`
+        # and the sync-time column.
+        old = Path(self.tmp.name) / "old.sqlite"
+        with _db(old) as conn:
+            conn.execute(
+                "CREATE TABLE v_service_health "
+                "(pid INTEGER, beat_age_s INTEGER, viewer_login TEXT)"
+            )
+            conn.execute("INSERT INTO v_service_health VALUES (4242, 5, 'alice')")
+        source = PackratSource(old, "conv123", runner=self.cli)
+        self.assertEqual(source.health(), ServiceHealth(5, 0, {}))
+        set_heartbeat(old, None)
+        self.assertFalse(source.health().heartbeat_fresh)
+        self.assertEqual(self.cli.calls, [])
+
+    def test_fixture_file_defaults_to_zero_ticks_and_no_synced_sets(self) -> None:
+        self.assertEqual(self.source.health(), ServiceHealth(5, 0, {}))
+
+    def test_fixture_file_reads_failed_ticks_and_sync_times(self) -> None:
+        synced = {"authored_open": "2026-11-17T01:19:05Z"}
+        set_failed_ticks(self.db, 3)
+        set_synced_sets(self.db, synced)
+        health = self.source.health()
+        self.assertEqual(health, ServiceHealth(5, 3, synced))
+        self.assertTrue(health.heartbeat_fresh)
+        self.assertFalse(health.healthy)
+
+    def test_fixture_file_without_the_view_raises(self) -> None:
+        bare = Path(self.tmp.name) / "bare.sqlite"
+        sqlite3.connect(bare).close()
+        with self.assertRaises(PackratError):
+            PackratSource(bare, "conv123", runner=self.cli).health()
+
+
 class TestSnapshots(PackratDbCase):
     def _assert_round_trip(self, fixture: str) -> None:
         pr = json.loads(load_fixture(fixture))["data"]["pr0"]["pullRequest"]
@@ -403,7 +498,9 @@ class TestSnapshots(PackratDbCase):
         self._assert_round_trip("pr_ci_failed.json")
 
     def test_same_named_checks_keep_the_failing_run(self) -> None:
-        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
         failing = {
             "__typename": "CheckRun", "databaseId": 701, "name": "build", "status": "COMPLETED",
             "conclusion": "FAILURE", "isRequired": True,
@@ -414,14 +511,20 @@ class TestSnapshots(PackratDbCase):
         contexts["totalCount"] = 2
         key = store_graphql_pr(self.db, pr, rollup_state="FAILURE")
         with _db(self.db) as conn:
-            keys = [r[0] for r in conn.execute("SELECT run_key FROM v_pr_checks ORDER BY 1")]
+            keys = [
+                r[0] for r in conn.execute("SELECT run_key FROM v_pr_checks ORDER BY 1")
+            ]
         self.assertEqual(keys, ["CheckRun:701", "CheckRun:702"])
         snap = normalize_pr(self.source.snapshots([key])[key], viewer="alice")
-        self.assertEqual([(c.name, c.conclusion) for c in snap.checks], [("build", "FAILURE")])
+        self.assertEqual(
+            [(c.name, c.conclusion) for c in snap.checks], [("build", "FAILURE")]
+        )
         self.assertEqual(snap.truncated, [])
 
     def test_rollup_unknown_for_current_head_gives_no_checks(self) -> None:
-        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
         key = store_graphql_pr(self.db, pr, rollup_state=None, rollup_total=None)
         with _db(self.db) as conn:
             conn.execute("DELETE FROM v_pr_checks")
@@ -446,7 +549,9 @@ class TestSnapshots(PackratDbCase):
         self.assertEqual(self.source.viewer_login(), "alice")
 
     def test_author_reviews_hydration_and_pre_v8_fallback(self) -> None:
-        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
         pr["reviews"] = {
             "nodes": [
                 {
@@ -506,8 +611,12 @@ class TestSnapshots(PackratDbCase):
         )
         self.assertEqual(snap_carol.viewer_opinionated_state, "APPROVED")
 
-    def test_v9_threads_requests_and_comments_round_trip_and_pre_v9_fallback(self) -> None:
-        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+    def test_v9_threads_requests_and_comments_round_trip_and_pre_v9_fallback(
+        self,
+    ) -> None:
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
         pr["timelineItems"] = {
             "nodes": [
                 {
@@ -533,7 +642,9 @@ class TestSnapshots(PackratDbCase):
                     "id": "PRRT_v9",
                     "isResolved": False,
                     "isOutdated": True,
-                    "firstComment": {"nodes": [{"author": {"login": "bob", "__typename": "User"}}]},
+                    "firstComment": {
+                        "nodes": [{"author": {"login": "bob", "__typename": "User"}}]
+                    },
                     "comments": {
                         "nodes": [
                             {
@@ -588,7 +699,9 @@ class TestSnapshots(PackratDbCase):
             conn.execute("ALTER TABLE v_pr_threads DROP COLUMN participants_json")
         raw_pre_v9 = self.source.snapshots([key])[key]
         snap_pre_v9 = normalize_pr(raw_pre_v9, viewer="bob")
-        self.assertEqual(snap_pre_v9.requested_reviewers, ["bob", "team:core-reviewers"])
+        self.assertEqual(
+            snap_pre_v9.requested_reviewers, ["bob", "team:core-reviewers"]
+        )
         self.assertIsNone(snap_pre_v9.viewer_requested_at)
         self.assertIsNone(snap_pre_v9.viewer_last_comment_at)
         self.assertIsNone(snap_pre_v9.author_last_comment_at)
@@ -597,7 +710,9 @@ class TestSnapshots(PackratDbCase):
         self.assertEqual(snap_pre_v9.threads[0].participants, ())
 
     def test_discover_review_keys_orders_by_updated_at_and_filters_repo(self) -> None:
-        pr_base = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"]["pullRequest"]
+        pr_base = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
         pr1 = {
             **pr_base,
             "number": 10,
@@ -641,6 +756,73 @@ class TestSnapshots(PackratDbCase):
             ["acme/widget#10", "acme/widget#40"],
         )
 
+    def _store_authored(self) -> None:
+        pr_base = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
+        specs = (
+            ("acme/widget", 10, "OPEN", "2026-10-27T20:00:00Z"),
+            ("other/repo", 20, "OPEN", "2026-10-27T22:00:00Z"),
+            ("acme/widget", 30, "CLOSED", "2026-10-27T23:00:00Z"),
+            ("acme/widget", 50, "OPEN", "2026-10-27T20:00:00Z"),
+        )
+        for repo, number, state, updated in specs:
+            store_graphql_pr(
+                self.db,
+                {
+                    **pr_base,
+                    "number": number,
+                    "url": f"https://github.com/{repo}/pull/{number}",
+                    "state": state,
+                    "updatedAt": updated,
+                },
+            )
+        with _db(self.db) as conn:
+            conn.executemany(
+                "INSERT INTO v_viewer_items VALUES (?,?,?,?)",
+                [
+                    ("authored_open", "acme/widget#50", "x", "x"),
+                    ("authored_open", "acme/widget#10", "x", "x"),
+                    ("authored_open", "other/repo#20", "x", "x"),
+                    ("authored_open", "acme/widget#30", "x", "x"),  # row says CLOSED
+                    ("authored_open", "acme/widget#40", "x", "x"),  # no live row yet
+                    ("authored", "acme/widget#99", "x", "x"),
+                    ("review_requested", "acme/widget#77", "x", "x"),
+                ],
+            )
+
+    def test_discover_authored_keys_orders_by_update_then_key_and_filters_repo(
+        self,
+    ) -> None:
+        self._store_authored()
+        set_synced_sets(self.db, {"authored_open": "2026-11-17T01:19:05Z"})
+        self.assertEqual(
+            self.source.discover_authored_keys(),
+            ["other/repo#20", "acme/widget#10", "acme/widget#50", "acme/widget#40"],
+        )
+        self.assertEqual(
+            self.source.discover_authored_keys(repo="ACME/Widget"),
+            ["acme/widget#10", "acme/widget#50", "acme/widget#40"],
+        )
+        self.assertEqual(self.source.discover_authored_keys(repo="no/such"), [])
+        self.assertEqual(self.cli.calls, [])  # views only, no CLI call
+
+    def test_discover_authored_keys_raises_when_the_set_never_synced(self) -> None:
+        self._store_authored()
+        for synced in ({}, {"authored": "2026-11-17T01:19:05Z"}):
+            set_synced_sets(self.db, synced)
+            for repo in (None, "acme/widget", "no/such"):
+                with self.subTest(synced=synced, repo=repo):
+                    with self.assertRaises(ViewerSetUnavailable) as ctx:
+                        self.source.discover_authored_keys(repo=repo)
+                    self.assertIn("packrat auto-sync on", str(ctx.exception))
+                    self.assertIsInstance(ctx.exception, PackratError)
+        # A set that synced empty is available.
+        with _db(self.db) as conn:
+            conn.execute("DELETE FROM v_viewer_items")
+        set_synced_sets(self.db, {"authored_open": "2026-11-17T01:19:05Z"})
+        self.assertEqual(self.source.discover_authored_keys(), [])
+
 
 class TestStackNeighbors(PackratDbCase):
     def test_three_pr_stack_from_the_middle(self) -> None:
@@ -659,25 +841,32 @@ class TestStackNeighbors(PackratDbCase):
 
     def test_same_named_fork_branch_is_never_a_parent(self) -> None:
         add_basic_pr(self.db, "acme/widget#1", "main", "a")
-        add_basic_pr(self.db, "acme/widget#9", "main", "a", cross=1)  # fork with branch "a"
+        add_basic_pr(
+            self.db, "acme/widget#9", "main", "a", cross=1
+        )  # fork with branch "a"
         add_basic_pr(self.db, "acme/widget#2", "a", "b")
         self.assertEqual(
-            self.source.stack_neighbors("acme/widget#2"), ["acme/widget#1", "acme/widget#2"]
+            self.source.stack_neighbors("acme/widget#2"),
+            ["acme/widget#1", "acme/widget#2"],
         )
 
     def test_fork_headed_pr_has_no_children(self) -> None:
         add_basic_pr(self.db, "acme/widget#5", "main", "feature", cross=1)
         add_basic_pr(self.db, "acme/widget#6", "feature", "next")
-        self.assertEqual(self.source.stack_neighbors("acme/widget#5"), ["acme/widget#5"])
+        self.assertEqual(
+            self.source.stack_neighbors("acme/widget#5"), ["acme/widget#5"]
+        )
 
     def test_null_fork_fields_count_as_same_repo(self) -> None:
         add_basic_pr(self.db, "acme/widget#1", "main", "a", cross=None)
         add_basic_pr(self.db, "acme/widget#2", "a", "b", cross=None)
         self.assertEqual(
-            self.source.stack_neighbors("acme/widget#1"), ["acme/widget#1", "acme/widget#2"]
+            self.source.stack_neighbors("acme/widget#1"),
+            ["acme/widget#1", "acme/widget#2"],
         )
         self.assertEqual(
-            self.source.stack_neighbors("acme/widget#2"), ["acme/widget#1", "acme/widget#2"]
+            self.source.stack_neighbors("acme/widget#2"),
+            ["acme/widget#1", "acme/widget#2"],
         )
 
     def test_items_repo_and_unknown_pr_return_none(self) -> None:
@@ -721,7 +910,9 @@ class TestCliCalls(PackratDbCase):
             self.source.lease(["--help", "acme/widget#1", "acme/widget#x"])
             self.source.refresh(["-rf"])
         self.assertEqual(self.cli.calls[0][-2:], ["--", "acme/widget#1"])
-        self.assertEqual(len(self.cli.calls), 1)  # refresh with no valid keys makes no call
+        self.assertEqual(
+            len(self.cli.calls), 1
+        )  # refresh with no valid keys makes no call
         self.assertEqual(self.source.watched, {"acme/widget#1"})
         self.assertEqual(err.getvalue().count("malformed packrat item key"), 3)
 
@@ -729,12 +920,18 @@ class TestCliCalls(PackratDbCase):
         self.source.lease(["acme/widget#1"])
         self.cli.changes.append(change(12, "acme/widget#1", "acme/widget#7"))
         batch = self.source.wait_changes(10, 20)
-        self.assertEqual((batch.seq, batch.keys, batch.reset), (12, {"acme/widget#1"}, False))
-        self.assertIn(["changes", "--since", "10", "--wait", "20", "--json"], self.cli.calls)
+        self.assertEqual(
+            (batch.seq, batch.keys, batch.reset), (12, {"acme/widget#1"}, False)
+        )
+        self.assertIn(
+            ["changes", "--since", "10", "--wait", "20", "--json"], self.cli.calls
+        )
 
         self.cli.changes.append({"reset": True, "seq": 99})
         batch = self.source.wait_changes(12, 0)
-        self.assertEqual((batch.seq, batch.keys, batch.reset), (99, {"acme/widget#1"}, True))
+        self.assertEqual(
+            (batch.seq, batch.keys, batch.reset), (99, {"acme/widget#1"}, True)
+        )
 
     def test_unlease_and_viewer_changed_on_unwatched_pr(self) -> None:
         self.source.lease(["acme/widget#1", "acme/widget#2"])
@@ -810,6 +1007,340 @@ class TestGhConfigUser(unittest.TestCase):
             )
             self.assertEqual(gh_config_user(Path(tmp)), "alice")
             self.assertEqual(gh_config_user(Path(tmp) / "missing"), "")
+
+
+class FakeReaderRunner:
+    """Scripted `packrat` CLI runner serving `packrat reader --ops-json <ops> --json`.
+
+    `changes` answers "no changes" after calling `on_wait(seconds)`, so a fake clock
+    can advance while the monitor waits on the feed. A call that waits answers from
+    the `changes` queue first: each entry is a payload dict or a callable returning
+    one, as in `FakePackratCli`.
+    """
+
+    def __init__(
+        self,
+        *,
+        beat_age_s: int | None = 4,
+        viewer_login: str | None = "alice",
+        on_wait: Callable[[float], None] | None = None,
+    ) -> None:
+        self.calls: list[list[str]] = []
+        self.beat_age_s = beat_age_s
+        self.viewer_login = viewer_login
+        self.health_extra: dict[str, Any] = {}
+        self.on_wait = on_wait
+        self.viewer_items: list[dict[str, Any]] = []
+        self.items_bundle: dict[str, list[dict[str, Any]]] = {}
+        self.known_keys_map: dict[str, str] = {}
+        self.stacks_map: dict[str, list[str] | None] = {}
+        self.changes: list[dict[str, Any] | Callable[[], dict[str, Any]]] = []
+        self.fail_next: tuple[int, str] | None = None
+
+    def __call__(self, args: list[str], timeout_s: float) -> tuple[int, str, str]:
+        self.calls.append(list(args))
+        if self.fail_next is not None:
+            code, err = self.fail_next
+            self.fail_next = None
+            return code, "", err
+        if args[0] == "reader":
+            ops = json.loads(args[args.index("--ops-json") + 1])
+            resp: dict[str, Any] = {}
+            if ops.get("health"):
+                resp["health"] = {
+                    "pid": 9001,
+                    "beat_age_s": self.beat_age_s,
+                    "viewer_login": self.viewer_login,
+                    **self.health_extra,
+                }
+            if ops.get("viewer_items"):
+                resp["viewer_items"] = list(self.viewer_items)
+            if ops.get("items"):
+                resp["items"] = dict(self.items_bundle)
+            if ops.get("known_keys"):
+                req = set(ops["known_keys"].get("keys") or [])
+                resp["known_keys"] = {
+                    k: v for k, v in self.known_keys_map.items() if k in req
+                }
+            if ops.get("stack_neighbors"):
+                req_keys = ops["stack_neighbors"].get("keys") or []
+                resp["stack_neighbors"] = {k: self.stacks_map.get(k) for k in req_keys}
+            return 0, json.dumps(resp), ""
+        if args[0] == "changes":
+            since = int(args[args.index("--since") + 1])
+            wait = float(args[args.index("--wait") + 1])
+            if self.changes and wait > 0:
+                entry = self.changes.pop(0)
+                return 0, json.dumps(entry() if callable(entry) else entry), ""
+            if self.on_wait is not None and wait > 0:
+                self.on_wait(wait)
+            return 0, json.dumps({"seq": since, "changes": []}), ""
+        return 0, json.dumps({"ok": True}), ""
+
+
+class TestReaderCliMode(unittest.TestCase):
+    """Tests zero-local-DB `packrat reader` execution, `--db` omission, and `auth_expired`."""
+
+    def test_default_db_detection_and_subprocess_omits_db_flag(self) -> None:
+        self.assertTrue(_is_default_db_path(DEFAULT_PACKRAT_DB))
+        self.assertTrue(
+            _is_default_db_path(Path("~/.local/share/packrat/repos.sqlite"))
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            custom = Path(tmp) / "custom.sqlite"
+            self.assertFalse(_is_default_db_path(custom))
+            proc_ok = unittest.mock.MagicMock(returncode=0, stdout="{}", stderr="")
+            with unittest.mock.patch(
+                "subprocess.run", return_value=proc_ok
+            ) as run_mock:
+                SubprocessPackrat(DEFAULT_PACKRAT_DB).run(
+                    ["reader", "--health", "--json"]
+                )
+                default_argv = run_mock.call_args_list[-1].args[0]
+                self.assertNotIn("--db", default_argv)
+
+                SubprocessPackrat(custom).run(["reader", "--health", "--json"])
+                custom_argv = run_mock.call_args_list[-1].args[0]
+                self.assertIn("--db", custom_argv)
+                self.assertEqual(
+                    custom_argv[custom_argv.index("--db") + 1], str(custom)
+                )
+
+    def test_available_and_heartbeat_age_via_reader_and_auth_expired_probe(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_db = Path(tmp) / "no-local-db.sqlite"
+            runner = FakeReaderRunner(beat_age_s=12)
+            self.assertEqual(heartbeat_age(missing_db, runner=runner), 12)
+            self.assertTrue(available(missing_db, runner=runner))
+
+            runner.beat_age_s = 300
+            self.assertFalse(available(missing_db, runner=runner))
+
+            runner.beat_age_s = 5
+            runner.fail_next = (4, "Error [auth_expired]: remote token expired")
+            self.assertFalse(available(missing_db, runner=runner))
+
+    def test_health_via_reader(self) -> None:
+        runner = FakeReaderRunner(beat_age_s=12)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PackratSource(Path(tmp) / "remote.sqlite", "conv-h", runner=runner)
+            # A service that predates the new fields reports neither.
+            self.assertEqual(source.health(), ServiceHealth(12, 0, {}))
+            self.assertEqual(len(runner.calls), 1)
+            ops = runner.calls[0][runner.calls[0].index("--ops-json") + 1]
+            self.assertEqual(json.loads(ops), {"health": True})
+
+            synced = {"authored": "2026-11-17T01:19:05Z"}
+            runner.health_extra = {
+                "consecutive_failed_ticks": 4,
+                "viewer_sets_synced_at": synced,
+            }
+            health = source.health()
+            self.assertEqual(health, ServiceHealth(12, 4, synced))
+            self.assertTrue(health.heartbeat_fresh)
+            self.assertFalse(health.healthy)
+
+            runner.beat_age_s = None
+            self.assertFalse(source.health().heartbeat_fresh)
+
+    def test_health_via_reader_raises_when_the_cli_fails(self) -> None:
+        runner = FakeReaderRunner()
+        runner.fail_next = (1, "packrat: cannot reach the service")
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PackratSource(Path(tmp) / "remote.sqlite", "conv-h", runner=runner)
+            with self.assertRaises(PackratError) as ctx:
+                source.health()
+        self.assertIn("cannot reach the service", str(ctx.exception))
+
+    def test_snapshots_caches_ages_and_invalidates_on_refresh_or_changes(self) -> None:
+        pr = json.loads(load_fixture("pr_open_ci_running.json"))["data"]["pr0"][
+            "pullRequest"
+        ]
+        live = _live_row("acme/widget#3339", "acme/widget", "mirror", pr, age_s=7.25)
+        runner = FakeReaderRunner(viewer_login="alice")
+        runner.items_bundle = {
+            "pr_live": [live],
+            "checks": [],
+            "review_requests": [
+                {
+                    "item_key": "acme/widget#3339",
+                    "reviewer": "bob",
+                    "reviewer_kind": "User",
+                }
+            ],
+            "latest_reviews": [],
+            "latest_author_reviews": [],
+            "threads": [],
+            "comments": [
+                {
+                    "item_key": "acme/widget#3339",
+                    "kind": "pr",
+                    "comment_id": "IC_1",
+                    "author": "bob",
+                    "author_type": "User",
+                    "created_at": "2026-10-27T21:05:00Z",
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            no_db = Path(tmp) / "remote-only.sqlite"
+            source = PackratSource(no_db, "conv-remote", runner=runner)
+            snaps = source.snapshots(["acme/widget#3339", "acme/widget#404"])
+            self.assertEqual(list(snaps), ["acme/widget#3339"])
+            snap = normalize_pr(
+                snaps["acme/widget#3339"], viewer="alice", repo="acme/widget"
+            )
+            self.assertEqual(snap.requested_reviewers, ["bob"])
+            self.assertEqual(len(runner.calls), 1)
+
+            # Cached age_s avoids a redundant reader subprocess call!
+            ages = source.fetched_ages(["acme/widget#3339", "acme/widget#404"])
+            self.assertEqual(ages, {"acme/widget#3339": 7.25})
+            self.assertEqual(len(runner.calls), 1)
+
+            # refresh() invalidates the age cache so the next fetched_ages() re-queries.
+            runner.items_bundle["pr_live"] = [{**live, "age_s": 1.0}]
+            source.refresh(["acme/widget#3339"])
+            self.assertEqual(
+                source.fetched_ages(["acme/widget#3339"]), {"acme/widget#3339": 1.0}
+            )
+            self.assertEqual(len(runner.calls), 3)
+
+            # wait_changes() also invalidates the age cache.
+            runner.items_bundle["pr_live"] = [{**live, "age_s": 0.5}]
+            source.wait_changes(10, 0)
+            self.assertEqual(
+                source.fetched_ages(["acme/widget#3339"]), {"acme/widget#3339": 0.5}
+            )
+
+    def test_discover_review_keys_known_keys_viewer_and_stacks_via_reader(self) -> None:
+        runner = FakeReaderRunner(viewer_login="alice")
+        runner.viewer_items = [
+            {
+                "set_name": "reviewed",
+                "item_key": "other/repo#20",
+                "state": "OPEN",
+                "updated_at": "2026-10-27T22:00:00Z",
+            },
+            {
+                "set_name": "review_requested",
+                "item_key": "acme/widget#10",
+                "state": "OPEN",
+                "updated_at": "2026-10-27T20:00:00Z",
+            },
+            {
+                "set_name": "review_requested",
+                "item_key": "acme/widget#40",
+                "state": None,
+                "updated_at": None,
+            },
+            {
+                "set_name": "review_requested",
+                "item_key": "acme/widget#30",
+                "state": "CLOSED",
+                "updated_at": "2026-10-27T23:00:00Z",
+            },
+        ]
+        runner.known_keys_map = {"legacy/Widget#10": "acme/widget#10"}
+        runner.stacks_map = {
+            "acme/widget#2": ["acme/widget#1", "acme/widget#2", "acme/widget#3"],
+            "items/repo#9": None,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PackratSource(Path(tmp) / "remote.sqlite", "conv-r", runner=runner)
+            self.assertEqual(
+                source.discover_review_keys(),
+                ["acme/widget#10", "acme/widget#40", "other/repo#20"],
+            )
+            self.assertEqual(
+                source.discover_review_keys(repo="ACME/Widget"),
+                ["acme/widget#10", "acme/widget#40"],
+            )
+            self.assertEqual(
+                source.known_keys(["legacy/Widget#10", "acme/widget#99"]),
+                {"legacy/Widget#10": "acme/widget#10"},
+            )
+            self.assertEqual(source.viewer_login(), "alice")
+            self.assertEqual(
+                source.stack_neighbors("acme/widget#2"),
+                ["acme/widget#1", "acme/widget#2", "acme/widget#3"],
+            )
+            self.assertIsNone(source.stack_neighbors("items/repo#9"))
+
+            # The shared helper filters to the requested sets, so a review query
+            # ignores authored rows that a server returns anyway.
+            runner.viewer_items.append(
+                {
+                    "set_name": "authored_open",
+                    "item_key": "acme/widget#5",
+                    "state": "OPEN",
+                }
+            )
+            self.assertEqual(
+                source.discover_review_keys(),
+                ["acme/widget#10", "acme/widget#40", "other/repo#20"],
+            )
+
+            runner.fail_next = (
+                4,
+                "Error [auth_expired]: token expired\nplease re-authenticate",
+            )
+            with self.assertRaises(PackratError) as ctx:
+                source.snapshots(["acme/widget#10"])
+            self.assertIn("auth_expired", str(ctx.exception))
+
+    def test_discover_authored_keys_via_reader_reads_health_in_the_same_batch(
+        self,
+    ) -> None:
+        def row(key: str, state: str | None, updated: str | None) -> dict[str, Any]:
+            return {
+                "set_name": "authored_open",
+                "item_key": key,
+                "state": state,
+                "updated_at": updated,
+                "last_seen_at": "2026-10-27T19:00:00Z",
+            }
+
+        runner = FakeReaderRunner(viewer_login="alice")
+        runner.viewer_items = [
+            row("acme/widget#50", "OPEN", "2026-10-27T20:00:00Z"),
+            row("acme/widget#10", "OPEN", "2026-10-27T20:00:00Z"),
+            row("other/repo#20", "OPEN", "2026-10-27T22:00:00Z"),
+            row("acme/widget#30", "MERGED", "2026-10-27T23:00:00Z"),
+            row("acme/widget#40", None, None),  # no live row: ordered by last_seen_at
+            {"set_name": "review_requested", "item_key": "acme/widget#77"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PackratSource(Path(tmp) / "remote.sqlite", "conv-a", runner=runner)
+            for repo in (None, "acme/widget"):
+                with self.subTest(repo=repo), self.assertRaises(ViewerSetUnavailable):
+                    source.discover_authored_keys(repo=repo)
+
+            runner.health_extra = {
+                "viewer_sets_synced_at": {"authored_open": "2026-11-17T01:19:05Z"}
+            }
+            runner.calls.clear()
+            self.assertEqual(
+                source.discover_authored_keys(),
+                ["other/repo#20", "acme/widget#10", "acme/widget#50", "acme/widget#40"],
+            )
+            self.assertEqual(len(runner.calls), 1)
+            ops = json.loads(runner.calls[0][runner.calls[0].index("--ops-json") + 1])
+            self.assertEqual(
+                ops, {"viewer_items": {"sets": ["authored_open"]}, "health": True}
+            )
+
+            runner.calls.clear()
+            self.assertEqual(
+                source.discover_authored_keys(repo="ACME/Widget"),
+                ["acme/widget#10", "acme/widget#50", "acme/widget#40"],
+            )
+            ops = json.loads(runner.calls[0][runner.calls[0].index("--ops-json") + 1])
+            self.assertEqual(
+                ops["viewer_items"], {"sets": ["authored_open"], "repo": "ACME/Widget"}
+            )
 
 
 if __name__ == "__main__":

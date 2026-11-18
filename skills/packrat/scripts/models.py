@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 EMBEDDING_DIM = 384
 _PACK_FORMAT = f"<{EMBEDDING_DIM}f"
@@ -1173,3 +1173,94 @@ class ImportSummary:
     chunks_imported: int = 0
     embeddings_imported: int = 0
     duration_sec: float = 0.0
+
+
+class PendingDeleteError(ValueError):
+    """Raised when an operation targets a repository queued for async deletion."""
+
+
+class HttpHelperError(Exception):
+    """Structured error raised by the remote HTTP client or helper subprocess."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int = 0,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = int(status)
+        self.retryable = bool(retryable)
+
+
+@dataclass(frozen=True)
+class SeedRepoSpec:
+    """Seed repository entry declared in a multi-user `ServerConfig` file."""
+
+    full_name: str
+    default_branch: str = ""
+    git_source: Literal["managed", "none"] = "managed"
+    git_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ServerConfig:
+    """Configuration for a multi-user `packrat serve --server-config` instance."""
+
+    allowlisted_orgs: tuple[str, ...] = ("a2ui-project", "flutter", "dart-lang")
+    admin_users: tuple[str, ...] = ()
+    default_git_source: Literal["managed", "none"] = "managed"
+    allowed_git_protocols: tuple[str, ...] = ("https",)
+    disk_high_water_pct: float = 85.0
+    hmac_secret_env: str = "PACKRAT_EDGE_HMAC_KEYS_JSON"
+    repos: tuple[SeedRepoSpec, ...] = ()
+
+
+@dataclass(frozen=True)
+class ClientConfig:
+    """Client routing and HTTP helper configuration loaded from `config.json`."""
+
+    mode: Literal["local", "remote", "auto"] = "auto"
+    remote_url: str = ""
+    http_cmd: tuple[str, ...] = ()
+    forward_gh_token: bool = False
+    github_user: str = ""
+
+
+@dataclass(frozen=True)
+class UserIdentity:
+    """Caller identity record stored in `personal.sqlite`."""
+
+    owner_id: str
+    github_login: str
+    login_verified: bool = False
+    notifications_last_modified: str | None = None
+    notifications_poll_interval_s: int = 60
+    last_active_at: str = ""
+    updated_at: str = ""
+
+
+class SqlColumnMeta(TypedDict):
+    """Column name and DuckDB SQL type returned by `POST /api/v1/sql`."""
+
+    name: str
+    type: str
+
+
+class SqlResponseEnvelope(TypedDict):
+    """JSON response envelope returned by `POST /api/v1/sql`."""
+
+    rows: list[dict[str, Any]]
+    columns: list[SqlColumnMeta]
+
+
+class SearchResponseEnvelope(TypedDict):
+    """JSON response envelope returned by `POST /api/v1/search`."""
+
+    hits: list[dict[str, Any]]
+    repo_watermarks: dict[str, dict[str, str | None]]
+    warnings: list[str]

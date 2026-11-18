@@ -17,7 +17,7 @@ import contextlib
 import dataclasses
 import json
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC
 from email.utils import parsedate_to_datetime
@@ -28,12 +28,14 @@ from db_store import PackratStore
 from gh_transport import BudgetDeferred, GhApiError, GhResponse, GhRunner, GhTransport
 from models import (
     NotificationRecord,
+    PendingDeleteError,
     RepoConfig,
     WatchLease,
     format_item_key,
     parse_item_key,
 )
 from rate_budget import Priority
+from viewer_sync import VIEWER_LOGIN_STATE_KEY
 
 WORKER = "signals"
 """Worker name recorded in `api_calls` for every signal request."""
@@ -197,6 +199,9 @@ def _subject_type(entry: Mapping[str, Any]) -> str | None:
     return str(value) if value else None
 
 
+_VIEWER_PR_ACTIONS = frozenset({"opened", "reopened"})
+
+
 def _has_default_branch_push(
     events: Iterable[Mapping[str, Any]], default_branch: str
 ) -> bool:
@@ -207,6 +212,29 @@ def _has_default_branch_push(
             continue
         payload = event.get("payload")
         if isinstance(payload, Mapping) and payload.get("ref") == target_ref:
+            return True
+    return False
+
+
+def _has_viewer_pr_open(
+    events: Iterable[Mapping[str, Any]], viewer_login: str | None
+) -> bool:
+    """Returns True when the viewer opened or reopened a pull request."""
+    target = (viewer_login or "").strip().lower()
+    if not target:
+        return False
+    for event in events:
+        if event.get("type") != "PullRequestEvent":
+            continue
+        payload = event.get("payload")
+        actor = event.get("actor")
+        action = payload.get("action") if isinstance(payload, Mapping) else None
+        login = actor.get("login") if isinstance(actor, Mapping) else None
+        if (
+            action in _VIEWER_PR_ACTIONS
+            and isinstance(login, str)
+            and login.lower() == target
+        ):
             return True
     return False
 
@@ -256,17 +284,26 @@ class SignalPoller:
     successful poll returns it.
     """
 
-    def __init__(self, transport: GhTransport, store: PackratStore) -> None:
+    def __init__(
+        self,
+        transport: GhTransport,
+        store: PackratStore,
+        *,
+        forbid_private: bool = False,
+    ) -> None:
         """Initializes the poller.
 
         Args:
             transport: Budgeted GitHub transport.
             store: Packrat store for cursors, notifications, leases, and ETags.
+            forbid_private: Skip private repository notifications before `ensure_items_repo`.
         """
         self._transport = transport
         self._store = store
+        self._forbid_private = forbid_private
         self.notifications_poll_interval_s = DEFAULT_POLL_INTERVAL_S
         self._notifications_due_at = 0.0
+        self._user_notifications_due_at: dict[str, float] = {}
         self._events_due_at: dict[int, float] = {}
         self._checks_polled_at: dict[str, float] = {}
         self._headless_marked: set[str] = set()
@@ -338,9 +375,14 @@ class SignalPoller:
             return dirty
 
     def _read_notification_pages(
-        self, first: GhResponse, cursor_iso: str | None
+        self,
+        first: GhResponse,
+        cursor_iso: str | None,
+        *,
+        transport: GhTransport | None = None,
     ) -> list[dict[str, Any]]:
         """Returns entries from `first` plus `rel="next"` pages until the cursor is reached."""
+        active_transport = self._transport if transport is None else transport
         page_entries = _decode_list(first.body)
         entries = _filter_since_cursor(page_entries, cursor_iso)
         resp = first
@@ -351,7 +393,7 @@ class SignalPoller:
             next_path = _next_page_path(resp.headers)
             if next_path is None:
                 break
-            resp = self._transport.rest_get(
+            resp = active_transport.rest_get(
                 next_path, worker=WORKER, priority=Priority.HOT
             )
             page_entries = _decode_list(resp.body)
@@ -359,29 +401,125 @@ class SignalPoller:
             pages += 1
         return entries
 
-    def _store_notifications(
-        self, entries: Sequence[Mapping[str, Any]], now: float
-    ) -> list[str]:
-        """Upserts notification entries and returns item keys that are new or updated."""
+    def _build_notification_records(
+        self, entries: Sequence[Mapping[str, Any]]
+    ) -> list[NotificationRecord]:
         records: list[NotificationRecord] = []
         known: dict[tuple[str, str], RepoConfig] = {}
         for entry in entries:
             thread_id = entry.get("id")
             if not thread_id:
                 continue
+            item_key = self._entry_item_key(entry, known)
+            repo_obj = entry.get("repository")
+            if (
+                self._forbid_private
+                and isinstance(repo_obj, Mapping)
+                and repo_obj.get("private") is True
+            ):
+                continue
             records.append(
                 NotificationRecord(
                     thread_id=str(thread_id),
                     reason=entry.get("reason"),
                     subject_type=_subject_type(entry),
-                    item_key=self._entry_item_key(entry, known),
+                    item_key=item_key,
                     updated_at=entry.get("updated_at"),
                     unread=bool(entry.get("unread")),
                 )
             )
+        return records
+
+    def _store_notifications(
+        self, entries: Sequence[Mapping[str, Any]], now: float
+    ) -> list[str]:
+        """Upserts notification entries and returns item keys that are new or updated."""
+        records = self._build_notification_records(entries)
         if not records:
             return []
         return self._store.upsert_notifications(records, now)
+
+    def poll_user_notifications(
+        self,
+        personal_store: Any,
+        transport_for_owner: Callable[[str], GhTransport | None] | None,
+        now: float,
+    ) -> DirtySet:
+        """Polls `/notifications` per active verified identity with a cached user token."""
+        with self._collect() as dirty:
+            if transport_for_owner is None:
+                return dirty
+            leased = self._leased_map_combined(personal_store, now)
+            for ident in personal_store.active_identities(within_days=7, now=now):
+                if not ident.login_verified:
+                    continue
+                user_tx = transport_for_owner(ident.owner_id)
+                if user_tx is None:
+                    continue
+                if now < self._user_notifications_due_at.get(ident.owner_id, 0.0):
+                    continue
+                self._poll_one_user_notifications(
+                    ident, user_tx, personal_store, leased, now, dirty
+                )
+            return dirty
+
+    def _poll_one_user_notifications(
+        self,
+        ident: Any,
+        user_tx: GhTransport,
+        personal_store: Any,
+        leased: Mapping[str, str],
+        now: float,
+        dirty: DirtySet,
+    ) -> None:
+        interval = max(
+            1, int(ident.notifications_poll_interval_s or DEFAULT_POLL_INTERVAL_S)
+        )
+        self._user_notifications_due_at[ident.owner_id] = now + interval
+        cursor = ident.notifications_last_modified
+        try:
+            first = user_tx.rest_get(
+                NOTIFICATIONS_PATH,
+                worker=WORKER,
+                priority=Priority.HOT,
+                if_modified_since=cursor,
+            )
+            new_interval = _poll_interval(first.headers, interval)
+            self._user_notifications_due_at[ident.owner_id] = now + new_interval
+            if first.status == 304:
+                personal_store.update_notification_poll_state(
+                    ident.owner_id,
+                    last_modified=cursor,
+                    poll_interval_s=new_interval,
+                    now=now,
+                )
+                return
+            entries = self._read_notification_pages(
+                first, _http_date_to_iso(cursor), transport=user_tx
+            )
+        except (BudgetDeferred, GhApiError):
+            return
+        records = self._build_notification_records(entries)
+        changed = (
+            personal_store.upsert_notifications(ident.owner_id, records, now=now)
+            if records
+            else []
+        )
+        personal_store.update_notification_poll_state(
+            ident.owner_id,
+            last_modified=first.headers.get("last-modified") or cursor,
+            poll_interval_s=new_interval,
+            now=now,
+        )
+        if changed:
+            dirty.viewer = True
+            dirty.hot |= {leased[k.lower()] for k in changed if k.lower() in leased}
+
+    def _leased_map_combined(self, personal_store: Any, now: float) -> dict[str, str]:
+        merged = self._leased_map(now)
+        for lease in personal_store.active_watches(now):
+            merged.setdefault(lease.item_key.lower(), lease.item_key)
+        return merged
 
     def _entry_item_key(
         self, entry: Mapping[str, Any], known: dict[tuple[str, str], RepoConfig]
@@ -391,6 +529,13 @@ class SignalPoller:
         Registers the subject's repository in `items` mode the first time it
         is seen; `known` caches repositories already resolved in this poll.
         """
+        repo_obj = entry.get("repository")
+        if (
+            self._forbid_private
+            and isinstance(repo_obj, Mapping)
+            and repo_obj.get("private") is True
+        ):
+            return None
         repo_name = _subject_repo(entry)
         number = _subject_number(entry)
         if repo_name is None or number is None:
@@ -399,7 +544,10 @@ class SignalPoller:
         if repo is None:
             repo = self._store.get_repo(f"{repo_name[0]}/{repo_name[1]}")
             if repo is None:
-                repo = self._store.ensure_items_repo(*repo_name)
+                try:
+                    repo = self._store.ensure_items_repo(*repo_name)
+                except PendingDeleteError:
+                    return None
             known[repo_name] = repo
         return format_item_key(repo.owner, repo.name, number)
 
@@ -467,6 +615,10 @@ class SignalPoller:
         dirty.mirror_repos.add(repo.repo_id)
         if _has_default_branch_push(new_events, repo.default_branch):
             dirty.git_repos.add(repo.repo_id)
+        if _has_viewer_pr_open(
+            new_events, self._store.get_state(VIEWER_LOGIN_STATE_KEY)
+        ):
+            dirty.viewer = True
         for number in _event_numbers(new_events):
             key = format_item_key(repo.owner, repo.name, number).lower()
             if key in leased:

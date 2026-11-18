@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "packrat" / "repos.sqlite"
+_IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
+_AUTH_ERROR_MARKERS = ("auth_expired", "auth expired", "unauthorized", "401")
 _CLOSING_UNTRUSTED_RE = re.compile(
     r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE
 )
@@ -633,6 +635,264 @@ def _resolve_indexed_status(
     return status, resolved_cmd is not None, False, note
 
 
+def _default_db_path() -> Path:
+    if DEFAULT_DB_PATH != _IMPORT_DEFAULT_DB_PATH:
+        return DEFAULT_DB_PATH
+    return Path.home() / ".local" / "share" / "packrat" / "repos.sqlite"
+
+
+def _is_default_db_path(db_path: Path | None) -> bool:
+    if db_path is None:
+        return True
+    resolved = Path(db_path).expanduser().resolve()
+    defaults = {
+        DEFAULT_DB_PATH.expanduser().resolve(),
+        (Path.home() / ".local" / "share" / "packrat" / "repos.sqlite").resolve(),
+    }
+    return resolved in defaults
+
+
+def _has_remote_config() -> bool:
+    if os.environ.get("PACKRAT_URL", "").strip():
+        return True
+    env_mode = os.environ.get("PACKRAT_MODE", "").strip().lower()
+    if env_mode == "local":
+        return False
+    if env_mode in {"remote", "auto"}:
+        return True
+    cfg_path = Path.home() / ".config" / "packrat" / "config.json"
+    if not cfg_path.is_file():
+        return False
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    cfg_mode = str(data.get("mode") or "").strip().lower()
+    if cfg_mode == "local":
+        return False
+    return bool(
+        str(data.get("remote_url") or "").strip() or cfg_mode in {"remote", "auto"}
+    )
+
+
+def _should_use_remote_reader(
+    db_path: Path | None,
+    resolved_cmd: list[str] | None,
+    packrat_cmd: Sequence[str] | None,
+) -> bool:
+    if not _is_default_db_path(db_path) or resolved_cmd is None:
+        return False
+    return packrat_cmd is not None or _has_remote_config()
+
+
+def _is_auth_expired_text(text: str) -> bool:
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_ERROR_MARKERS)
+
+
+def _invoke_packrat_reader(
+    cmd: Sequence[str], ops: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    full_cmd = [*cmd, "reader", "--ops-json", json.dumps(ops), "--json"]
+    try:
+        res = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except (OSError, subprocess.SubprocessError):
+        return None, "error"
+    if res.returncode != 0:
+        combined = f"{res.stderr or ''}\n{res.stdout or ''}"
+        return None, "auth_expired" if _is_auth_expired_text(combined) else "error"
+    try:
+        parsed = json.loads(res.stdout)
+    except ValueError:
+        return None, "error"
+    if not isinstance(parsed, dict):
+        return None, "error"
+    return parsed, ""
+
+
+def _remote_degraded_probe(
+    repo_slug: str,
+    checkout_str: str | None,
+    ephemeral: bool,
+    resolved_db: Path,
+    resolved_cmd: list[str] | None,
+    err_reason: str,
+) -> PackratProbeResult:
+    detail = (
+        f"remote authentication expired for {repo_slug}"
+        if err_reason == "auth_expired"
+        else f"remote packrat query failed for {repo_slug}"
+    )
+    return PackratProbeResult(
+        status="unavailable",
+        available=False,
+        synced=False,
+        repo=repo_slug,
+        checkout_root=checkout_str,
+        is_ephemeral_checkout=ephemeral,
+        db_path=str(resolved_db),
+        packrat_cmd=resolved_cmd,
+        user_note=(
+            f"Packrat context: unavailable ({detail}; using git-only review context)."
+        ),
+    )
+
+
+def _backfill_warnings_from_dict(backfill: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
+    for stream in _BACKFILL_STREAMS:
+        entry = backfill.get(stream)
+        if not isinstance(entry, dict) or entry.get("done_at"):
+            continue
+        if entry.get("cursor") is not None:
+            warnings.append(
+                f"{stream} backfill incomplete; resumes on next packrat sync"
+            )
+        else:
+            warnings.append(
+                f"{stream} backfill incomplete; history not fetched yet, run packrat sync"
+            )
+    return warnings
+
+
+def _extract_remote_counts(probe_data: dict[str, Any]) -> dict[str, int]:
+    raw_counts = probe_data.get("counts")
+    counts = (
+        {str(k): int(v) for k, v in raw_counts.items()}
+        if isinstance(raw_counts, dict)
+        else {}
+    )
+    for table in _COUNT_TABLES:
+        counts.setdefault(table, 0)
+    return counts
+
+
+def _extract_remote_warnings(
+    probe_data: dict[str, Any],
+    mode: str,
+    default_branch: str,
+    last_sha: str | None,
+    local_sha: str | None,
+) -> list[str]:
+    warnings = [str(w) for w in (probe_data.get("warnings") or []) if str(w)]
+    if (
+        "warnings" not in probe_data
+        and isinstance(probe_data.get("backfill"), dict)
+        and mode != "items"
+    ):
+        warnings = _backfill_warnings_from_dict(probe_data["backfill"])
+    if last_sha and local_sha and last_sha.lower() != local_sha.lower():
+        warnings.append(
+            f"packrat last_indexed_sha ({last_sha[:10]}) differs from "
+            f"local {default_branch} ({local_sha[:10]}); run packrat sync"
+        )
+    return warnings
+
+
+def _probe_from_remote_dict(
+    probe_data: dict[str, Any],
+    repo_slug: str,
+    *,
+    local_checkout: Path | None,
+    checkout_root: Path | None,
+    ephemeral: bool,
+    resolved_db: Path,
+    resolved_cmd: list[str] | None,
+    hint_dir: str,
+) -> PackratProbeResult:
+    checkout_str = str(checkout_root) if checkout_root is not None else None
+    if not probe_data.get("found"):
+        return _unregistered_result(
+            repo_slug, checkout_str, ephemeral, str(resolved_db), resolved_cmd, hint_dir
+        )
+    canonical_repo = str(probe_data.get("repo") or repo_slug)
+    mode = str(probe_data.get("mode") or "mirror")
+    default_branch = str(probe_data.get("default_branch") or "main")
+    raw_last = probe_data.get("last_indexed_sha")
+    last_sha = str(raw_last) if raw_last else None
+    counts = _extract_remote_counts(probe_data)
+    ref_root = local_checkout or checkout_root
+    local_sha = _resolve_canonical_sha(ref_root, default_branch) if ref_root else None
+    warnings = _extract_remote_warnings(
+        probe_data, mode, default_branch, last_sha, local_sha
+    )
+    status, available, synced, note = _resolve_indexed_status(
+        counts.get("chunks", 0), resolved_cmd, canonical_repo, ephemeral, hint_dir
+    )
+    return PackratProbeResult(
+        status=status,
+        available=available,
+        synced=synced,
+        repo=canonical_repo,
+        checkout_root=checkout_str,
+        is_ephemeral_checkout=ephemeral,
+        db_path=str(resolved_db),
+        packrat_cmd=resolved_cmd,
+        default_branch=default_branch,
+        last_indexed_sha=last_sha,
+        local_canonical_sha=local_sha,
+        counts=counts,
+        warnings=warnings,
+        user_note=note,
+    )
+
+
+def _build_local_probe(
+    loaded: tuple[sqlite3.Row, dict[str, int]],
+    *,
+    local_checkout: Path | None,
+    checkout_root: Path | None,
+    ephemeral: bool,
+    resolved_db: Path,
+    resolved_cmd: list[str] | None,
+    hint_dir: str,
+) -> PackratProbeResult:
+    row, counts = loaded
+    keys = set(row.keys())
+    canonical_repo = str(row["full_name"])
+    default_branch = (
+        str(row["default_branch"] or "main") if "default_branch" in keys else "main"
+    )
+    last_sha = (
+        str(row["last_indexed_sha"])
+        if "last_indexed_sha" in keys and row["last_indexed_sha"]
+        else None
+    )
+    ref_root = local_checkout or checkout_root
+    local_sha = _resolve_canonical_sha(ref_root, default_branch) if ref_root else None
+    warnings = _collect_probe_warnings(row, default_branch, last_sha, local_sha)
+    status, available, synced, note = _resolve_indexed_status(
+        counts.get("chunks", 0), resolved_cmd, canonical_repo, ephemeral, hint_dir
+    )
+    return PackratProbeResult(
+        status=status,
+        available=available,
+        synced=synced,
+        repo=canonical_repo,
+        checkout_root=str(checkout_root) if checkout_root is not None else None,
+        is_ephemeral_checkout=ephemeral,
+        db_path=str(resolved_db),
+        packrat_cmd=resolved_cmd,
+        default_branch=default_branch,
+        last_indexed_sha=last_sha,
+        local_canonical_sha=local_sha,
+        counts=counts,
+        warnings=warnings,
+        user_note=note,
+    )
+
+
 def probe_packrat(
     root: Path,
     *,
@@ -644,7 +904,8 @@ def probe_packrat(
     """Probes whether `packrat` has indexed context for the target repository.
 
     Opens `repos.sqlite` strictly in read-only mode (`mode=ro`) without creating
-    files on disk or running `git fetch`.
+    files on disk or running `git fetch`, falling back to `packrat reader` when
+    using the default DB without a synced local mirror.
 
     Args:
         root: Checkout directory to inspect.
@@ -656,7 +917,7 @@ def probe_packrat(
     Returns:
         A `PackratProbeResult` describing readiness, counts, warnings, and user notes.
     """
-    resolved_db = (db_path or DEFAULT_DB_PATH).expanduser()
+    resolved_db = (db_path or _default_db_path()).expanduser()
     resolved_cmd = discover_packrat_cmd(packrat_cmd)
     repo_slug, checkout_root = resolve_github_repo(root, repo_override)
     checkout_str = str(checkout_root) if checkout_root is not None else None
@@ -677,44 +938,49 @@ def probe_packrat(
 
     hint_dir = _format_hint_dir(root, checkout_root, local_checkout)
     loaded = _read_repo_probe_row(resolved_db, repo_slug)
-    if loaded is None:
-        return _unregistered_result(
-            repo_slug, checkout_str, ephemeral, str(resolved_db), resolved_cmd, hint_dir
+    local_result = (
+        _build_local_probe(
+            loaded,
+            local_checkout=local_checkout,
+            checkout_root=checkout_root,
+            ephemeral=ephemeral,
+            resolved_db=resolved_db,
+            resolved_cmd=resolved_cmd,
+            hint_dir=hint_dir,
         )
-
-    row, counts = loaded
-    keys = set(row.keys())
-    canonical_repo = str(row["full_name"])
-    default_branch = (
-        str(row["default_branch"] or "main") if "default_branch" in keys else "main"
-    )
-    last_sha = (
-        str(row["last_indexed_sha"])
-        if "last_indexed_sha" in keys and row["last_indexed_sha"]
+        if loaded is not None
         else None
     )
-    ref_root = local_checkout or checkout_root
-    local_sha = _resolve_canonical_sha(ref_root, default_branch) if ref_root else None
-    warnings = _collect_probe_warnings(row, default_branch, last_sha, local_sha)
-    status, available, synced, note = _resolve_indexed_status(
-        counts.get("chunks", 0), resolved_cmd, canonical_repo, ephemeral, hint_dir
-    )
+    if local_result is not None and local_result.synced:
+        return local_result
 
-    return PackratProbeResult(
-        status=status,
-        available=available,
-        synced=synced,
-        repo=canonical_repo,
-        checkout_root=checkout_str,
-        is_ephemeral_checkout=ephemeral,
-        db_path=str(resolved_db),
-        packrat_cmd=resolved_cmd,
-        default_branch=default_branch,
-        last_indexed_sha=last_sha,
-        local_canonical_sha=local_sha,
-        counts=counts,
-        warnings=warnings,
-        user_note=note,
+    if _should_use_remote_reader(db_path, resolved_cmd, packrat_cmd):
+        assert resolved_cmd is not None
+        resp, err = _invoke_packrat_reader(
+            resolved_cmd, {"repo_probe": {"repo": repo_slug}}
+        )
+        if resp is None:
+            return local_result or _remote_degraded_probe(
+                repo_slug, checkout_str, ephemeral, resolved_db, resolved_cmd, err
+            )
+        probe_dict = resp.get("repo_probe")
+        if isinstance(probe_dict, dict):
+            return _probe_from_remote_dict(
+                probe_dict,
+                repo_slug,
+                local_checkout=local_checkout,
+                checkout_root=checkout_root,
+                ephemeral=ephemeral,
+                resolved_db=resolved_db,
+                resolved_cmd=resolved_cmd,
+                hint_dir=hint_dir,
+            )
+        return local_result or _remote_degraded_probe(
+            repo_slug, checkout_str, ephemeral, resolved_db, resolved_cmd, "error"
+        )
+
+    return local_result or _unregistered_result(
+        repo_slug, checkout_str, ephemeral, str(resolved_db), resolved_cmd, hint_dir
     )
 
 
@@ -1119,79 +1385,118 @@ def _query_related_items(
     return [asdict(item) for item in [*selected_issues, *selected_prs]]
 
 
-def query_changed_files_context(
-    db_path: Path,
+def _empty_context_payload(probe_res: PackratProbeResult) -> dict[str, Any]:
+    return {
+        "probe": asdict(probe_res),
+        "hotspots": [],
+        "prior_review_threads": [],
+        "related_items": [],
+    }
+
+
+def _ensure_wrapped_snippet(source: str, text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("<untrusted_repo_content ") and stripped.endswith(
+        "</untrusted_repo_content>"
+    ):
+        inner = stripped.split(">", 1)[1][: -len("</untrusted_repo_content>")]
+        if not _CLOSING_UNTRUSTED_RE.search(inner):
+            return stripped
+    return wrap_untrusted_snippet(source, text)
+
+
+def _normalize_remote_hotspots(raw: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in raw or ():
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            asdict(
+                FileHotspot(
+                    file_path=str(item.get("file_path") or ""),
+                    commit_count=int(item.get("commit_count") or 0),
+                    review_thread_count=int(item.get("review_thread_count") or 0),
+                    unresolved_thread_count=int(
+                        item.get("unresolved_thread_count") or 0
+                    ),
+                )
+            )
+        )
+    return out
+
+
+def _normalize_remote_threads(raw: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in raw or ():
+        if not isinstance(item, dict):
+            continue
+        pr_num = int(item["pr_number"])
+        reviewer = str(item.get("reviewer") or "").strip() or "unknown"
+        line_raw = item.get("line")
+        excerpt = _ensure_wrapped_snippet(
+            f"review_thread:PR#{pr_num}", str(item.get("untrusted_excerpt") or "")
+        )
+        out.append(
+            asdict(
+                HistoricalThread(
+                    pr_number=pr_num,
+                    file_path=str(item.get("file_path") or ""),
+                    line=int(line_raw) if line_raw is not None else None,
+                    is_resolved=bool(item.get("is_resolved", False)),
+                    reviewer=reviewer,
+                    untrusted_excerpt=excerpt,
+                )
+            )
+        )
+    return out
+
+
+def _normalize_remote_related(raw: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in raw or ():
+        if not isinstance(item, dict):
+            continue
+        kind = "issue" if item.get("kind") == "issue" else "pr"
+        num = int(item["number"])
+        title = _ensure_wrapped_snippet(
+            f"{kind}#{num}", str(item.get("untrusted_title") or "")
+        )
+        out.append(
+            asdict(
+                RelatedItem(
+                    kind=kind,
+                    number=num,
+                    state=str(item.get("state") or ""),
+                    link_type=str(item.get("link_type") or ""),
+                    untrusted_title=title,
+                )
+            )
+        )
+    return out
+
+
+def _query_local_sqlite_context(
+    resolved_db: Path,
     repo_full_name: str,
-    changed_files: Sequence[str],
+    clean_files: Sequence[str],
     *,
-    exclude_pr: int | None = None,
-    exclude_head_sha: str | None = None,
-    max_threads: int = 8,
-    max_items: int = 8,
-    probe: PackratProbeResult | None = None,
-    root: Path | None = None,
+    exclude_pr: int | None,
+    head_sha: str | None,
+    max_threads: int,
+    max_items: int,
+    active_probe: PackratProbeResult,
 ) -> dict[str, Any]:
-    """Queries historical hotspots, review threads, and related items for changed files.
-
-    Excludes any pull request matching `exclude_pr` or `exclude_head_sha` so a
-    pull request under review never leaks its own metadata or review threads.
-    Queries `commit_files` and `review_threads` separately and merges them in
-    Python so `--github-only` mirrors retain thread hotspots without join fan-out.
-
-    Args:
-        db_path: Path to `repos.sqlite`.
-        repo_full_name: Canonical GitHub `<owner>/<name>` slug.
-        changed_files: Repository-relative changed file paths.
-        exclude_pr: Optional PR number to exclude from results.
-        exclude_head_sha: Optional HEAD commit SHA to exclude matching PRs.
-        max_threads: Maximum historical review threads to return.
-        max_items: Maximum related PRs and issues to return.
-        probe: Optional precomputed `PackratProbeResult`.
-        root: Optional checkout path used when `probe` or `exclude_head_sha` is omitted.
-
-    Returns:
-        A dict with keys `"probe"`, `"hotspots"`, `"prior_review_threads"`, and
-        `"related_items"`.
-    """
-    active_probe = probe or probe_packrat(
-        root or Path("."), repo_override=repo_full_name, db_path=db_path
-    )
-    clean_files = _normalize_changed_paths(changed_files)
-    resolved_db = db_path.expanduser()
-    if active_probe.status != "ready" or not clean_files or not resolved_db.is_file():
-        return {
-            "probe": asdict(active_probe),
-            "hotspots": [],
-            "prior_review_threads": [],
-            "related_items": [],
-        }
-
-    head_sha = exclude_head_sha
-    if head_sha is None and root is not None:
-        head_sha = _resolve_head_sha(root)
-
     try:
         conn = _connect_readonly(resolved_db)
     except sqlite3.Error:
-        return {
-            "probe": asdict(active_probe),
-            "hotspots": [],
-            "prior_review_threads": [],
-            "related_items": [],
-        }
-
+        return _empty_context_payload(active_probe)
     try:
         repo_row = conn.execute(
             "SELECT repo_id FROM repos WHERE lower(full_name) = lower(?)",
             (repo_full_name,),
         ).fetchone()
         if repo_row is None:
-            return {
-                "probe": asdict(active_probe),
-                "hotspots": [],
-                "prior_review_threads": [],
-                "related_items": [],
-            }
+            return _empty_context_payload(active_probe)
         repo_id = int(repo_row["repo_id"])
         excluded_prs = _find_excluded_prs(conn, repo_id, exclude_pr, head_sha)
         hotspots = _build_hotspots(conn, repo_id, clean_files, excluded_prs)
@@ -1203,13 +1508,274 @@ def query_changed_files_context(
         )
     finally:
         conn.close()
-
     return {
         "probe": asdict(active_probe),
         "hotspots": hotspots,
         "prior_review_threads": threads,
         "related_items": related,
     }
+
+
+def _query_remote_context(
+    resolved_cmd: list[str],
+    repo_full_name: str,
+    clean_files: Sequence[str],
+    *,
+    exclude_pr: int | None,
+    head_sha: str | None,
+    max_threads: int,
+    max_items: int,
+    root: Path,
+    local_checkout: Path | None,
+    resolved_db: Path,
+    fallback_probe: PackratProbeResult | None,
+) -> dict[str, Any]:
+    _slug, checkout_root = resolve_github_repo(root, repo_full_name)
+    checkout_str = str(checkout_root) if checkout_root is not None else None
+    ephemeral = _is_ephemeral_checkout(checkout_root or root, local_checkout)
+    hint_dir = _format_hint_dir(root, checkout_root, local_checkout)
+    ops = {
+        "context": {
+            "repo": repo_full_name,
+            "files": list(clean_files),
+            "exclude_pr": exclude_pr,
+            "exclude_head_sha": head_sha,
+            "max_threads": max_threads,
+            "max_items": max_items,
+        }
+    }
+    resp, err = _invoke_packrat_reader(resolved_cmd, ops)
+    ctx = resp.get("context") if isinstance(resp, dict) else None
+    if not isinstance(ctx, dict):
+        degraded = _remote_degraded_probe(
+            repo_full_name, checkout_str, ephemeral, resolved_db, resolved_cmd, err
+        )
+        return _empty_context_payload(degraded)
+
+    probe_dict = ctx.get("probe")
+    if isinstance(probe_dict, dict):
+        active_probe = _probe_from_remote_dict(
+            probe_dict,
+            repo_full_name,
+            local_checkout=local_checkout,
+            checkout_root=checkout_root,
+            ephemeral=ephemeral,
+            resolved_db=resolved_db,
+            resolved_cmd=resolved_cmd,
+            hint_dir=hint_dir,
+        )
+    else:
+        active_probe = fallback_probe or _unregistered_result(
+            repo_full_name,
+            checkout_str,
+            ephemeral,
+            str(resolved_db),
+            resolved_cmd,
+            hint_dir,
+        )
+    if active_probe.status != "ready":
+        return _empty_context_payload(active_probe)
+    return {
+        "probe": asdict(active_probe),
+        "hotspots": _normalize_remote_hotspots(ctx.get("hotspots")),
+        "prior_review_threads": _normalize_remote_threads(
+            ctx.get("prior_review_threads")
+        ),
+        "related_items": _normalize_remote_related(ctx.get("related_items")),
+    }
+
+
+def _query_context_with_probe(
+    db_path: Path | None,
+    resolved_db: Path,
+    repo_full_name: str,
+    clean_files: Sequence[str],
+    *,
+    probe: PackratProbeResult,
+    exclude_pr: int | None,
+    head_sha: str | None,
+    max_threads: int,
+    max_items: int,
+    effective_root: Path,
+    local_checkout: Path | None,
+    packrat_cmd: Sequence[str] | None,
+) -> dict[str, Any]:
+    if probe.status != "ready" or not clean_files:
+        return _empty_context_payload(probe)
+    if resolved_db.is_file() and _read_repo_probe_row(resolved_db, repo_full_name):
+        return _query_local_sqlite_context(
+            resolved_db,
+            repo_full_name,
+            clean_files,
+            exclude_pr=exclude_pr,
+            head_sha=head_sha,
+            max_threads=max_threads,
+            max_items=max_items,
+            active_probe=probe,
+        )
+    resolved_cmd = discover_packrat_cmd(packrat_cmd) or probe.packrat_cmd
+    if _should_use_remote_reader(db_path, resolved_cmd, packrat_cmd or resolved_cmd):
+        assert resolved_cmd is not None
+        return _query_remote_context(
+            resolved_cmd,
+            repo_full_name,
+            clean_files,
+            exclude_pr=exclude_pr,
+            head_sha=head_sha,
+            max_threads=max_threads,
+            max_items=max_items,
+            root=effective_root,
+            local_checkout=local_checkout,
+            resolved_db=resolved_db,
+            fallback_probe=probe,
+        )
+    return _empty_context_payload(probe)
+
+
+def _query_context_without_probe(
+    db_path: Path | None,
+    resolved_db: Path,
+    repo_full_name: str,
+    clean_files: Sequence[str],
+    *,
+    exclude_pr: int | None,
+    head_sha: str | None,
+    max_threads: int,
+    max_items: int,
+    effective_root: Path,
+    local_checkout: Path | None,
+    packrat_cmd: Sequence[str] | None,
+) -> dict[str, Any]:
+    if clean_files:
+        resolved_cmd = discover_packrat_cmd(packrat_cmd)
+        loaded = _read_repo_probe_row(resolved_db, repo_full_name)
+        if loaded is not None and loaded[1].get("chunks", 0) > 0:
+            _slug, checkout_root = resolve_github_repo(effective_root, repo_full_name)
+            ephemeral = _is_ephemeral_checkout(
+                checkout_root or effective_root, local_checkout
+            )
+            hint_dir = _format_hint_dir(effective_root, checkout_root, local_checkout)
+            local_probe = _build_local_probe(
+                loaded,
+                local_checkout=local_checkout,
+                checkout_root=checkout_root,
+                ephemeral=ephemeral,
+                resolved_db=resolved_db,
+                resolved_cmd=resolved_cmd,
+                hint_dir=hint_dir,
+            )
+            return _query_local_sqlite_context(
+                resolved_db,
+                repo_full_name,
+                clean_files,
+                exclude_pr=exclude_pr,
+                head_sha=head_sha,
+                max_threads=max_threads,
+                max_items=max_items,
+                active_probe=local_probe,
+            )
+        if _should_use_remote_reader(db_path, resolved_cmd, packrat_cmd):
+            assert resolved_cmd is not None
+            return _query_remote_context(
+                resolved_cmd,
+                repo_full_name,
+                clean_files,
+                exclude_pr=exclude_pr,
+                head_sha=head_sha,
+                max_threads=max_threads,
+                max_items=max_items,
+                root=effective_root,
+                local_checkout=local_checkout,
+                resolved_db=resolved_db,
+                fallback_probe=None,
+            )
+
+    active_probe = probe_packrat(
+        effective_root,
+        repo_override=repo_full_name,
+        local_checkout=local_checkout,
+        db_path=db_path,
+        packrat_cmd=packrat_cmd,
+    )
+    return _empty_context_payload(active_probe)
+
+
+def query_changed_files_context(
+    db_path: Path | None,
+    repo_full_name: str,
+    changed_files: Sequence[str],
+    *,
+    exclude_pr: int | None = None,
+    exclude_head_sha: str | None = None,
+    max_threads: int = 8,
+    max_items: int = 8,
+    probe: PackratProbeResult | None = None,
+    root: Path | None = None,
+    local_checkout: Path | None = None,
+    packrat_cmd: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Queries historical hotspots, review threads, and related items for changed files.
+
+    Excludes any pull request matching `exclude_pr` or `exclude_head_sha` so a
+    pull request under review never leaks its own metadata or review threads.
+    Queries `commit_files` and `review_threads` separately and merges them in
+    Python so `--github-only` mirrors retain thread hotspots without join fan-out.
+    Routes through `packrat reader` with a single `context` batch op when using
+    the default DB without a synced local mirror.
+
+    Args:
+        db_path: Path to `repos.sqlite`, or None for the default path.
+        repo_full_name: Canonical GitHub `<owner>/<name>` slug.
+        changed_files: Repository-relative changed file paths.
+        exclude_pr: Optional PR number to exclude from results.
+        exclude_head_sha: Optional HEAD commit SHA to exclude matching PRs.
+        max_threads: Maximum historical review threads to return.
+        max_items: Maximum related PRs and issues to return.
+        probe: Optional precomputed `PackratProbeResult`.
+        root: Optional checkout path used when `probe` or `exclude_head_sha` is omitted.
+        local_checkout: Optional persistent local clone path when `root` is temporary.
+        packrat_cmd: Optional override command argv for `packrat`.
+
+    Returns:
+        A dict with keys `"probe"`, `"hotspots"`, `"prior_review_threads"`, and
+        `"related_items"`.
+    """
+    effective_root = root or Path(".")
+    effective_db = db_path if db_path is not None else _default_db_path()
+    resolved_db = effective_db.expanduser()
+    clean_files = _normalize_changed_paths(changed_files)
+    head_sha = exclude_head_sha
+    if head_sha is None and root is not None:
+        head_sha = _resolve_head_sha(root)
+
+    if probe is not None:
+        return _query_context_with_probe(
+            db_path,
+            resolved_db,
+            repo_full_name,
+            clean_files,
+            probe=probe,
+            exclude_pr=exclude_pr,
+            head_sha=head_sha,
+            max_threads=max_threads,
+            max_items=max_items,
+            effective_root=effective_root,
+            local_checkout=local_checkout,
+            packrat_cmd=packrat_cmd,
+        )
+    return _query_context_without_probe(
+        db_path,
+        resolved_db,
+        repo_full_name,
+        clean_files,
+        exclude_pr=exclude_pr,
+        head_sha=head_sha,
+        max_threads=max_threads,
+        max_items=max_items,
+        effective_root=effective_root,
+        local_checkout=local_checkout,
+        packrat_cmd=packrat_cmd,
+    )
 
 
 def _append_bounded_lines(
@@ -1355,24 +1921,54 @@ def _read_cli_paths(raw_paths: Sequence[str]) -> list[str]:
     return expanded
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    """Runs the CLI entrypoint and returns the process exit code."""
-    try:
-        args = _parse_args(sys.argv[1:] if argv is None else argv)
-    except (argparse.ArgumentError, SystemExit, ValueError):
-        print(__doc__, file=sys.stderr)
-        return 2
-
-    if args.check_skill_budget is not False:
-        return _run_budget_gate(args)
-
-    root = Path(args.root)
-    local_checkout = Path(args.local_checkout) if args.local_checkout else None
-    db_path = Path(args.packrat_db) if args.packrat_db else DEFAULT_DB_PATH
-    cmd_override = (
-        shlex.split(args.packrat_cmd) if args.packrat_cmd is not None else None
+def _try_single_remote_context_cli(
+    args: argparse.Namespace,
+    root: Path,
+    local_checkout: Path | None,
+    db_path: Path | None,
+    cmd_override: Sequence[str] | None,
+    changed_files: list[str],
+) -> dict[str, Any] | None:
+    if not changed_files or not _is_default_db_path(db_path):
+        return None
+    repo_slug, checkout_root = resolve_github_repo(root, args.repo)
+    if repo_slug is None:
+        return None
+    resolved_db = (db_path or _default_db_path()).expanduser()
+    loaded = _read_repo_probe_row(resolved_db, repo_slug)
+    if loaded is not None and loaded[1].get("chunks", 0) > 0:
+        return None
+    resolved_cmd = discover_packrat_cmd(cmd_override)
+    if not _should_use_remote_reader(db_path, resolved_cmd, cmd_override):
+        return None
+    head_sha = args.exclude_head_sha
+    if head_sha is None and checkout_root is not None:
+        head_sha = _resolve_head_sha(checkout_root)
+    return query_changed_files_context(
+        db_path,
+        repo_slug,
+        changed_files,
+        exclude_pr=args.pr,
+        exclude_head_sha=head_sha,
+        root=root,
+        local_checkout=local_checkout,
+        packrat_cmd=cmd_override,
     )
-    changed_files = _read_cli_paths(args.paths)
+
+
+def _run_context_cli(
+    args: argparse.Namespace,
+    root: Path,
+    local_checkout: Path | None,
+    db_path: Path | None,
+    cmd_override: Sequence[str] | None,
+    changed_files: list[str],
+) -> dict[str, Any]:
+    remote_payload = _try_single_remote_context_cli(
+        args, root, local_checkout, db_path, cmd_override, changed_files
+    )
+    if remote_payload is not None:
+        return remote_payload
 
     probe = probe_packrat(
         root,
@@ -1386,7 +1982,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         head_sha = _resolve_head_sha(Path(probe.checkout_root))
 
     if probe.status == "ready" and probe.repo is not None:
-        payload = query_changed_files_context(
+        return query_changed_files_context(
             db_path,
             probe.repo,
             changed_files,
@@ -1394,14 +1990,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             exclude_head_sha=head_sha,
             probe=probe,
             root=root,
+            local_checkout=local_checkout,
+            packrat_cmd=cmd_override,
         )
-    else:
-        payload = {
-            "probe": asdict(probe),
-            "hotspots": [],
-            "prior_review_threads": [],
-            "related_items": [],
-        }
+    return _empty_context_payload(probe)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Runs the CLI entrypoint and returns the process exit code."""
+    try:
+        args = _parse_args(sys.argv[1:] if argv is None else argv)
+    except (argparse.ArgumentError, SystemExit, ValueError):
+        print(__doc__, file=sys.stderr)
+        return 2
+
+    if args.check_skill_budget is not False:
+        return _run_budget_gate(args)
+
+    root = Path(args.root)
+    local_checkout = Path(args.local_checkout) if args.local_checkout else None
+    db_path = Path(args.packrat_db) if args.packrat_db else None
+    cmd_override = (
+        shlex.split(args.packrat_cmd) if args.packrat_cmd is not None else None
+    )
+    changed_files = _read_cli_paths(args.paths)
+    payload = _run_context_cli(
+        args, root, local_checkout, db_path, cmd_override, changed_files
+    )
 
     if args.markdown:
         rendered = format_markdown_context(payload)

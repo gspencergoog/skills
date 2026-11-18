@@ -762,6 +762,38 @@ def diff_reviewer_snapshots(
     return events
 
 
+def pr_added_event(snap: PrSnapshot) -> Event:
+    """Returns the passive ``pr_added`` event for a row that first shows under ``--mine``."""
+    return Event(
+        pr=snap.key,
+        kind="pr_added",
+        from_value=None,
+        to_value="OPEN",
+        actionable=False,
+        suggested_action=None,
+        summary="draft PR added" if snap.draft else "PR added",
+        detail={"draft": snap.draft},
+    )
+
+
+def pr_removed_event(snap: PrSnapshot, reason: str) -> Event:
+    """Returns the passive ``pr_removed`` event for a row that left the set while open.
+
+    ``reason`` is ``left_set`` when a fresh row confirmed the pull request is still
+    open, and ``left_set_unconfirmed`` when no fresh row arrived in time.
+    """
+    return Event(
+        pr=snap.key,
+        kind="pr_removed",
+        from_value="OPEN",
+        to_value=None,
+        actionable=False,
+        suggested_action=None,
+        summary="PR left your open PRs",
+        detail={"reason": reason},
+    )
+
+
 def filter_events(events: list[Event], kinds: set[str] | None) -> list[Event]:
     """Filters ``events`` to ``kinds`` when provided."""
     if not kinds:

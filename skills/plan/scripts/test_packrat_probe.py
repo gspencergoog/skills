@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -648,6 +649,122 @@ class TestPackratProbe(unittest.TestCase):
         res = probe_packrat(repo_dir, db_path=db_path, packrat_cmd=["packrat"])
         self.assertEqual(res.status, "ready")
         self.assertEqual(res.warnings, [])
+
+    def test_remote_repo_probe_missing_local_db_drift_and_backfill_warnings(
+        self,
+    ) -> None:
+        empty_home = self.temp_dir / "empty_home"
+        empty_home.mkdir()
+        repo_dir = self.temp_dir / "remote_widgets"
+        _init_git_config_repo(
+            repo_dir,
+            {"upstream": "https://github.com/octo-org/widgets.git"},
+            loose_refs={"refs/remotes/upstream/main": SHA_DRIFTED},
+        )
+        remote_payload = {
+            "repo_probe": {
+                "found": True,
+                "repo": "octo-org/widgets",
+                "mode": "mirror",
+                "default_branch": "main",
+                "last_indexed_sha": SHA_INDEXED,
+                "counts": {
+                    "chunks": 12,
+                    "commits": 5,
+                    "pull_requests": 4,
+                    "issues": 3,
+                    "review_threads": 2,
+                },
+                "backfill": {
+                    "issues": {"cursor": None, "done_at": None},
+                    "prs": {"cursor": "cursor-1", "done_at": None},
+                    "discussions": {"cursor": None, "done_at": "2026-11-01T00:00:00Z"},
+                },
+                "warnings": [],
+            }
+        }
+        seen_cmds: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            seen_cmds.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(remote_payload), "")
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"HOME": str(empty_home), "PACKRAT_MODE": "remote"},
+            ),
+            mock.patch("packrat_probe.shutil.which", return_value="/usr/bin/packrat"),
+            mock.patch("packrat_probe.subprocess.run", side_effect=fake_run),
+        ):
+            res = probe_packrat(repo_dir)
+
+        self.assertEqual(len(seen_cmds), 1)
+        cmd = seen_cmds[0]
+        self.assertNotIn("--db", cmd)
+        self.assertEqual(cmd[:3], ["/usr/bin/packrat", "reader", "--ops-json"])
+        self.assertEqual(
+            json.loads(cmd[3]), {"repo_probe": {"repo": "octo-org/widgets"}}
+        )
+        self.assertEqual(res.status, "ready")
+        self.assertTrue(res.synced)
+        self.assertEqual(res.local_canonical_sha, SHA_DRIFTED)
+        self.assertEqual(res.counts["chunks"], 12)
+        self.assertIn(
+            "issues backfill incomplete (run `packrat sync --repo octo-org/widgets`)",
+            res.warnings,
+        )
+        self.assertIn(
+            "prs backfill incomplete (resumes on next `packrat sync --repo octo-org/widgets`)",
+            res.warnings,
+        )
+        self.assertTrue(
+            any(
+                f"SHA drift: last_indexed_sha ({SHA_INDEXED[:12]}) differs from "
+                f"local upstream/main ({SHA_DRIFTED[:12]})" in w
+                for w in res.warnings
+            ),
+            res.warnings,
+        )
+        self.assertFalse(
+            (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+        )
+
+    def test_remote_repo_probe_degraded_fallbacks(self) -> None:
+        empty_home = self.temp_dir / "empty_home_err"
+        empty_home.mkdir()
+        repo_dir = self.temp_dir / "err_widgets"
+        _init_git_config_repo(
+            repo_dir,
+            {"origin": "https://github.com/octo-org/widgets.git"},
+        )
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(empty_home)}),
+            mock.patch(
+                "packrat_probe.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["packrat"], 4, "", "auth_expired"
+                ),
+            ),
+        ):
+            res_auth = probe_packrat(repo_dir, packrat_cmd=["packrat"])
+        self.assertEqual(res_auth.status, "unavailable")
+        self.assertFalse(res_auth.synced)
+        self.assertIn("authentication expired", res_auth.user_note)
+
+        with (
+            mock.patch.dict(os.environ, {"HOME": str(empty_home)}),
+            mock.patch(
+                "packrat_probe.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["packrat"], 15.0),
+            ),
+        ):
+            res_timeout = probe_packrat(repo_dir, packrat_cmd=["packrat"])
+        self.assertEqual(res_timeout.status, "unavailable")
+        self.assertIn("Remote packrat query failed", res_timeout.user_note)
+        self.assertFalse(
+            (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+        )
 
 
 if __name__ == "__main__":

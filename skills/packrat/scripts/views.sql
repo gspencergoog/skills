@@ -1,4 +1,4 @@
--- packrat-views-version: 2
+-- packrat-views-version: 4
 -- Read-only reader views for packrat's live GitHub data.
 --
 -- Readers (/monitor, inflight, the watchdog) query only these views, never the
@@ -31,7 +31,10 @@ SELECT
   p.is_cross_repository AS is_cross_repository,
   p.body AS body
 FROM pull_requests p
-JOIN repos r ON r.repo_id = p.repo_id;
+JOIN repos r ON r.repo_id = p.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_issue_basic;
 CREATE VIEW v_issue_basic AS
@@ -51,7 +54,10 @@ SELECT
   i.closed_at AS closed_at,
   i.body AS body
 FROM issues i
-JOIN repos r ON r.repo_id = i.repo_id;
+JOIN repos r ON r.repo_id = i.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_item_comments;
 CREATE VIEW v_item_comments AS
@@ -73,6 +79,9 @@ FROM (
   FROM comments c
   JOIN repos r ON r.repo_id = c.repo_id
   WHERE c.parent_kind IN ('pr', 'issue')
+    AND NOT EXISTS (
+      SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+    )
 )
 WHERE rn <= 10;
 
@@ -112,7 +121,10 @@ FROM pull_requests p
 JOIN repos r ON r.repo_id = p.repo_id
 LEFT JOIN pr_rollup ro
   ON ro.repo_id = p.repo_id AND ro.pr_number = p.number AND ro.head_oid = p.head_sha
-WHERE p.live_fetched_at IS NOT NULL;
+WHERE p.live_fetched_at IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+  );
 
 DROP VIEW IF EXISTS v_pr_checks;
 CREATE VIEW v_pr_checks AS
@@ -132,7 +144,10 @@ SELECT
 FROM check_runs c
 JOIN pull_requests p
   ON p.repo_id = c.repo_id AND p.number = c.pr_number AND p.head_sha = c.head_oid
-JOIN repos r ON r.repo_id = c.repo_id;
+JOIN repos r ON r.repo_id = c.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_pr_review_requests;
 CREATE VIEW v_pr_review_requests AS
@@ -142,7 +157,10 @@ SELECT
   q.reviewer_kind AS reviewer_kind,
   q.requested_at AS requested_at
 FROM review_requests q
-JOIN repos r ON r.repo_id = q.repo_id;
+JOIN repos r ON r.repo_id = q.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_pr_latest_reviews;
 CREATE VIEW v_pr_latest_reviews AS
@@ -153,7 +171,10 @@ SELECT
   o.state AS state,
   o.submitted_at AS submitted_at
 FROM latest_opinionated_reviews o
-JOIN repos r ON r.repo_id = o.repo_id;
+JOIN repos r ON r.repo_id = o.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_pr_latest_author_reviews;
 CREATE VIEW v_pr_latest_author_reviews AS
@@ -167,7 +188,10 @@ SELECT
   lr.submitted_at,
   lr.commit_oid
 FROM latest_reviews lr
-JOIN repos r ON r.repo_id = lr.repo_id;
+JOIN repos r ON r.repo_id = lr.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_pr_threads;
 CREATE VIEW v_pr_threads AS
@@ -181,7 +205,10 @@ SELECT
   t.last_at AS last_at,
   t.participants_json AS participants_json
 FROM thread_activity t
-JOIN repos r ON r.repo_id = t.repo_id;
+JOIN repos r ON r.repo_id = t.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_viewer_items;
 CREATE VIEW v_viewer_items AS
@@ -191,7 +218,10 @@ SELECT
   v.first_seen_at AS first_seen_at,
   v.last_seen_at AS last_seen_at
 FROM viewer_sets v
-JOIN repos r ON r.repo_id = v.repo_id;
+JOIN repos r ON r.repo_id = v.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_notifications;
 CREATE VIEW v_notifications AS
@@ -215,7 +245,10 @@ SELECT
   w.lease_expires_at AS lease_expires_at,
   w.lease_expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now') AS active
 FROM watches w
-JOIN repos r ON r.repo_id = w.repo_id;
+JOIN repos r ON r.repo_id = w.repo_id
+WHERE NOT EXISTS (
+  SELECT 1 FROM service_state s WHERE s.key = 'pending_delete:' || r.repo_id
+);
 
 DROP VIEW IF EXISTS v_changes;
 CREATE VIEW v_changes AS
@@ -259,6 +292,12 @@ SELECT
     AS active_leases,
   (SELECT value FROM service_state WHERE key = 'viewer_login') AS viewer_login,
   h.last_ok_at AS last_ok_at,
-  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks
+  COALESCE(h.consecutive_failed_ticks, 0) AS consecutive_failed_ticks,
+  COALESCE(
+    (SELECT json_group_object(substr(key, 12), value)
+     FROM service_state
+     WHERE substr(key, 1, 11) = 'viewer_set:' AND length(key) > 11 AND value IS NOT NULL),
+    '{}'
+  ) AS viewer_sets_synced_json
 FROM (SELECT 1 AS one) AS anchor
 LEFT JOIN service_heartbeat h ON h.id = 1;

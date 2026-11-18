@@ -31,6 +31,7 @@ try:
         LatestReviewRecord,
         NotificationRecord,
         OpinionatedReviewRecord,
+        PendingDeleteError,
         PrLiveRecord,
         RepoConfig,
         ReviewRequestRecord,
@@ -54,6 +55,7 @@ except ImportError:
         LatestReviewRecord,
         NotificationRecord,
         OpinionatedReviewRecord,
+        PendingDeleteError,
         PrLiveRecord,
         RepoConfig,
         ReviewRequestRecord,
@@ -135,10 +137,17 @@ class LiveStoreMixin:
     """Store methods for live GitHub data, mixed into `PackratStore`."""
 
     conn: sqlite3.Connection
+    personal_store: Any | None = None
 
-    def get_repo_by_id(self, repo_id: int) -> RepoConfig | None:  # pragma: no cover
+    def get_repo_by_id(
+        self, repo_id: int, *, include_pending_delete: bool = False
+    ) -> RepoConfig | None:  # pragma: no cover
         """Looks up a repository by repo_id (implemented by `PackratStore`)."""
         raise NotImplementedError
+
+    def pending_delete_repo_ids(self) -> set[int]:  # pragma: no cover
+        """Returns pending-delete repo IDs (implemented by `PackratStore`)."""
+        return set()
 
     def _bump_vector_cache_seq_in_tx(
         self, now: float | None = None
@@ -181,7 +190,14 @@ class LiveStoreMixin:
                 (owner, name, f"{owner}/{name}", now_iso, now_iso, REPO_MODE_ITEMS),
             )
             row = self._find_repo_row(owner, name)
-        repo = self.get_repo_by_id(int(row["repo_id"])) if row is not None else None
+        if row is None:
+            raise RuntimeError(f"Failed to register repository {owner}/{name}")
+        repo_id = int(row["repo_id"])
+        if repo_id in self.pending_delete_repo_ids():
+            raise PendingDeleteError(
+                f"Repository '{owner}/{name}' is pending deletion."
+            )
+        repo = self.get_repo_by_id(repo_id, include_pending_delete=True)
         if repo is None:
             raise RuntimeError(f"Failed to register repository {owner}/{name}")
         return repo
@@ -197,7 +213,12 @@ class LiveStoreMixin:
         """
         row = self._find_repo_row(owner, name)
         if row is not None:
-            repo = self.get_repo_by_id(int(row["repo_id"]))
+            repo_id = int(row["repo_id"])
+            if repo_id in self.pending_delete_repo_ids():
+                raise PendingDeleteError(
+                    f"Repository '{owner}/{name}' is pending deletion."
+                )
+            repo = self.get_repo_by_id(repo_id, include_pending_delete=True)
             if repo is not None:
                 return repo
         with self.conn:
@@ -455,7 +476,11 @@ class LiveStoreMixin:
                     alias_full_name,
                     canonical.full_name,
                 )
-            return canonical
+        if self.personal_store is not None:
+            self.personal_store.rewrite_repo_full_name(
+                alias_full_name, canonical.full_name
+            )
+        return canonical
 
     def _resolve_key(
         self, item_key: str, *, create: bool
@@ -496,6 +521,17 @@ class LiveStoreMixin:
         self, item_key: str, kind: str, fields: Sequence[str], now: float | None
     ) -> int:
         """Inserts one change row inside the caller's transaction and returns its seq."""
+        if self.personal_store is not None:
+            return int(
+                self.personal_store.append_change(
+                    item_key,
+                    kind,
+                    list(fields),
+                    viewer_login=None,
+                    owner_id=None,
+                    now=now,
+                )
+            )
         cur = self.conn.execute(
             "INSERT INTO changes (item_key, kind, fields, at) VALUES (?, ?, ?, ?)",
             (item_key, kind, json.dumps(list(fields)), iso_at(now)),
@@ -514,6 +550,17 @@ class LiveStoreMixin:
             fields: Names of the fields that changed.
             now: Change time in epoch seconds.
         """
+        if self.personal_store is not None:
+            return int(
+                self.personal_store.append_change(
+                    item_key,
+                    kind,
+                    list(fields),
+                    viewer_login=None,
+                    owner_id=None,
+                    now=now,
+                )
+            )
         with self.conn:
             return self._append_change_in_tx(item_key, kind, fields, now)
 
@@ -681,11 +728,17 @@ class LiveStoreMixin:
         changed = self._changed_live_fields(
             self._pr_live_row(record.repo_id, record.number), record
         )
+        key: str | None = None
         with self.conn:
             self._write_pr_live_in_tx(record, iso_at(now))
             if changed:
                 key = self._item_key_for(record.repo_id, record.number)
-                self._append_change_in_tx(key, "pr", changed, now)
+                if self.personal_store is None:
+                    self._append_change_in_tx(key, "pr", changed, now)
+        if changed and key is not None and self.personal_store is not None:
+            self.personal_store.append_change(
+                key, "pr", changed, viewer_login=None, owner_id=None, now=now
+            )
         return changed
 
     def _replace_pr_rows(
@@ -730,7 +783,12 @@ class LiveStoreMixin:
                 [(repo_id, pr_number, *row) for row in sorted(new, key=repr)],
             )
             key = self._item_key_for(repo_id, pr_number)
-            self._append_change_in_tx(key, kind, [table], now)
+            if self.personal_store is None:
+                self._append_change_in_tx(key, kind, [table], now)
+        if self.personal_store is not None:
+            self.personal_store.append_change(
+                key, kind, [table], viewer_login=None, owner_id=None, now=now
+            )
         return True
 
     def replace_check_runs(
@@ -926,6 +984,7 @@ class LiveStoreMixin:
             )
             for c in comments
         ]
+        key: str | None = None
         with self.conn:
             self.conn.executemany(
                 """
@@ -938,7 +997,12 @@ class LiveStoreMixin:
             )
             if added:
                 key = self._item_key_for(repo_id, number)
-                self._append_change_in_tx(key, "comments", ["comments"], now)
+                if self.personal_store is None:
+                    self._append_change_in_tx(key, "comments", ["comments"], now)
+        if added and key is not None and self.personal_store is not None:
+            self.personal_store.append_change(
+                key, "comments", ["comments"], viewer_login=None, owner_id=None, now=now
+            )
         return bool(added)
 
     # ----- notifications and viewer sets ---------------------------------------------
@@ -1051,6 +1115,20 @@ class LiveStoreMixin:
             for key in [*added, *removed]:
                 self._append_change_in_tx(key, "viewer", [set_name], now)
         return added, removed
+
+    def viewer_set_sync_times(self) -> dict[str, str]:
+        """Returns `{set_name: synced_at}` from `service_state` `viewer_set:*` rows."""
+        rows = self.conn.execute(
+            "SELECT key, value FROM service_state "
+            "WHERE key LIKE ? AND value IS NOT NULL ORDER BY key",
+            (f"{VIEWER_SET_STATE_PREFIX}%",),
+        ).fetchall()
+        return {
+            str(r["key"]).removeprefix(VIEWER_SET_STATE_PREFIX): str(r["value"])
+            for r in rows
+            if str(r["key"]).startswith(VIEWER_SET_STATE_PREFIX)
+            and str(r["key"]).removeprefix(VIEWER_SET_STATE_PREFIX)
+        }
 
     # ----- watches and refresh requests ----------------------------------------------
 
@@ -1670,10 +1748,22 @@ class LiveStoreMixin:
             """,
             (REPO_MODE_ITEMS, cutoff_iso, now_iso, cutoff_iso, cutoff_iso, cutoff_iso),
         ).fetchall()
-        repo_ids = [int(r["repo_id"]) for r in rows]
+        personal_refs = (
+            self.personal_store.referenced_repo_names(cutoff_iso, now_iso=now_iso)
+            if self.personal_store is not None
+            else set()
+        )
+        pending_ids = self.pending_delete_repo_ids()
+        kept_rows = [
+            r
+            for r in rows
+            if str(r["full_name"]).lower() not in personal_refs
+            and int(r["repo_id"]) not in pending_ids
+        ]
+        repo_ids = [int(r["repo_id"]) for r in kept_rows]
         if not repo_ids:
             return 0
-        for row in rows:
+        for row in kept_rows:
             self._delete_repo_live_logs_in_tx(str(row["full_name"]))
         marks = ", ".join("?" for _ in repo_ids)
         fts_cur = self.conn.execute(
@@ -1688,6 +1778,9 @@ class LiveStoreMixin:
         )
         if fts_cur.rowcount:
             self._bump_vector_cache_seq_in_tx()
+        if self.personal_store is not None:
+            for row in kept_rows:
+                self.personal_store.delete_repo_rows(str(row["full_name"]))
         return cur.rowcount
 
     def prune(
@@ -1743,6 +1836,14 @@ class LiveStoreMixin:
                 """
             )
         deleted["watches"] = self.prune_expired_watches(moment)
+        if self.personal_store is not None:
+            personal_deleted = self.personal_store.prune(
+                moment,
+                keep_changes_s=keep_changes_s,
+                keep_notifications_s=keep_notifications_s,
+                keep_viewer_s=keep_viewer_s,
+            )
+            deleted.update(personal_deleted)
         with self.conn:
             deleted["items_repos"] = self._prune_idle_items_repos_in_tx(
                 iso_at(moment), iso_at(moment - keep_idle_items_repo_s)

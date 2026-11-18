@@ -522,22 +522,48 @@ class TestManagedGitAdapterAndDryRun(unittest.TestCase):
         self.store.close()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_adapter_polls_most_overdue_first_without_touching_repos_and_backs_off(self) -> None:
+    def test_adapter_polls_most_overdue_first_without_touching_repos_and_backs_off(
+        self,
+    ) -> None:
         import subprocess
+
         from serve_cli import ManagedGitAdapter, read_git_poll, scoped_child_argv
 
         origin = self.tmp / "origin.git"
         work = self.tmp / "work"
-        subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(origin)], check=True, capture_output=True)
-        subprocess.run(["git", "clone", str(origin), str(work)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "init", "--bare", "--initial-branch=main", str(origin)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "clone", str(origin), str(work)], check=True, capture_output=True
+        )
         subprocess.run(["git", "-C", str(work), "config", "user.name", "T"], check=True)
-        subprocess.run(["git", "-C", str(work), "config", "user.email", "t@e"], check=True)
-        subprocess.run(["git", "-C", str(work), "checkout", "-B", "trunk"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(work), "config", "user.email", "t@e"], check=True
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "checkout", "-B", "trunk"],
+            check=True,
+            capture_output=True,
+        )
         (work / "a.txt").write_text("hi\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(work), "add", "a.txt"], check=True)
-        subprocess.run(["git", "-C", str(work), "commit", "-m", "c1"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(work), "push", "-u", "origin", "trunk"], check=True, capture_output=True)
-        subprocess.run(["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/trunk"], check=True)
+        subprocess.run(
+            ["git", "-C", str(work), "commit", "-m", "c1"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(work), "push", "-u", "origin", "trunk"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(origin), "symbolic-ref", "HEAD", "refs/heads/trunk"],
+            check=True,
+        )
 
         repo = self.store.register_repo(
             "octo",
@@ -577,14 +603,170 @@ class TestManagedGitAdapterAndDryRun(unittest.TestCase):
     def test_dry_run_managed_git_and_store_reads_run_no_subprocess(self) -> None:
         from serve_cli import DryRunManagedGit
 
-        repo = self.store.register_repo("octo", "widgets", git_source="managed", update_binding=True)
+        repo = self.store.register_repo(
+            "octo", "widgets", git_source="managed", update_binding=True
+        )
         dry_store = DryRunStore(self.store)
-        self.assertEqual(dry_store.resolve_git_dir(repo), self.store.resolve_git_dir(repo))
-        with mock.patch("git_cmd.run_git_command", side_effect=AssertionError("git called")):
+        self.assertEqual(
+            dry_store.resolve_git_dir(repo), self.store.resolve_git_dir(repo)
+        )
+        with mock.patch(
+            "git_cmd.run_git_command", side_effect=AssertionError("git called")
+        ):
             dry_git = DryRunManagedGit(dry_store)
             self.assertEqual(dry_git.poll_remotes(100.0, budget_s=10.0), [])
             self.assertEqual(dry_git.fetch([repo.repo_id], budget_s=10.0), [])
             self.assertTrue(dry_git.calls)
+
+
+class TestMultiUserServeWiring(unittest.TestCase):
+    """Covers Commit 2 `DryRunStore` parity, HTTPS git protocol propagation, and `--http-listen`."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="packrat-serve-http-"))
+        self.db_path = self.tmp / "repos.sqlite"
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_dry_run_store_multi_user_parity(self) -> None:
+        store = PackratStore(self.db_path)
+        try:
+            repo = store.register_repo("octo-org", "widgets")
+            store.mark_repo_pending_delete(repo.repo_id)
+            dry = DryRunStore(store)
+            self.assertIsNone(dry.personal_store)
+            self.assertEqual(dry.default_cache_dir, store.default_cache_dir)
+            self.assertEqual(dry.pending_delete_repo_ids(), {repo.repo_id})
+            self.assertIsNone(dry.clear_repo_pending_delete(repo.repo_id))
+            self.assertEqual(store.pending_delete_repo_ids(), {repo.repo_id})
+            self.assertIsNone(dry.requeue_user_refresh_requests([("u@e", "a/b#1")]))
+            self.assertEqual(dry.take_user_refresh_requests(), [])
+            self.assertIn("take_user_refresh_requests", DryRunStore._DRY_RUN_READS)
+        finally:
+            store.close()
+
+    def test_server_config_enforces_https_git_and_child_sync_env(self) -> None:
+        from models import SeedRepoSpec, ServerConfig
+        from serve_cli import child_sync_env, extra_git_config_for_server
+
+        cfg = ServerConfig(
+            allowed_git_protocols=("https",),
+            repos=(SeedRepoSpec(full_name="flutter/genui", git_source="none"),),
+        )
+        self.assertEqual(
+            extra_git_config_for_server(cfg), ("-c", "protocol.ssh.allow=never")
+        )
+        env = child_sync_env(cfg, base_env={"PATH": "/usr/bin"})
+        self.assertEqual(env["PACKRAT_GIT_ALLOWED_PROTOCOLS"], "https")
+
+        store = PackratStore(self.db_path)
+        try:
+            svc = build_service(store, self.db_path, once=False, server_config=cfg)
+            self.assertEqual(
+                svc.managed_git._extra_git_config,  # type: ignore[union-attr]
+                ("-c", "protocol.ssh.allow=never"),
+            )
+            self.assertTrue(svc.hot.forbid_private)  # type: ignore[attr-defined]
+            self.assertTrue(svc.viewer._forbid_private)  # type: ignore[attr-defined]
+            self.assertTrue(svc.signals._forbid_private)  # type: ignore[attr-defined]
+
+            with mock.patch("serve_cli.subprocess.Popen") as mock_popen:
+                fake_proc = mock.Mock(pid=9999)
+                mock_popen.return_value = fake_proc
+                svc.spawn(["python3", "packrat.py", "sync"])
+                passed_env = mock_popen.call_args.kwargs["env"]
+                self.assertEqual(passed_env["PACKRAT_GIT_ALLOWED_PROTOCOLS"], "https")
+        finally:
+            store.close()
+
+    def test_cmd_serve_http_listen_lifecycle_and_server_config_reconcile(self) -> None:
+        import json
+        import threading
+        import time
+        import urllib.request
+
+        cfg_path = self.tmp / "server.json"
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "allowlisted_orgs": ["flutter"],
+                    "allowed_git_protocols": ["https"],
+                    "repos": [
+                        {
+                            "full_name": "flutter/genui",
+                            "default_branch": "main",
+                            "git_source": "none",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        personal_db = self.tmp / "personal.sqlite"
+        captured_srvs: list[Any] = []
+        ready = threading.Event()
+        real_http_cls = serve_cli._lazy("PackratHttpServer")
+
+        def make_http(*a: Any, **kw: Any) -> Any:
+            srv = real_http_cls(*a, **kw)
+            captured_srvs.append(srv)
+            ready.set()
+            return srv
+
+        args = argparse.Namespace(
+            once=False,
+            dry_run=False,
+            json=False,
+            http_listen="127.0.0.1:0",
+            personal_db=str(personal_db),
+            server_config=str(cfg_path),
+            trust_edge_proxy=False,
+        )
+
+        def fake_service_run(self_svc: Any, stop_evt: threading.Event) -> int:
+            self_svc._beat(self_svc.clock())
+            stop_evt.wait(timeout=5.0)
+            return 0
+
+        with (
+            mock.patch.object(
+                serve_cli, "PackratHttpServer", side_effect=make_http, create=True
+            ),
+            mock.patch.object(
+                serve_cli._lazy("PackratService"), "run", fake_service_run
+            ),
+        ):
+            rc_box: list[int] = []
+            t = threading.Thread(
+                target=lambda: rc_box.append(serve_cli.cmd_serve(args, self.db_path))
+            )
+            t.start()
+            self.assertTrue(ready.wait(timeout=5.0))
+            base_url = captured_srvs[0].base_url
+            deadline = time.monotonic() + 5.0
+            health_data: dict[str, Any] = {}
+            while time.monotonic() < deadline:
+                with urllib.request.urlopen(
+                    f"{base_url}/api/v1/health", timeout=2
+                ) as resp:
+                    health_data = json.loads(resp.read().decode("utf-8"))
+                if health_data.get("pid") is not None:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(health_data.get("status"), "ok")
+
+            with urllib.request.urlopen(f"{base_url}/api/v1/repos", timeout=2) as resp:
+                repos_data = json.loads(resp.read().decode("utf-8"))
+            self.assertEqual(
+                [r["full_name"] for r in repos_data["repos"]], ["flutter/genui"]
+            )
+
+            captured_srvs[0].stop_event.set()
+            t.join(timeout=5.0)
+            self.assertFalse(t.is_alive())
+            self.assertEqual(rc_box, [0])
+        self.assertTrue(personal_db.is_file())
 
 
 if __name__ == "__main__":

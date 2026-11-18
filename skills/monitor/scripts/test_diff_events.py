@@ -11,10 +11,12 @@ from diff_events import (
     filter_events,
     is_green,
     is_terminal,
+    pr_added_event,
+    pr_removed_event,
     snapshot_thread_watermarks,
     summarize,
 )
-from models import ReviewerEventKind
+from models import EVENT_KINDS, ReviewerEventKind
 from review_overrides import ReviewOverrides, mute_pr
 from testing import make_check, make_snapshot, make_thread, make_viewer_review
 
@@ -754,6 +756,34 @@ class TestDiffEvents(unittest.TestCase):
         self.assertEqual(
             diff_reviewer_snapshots(s_peer_prev, s_peer_bot, DiffContext(viewer="bob")),
             [],
+        )
+
+    def test_pr_added_and_pr_removed_events_are_passive(self) -> None:
+        added = pr_added_event(make_snapshot(draft=True))
+        self.assertEqual(
+            added.to_dict(),
+            {
+                "pr": "acme/widget#3339",
+                "kind": "pr_added",
+                "from": None,
+                "to": "OPEN",
+                "actionable": False,
+                "suggested_action": None,
+                "summary": "draft PR added",
+                "detail": {"draft": True},
+            },
+        )
+        self.assertEqual(pr_added_event(make_snapshot()).detail, {"draft": False})
+
+        for reason in ("left_set", "left_set_unconfirmed"):
+            removed = pr_removed_event(make_snapshot(), reason)
+            self.assertEqual((removed.kind, removed.actionable), ("pr_removed", False))
+            self.assertEqual((removed.from_value, removed.to_value), ("OPEN", None))
+            self.assertEqual(removed.detail, {"reason": reason})
+        self.assertLessEqual({"pr_added", "pr_removed"}, set(EVENT_KINDS))
+        self.assertEqual(
+            [e.kind for e in filter_events([added, removed], {"pr_removed"})],
+            ["pr_removed"],
         )
 
 

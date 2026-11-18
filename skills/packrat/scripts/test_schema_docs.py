@@ -45,6 +45,7 @@ VALUE_TOKENS = frozenset(
         "graphql",
         "core",
         "authored",
+        "authored_open",
         "review_requested",
         "reviewed",
         "issues",

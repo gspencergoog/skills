@@ -35,6 +35,12 @@ GIT_ISOLATED_ENV: dict[str, str] = {
 }
 """Environment overrides preventing interactive prompts and `~/.gitconfig` side effects."""
 
+ALLOWED_GIT_PROTOCOLS_ENV = "PACKRAT_GIT_ALLOWED_PROTOCOLS"
+"""Environment variable restricting git URL schemes (comma-separated, e.g. `https`)."""
+
+DEFAULT_ALLOWED_GIT_PROTOCOLS: tuple[str, ...] = ("https", "ssh")
+"""Default git transport protocols permitted in single-user workstation mode."""
+
 GIT_ISOLATED_CONFIG_ARGS: tuple[str, ...] = (
     "-c",
     "protocol.allow=never",
@@ -48,6 +54,46 @@ GIT_ISOLATED_CONFIG_ARGS: tuple[str, ...] = (
     "core.hooksPath=/dev/null",
 )
 """Git `-c` overrides enforcing allowed protocols, no credential helper, and no hooks."""
+
+
+def resolve_allowed_git_protocols(
+    allowed_protocols: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """Resolves permitted git schemes from `allowed_protocols` or `PACKRAT_GIT_ALLOWED_PROTOCOLS`."""
+    if allowed_protocols is not None:
+        raw = [str(item).strip().lower() for item in allowed_protocols]
+    else:
+        env_val = os.environ.get(ALLOWED_GIT_PROTOCOLS_ENV, "").strip()
+        if not env_val:
+            return DEFAULT_ALLOWED_GIT_PROTOCOLS
+        raw = [part.strip().lower() for part in env_val.split(",")]
+    cleaned = tuple(dict.fromkeys(p for p in raw if p in ("https", "ssh")))
+    if not cleaned:
+        raise ValueError(
+            "allowed_git_protocols must contain at least one of 'https' or 'ssh'."
+        )
+    return cleaned
+
+
+def build_isolated_git_config_args(
+    allowed_protocols: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """Builds git `-c` protocol lockdown flags for `allowed_protocols`."""
+    allowed = set(resolve_allowed_git_protocols(allowed_protocols))
+    https_policy = "always" if "https" in allowed else "never"
+    ssh_policy = "always" if "ssh" in allowed else "never"
+    return (
+        "-c",
+        "protocol.allow=never",
+        "-c",
+        f"protocol.https.allow={https_policy}",
+        "-c",
+        f"protocol.ssh.allow={ssh_policy}",
+        "-c",
+        "credential.helper=",
+        "-c",
+        "core.hooksPath=/dev/null",
+    )
 
 
 def _extract_remote_host(remote_url: str) -> str | None:
@@ -116,6 +162,7 @@ def run_git_command(
     *,
     isolated: bool = True,
     extra_config: Sequence[str] = (),
+    allowed_protocols: Sequence[str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Executes git in a bounded process group with isolated config by default.
 
@@ -146,7 +193,7 @@ def run_git_command(
 
     cmd: list[str] = ["git"]
     if isolated:
-        cmd.extend(GIT_ISOLATED_CONFIG_ARGS)
+        cmd.extend(build_isolated_git_config_args(allowed_protocols))
     if extra_config:
         cmd.extend(extra_config)
     if repo_dir is not None:

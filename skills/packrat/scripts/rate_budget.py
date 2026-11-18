@@ -13,12 +13,13 @@ import fcntl
 import json
 import os
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import asdict, dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 RATE_BUDGET_FILENAME = "rate_budget.json"
 RATE_BUDGET_LOCK_FILENAME = "rate_budget.lock"
@@ -130,6 +131,95 @@ def _snapshot_from_json(data: Any) -> RateSnapshot | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _allows_snapshot(snap: RateSnapshot | None, priority: Priority) -> bool:
+    """Evaluates budget reserve and floor thresholds against `snap`."""
+    if priority == Priority.HOT or snap is None:
+        return True
+    fraction = snap.fraction_remaining()
+    if fraction < FLOOR_FRACTION:
+        return False
+    if fraction < RESERVE_FRACTION:
+        return priority < Priority.MIRROR
+    return True
+
+
+class BudgetTracker(Protocol):
+    """Interface shared by file-backed `RateBudget` and `InMemoryRateBudget`."""
+
+    def record(
+        self,
+        headers: Mapping[str, str],
+        worker: str = "",
+        now: float | None = None,
+    ) -> RateSnapshot | None:
+        """Records the rate snapshot carried in response `headers`."""
+        ...
+
+    def current(self, resource: str, now: float | None = None) -> RateSnapshot | None:
+        """Returns the active snapshot for `resource`, or None if unknown or reset."""
+        ...
+
+    def last_snapshots(self) -> dict[str, RateSnapshot]:
+        """Returns all recorded snapshots by resource."""
+        ...
+
+    def allows(
+        self, resource: str, priority: Priority, now: float | None = None
+    ) -> bool:
+        """Returns whether work at `priority` may spend `resource` budget."""
+        ...
+
+
+class InMemoryRateBudget:
+    """Thread-safe in-memory rate budget for per-caller bearer tokens."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
+        """Initializes an empty in-memory budget."""
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._snapshots: dict[str, RateSnapshot] = {}
+
+    def record(
+        self,
+        headers: Mapping[str, str],
+        worker: str = "",
+        now: float | None = None,
+    ) -> RateSnapshot | None:
+        """Records `X-RateLimit-*` response headers in memory."""
+        del worker
+        moment = self._clock() if now is None else now
+        snap = parse_rate_headers(headers, moment)
+        if snap is None:
+            return None
+        with self._lock:
+            if _supersedes(snap, self._snapshots.get(snap.resource)):
+                self._snapshots[snap.resource] = snap
+        return snap
+
+    def current(self, resource: str, now: float | None = None) -> RateSnapshot | None:
+        """Returns the active snapshot for `resource`, or None if unknown or reset."""
+        moment = self._clock() if now is None else now
+        with self._lock:
+            snap = self._snapshots.get(resource)
+        if snap is None or snap.expired(moment):
+            return None
+        return snap
+
+    def last_snapshots(self) -> dict[str, RateSnapshot]:
+        """Returns a copy of all stored snapshots."""
+        with self._lock:
+            return dict(self._snapshots)
+
+    def allows(
+        self, resource: str, priority: Priority, now: float | None = None
+    ) -> bool:
+        """Returns whether a request at `priority` may spend `resource` budget now."""
+        if priority == Priority.HOT:
+            return True
+        moment = self._clock() if now is None else now
+        return _allows_snapshot(self.current(resource, moment), priority)
 
 
 class RateBudget:
@@ -265,12 +355,4 @@ class RateBudget:
         if priority == Priority.HOT:
             return True
         moment = self._clock() if now is None else now
-        snap = self.current(resource, moment)
-        if snap is None:
-            return True
-        fraction = snap.fraction_remaining()
-        if fraction < FLOOR_FRACTION:
-            return False
-        if fraction < RESERVE_FRACTION:
-            return priority < Priority.MIRROR
-        return True
+        return _allows_snapshot(self.current(resource, moment), priority)

@@ -11,6 +11,7 @@ from models import (
     CheckRun,
     DrawerReason,
     Event,
+    Membership,
     MonitorState,
     MuteEntry,
     PrSnapshot,
@@ -177,6 +178,49 @@ class TestModels(unittest.TestCase):
         self.assertEqual(restored.pushed_shas, {})
         self.assertEqual(restored.reruns, {})
         self.assertEqual(restored.reported_threads, {})
+
+    def test_recent_retired_round_trips_and_old_state_loads_without_it(self) -> None:
+        retired = [
+            {
+                "pr": "acme/widget#4153",
+                "title": "feat: add planner",
+                "state": "MERGED",
+                "at": "2026-11-17T01:19:05Z",
+            },
+            {
+                "pr": "acme/widget#4160",
+                "title": "fix: archive",
+                "state": "REMOVED",
+                "at": "2026-11-17T02:00:00Z",
+            },
+        ]
+        state = MonitorState(recent_retired=retired)
+        data = state.to_dict()
+        self.assertEqual(data["recent_retired"], retired)
+        self.assertEqual(data["schema"], SCHEMA_VERSION)  # no schema bump
+        restored = MonitorState.from_dict(data)
+        self.assertEqual(restored, state)
+        restored.recent_retired[0]["title"] = "changed"
+        self.assertEqual(state.recent_retired[0]["title"], "feat: add planner")
+
+        # A state.json written before the field existed loads as an empty list,
+        # and a state with no removals does not write the key.
+        old = MonitorState.empty().to_dict()
+        self.assertNotIn("recent_retired", old)
+        self.assertEqual(MonitorState.from_dict(old).recent_retired, [])
+        junk = {**old, "recent_retired": [retired[0], "not an entry"]}
+        self.assertEqual(MonitorState.from_dict(junk).recent_retired, [retired[0]])
+
+    def test_membership_values_and_mine_event_kinds(self) -> None:
+        self.assertEqual(
+            [m.value for m in Membership], ["static", "review_queue", "mine"]
+        )
+        self.assertEqual(
+            parse_event_list("pr_added,pr_removed", ReviewRole.AUTHOR),
+            {"pr_added", "pr_removed"},
+        )
+        with self.assertRaises(ValueError):
+            parse_event_list("pr_added", ReviewRole.REVIEWER)
 
     def test_unsupported_schema_raises(self) -> None:
         with self.assertRaises(ValueError):

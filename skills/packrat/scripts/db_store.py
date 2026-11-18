@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import threading
 import time
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ try:
         CONNECTION_PRAGMAS,
         LATEST_SCHEMA_VERSION,
         MIN_IMPORT_SCHEMA_VERSION,
+        SchemaTooNewError,
         apply_migrations,
         read_schema_version,
     )
@@ -58,6 +60,7 @@ try:
         GitSource,
         ImportSummary,
         IssueRecord,
+        PendingDeleteError,
         PrRecord,
         RepoConfig,
         SearchFilters,
@@ -90,6 +93,7 @@ except ImportError:
         CONNECTION_PRAGMAS,
         LATEST_SCHEMA_VERSION,
         MIN_IMPORT_SCHEMA_VERSION,
+        SchemaTooNewError,
         apply_migrations,
         read_schema_version,
     )
@@ -123,6 +127,7 @@ except ImportError:
         GitSource,
         ImportSummary,
         IssueRecord,
+        PendingDeleteError,
         PrRecord,
         RepoConfig,
         SearchFilters,
@@ -438,14 +443,44 @@ class PackratStore(LiveStoreMixin):
     is handled by the methods inherited from `LiveStoreMixin`.
     """
 
-    def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
-        """Opens the database, applying pending schema migrations.
+    PENDING_DELETE_PREFIX = "pending_delete:"
+
+    def __init__(
+        self,
+        db_path: Path = DEFAULT_DB_PATH,
+        *,
+        read_only: bool = False,
+        personal_store: Any | None = None,
+    ) -> None:
+        """Opens the database, applying pending schema migrations when writable.
 
         Raises:
             SchemaTooNewError: If the database was migrated by a newer packrat.
         """
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        self.personal_store = personal_store
+        self.applied_migrations: list[int] = []
+        if self.read_only:
+            uri = f"{self.db_path.expanduser().resolve().as_uri()}?mode=ro"
+            self.conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+            self.conn.row_factory = sqlite3.Row
+            try:
+                self.conn.execute("PRAGMA busy_timeout = 5000")
+                self.conn.execute("PRAGMA temp_store = MEMORY")
+                self.conn.execute("PRAGMA cache_size = -16000")
+                current_ver = read_schema_version(self.conn)
+                if current_ver > LATEST_SCHEMA_VERSION:
+                    raise SchemaTooNewError(
+                        f"packrat database schema version {current_ver} is newer than this packrat "
+                        f"supports ({LATEST_SCHEMA_VERSION}); update packrat (git pull) before opening it."
+                    )
+            except BaseException:
+                self.conn.close()
+                raise
+            return
+        if str(self.db_path) != ":memory:":
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.db_path), timeout=5.0)
         self.conn.row_factory = sqlite3.Row
         try:
@@ -460,6 +495,31 @@ class PackratStore(LiveStoreMixin):
         except BaseException:
             self.conn.close()
             raise
+
+    def pending_delete_repo_ids(self) -> set[int]:
+        """Returns integer `repo_id` values marked `pending_delete:<repo_id>`."""
+        rows = self.conn.execute(
+            "SELECT key FROM service_state WHERE key LIKE 'pending_delete:%'"
+        ).fetchall()
+        prefix_len = len(self.PENDING_DELETE_PREFIX)
+        ids: set[int] = set()
+        for row in rows:
+            suffix = str(row["key"])[prefix_len:]
+            if suffix.isdigit():
+                ids.add(int(suffix))
+        return ids
+
+    def mark_repo_pending_delete(
+        self, repo_id: int, *, now: float | None = None
+    ) -> None:
+        """Marks `repo_id` hidden and queued for asynchronous server deletion."""
+        self.set_state(
+            f"{self.PENDING_DELETE_PREFIX}{int(repo_id)}", iso_at(now), now=now
+        )
+
+    def clear_repo_pending_delete(self, repo_id: int) -> None:
+        """Clears any `pending_delete:<repo_id>` marker for `repo_id`."""
+        self.set_state(f"{self.PENDING_DELETE_PREFIX}{int(repo_id)}", None)
 
     @property
     def default_cache_dir(self) -> Path | None:
@@ -552,7 +612,7 @@ class PackratStore(LiveStoreMixin):
 
         Returns False when no repository named `full_name` is registered.
         """
-        repo = self.get_repo(full_name)
+        repo = self.get_repo(full_name, include_pending_delete=True)
         if repo is None:
             return False
         with self.conn:
@@ -562,12 +622,17 @@ class PackratStore(LiveStoreMixin):
                 (repo.repo_id,),
             )
             self.conn.execute(
-                "DELETE FROM service_state WHERE key = ?",
-                (f"git_poll:{repo.repo_id}",),
+                "DELETE FROM service_state WHERE key IN (?, ?)",
+                (
+                    f"git_poll:{repo.repo_id}",
+                    f"{self.PENDING_DELETE_PREFIX}{repo.repo_id}",
+                ),
             )
             self._delete_repo_live_logs_in_tx(repo.full_name)
             self.conn.execute("DELETE FROM repos WHERE repo_id = ?", (repo.repo_id,))
             self._bump_vector_cache_seq_in_tx()
+        if self.personal_store is not None:
+            self.personal_store.delete_repo_rows(repo.full_name)
         return True
 
     def rename_repo(
@@ -646,7 +711,9 @@ class PackratStore(LiveStoreMixin):
                 repo.repo_id, old_prefix, repo.repo_id, new_full_name, now_iso
             )
             self._bump_vector_cache_seq_in_tx(now)
-        renamed = self.get_repo(new_full_name)
+        if self.personal_store is not None:
+            self.personal_store.rewrite_repo_full_name(old_prefix, new_full_name)
+        renamed = self.get_repo(new_full_name, include_pending_delete=True)
         if renamed is None:
             raise RuntimeError(f"Failed to load repository {new_full_name}")
         return renamed
@@ -781,7 +848,11 @@ class PackratStore(LiveStoreMixin):
 
         now_iso = iso_at(now)
         full_name = f"{owner}/{name}"
-        existing = self.get_repo(full_name)
+        existing = self.get_repo(full_name, include_pending_delete=True)
+        if existing is not None and existing.repo_id in self.pending_delete_repo_ids():
+            raise PendingDeleteError(
+                f"Repository '{existing.full_name}' is pending deletion."
+            )
         inferred_source: GitSource = (
             git_source
             if git_source is not None
@@ -1047,7 +1118,9 @@ class PackratStore(LiveStoreMixin):
                     (repo_id,),
                 )
 
-    def get_repo(self, full_name: str) -> RepoConfig | None:
+    def get_repo(
+        self, full_name: str, *, include_pending_delete: bool = False
+    ) -> RepoConfig | None:
         """Looks up a repository by full_name (case-insensitively, including aliases)."""
         if "/" in full_name:
             owner, name = full_name.split("/", 1)
@@ -1057,21 +1130,42 @@ class PackratStore(LiveStoreMixin):
                 "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
                 (full_name,),
             ).fetchone()
-        return _row_to_repo(row) if row else None
+        if row is None:
+            return None
+        repo = _row_to_repo(row)
+        if (
+            not include_pending_delete
+            and repo.repo_id in self.pending_delete_repo_ids()
+        ):
+            return None
+        return repo
 
-    def get_repo_by_id(self, repo_id: int) -> RepoConfig | None:
+    def get_repo_by_id(
+        self, repo_id: int, *, include_pending_delete: bool = False
+    ) -> RepoConfig | None:
         """Looks up a repository by integer repo_id."""
         row = self.conn.execute(
             "SELECT * FROM repos WHERE repo_id = ?",
             (repo_id,),
         ).fetchone()
-        return _row_to_repo(row) if row else None
+        if row is None:
+            return None
+        repo = _row_to_repo(row)
+        if (
+            not include_pending_delete
+            and repo.repo_id in self.pending_delete_repo_ids()
+        ):
+            return None
+        return repo
 
-    def list_repos(self, mode: str | None = None) -> list[RepoConfig]:
+    def list_repos(
+        self, mode: str | None = None, *, include_pending_delete: bool = False
+    ) -> list[RepoConfig]:
         """Returns registered repositories ordered by repo_id.
 
         Args:
             mode: When set ("mirror" or "items"), only repositories in that mode.
+            include_pending_delete: Include repositories marked `pending_delete`.
         """
         if mode is None:
             rows = self.conn.execute(
@@ -1081,7 +1175,29 @@ class PackratStore(LiveStoreMixin):
             rows = self.conn.execute(
                 "SELECT * FROM repos WHERE mode = ? ORDER BY repo_id ASC", (mode,)
             ).fetchall()
-        return [_row_to_repo(r) for r in rows]
+        pending = set() if include_pending_delete else self.pending_delete_repo_ids()
+        return [_row_to_repo(r) for r in rows if int(r["repo_id"]) not in pending]
+
+    def latest_commit_timestamps(
+        self, repo_ids: Sequence[int] | None = None
+    ) -> dict[int, str | None]:
+        """Returns `{repo_id: MAX(committed_at)}` from `commits` for `repo_ids`."""
+        if repo_ids is not None:
+            if not repo_ids:
+                return {}
+            marks = ",".join("?" for _ in repo_ids)
+            rows = self.conn.execute(
+                f"SELECT repo_id, MAX(committed_at) AS max_at FROM commits "
+                f"WHERE repo_id IN ({marks}) GROUP BY repo_id",
+                [int(r) for r in repo_ids],
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT repo_id, MAX(committed_at) AS max_at FROM commits GROUP BY repo_id"
+            ).fetchall()
+        return {
+            int(r["repo_id"]): (str(r["max_at"]) if r["max_at"] else None) for r in rows
+        }
 
     def upsert_issues(
         self,
@@ -2494,10 +2610,20 @@ class PackratStore(LiveStoreMixin):
     # ----- search engine read queries ------------------------------------------------
 
     @staticmethod
-    def build_search_filter_sql(filters: SearchFilters) -> tuple[str, list[Any]]:
+    def build_search_filter_sql(
+        filters: SearchFilters,
+        *,
+        excluded_repo_ids: Collection[int] = (),
+    ) -> tuple[str, list[Any]]:
         """Builds SQL WHERE predicates and bind parameters for `SearchFilters`."""
         clauses: list[str] = []
         params: list[Any] = []
+
+        if excluded_repo_ids:
+            ordered_excl = sorted(int(rid) for rid in excluded_repo_ids)
+            marks = ",".join("?" for _ in ordered_excl)
+            clauses.append(f"c.repo_id NOT IN ({marks})")
+            params.extend(ordered_excl)
 
         if filters.repo:
             clauses.append(
@@ -2545,7 +2671,9 @@ class PackratStore(LiveStoreMixin):
         """Executes an FTS5 BM25 lexical search and returns `(chunk_id, raw_bm25)` rows."""
         if not fts_expr:
             return []
-        filter_sql, filter_params = self.build_search_filter_sql(filters)
+        filter_sql, filter_params = self.build_search_filter_sql(
+            filters, excluded_repo_ids=self.pending_delete_repo_ids()
+        )
         sql = f"""
         SELECT
           c.chunk_id,
@@ -2582,9 +2710,12 @@ class PackratStore(LiveStoreMixin):
         model_id: str | None = None,
         *,
         order_by_rowid: bool = False,
+        excluded_repo_ids: Collection[int] = (),
     ) -> tuple[str, list[Any]]:
         """Builds the filtered `chunk_embeddings` SQL query and bind parameters."""
-        filter_sql, filter_params = cls.build_search_filter_sql(filters)
+        filter_sql, filter_params = cls.build_search_filter_sql(
+            filters, excluded_repo_ids=excluded_repo_ids
+        )
         model_sql = " AND ce.model_id = ?" if model_id else ""
         sql_params = [model_id, *filter_params] if model_id else filter_params
         has_filters = bool(
@@ -2614,7 +2745,11 @@ class PackratStore(LiveStoreMixin):
     ) -> list[int]:
         """Returns sorted `chunk_embeddings.rowid` values matching `filters` and `model_id`."""
         sql, params = self._filtered_embeddings_sql(
-            "ce.rowid", filters, model_id, order_by_rowid=True
+            "ce.rowid",
+            filters,
+            model_id,
+            order_by_rowid=True,
+            excluded_repo_ids=self.pending_delete_repo_ids(),
         )
         rows = self.conn.execute(sql, params).fetchall()
         return [int(r[0]) for r in rows]
@@ -2639,7 +2774,10 @@ class PackratStore(LiveStoreMixin):
     ) -> Iterable[tuple[str, float, bytes]]:
         """Streams `(chunk_id, scale, vector_u8)` rows matching `filters` and `model_id`."""
         sql, params = self._filtered_embeddings_sql(
-            "ce.chunk_id, ce.scale, ce.vector_u8", filters, model_id
+            "ce.chunk_id, ce.scale, ce.vector_u8",
+            filters,
+            model_id,
+            excluded_repo_ids=self.pending_delete_repo_ids(),
         )
         for row in self.conn.execute(sql, params):
             yield str(row[0]), float(row[1]), bytes(row[2])
@@ -2841,7 +2979,10 @@ class PackratStore(LiveStoreMixin):
             else self.db_path.stat().st_size
         )
         tracker = _export_progress(reporter=reporter, on_progress=on_progress)
-        tmp_path = resolved_dest.parent / f"{resolved_dest.name}.tmp.{os.getpid()}"
+        tmp_path = (
+            resolved_dest.parent
+            / f"{resolved_dest.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+        )
         _unlink_temp_export_files(tmp_path)
         dest_conn: sqlite3.Connection | None = None
         try:
@@ -2882,6 +3023,36 @@ class PackratStore(LiveStoreMixin):
             duration_sec=duration_sec,
             managed_git_repos=sum(1 for r in kept_repos if r.git_source != "none"),
         )
+
+    def export_single_repo_snapshot(
+        self,
+        full_name: str,
+        dest_path: Path | str,
+        *,
+        now: float | None = None,
+    ) -> tuple[ExportSummary, str]:
+        """Exports a scrubbed single-repository `.sqlite` snapshot and returns `(summary, etag)`.
+
+        Raises:
+            ValueError: When `full_name` is unknown, `pending_delete`, or not in `mirror` mode.
+        """
+        repo = self.get_repo(full_name)
+        if repo is None or not repo.is_mirror:
+            raise ValueError(
+                f"Repository '{full_name}' is not a registered mirror repository."
+            )
+        summary = self.export_database(
+            dest_path,
+            repo_ids=[repo.repo_id],
+            force=True,
+            now=now,
+        )
+        fk = mirror_freshness_key(repo)
+        etag = (
+            f'"{repo.repo_id}-{fk.done_backfills}-{fk.sync_watermark}-'
+            f'{repo.last_indexed_sha or "none"}-{summary.dest_bytes}"'
+        )
+        return summary, etag
 
     def import_database(
         self,

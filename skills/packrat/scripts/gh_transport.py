@@ -18,9 +18,10 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from rate_budget import Priority, RateBudget
+from rate_budget import BudgetTracker, Priority
 from sync_runtime import run_bounded_subprocess
 
 DEFAULT_TIMEOUT_SEC = 30
@@ -81,6 +82,46 @@ def run_gh_command(args: Sequence[str], timeout: int = 20) -> GhCommandResult:
         stderr=res.stderr,
         timed_out=False,
     )
+
+
+def make_token_gh_runner(token: str, empty_config_dir: Path) -> GhRunner:
+    """Builds an isolated `GhRunner` bound to `token` and an empty `0700` `GH_CONFIG_DIR`.
+
+    `empty_config_dir` must be an existing directory (never `/dev/null`, because
+    `gh` attempts to open `<GH_CONFIG_DIR>/config.yml` on startup).
+    """
+    clean_token = token.strip()
+    if not clean_token:
+        raise ValueError("GitHub token must be non-empty.")
+    cfg_dir = Path(empty_config_dir)
+    cfg_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    def _run(args: Sequence[str], timeout: int = 20) -> GhCommandResult:
+        env = {
+            **os.environ,
+            "GH_TOKEN": clean_token,
+            "GITHUB_TOKEN": clean_token,
+            "GH_CONFIG_DIR": str(cfg_dir),
+            "GH_PROMPT_DISABLED": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "PAGER": "cat",
+        }
+        res = run_bounded_subprocess(["gh", *args], env=env, timeout=timeout)
+        if res.timed_out:
+            return GhCommandResult(
+                returncode=res.returncode,
+                stdout=res.stdout,
+                stderr="gh command timed out (possible network stall)",
+                timed_out=True,
+            )
+        return GhCommandResult(
+            returncode=res.returncode,
+            stdout=res.stdout,
+            stderr=res.stderr,
+            timed_out=False,
+        )
+
+    return _run
 
 
 def is_rate_limited(text: str) -> bool:
@@ -210,6 +251,23 @@ class ApiCallStore(Protocol):
     ) -> None:
         """Records one GitHub API call."""
         ...
+
+
+class NullApiCallStore:
+    """Thread-safe no-op `ApiCallStore` for per-caller bearer-token transports."""
+
+    def record_api_call(
+        self,
+        *,
+        worker: str,
+        resource: str,
+        cost: int | None,
+        remaining: int | None,
+        reset_at: int | None,
+        status: int,
+    ) -> None:
+        """Discards caller-scoped API call audit events without touching SQLite."""
+        del worker, resource, cost, remaining, reset_at, status
 
 
 @dataclass(frozen=True)
@@ -380,7 +438,7 @@ class GhTransport:
 
     def __init__(
         self,
-        budget: RateBudget,
+        budget: BudgetTracker,
         store: ApiCallStore,
         runner: GhRunner | None = None,
         *,

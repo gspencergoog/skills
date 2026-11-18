@@ -6,7 +6,7 @@ This document defines the persistent daemon protocol used by `/monitor`.
 
 In daemon mode (`--daemon`), the monitor process does not terminate when actionable events occur. Instead, it:
 1. Emits the event payload to `<state-dir>/last.json` and updates the A2UI board pane.
-2. In author mode (or with `--wake-on-review`), posts a batch message via `agentapi send-message` and sets `AckGate`. Under `--reviews --daemon` by default, it records `notify_mode: "none"` in `last.json` and `events.jsonl` without waking the conversation.
+2. In author mode (or with `--wake-on-review` or `--wake`), posts a batch message via `agentapi send-message` and sets `AckGate`. Under `--reviews --daemon` and `--mine --daemon` by default, it records `notify_mode: "none"` in `last.json` and `events.jsonl` without waking the conversation.
 3. Reads incremental instructions from `<state-dir>/control.jsonl` on each polling tick.
 4. Emits a reminder if an active batch remains unacknowledged beyond `--reminder` seconds.
 5. Once acknowledged, unblocks the gate and sends the next pending batch.
@@ -19,10 +19,10 @@ All daemon files are located in the state directory (e.g. `<conversation-scratch
 | :--- | :--- | :--- |
 | `daemon.lock` | Daemon | Exclusive `fcntl.flock` lock file preventing duplicate daemons. |
 | `daemon.pid` | Daemon | Contains the PID of the active daemon process. |
-| `armed.json` | Daemon | Metadata declaring that the monitor is armed and expected to run. Contains `{"argv": [...], "cwd": "...", "skill": "...", "started_at": "...", "poll_s": ...}`. The PR monitor adds `"source"` (`"packrat"` or `"github"`, rewritten when it falls back) and, in `packrat` mode, `"packrat_db"`. |
+| `armed.json` | Daemon | Metadata declaring that the monitor is armed and expected to run. Contains `{"argv": [...], "cwd": "...", "skill": "...", "started_at": "...", "poll_s": ...}`. The PR monitor adds `"source"` (`"packrat"` or `"github"`, rewritten when it falls back; always `"packrat"` under `--mine`, which never falls back) and, in `packrat` mode, `"packrat_db"`. |
 | `heartbeat` | Daemon | Empty file whose `mtime` is touched every polling loop tick. |
 | `control.jsonl` | Agent | Append-only instruction file consumed by `ControlReader`. |
-| `last.json` | Daemon | Latest emitted payload, including `batch_id`, `notify_mode`, and `notifier`. |
+| `last.json` | Daemon | Latest emitted payload, including `batch_id`, `notify_mode`, and `notifier`. Under `--mine --wake`, a passive event that arrives while a wake batch awaits acknowledgment is logged to `events.jsonl` but leaves `last.json` holding that batch. |
 | `events.jsonl` | Daemon | Continuous historical event log. |
 | `board.a2ui` | Daemon | A2UI Express DSL board definition for the side pane. |
 | `watchdog_nags.json` | Watchdog | Tracks hook nag history: `{"pids": {pid: count}, "recent_nags": [timestamps]}`. |
@@ -64,7 +64,14 @@ When `/monitor` reads from `packrat serve` (`--source auto` with a fresh heartbe
 2. **Running:** `packrat watch renew` every 5 minutes. The daemon waits on `packrat changes --since <seq> --wait <debounce>` and re-reads only the changed pull requests from the views. A `{"reset": true}` answer re-reads every watched pull request.
 3. **Exit:** after the daemon loop ends (`stop`, `--timeout`, terminal state, or a signal), `packrat watch remove` drops the leases. A crashed daemon's leases expire after the 900-second TTL. `--once` keeps its lease so the daemon that usually follows starts warm.
 4. **Review queue discovery and retirement (`--reviews`):** on startup, the daemon discovers up to 60 open review keys from `v_viewer_items` (`discover_review_keys`) and leases them. It re-runs discovery on `packrat changes` viewer-set events (`viewer_changed`), on `--sweep` intervals, or on `/notifications` `review_requested` in GitHub mode. When a watched review pull request closes or merges mid-session, the daemon keeps its terminal row on the board and drops its lease with `packrat watch remove` (`unlease`); reopened pull requests are re-leased on the next sweep.
-5. **Fallback:** if the heartbeat goes stale or a `packrat` command fails, the daemon switches to direct GitHub polling for the rest of the run, logs it once, and rewrites `armed.json` with `"source": "github"`.
+5. **Fallback:** if the heartbeat goes stale or a `packrat` command fails, the daemon switches to direct GitHub polling for the rest of the run, logs it once, and rewrites `armed.json` with `"source": "github"`. The daemon reads the heartbeat before every wait on an explicit `--packrat-db` file, and every 60 seconds on the default path, where each read is a `packrat reader` call. `--mine` has no fallback (see the next item).
+6. **My open PRs (`--mine`):** the watched set is the viewer's `authored_open` set in `packrat`, which holds every open and draft pull request the user authored.
+   - Discovery: startup reads the set and its sync time in one read, and exits 1 when `packrat` has never synced the set. It leases the 60 most recently updated members and counts the rest. Discovery runs again on a `viewer` change row, a feed reset, and every `--sweep` interval. A key with no open row in `packrat` yet is pending: it is leased but has no board row until its row arrives. Each sweep sends `packrat refresh` for the pending keys. A key pushed past the 60-PR cap loses its row and lease with no event.
+   - Gates: when the monitor cannot trust a stored row, it gates the key at the current time and sends `packrat refresh` for it. While the gate holds, the monitor ignores rows fetched before the gate time. It re-reads every gated key after each wait, and it waits at most 5 seconds. A gate clears when a newer row arrives, and it lapses after 600 seconds. Three things set a gate: a shown row that leaves the set while open, a recovery from `stale` (on every watched key), and a startup row older than 900 seconds.
+   - Startup gates: the monitor waits up to 30 seconds for them before its first refresh. A daemon carries any gate that still holds into its loop. `--once` uses a stale startup row with a warning.
+   - Retirement: a row whose fresh state is `MERGED` or `CLOSED` emits `terminal` and leaves the board. A row that left the set stays if its key comes back. It leaves with `pr_removed` once a fresh row shows it still open (`left_set`), or when its gate lapses (`left_set_unconfirmed`). `--once` never retires an unconfirmed exit. A retirement drops the snapshot, the watched key, and the lease, and records the row in `recent_retired`. The board and `state.json` change in the same tick, without waiting for the debounce.
+   - Source states: the state starts `live`. It turns `stale` when a `packrat` command fails or the health check finds the service unhealthy. That check runs every 60 seconds on either database path. It fails when the heartbeat is missing or over 180 seconds old, or when 3 or more service ticks in a row have failed. While `stale`, the daemon keeps the last board with a `packrat stale since HH:MM UTC` badge. It emits no events, retires nothing, and keeps touching its `heartbeat` file. A good health read moves it to `catching_up`. The daemon then leases every watched key again, moves to the head of the change feed, and gates every watched key at the recovery time. It returns to `live` when no recovery gate holds.
+   - No fallback: `--mine` never polls or searches GitHub, and `armed.json` keeps `"source": "packrat"`, so the `monitor-watchdog` hook still reports a dead service.
 
 ## Exit Codes & Exit Reasons
 

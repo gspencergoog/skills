@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,6 +19,7 @@ from models import (
     SearchHit,
     TextChunk,
     l2_normalize,
+    normalize_utc_iso,
     wrap_untrusted_text,
 )
 
@@ -292,6 +293,46 @@ def _ensure_vector_mmap_cache(
     return _write_vector_mmap_files(resolved_dir, rows, watermark, uniform_model)
 
 
+def rebuild_vector_mmap_cache(
+    store: PackratStore, *, cache_dir: Path | None = None
+) -> dict[str, Any] | None:
+    """Rebuilds or validates the sidecar `.mmap` vector files for `store`."""
+    resolved_dir = cache_dir if cache_dir is not None else store.default_cache_dir
+    if resolved_dir is None or not _ensure_numpy(resolved_dir, allow_cache_write=True):
+        return None
+    return _ensure_vector_mmap_cache(store, cache_dir=resolved_dir, allow_rebuild=True)
+
+
+def repo_watermarks(
+    store: PackratStore, repo_ids: Iterable[int] | None = None
+) -> dict[str, dict[str, str | None]]:
+    """Returns `{full_name_lower: {sync_watermark, last_indexed_sha, last_commit_at}}`."""
+    repos = store.list_repos()
+    if repo_ids is not None:
+        wanted = {int(rid) for rid in repo_ids}
+        repos = [r for r in repos if r.repo_id in wanted]
+    commit_times = store.latest_commit_timestamps([r.repo_id for r in repos])
+    out: dict[str, dict[str, str | None]] = {}
+    for repo in repos:
+        watermarks = [
+            normalize_utc_iso(w)
+            for w in (
+                repo.issues_watermark,
+                repo.prs_watermark,
+                repo.discussions_watermark,
+            )
+            if w
+        ]
+        sync_wm = max(watermarks) if watermarks else None
+        out[repo.full_name.lower()] = {
+            "repo_full_name": repo.full_name,
+            "sync_watermark": sync_wm,
+            "last_indexed_sha": repo.last_indexed_sha,
+            "last_commit_at": commit_times.get(repo.repo_id),
+        }
+    return out
+
+
 def _resolve_filtered_mmap_indices(
     store: PackratStore,
     rowids_mmap: Any,
@@ -414,11 +455,12 @@ def _search_vector_numpy(
         has_filters = bool(
             filters.repo or filters.kinds or filters.path_prefix or filters.state
         )
+        has_pending_delete = bool(store.pending_delete_repo_ids())
         needs_model_filter = bool(
             model_id and model_id != cache.get("uniform_model_id")
         )
         idx = None
-        if has_filters or needs_model_filter:
+        if has_filters or needs_model_filter or has_pending_delete:
             idx = _resolve_filtered_mmap_indices(store, rowids_mmap, filters, model_id)
             if len(idx) == 0:
                 return []

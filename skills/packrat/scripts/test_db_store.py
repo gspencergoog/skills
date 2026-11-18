@@ -1392,6 +1392,13 @@ class TestLiveStore(unittest.TestCase):
         )
 
     def test_replace_viewer_set(self) -> None:
+        self.assertEqual(self.store.viewer_set_sync_times(), {})
+        self.assertEqual(
+            self._view("SELECT viewer_sets_synced_json FROM v_service_health")[0][
+                "viewer_sets_synced_json"
+            ],
+            "{}",
+        )
         a, b, c = "o/r#1", "o/r#2", "o/r#3"
         self.assertEqual(
             self.store.replace_viewer_set("authored", [a, b], now=T0), ([a, b], [])
@@ -1426,6 +1433,23 @@ class TestLiveStore(unittest.TestCase):
         self.assertEqual(feed[0].fields, ("authored",))
         self.assertEqual(
             self.store.replace_viewer_set("authored", [b, c], now=T0 + 90), ([], [])
+        )
+        self.assertEqual(
+            self.store.replace_viewer_set("authored_open", [], now=T0 + 120), ([], [])
+        )
+        expected_sync = {
+            "authored": iso_at(T0 + 90),
+            "authored_open": iso_at(T0 + 120),
+        }
+        self.assertEqual(self.store.viewer_set_sync_times(), expected_sync)
+        self.assertNotIn("review_requested", self.store.viewer_set_sync_times())
+        self.assertEqual(
+            json.loads(
+                self._view("SELECT viewer_sets_synced_json FROM v_service_health")[0][
+                    "viewer_sets_synced_json"
+                ]
+            ),
+            expected_sync,
         )
 
     # ----- watches and refresh requests -------------------------------------------

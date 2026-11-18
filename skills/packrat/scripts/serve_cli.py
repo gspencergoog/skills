@@ -12,11 +12,13 @@ import argparse
 import contextlib
 import importlib
 import json
+import os
+import subprocess
 import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -51,12 +53,23 @@ if TYPE_CHECKING:
     from service import PackratService, TickReport
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
+    "ChangeNotifier": ("personal_store", "ChangeNotifier"),
     "HotRefresher": ("hot_sync", "HotRefresher"),
+    "PackratHttpServer": ("http_server", "PackratHttpServer"),
     "PackratService": ("service", "PackratService"),
+    "PersonalStore": ("personal_store", "PersonalStore"),
     "SignalPoller": ("signals", "SignalPoller"),
     "TickReport": ("service", "TickReport"),
     "ViewerSync": ("viewer_sync", "ViewerSync"),
+    "_PopenChild": ("service", "_PopenChild"),
+    "_nice_child": ("service", "_nice_child"),
     "format_service_version": ("service", "format_service_version"),
+    "load_server_config": ("personal_store", "load_server_config"),
+    "reconcile_server_config": ("service", "reconcile_server_config"),
+    "remote_changes": ("remote_client", "remote_changes"),
+    "remote_refresh": ("remote_client", "remote_refresh"),
+    "remote_watches": ("remote_client", "remote_watches"),
+    "spawn_niced_child": ("service", "spawn_niced_child"),
     "sync_github_metadata": ("github_sync", "sync_github_metadata"),
     "sync_repo_timelines": ("timeline_sync", "sync_repo_timelines"),
 }
@@ -199,6 +212,9 @@ _DRY_RUN_WRITES: dict[str, Callable[..., Any]] = {
     "add_watch": _echo_watch,
     "renew_watch": _returns(0),
     "remove_watch": _returns(0),
+    "clear_repo_pending_delete": _returns(None),
+    "requeue_user_refresh_requests": _returns(None),
+    "take_user_refresh_requests": _returns([]),
 }
 """Store writes the service, workers, and transport make, with their dry-run results."""
 
@@ -261,6 +277,9 @@ _DRY_RUN_READS: frozenset[str] = frozenset(
         "timeline_candidates",
         "count_timeline_pending",
         "get_item_updated_at",
+        "default_cache_dir",
+        "pending_delete_repo_ids",
+        "take_user_refresh_requests",
     }
 )
 """Explicit allowlist of read-only store attributes exposed through `DryRunStore`."""
@@ -279,6 +298,7 @@ class DryRunStore:
     def __init__(self, store: PackratStore) -> None:
         """Wraps `store`."""
         self._store = store
+        self.personal_store = None
 
     def __getattr__(self, name: str) -> Any:
         """Returns a no-op for store writes and allowlisted reads on the wrapped store."""
@@ -294,7 +314,9 @@ class DryRunStore:
         """Returns the queued refresh requests without removing them."""
         return list(self._store.peek_refresh_requests())
 
-    def ensure_items_repo(self, owner: str, name: str) -> RepoConfig:
+    def ensure_items_repo(
+        self, owner: str, name: str, *_args: Any, **_kwargs: Any
+    ) -> RepoConfig:
         """Returns the registered repository, or an unsaved `items` placeholder."""
         full_name = f"{owner}/{name}"
         existing = self._store.get_repo(full_name)
@@ -722,12 +744,57 @@ def backfill_child_argv(db_path: Path) -> list[str]:
     ]
 
 
+def extra_git_config_for_server(server_config: Any) -> tuple[str, ...]:
+    """Returns extra `-c` git arguments enforcing `server_config.allowed_git_protocols`."""
+    if server_config is None:
+        return ()
+    allowed = {str(p).strip().lower() for p in server_config.allowed_git_protocols}
+    if "ssh" not in allowed:
+        return ("-c", "protocol.ssh.allow=never")
+    return ()
+
+
+def child_sync_env(
+    server_config: Any, base_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """Builds the environment dictionary passed to child `packrat sync` processes."""
+    env = dict(os.environ if base_env is None else base_env)
+    if server_config is not None and server_config.allowed_git_protocols:
+        env["PACKRAT_GIT_ALLOWED_PROTOCOLS"] = ",".join(
+            str(p).strip().lower() for p in server_config.allowed_git_protocols
+        )
+    return env
+
+
+def _make_child_spawner(server_config: Any) -> Callable[[Sequence[str]], Any]:
+    """Builds the child-process spawner propagating `PACKRAT_GIT_ALLOWED_PROTOCOLS`."""
+    if server_config is None:
+        return _lazy("spawn_niced_child")
+
+    def _spawn(argv: Sequence[str]) -> Any:
+        proc = subprocess.Popen(
+            list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            preexec_fn=_lazy("_nice_child"),  # noqa: PLW1509
+            env=child_sync_env(server_config),
+        )
+        return _lazy("_PopenChild")(proc)
+
+    return _spawn
+
+
 def build_service(
     store: PackratStore,
     db_path: Path,
     *,
     once: bool,
     runner: DryRunRunner | None = None,
+    personal_store: Any | None = None,
+    server_config: Any | None = None,
+    transport_for_owner: Callable[[str], Any] | None = None,
 ) -> PackratService:
     """Wires the real workers into a `PackratService`.
 
@@ -736,28 +803,40 @@ def build_service(
         db_path: Database path, for the budget file and the backfill child.
         once: One tick only: never spawn the backfill child.
         runner: Optional `gh` runner override, such as a `DryRunRunner`.
+        personal_store: Optional `PersonalStore` for multi-user serve mode.
+        server_config: Optional `ServerConfig` for org/protocol/disk guardrails.
+        transport_for_owner: Optional per-owner `GhTransport` lookup callback.
     """
+    multi_user = bool(personal_store is not None or server_config is not None)
     budget = RateBudget(db_path.parent / RATE_BUDGET_FILENAME)
     transport = GhTransport(budget, store, runner=runner)
-    hot = _lazy("HotRefresher")(transport, store)
-    viewer = _lazy("ViewerSync")(transport, store, hot)
+    hot = _lazy("HotRefresher")(transport, store, forbid_private=multi_user)
+    viewer = _lazy("ViewerSync")(transport, store, hot, forbid_private=multi_user)
+    signals = _lazy("SignalPoller")(transport, store, forbid_private=multi_user)
+    extra_git_cfg = extra_git_config_for_server(server_config)
     managed: Any = (
-        DryRunManagedGit(store) if runner is not None else ManagedGitAdapter(store)
+        DryRunManagedGit(store)
+        if runner is not None
+        else ManagedGitAdapter(store, extra_git_config=extra_git_cfg)
     )
     scoped_builder = (
         None if once or runner is not None else scoped_child_argv(db_path, store)
     )
     return _lazy("PackratService")(
         store,
-        _lazy("SignalPoller")(transport, store),
+        signals,
         hot,
         viewer,
         MirrorAdapter(store, transport, budget),
         None if once or runner is not None else backfill_child_argv(db_path),
         budget=budget,
+        spawn=_make_child_spawner(server_config),
         timeline=TimelineAdapter(store, transport, budget),
         managed_git=managed,
         scoped_child_argv=scoped_builder,
+        personal_store=personal_store,
+        server_config=server_config,
+        transport_for_owner=transport_for_owner,
     )
 
 
@@ -783,8 +862,120 @@ def _print_tick(report: TickReport, runner: DryRunRunner | None, as_json: bool) 
         print(f"  would call: {call}")
 
 
+def _resolve_server_config_arg(args: argparse.Namespace) -> Any | None:
+    raw_cfg = getattr(args, "server_config", None)
+    if not raw_cfg:
+        return None
+    return _lazy("load_server_config")(Path(raw_cfg).expanduser())
+
+
+def _resolve_personal_db_path(args: argparse.Namespace, db_path: Path) -> Path:
+    raw = getattr(args, "personal_db", None)
+    if raw:
+        return Path(raw).expanduser()
+    return db_path.parent / "personal.sqlite"
+
+
+def _start_optional_http_server(
+    args: argparse.Namespace,
+    db_path: Path,
+    personal_db_path: Path,
+    *,
+    server_config: Any | None,
+    notifier: Any | None,
+    stop: threading.Event,
+) -> Any | None:
+    listen = getattr(args, "http_listen", None)
+    if not listen or args.dry_run:
+        return None
+    http_server = _lazy("PackratHttpServer")(
+        listen,
+        db_path,
+        personal_db_path,
+        server_config=server_config,
+        trust_edge_proxy=bool(getattr(args, "trust_edge_proxy", False)),
+        notifier=notifier,
+        stop_event=stop,
+    )
+    thread = threading.Thread(
+        target=http_server.serve_forever, name="packrat-http", daemon=True
+    )
+    thread.start()
+    return http_server
+
+
+def _shutdown_http_server(http_server: Any | None) -> None:
+    if http_server is None:
+        return
+    with contextlib.suppress(Exception):
+        http_server.shutdown()
+    with contextlib.suppress(Exception):
+        http_server.server_close()
+
+
+def _run_serve_locked(args: argparse.Namespace, db_path: Path) -> int:
+    server_config = _resolve_server_config_arg(args)
+    use_multi_user = bool(
+        getattr(args, "http_listen", None)
+        or getattr(args, "personal_db", None)
+        or server_config is not None
+    )
+    personal_db_path = _resolve_personal_db_path(args, db_path)
+    notifier = (
+        _lazy("ChangeNotifier")() if use_multi_user and not args.dry_run else None
+    )
+    personal_store = (
+        _lazy("PersonalStore")(personal_db_path, notifier=notifier)
+        if use_multi_user and not args.dry_run
+        else None
+    )
+    store: PackratStore | None = None
+    http_server: Any | None = None
+    stop = threading.Event()
+    try:
+        store = PackratStore(db_path, personal_store=personal_store)
+        if server_config is not None and not args.dry_run:
+            _lazy("reconcile_server_config")(store, server_config)
+        http_server = _start_optional_http_server(
+            args,
+            db_path,
+            personal_db_path,
+            server_config=server_config,
+            notifier=notifier,
+            stop=stop,
+        )
+        runner = DryRunRunner() if args.dry_run else None
+        target: Any = DryRunStore(store) if runner is not None else store
+        once = bool(args.once or args.dry_run)
+        tx_lookup = (
+            http_server.token_registry.transport_for_owner
+            if http_server is not None
+            else None
+        )
+        service = build_service(
+            target,
+            db_path,
+            once=once,
+            runner=runner,
+            personal_store=personal_store,
+            server_config=server_config,
+            transport_for_owner=tx_lookup,
+        )
+        if once:
+            _print_tick(service.run_once(), runner, bool(args.json))
+            return 0
+        return service.run(stop)
+    finally:
+        stop.set()
+        _shutdown_http_server(http_server)
+        if store is not None:
+            store.close()
+        if personal_store is not None:
+            personal_store.close()
+
+
 def cmd_serve(args: argparse.Namespace, db_path: Path) -> int:
-    """Handles `packrat serve [--once] [--dry-run] [--json]`."""
+    """Handles `packrat serve [--once] [--dry-run] [--http-listen ...] [--json]`."""
     with acquire_serve_lock(db_path) as lock:
         if not lock.acquired:
             sys.stderr.write(
@@ -792,18 +983,7 @@ def cmd_serve(args: argparse.Namespace, db_path: Path) -> int:
                 f"started_at={lock.holder_started_at}).\n"
             )
             return EXIT_SERVE_LOCKED
-        store = PackratStore(db_path)
-        try:
-            runner = DryRunRunner() if args.dry_run else None
-            target: Any = DryRunStore(store) if runner is not None else store
-            once = bool(args.once or args.dry_run)
-            service = build_service(target, db_path, once=once, runner=runner)
-            if once:
-                _print_tick(service.run_once(), runner, bool(args.json))
-                return 0
-            return service.run(threading.Event())
-        finally:
-            store.close()
+        return _run_serve_locked(args, db_path)
 
 
 def _probe_watch_repo(store: PackratStore, owner: str, name: str) -> None:
@@ -915,6 +1095,82 @@ def cmd_refresh(args: argparse.Namespace, store: PackratStore) -> int:
     return 0
 
 
+def _format_watch_remote_result(
+    action: str, resp: Mapping[str, Any], args: argparse.Namespace
+) -> dict[str, Any]:
+    if action == "add":
+        return {
+            "leased": list(resp.get("leased") or []),
+            "ttl_s": int(resp.get("ttl_s") or args.ttl),
+            "freshness_s": int(resp.get("freshness_s") or args.freshness),
+        }
+    if action == "renew":
+        return {
+            "renewed": int(resp.get("renewed") or 0),
+            "ttl_s": int(resp.get("ttl_s") or args.ttl),
+        }
+    return {"removed": int(resp.get("removed") or 0)}
+
+
+def _emit_watch_result(result: Mapping[str, Any], *, as_json: bool) -> int:
+    if as_json:
+        print(json.dumps(result))
+    else:
+        print(", ".join(f"{k}={v}" for k, v in result.items()))
+    return 0
+
+
+def cmd_watch_remote(args: argparse.Namespace, transport: Any) -> int:
+    """Handles `packrat watch add|renew|remove` against a remote `/api/v1/watches` server."""
+    items = list(args.items or [])
+    action = str(args.watch_action)
+    if action == "add" and not items:
+        raise ValueError("watch add needs at least one ITEM (owner/name#number).")
+    resp = _lazy("remote_watches")(
+        transport,
+        action,
+        consumer=args.consumer,
+        consumer_id=args.id,
+        keys=items or None,
+        freshness_s=args.freshness if action == "add" else None,
+        ttl_s=args.ttl if action in ("add", "renew") else None,
+    )
+    result = _format_watch_remote_result(action, resp, args)
+    return _emit_watch_result(result, as_json=bool(args.json))
+
+
+def cmd_changes_remote(args: argparse.Namespace, transport: Any) -> int:
+    """Handles `packrat changes` against a remote `/api/v1/changes` server."""
+    wait_s = round(max(0.0, float(args.wait or 0)))
+    resp = _lazy("remote_changes")(
+        transport, since=int(args.since), wait=wait_s, limit=int(args.limit)
+    )
+    if resp.get("reset"):
+        payload: dict[str, Any] = {
+            "reset": True,
+            "seq": int(resp.get("seq") or 0),
+        }
+    else:
+        payload = {
+            "seq": int(resp.get("seq") or int(args.since)),
+            "truncated": bool(resp.get("truncated", False)),
+            "changes": list(resp.get("changes") or []),
+        }
+    print(json.dumps(payload) if args.json else json.dumps(payload, indent=2))
+    return 0
+
+
+def cmd_refresh_remote(args: argparse.Namespace, transport: Any) -> int:
+    """Handles `packrat refresh ITEM...` against a remote `/api/v1/refresh` server."""
+    resp = _lazy("remote_refresh")(transport, list(args.items))
+    keys = list(resp.get("requested") or resp.get("queued") or [])
+    if args.json:
+        print(json.dumps({"requested": keys}))
+    else:
+        print(f"Queued refresh for {len(keys)} item(s): {', '.join(keys)}")
+    return 0
+
+
 def _beat_age_s(beat_at: str | None, now: float) -> int | None:
     """Returns seconds since an ISO-8601 heartbeat, or None."""
     if not beat_at:
@@ -998,13 +1254,17 @@ def _int_at_least(minimum: int) -> Callable[[str], int]:
     return parse
 
 
-def add_live_parsers(sub: Any, func: Any) -> None:
+def add_live_parsers(
+    sub: Any, func: Any, routing_adder: Callable[[Any], None] | None = None
+) -> None:
     """Registers `serve`, `watch`, `changes`, and `refresh` on the top-level subparsers.
 
     Args:
         sub: The top-level `add_subparsers()` object.
         func: Dispatcher stored as each parser's `func` default; it reads
             `command_kind` ("serve" or "store") and `store_func`.
+        routing_adder: Optional callback adding `--mode`/`--remote`/`--local`/`--remote-url`
+            routing flags to client live commands (`watch`, `changes`, `refresh`).
     """
     p_serve = sub.add_parser(
         "serve", help="Run the long-lived GitHub service (packrat.service)."
@@ -1014,6 +1274,29 @@ def add_live_parsers(sub: Any, func: Any) -> None:
         "--dry-run",
         action="store_true",
         help="Run one tick that records intended GitHub calls without making them.",
+    )
+    p_serve.add_argument(
+        "--http-listen",
+        metavar="HOST:PORT",
+        default=None,
+        help="Bind the in-process HTTP v1 API server on HOST:PORT (e.g. 127.0.0.1:8787).",
+    )
+    p_serve.add_argument(
+        "--personal-db",
+        metavar="PATH",
+        default=None,
+        help="Override multi-user personal.sqlite path (default: <db_dir>/personal.sqlite).",
+    )
+    p_serve.add_argument(
+        "--server-config",
+        metavar="PATH",
+        default=None,
+        help="Path to multi-user server configuration JSON.",
+    )
+    p_serve.add_argument(
+        "--trust-edge-proxy",
+        action="store_true",
+        help="Require HMAC-verified X-Packrat-User and X-Packrat-Edge-Sig headers.",
     )
     p_serve.add_argument(
         "--json", action="store_true", help="Emit the tick report as JSON."
@@ -1042,6 +1325,8 @@ def add_live_parsers(sub: Any, func: Any) -> None:
         help="Lease TTL (s).",
     )
     p_watch.add_argument("--json", action="store_true", help="Emit JSON output.")
+    if routing_adder is not None:
+        routing_adder(p_watch)
     p_watch.set_defaults(func=func, command_kind="store", store_func=cmd_watch)
 
     p_changes = sub.add_parser(
@@ -1060,9 +1345,13 @@ def add_live_parsers(sub: Any, func: Any) -> None:
         help="Max rows.",
     )
     p_changes.add_argument("--json", action="store_true", help="Emit compact JSON.")
+    if routing_adder is not None:
+        routing_adder(p_changes)
     p_changes.set_defaults(func=func, command_kind="store", store_func=cmd_changes)
 
     p_refresh = sub.add_parser("refresh", help="Ask the service to refresh items now.")
     p_refresh.add_argument("items", nargs="+", help="Items as owner/name#number.")
     p_refresh.add_argument("--json", action="store_true", help="Emit JSON output.")
+    if routing_adder is not None:
+        routing_adder(p_refresh)
     p_refresh.set_defaults(func=func, command_kind="store", store_func=cmd_refresh)

@@ -21,19 +21,23 @@ from a2ui_board import (
     REVIEW_BOARD_STEPS,
     STACK_BOARD_COMPONENTS,
     STATUS_CATALOG,
+    MineBoard,
     board_data_model,
     board_dsl,
     default_store_dir,
     drawer_item_for,
     item_for,
     lifecycle_step,
+    mine_row_labels,
     review_board_data_model,
     review_board_dsl,
     review_item_for,
+    sort_mine_snapshots,
     sort_review_snapshots,
     sync_pane_store,
     write_board_file,
 )
+from mine_mode import SourceState
 from models import DrawerReason, Event, ReviewSortTier, ReviewStep, TriageEntry, TriageVerdict
 from review_overrides import ReviewOverrides, mute_pr, record_triage_entry, unmute_pr
 from testing import make_check, make_snapshot, make_thread, make_viewer_review
@@ -223,6 +227,237 @@ class TestA2uiBoard(unittest.TestCase):
         )
         dm = board_data_model({snap.key: snap}, [ev1, ev2], observed_at="2026-10-27T21:15:00Z")
         self.assertEqual(dm["items"][0]["detail"], "- CI failed (build)\n- CI failed (lint)")
+
+
+_STATIC_BOARD_LINES = (
+    '$/title = "### PR Monitor"',
+    '$/subtitle = "3 PRs across 2 repos \\u00b7 1 PR updated"',
+    '$/status = "CI running, ETA 2m \\u00b7 21:15 UTC"',
+    '$/statusTone = "active"',
+    "$/statusPulse = true",
+    (
+        '$/steps = [{"label": "Draft", "detail": "Initial branch or work in progress"}, '
+        '{"label": "Open", "detail": "Open for review and CI checks"}, '
+        '{"label": "Partially Ready", "detail": "Review approved or CI checks passing"}, '
+        '{"label": "Ready", "detail": "Approved and CI green"}, '
+        '{"label": "Merged", "detail": "Landed on base branch"}]'
+    ),
+    (
+        '$/items = [{"id": "PR 3338", "title": "feat: add decision planner format", '
+        '"url": "https://github.com/acme/widget/pull/3338", "wave": "1", "base": "main", '
+        '"state": "Open", "tone": "active", "ci": "CI passed", "ciTone": "success", '
+        '"review": "Review required", "reviewTone": "warning", "detail": "- Head `aaa1111`", '
+        '"step": 2}, '
+        '{"id": "PR 3339", "title": "feat: add decision planner format", '
+        '"url": "https://github.com/acme/widget/pull/3339", "wave": "2", "base": "PR 3338", '
+        '"state": "Open", "tone": "active", "ci": "CI running, ETA 2m", "ciTone": "active", '
+        '"review": "Review required", "reviewTone": "warning", "detail": "- CI started (build)", '
+        '"step": 1}, '
+        '{"id": "PR 7", "title": "feat: add decision planner format", '
+        '"url": "https://github.com/other/repo/pull/7", "wave": "1", "base": "main", '
+        '"state": "Draft", "tone": "neutral", "ci": "CI passed", "ciTone": "success", '
+        '"review": "Review required", "reviewTone": "warning", "detail": "- Head `aaa1111`", '
+        '"step": 0}]'
+    ),
+    '$/ackLabel = "Acknowledge"',
+)
+_STATIC_BOARD_DSL = "\n".join(_STATIC_BOARD_LINES)
+"""``board_dsl()`` output for ``_static_board_inputs()``, recorded before ``--mine`` existed."""
+
+
+def _static_board_inputs() -> tuple[dict[str, Any], list[Event], dict[str, int | None]]:
+    parent = make_snapshot(number=3338, key="acme/widget#3338", head_ref="feat/base")
+    child = make_snapshot(
+        number=3339,
+        key="acme/widget#3339",
+        base_ref="feat/base",
+        stack_parent="acme/widget#3338",
+        checks=[make_check(name="build", status="IN_PROGRESS", conclusion=None)],
+        rollup_state="PENDING",
+    )
+    other = make_snapshot(number=7, key="other/repo#7", repo="other/repo", draft=True)
+    ev = Event(
+        pr=child.key,
+        kind="ci_check",
+        from_value=None,
+        to_value="IN_PROGRESS",
+        actionable=False,
+        suggested_action=None,
+        summary="CI started (build)",
+    )
+    snaps = {s.key: s for s in (parent, child, other)}
+    return snaps, [ev], {child.key: 90}
+
+
+def _dsl_values(dsl: str) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for line in dsl.splitlines():
+        key, val = line.split(" = ", 1)
+        parsed[key.removeprefix("$/")] = json.loads(val)
+    return parsed
+
+
+_MINE_NOW = "2026-10-27T21:15:00Z"
+
+
+class TestMineBoard(unittest.TestCase):
+    """The ``--mine`` board: title, row order, labels, subtitle, and source badges."""
+
+    def _board(
+        self, snaps: list[Any], observed_at: str = _MINE_NOW, **mine: Any
+    ) -> dict[str, Any]:
+        board = MineBoard(**{"total_open": len(snaps), **mine})
+        by_key = {s.key: s for s in snaps}
+        dm = board_data_model(by_key, [], observed_at=observed_at, mine=board)
+        dsl = board_dsl(by_key, [], observed_at=observed_at, mine=board)
+        self.assertEqual(_dsl_values(dsl), dm)  # the DSL file and the pane store agree
+        return dm
+
+    def test_static_board_is_unchanged_without_mine(self) -> None:
+        snaps, events, eta = _static_board_inputs()
+        observed = "2026-10-27T21:15:00Z"
+        self.assertEqual(board_dsl(snaps, events, eta, observed_at=observed), _STATIC_BOARD_DSL)
+        self.assertEqual(
+            board_data_model(snaps, events, eta, observed_at=observed),
+            _dsl_values(_STATIC_BOARD_DSL),
+        )
+        self.assertEqual(
+            board_dsl(snaps, events, eta, observed_at=observed, mine=None), _STATIC_BOARD_DSL
+        )
+
+    def test_title_counts_every_open_pr_and_one_repo_keeps_short_labels(self) -> None:
+        snaps = [
+            make_snapshot(number=12),
+            make_snapshot(number=3339, draft=True),
+        ]
+        dm = self._board(snaps, total_open=5, pending=3)
+        self.assertEqual(dm["title"], "### My Open PRs (5)")
+        self.assertEqual([i["id"] for i in dm["items"]], ["PR 12", "PR 3339"])
+        self.assertEqual(dm["subtitle"], "5 open (1 draft) in `acme/widget` · 3 pending")
+        self.assertNotIn("via packrat", dm["subtitle"])
+        self.assertEqual(dm["status"], "Watching · 21:15 UTC")
+
+    def test_rows_sort_by_repo_then_stack_root_then_depth_then_number(self) -> None:
+        snaps = [
+            make_snapshot(number=9, repo="zeta/app"),
+            make_snapshot(number=40, stack_parent="acme/widget#30"),
+            make_snapshot(number=31),
+            make_snapshot(number=30),
+            make_snapshot(number=41, stack_parent="acme/widget#40"),
+            make_snapshot(number=35, stack_parent="acme/widget#30"),
+            make_snapshot(number=2, repo="Beta/lib"),
+        ]
+        dm = self._board(snaps)
+        self.assertEqual(
+            [i["id"] for i in dm["items"]],
+            [
+                "widget#30",
+                "widget#35",
+                "widget#40",
+                "widget#41",
+                "widget#31",
+                "lib#2",
+                "app#9",
+            ],
+        )
+        self.assertEqual([i["wave"] for i in dm["items"][:5]], ["1", "2", "2", "3", "1"])
+        self.assertEqual(
+            list(sort_mine_snapshots({s.key: s for s in snaps})),
+            [
+                "acme/widget#30",
+                "acme/widget#35",
+                "acme/widget#40",
+                "acme/widget#41",
+                "acme/widget#31",
+                "Beta/lib#2",
+                "zeta/app#9",
+            ],
+        )
+
+    def test_colliding_short_names_keep_the_owner(self) -> None:
+        labels = mine_row_labels(["acme/widget#1", "other/widget#2", "acme/lib#3"])
+        self.assertEqual(
+            labels,
+            {
+                "acme/widget#1": "acme/widget#1",
+                "other/widget#2": "other/widget#2",
+                "acme/lib#3": "lib#3",
+            },
+        )
+        # Keys that differ only in case are one repository.
+        self.assertEqual(
+            mine_row_labels(["acme/widget#1", "Acme/Widget#2"]),
+            {"acme/widget#1": "PR 1", "Acme/Widget#2": "PR 2"},
+        )
+        dm = self._board([make_snapshot(number=1), make_snapshot(number=2, repo="other/widget")])
+        self.assertEqual([i["id"] for i in dm["items"]], ["acme/widget#1", "other/widget#2"])
+        self.assertEqual(dm["subtitle"], "2 open across 2 repos")
+
+    def test_recent_removals_use_the_row_labels_newest_first(self) -> None:
+        def gone(pr: str, state: str) -> dict[str, str]:
+            return {"pr": pr, "title": "t", "state": state, "at": "2026-10-27T20:00:00Z"}
+
+        retired = [
+            gone("acme/widget#1", "MERGED"),
+            gone("other/repo#2", "CLOSED"),
+            gone("acme/widget#3", "MERGED"),
+            gone("acme/widget#4", "REMOVED"),
+            gone("acme/widget#5", "MERGED"),
+            gone("acme/widget#6", "MERGED"),
+        ]
+        dm = self._board([make_snapshot(number=9)], recent_retired=retired)
+        self.assertEqual(
+            dm["subtitle"],
+            "1 open in `acme/widget` · merged today: widget#6, widget#5, widget#3 +1 more"
+            " · closed today: repo#2 · removed today: widget#4",
+        )
+        # A removal from another repository makes the rows carry the repository too.
+        self.assertEqual(dm["items"][0]["id"], "widget#9")
+        one_repo = self._board(
+            [make_snapshot(number=9)], recent_retired=[gone("acme/widget#1", "MERGED")]
+        )
+        self.assertEqual(one_repo["subtitle"], "1 open in `acme/widget` · merged today: PR 1")
+
+    def test_cap_note_shows_when_set_members_are_left_off_the_board(self) -> None:
+        snaps = [make_snapshot(number=n) for n in range(1, 4)]
+        dm = self._board(snaps, total_open=75, pending=1)
+        self.assertEqual(dm["title"], "### My Open PRs (75)")
+        self.assertEqual(dm["subtitle"], "75 open in `acme/widget` · 1 pending · showing 3 of 75")
+        self.assertNotIn("showing", self._board(snaps, total_open=4, pending=1)["subtitle"])
+
+    def test_membership_age_note_after_30_minutes(self) -> None:
+        snaps = [make_snapshot(number=1)]
+        fresh = self._board(snaps, set_synced_at="2026-10-27T20:45:00Z")
+        self.assertEqual(fresh["subtitle"], "1 open in `acme/widget`")
+        old = self._board(snaps, set_synced_at="2026-10-27T20:44:59Z")
+        self.assertEqual(
+            old["subtitle"], "1 open in `acme/widget` · membership as of 20:44 UTC"
+        )
+        unknown = self._board(snaps, set_synced_at=None)
+        self.assertEqual(unknown["subtitle"], "1 open in `acme/widget`")
+
+    def test_stale_and_catching_up_badges(self) -> None:
+        snaps = [make_snapshot(number=1, rollup_state="PENDING", checks=[])]
+        stale = self._board(
+            snaps, source_state=SourceState.STALE, stale_since="2026-10-27T21:03:10Z"
+        )
+        self.assertEqual(
+            (stale["status"], stale["statusTone"], stale["statusPulse"]),
+            ("packrat stale since 21:03 UTC", "warning", False),
+        )
+        catching_up = self._board(snaps, source_state=SourceState.CATCHING_UP)
+        self.assertEqual(
+            (catching_up["status"], catching_up["statusTone"], catching_up["statusPulse"]),
+            ("catching up · 21:15 UTC", "active", True),
+        )
+        live = self._board(snaps, source_state=SourceState.LIVE)
+        self.assertEqual(live["status"], "CI running · 21:15 UTC")
+
+    def test_empty_board(self) -> None:
+        dm = self._board([], total_open=0)
+        self.assertEqual(
+            (dm["title"], dm["subtitle"], dm["items"]), ("### My Open PRs (0)", "0 open", [])
+        )
 
 
 def _surface_lines(store_dir: Path, conv_id: str, surface_id: str) -> list[dict[str, Any]]:

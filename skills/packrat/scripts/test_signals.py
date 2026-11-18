@@ -525,6 +525,114 @@ class TestPollRepoEvents(_SignalsTestCase):
         self.assertEqual(dirty3.mirror_repos, {self.repo.repo_id})
         self.assertEqual(dirty3.git_repos, set())
 
+    def test_viewer_pr_opened_or_reopened_sets_dirty_viewer(self) -> None:
+        fixture_path = (
+            Path(__file__).resolve().parent / "fixtures" / "events_pull_request.json"
+        )
+        recorded = json.loads(fixture_path.read_text(encoding="utf-8"))
+        self.assertEqual(len(recorded), 2)
+        for entry in recorded:
+            self.assertEqual(entry["type"], "PullRequestEvent")
+            self.assertTrue(entry["actor"]["login"])
+            self.assertTrue(entry["payload"]["action"])
+
+        # Empty stored login never sets dirty.viewer.
+        runner_no_login = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(recorded),
+                            headers=['ETag: "sig-v0"', "X-Poll-Interval: 60"],
+                        )
+                    )
+                ]
+            }
+        )
+        dirty_no_login = self.poller(runner_no_login).poll_repo_events(NOW)
+        self.assertFalse(dirty_no_login.viewer)
+
+        # Stored viewer login matches case-insensitively on recorded `opened` event.
+        self.store.set_state("viewer_login", "GSpencerGoog")
+        self.store.set_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}", None)
+        self.store.set_state(f"{EVENTS_STATE_KEY_PREFIX}{self.repo.repo_id}", None)
+        runner_match = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(recorded),
+                            headers=['ETag: "sig-v1"', "X-Poll-Interval: 60"],
+                        )
+                    )
+                ]
+            }
+        )
+        dirty_match = self.poller(runner_match).poll_repo_events(NOW + 61)
+        self.assertTrue(dirty_match.viewer)
+
+        # Event opened by another user or a `closed` action by the viewer does not set dirty.viewer.
+        non_matching = [
+            {
+                "id": "300",
+                "type": "PullRequestEvent",
+                "actor": {"login": "someone-else"},
+                "payload": {"action": "opened", "number": 10},
+            },
+            {
+                "id": "301",
+                "type": "PullRequestEvent",
+                "actor": {"login": "gspencergoog"},
+                "payload": {"action": "closed", "number": 11},
+            },
+        ]
+        self.store.set_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}", None)
+        self.store.set_state(f"{EVENTS_STATE_KEY_PREFIX}{self.repo.repo_id}", None)
+        runner_other = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(non_matching),
+                            headers=['ETag: "sig-v2"', "X-Poll-Interval: 60"],
+                        )
+                    )
+                ]
+            }
+        )
+        dirty_other = self.poller(runner_other).poll_repo_events(NOW + 122)
+        self.assertFalse(dirty_other.viewer)
+
+        # Reopened event by the viewer sets dirty.viewer.
+        reopened = [
+            {
+                "id": "302",
+                "type": "PullRequestEvent",
+                "actor": {"login": "gspencergoog"},
+                "payload": {"action": "reopened", "number": 11},
+            }
+        ]
+        self.store.set_state(f"{EVENTS_LAST_ID_KEY_PREFIX}{self.repo.repo_id}", None)
+        self.store.set_state(f"{EVENTS_STATE_KEY_PREFIX}{self.repo.repo_id}", None)
+        runner_reopen = RoutingRunner(
+            {
+                "/events": [
+                    _ok(
+                        _http(
+                            "200 OK",
+                            json.dumps(reopened),
+                            headers=['ETag: "sig-v3"', "X-Poll-Interval: 60"],
+                        )
+                    )
+                ]
+            }
+        )
+        dirty_reopen = self.poller(runner_reopen).poll_repo_events(NOW + 183)
+        self.assertTrue(dirty_reopen.viewer)
+
 
 class TestPollCheckRuns(_SignalsTestCase):
     def setUp(self) -> None:

@@ -63,7 +63,7 @@ The `packrat serve` service writes these tables. Migrations are tracked in `sche
 | `latest_reviews` | `(repo_id, pr_number, author)` | `author_type`, `state` (includes `COMMENTED`), `submitted_at`, `commit_oid` |
 | `thread_activity` | `thread_id` | `repo_id`, `pr_number`, `is_resolved`, `is_outdated`, `last_author`, `last_author_type`, `last_at`, `participants_json` |
 | `notifications` | `thread_id` | `reason`, `subject_type`, `item_key`, `updated_at`, `unread`, `seen_at` |
-| `viewer_sets` | `(set_name, repo_id, item_number)` | `set_name` (`authored`, `review_requested`, `reviewed`, `issues`), `first_seen_at`, `last_seen_at`. `v_viewer_items` adds the item key text |
+| `viewer_sets` | `(set_name, repo_id, item_number)` | `set_name` (`authored`, `authored_open`, `review_requested`, `reviewed`, `issues`), `first_seen_at`, `last_seen_at`. `v_viewer_items` adds the item key text |
 | `watches` | `(consumer, consumer_id, repo_id, item_number)` | `freshness_s`, `lease_expires_at`. `v_watches` adds the item key text |
 | `refresh_requests` | `(repo_id, item_number)` | `requested_at` |
 | `changes` | `seq` (autoincrement) | `item_key`, `kind`, `fields` (JSON array), `at` |
@@ -525,3 +525,42 @@ Run hybrid BM25 and vector search restricted to `code_symbol` chunks (which embe
 ```bash
 packrat search "lexical token stream lookahead" --repo <owner>/<name> --kind code_symbol
 ```
+
+### 16. Remote Status, Cross-DB `--with-remote` Joins, and Snapshot Import
+
+Check remote server health and onboard an allowlisted public repository without a local checkout:
+
+```bash
+packrat --remote status
+packrat repo add <owner>/<name> --remote --github-only
+```
+
+Join a remote subquery against local DuckDB views with `--with-remote <alias>="<sql>"` (each remote subquery runs over `/api/v1/sql` and stages as a typed temporary view, even when 0 rows match):
+
+```bash
+packrat sql \
+  --with-remote remote_hot="SELECT repo, file_path, review_thread_count FROM v_file_hotspots WHERE repo = 'octo-org/widgets' LIMIT 25" \
+  "SELECT r.file_path, r.review_thread_count, COALESCE(l.commit_count, 0) AS local_commits
+   FROM remote_hot r
+   LEFT JOIN v_file_hotspots l ON l.repo = r.repo AND l.file_path = r.file_path
+   ORDER BY r.review_thread_count DESC;"
+```
+
+Download a scrubbed per-repository snapshot from a remote server and merge it into local `repos.sqlite`:
+
+```bash
+packrat export /tmp/widgets.sqlite --repo octo-org/widgets --remote --force
+packrat import /tmp/widgets.sqlite
+```
+
+Multi-user servers store per-caller state in a separate `personal.sqlite` file (`repos.sqlite` stays at schema v15):
+
+| Personal Table | Primary Key | Columns |
+| :--- | :--- | :--- |
+| `user_identities` | `owner_id` | `github_login`, `login_verified`, `notifications_last_modified`, `notifications_poll_interval_s`, `last_active_at`, `updated_at` |
+| `user_viewer_sets` | `(viewer_login, set_name, item_key)` | `first_seen_at`, `last_seen_at` |
+| `user_viewer_set_sync` | `(viewer_login, set_name)` | `synced_at` |
+| `user_watches` | `(owner_id, consumer, consumer_id, item_key)` | `freshness_s`, `lease_expires_at` |
+| `user_notifications` | `(owner_id, thread_id)` | `reason`, `subject_type`, `item_key`, `updated_at`, `unread`, `seen_at` |
+| `user_refresh_requests` | `(owner_id, item_key)` | `requested_at` |
+| `user_changes` | `seq` | `item_key`, `kind`, `fields`, `viewer_login`, `owner_id`, `at` |

@@ -8,12 +8,15 @@ import re
 import secrets
 import statistics
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections import Counter
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from mine_mode import RETIRED_REMOVED, SourceState
 from models import (
     DrawerReason,
     Event,
@@ -29,6 +32,7 @@ from models import (
     has_unanswered_direct_request,
     is_dormant_review,
     is_mute_active,
+    parse_iso_seconds,
     viewer_thread_progress,
 )
 from review_overrides import ReviewOverrides
@@ -698,8 +702,13 @@ def item_for(
     latest_event: Event | None = None,
     wave: int = 1,
     events: list[Event] | None = None,
+    *,
+    label: str | None = None,
 ) -> dict[str, Any]:
-    """Builds a single ``stack_board`` item dictionary for ``snap``."""
+    """Builds a single ``stack_board`` item dictionary for ``snap``.
+
+    ``label`` replaces the default ``PR <number>`` row label.
+    """
     state_text, state_tone = _state_badge(snap)
     ci_text, ci_tone = _ci_badge(snap, eta_s)
     rev_text, rev_tone = _review_badge(snap)
@@ -709,7 +718,7 @@ def item_for(
     )
     detail = _detail_bullets(snap, pr_events)
     return {
-        "id": f"PR {snap.number}",
+        "id": label or f"PR {snap.number}",
         "title": snap.title,
         "url": snap.url,
         "wave": str(wave),
@@ -735,6 +744,95 @@ def _format_utc_short(observed_at: str) -> str:
     return raw
 
 
+MINE_SYNC_AGE_NOTE_S = 30 * 60
+"""Under ``--mine``, a set sync older than this adds ``membership as of HH:MM`` to the subtitle."""
+MINE_REMOVALS_SHOWN = 3
+"""Most recent removals listed per state in the ``--mine`` subtitle before ``+N more``."""
+
+_REMOVAL_HEADINGS: tuple[tuple[str, str], ...] = (
+    ("MERGED", "merged today"),
+    ("CLOSED", "closed today"),
+    (RETIRED_REMOVED, "removed today"),
+)
+
+
+@dataclass(frozen=True)
+class MineBoard:
+    """What the ``--mine`` board shows beyond the snapshots themselves.
+
+    Attributes:
+        total_open: Keys in the ``authored_open`` set at the last discovery,
+            before the 60-PR cap. The title shows it.
+        pending: Keys in the set that have no board row yet.
+        recent_retired: Rows that left the board in the last 24 hours, oldest
+            first, as ``{"pr", "title", "state", "at"}`` entries from ``state.json``.
+        set_synced_at: ISO-8601 time that ``packrat`` last synced the set, or
+            None when it is not known.
+        source_state: How far the monitor trusts ``packrat`` right now.
+        stale_since: ISO-8601 time that the source turned stale, or None.
+    """
+
+    total_open: int
+    pending: int = 0
+    recent_retired: Sequence[Mapping[str, Any]] = ()
+    set_synced_at: str | None = None
+    source_state: SourceState = SourceState.LIVE
+    stale_since: str | None = None
+
+
+def _split_key(key: str) -> tuple[str, str]:
+    repo, _, number = key.rpartition("#")
+    return repo, number
+
+
+def sort_mine_snapshots(snapshots: Mapping[str, PrSnapshot]) -> dict[str, PrSnapshot]:
+    """Orders ``--mine`` rows by repository, then stack root, stack depth, and PR number."""
+    by_key = {snap.key: snap for snap in snapshots.values()}
+
+    def sort_key(snap: PrSnapshot) -> tuple[str, int, int, int]:
+        chain = _trace_chain(snap, by_key)
+        return snap.repo.lower(), by_key[chain[-1]].number, len(chain) - 1, snap.number
+
+    return {snap.key: snap for snap in sorted(by_key.values(), key=sort_key)}
+
+
+def mine_row_labels(keys: Iterable[str]) -> dict[str, str]:
+    """Maps each ``owner/repo#N`` key to its ``--mine`` row label.
+
+    The label is ``PR N`` when every key is in one repository and ``repo#N`` when
+    the keys span several. A repository whose short name another one shares
+    keeps its full ``owner/repo#N`` name.
+    """
+    keys = list(dict.fromkeys(keys))
+    repos = {_split_key(key)[0].lower() for key in keys}
+    if len(repos) <= 1:
+        return {key: f"PR {_split_key(key)[1]}" for key in keys}
+    short_names = Counter(repo.rsplit("/", 1)[-1] for repo in repos)
+    labels: dict[str, str] = {}
+    for key in keys:
+        repo, number = _split_key(key)
+        short = repo.rsplit("/", 1)[-1]
+        labels[key] = f"{repo if short_names[short.lower()] > 1 else short}#{number}"
+    return labels
+
+
+def _mine_labels(snapshots: Mapping[str, PrSnapshot], mine: MineBoard) -> dict[str, str]:
+    """Labels the board rows and the recent removals together, so both use one scheme."""
+    removed = [str(entry.get("pr") or "") for entry in mine.recent_retired]
+    return mine_row_labels([*snapshots, *(key for key in removed if key)])
+
+
+def _mine_status_badge(mine: MineBoard, observed_at: str) -> tuple[str, str, bool] | None:
+    """Returns the ``stale`` or ``catching up`` badge, or None while the source is live."""
+    if mine.source_state == SourceState.STALE:
+        since = _format_utc_short(mine.stale_since or "")
+        return (f"packrat stale since {since}" if since else "packrat stale"), "warning", False
+    if mine.source_state == SourceState.CATCHING_UP:
+        short_ts = _format_utc_short(observed_at)
+        return (f"catching up · {short_ts}" if short_ts else "catching up"), "active", True
+    return None
+
+
 def _board_status_badge(
     snapshots: dict[str, PrSnapshot],
     eta_map: dict[str, int | None],
@@ -757,7 +855,70 @@ def _board_status_badge(
     return f"Watching{suffix}", "active", True
 
 
-def _board_subtitle(snapshots: dict[str, PrSnapshot], events: list[Event]) -> str:
+def _mine_counts(snaps: Sequence[PrSnapshot], total_open: int) -> str:
+    """Returns the subtitle's opening count, for example ``14 open (2 draft) across 2 repos``."""
+    drafts = sum(1 for snap in snaps if snap.draft and snap.state == "OPEN")
+    repos = sorted({snap.repo.lower(): snap.repo for snap in snaps if snap.repo}.values())
+    text = f"{total_open} open"
+    if drafts:
+        text += f" ({drafts} draft)"
+    if len(repos) > 1:
+        return f"{text} across {len(repos)} repos"
+    return f"{text} in `{repos[0]}`" if repos else text
+
+
+def _mine_removal_notes(mine: MineBoard, labels: Mapping[str, str]) -> list[str]:
+    """Returns one ``merged today: a2ui#4153`` note per removal state, newest first."""
+    notes: list[str] = []
+    for state, heading in _REMOVAL_HEADINGS:
+        keys = [str(e.get("pr")) for e in reversed(mine.recent_retired) if e.get("state") == state]
+        if not keys:
+            continue
+        shown = ", ".join(labels.get(key, key) for key in keys[:MINE_REMOVALS_SHOWN])
+        more = len(keys) - MINE_REMOVALS_SHOWN
+        notes.append(f"{heading}: {shown}" + (f" +{more} more" if more > 0 else ""))
+    return notes
+
+
+def _mine_sync_note(set_synced_at: str | None, observed_at: str) -> str:
+    """Returns ``membership as of HH:MM UTC`` when the set last synced over 30 minutes ago."""
+    synced = parse_iso_seconds(set_synced_at)
+    observed = parse_iso_seconds(observed_at)
+    if synced is None or observed is None or observed - synced <= MINE_SYNC_AGE_NOTE_S:
+        return ""
+    return f"membership as of {_format_utc_short(set_synced_at or '')}"
+
+
+def _mine_subtitle(
+    snapshots: Mapping[str, PrSnapshot], mine: MineBoard, observed_at: str
+) -> str:
+    """Builds the ``--mine`` subtitle: counts, pending rows, the cap note, removals, sync age.
+
+    The source note (``via packrat``) is not part of it: ``monitor_prs.py``
+    appends that to every board.
+    """
+    snaps = list(snapshots.values())
+    parts = [_mine_counts(snaps, mine.total_open)]
+    if mine.pending:
+        parts.append(f"{mine.pending} pending")
+    if mine.total_open > len(snaps) + mine.pending:
+        parts.append(f"showing {len(snaps)} of {mine.total_open}")
+    parts.extend(_mine_removal_notes(mine, _mine_labels(snapshots, mine)))
+    sync_note = _mine_sync_note(mine.set_synced_at, observed_at)
+    if sync_note:
+        parts.append(sync_note)
+    return " · ".join(parts)
+
+
+def _board_subtitle(
+    snapshots: dict[str, PrSnapshot],
+    events: list[Event],
+    *,
+    mine: MineBoard | None = None,
+    observed_at: str = "",
+) -> str:
+    if mine is not None:
+        return _mine_subtitle(snapshots, mine, observed_at)
     snaps = list(snapshots.values())
     if not snaps:
         return ""
@@ -785,9 +946,21 @@ def board_data_model(
     events: list[Event],
     eta: dict[str, int | None] | None = None,
     observed_at: str = "",
+    *,
+    mine: MineBoard | None = None,
 ) -> dict[str, Any]:
-    """Builds the ``stack_board`` dataModel dictionary for ``snapshots`` and ``events``."""
+    """Builds the ``stack_board`` dataModel dictionary for ``snapshots`` and ``events``.
+
+    With ``mine``, builds the ``--mine`` board instead: the ``My Open PRs (N)``
+    title, rows sorted by ``sort_mine_snapshots()`` and labeled by
+    ``mine_row_labels()``, the ``--mine`` subtitle, and the ``stale`` and
+    ``catching up`` badges. Without it, the output is the static board's.
+    """
     eta_map = eta or {}
+    labels: dict[str, str] = {}
+    if mine is not None:
+        snapshots = sort_mine_snapshots(snapshots)
+        labels = _mine_labels(snapshots, mine)
     events_by_pr: dict[str, list[Event]] = {}
     for ev in events:
         events_by_pr.setdefault(ev.pr, []).append(ev)
@@ -800,12 +973,16 @@ def board_data_model(
                 eta_s=eta_map.get(key),
                 wave=wave,
                 events=events_by_pr.get(key),
+                label=labels.get(key),
             )
         )
-    status_text, status_tone, status_pulse = _board_status_badge(snapshots, eta_map, observed_at)
-    subtitle = _board_subtitle(snapshots, events)
+    source_badge = _mine_status_badge(mine, observed_at) if mine is not None else None
+    status_text, status_tone, status_pulse = source_badge or _board_status_badge(
+        snapshots, eta_map, observed_at
+    )
+    subtitle = _board_subtitle(snapshots, events, mine=mine, observed_at=observed_at)
     return {
-        "title": "### PR Monitor",
+        "title": "### PR Monitor" if mine is None else f"### My Open PRs ({mine.total_open})",
         "subtitle": subtitle,
         "status": status_text,
         "statusTone": status_tone,
@@ -821,9 +998,14 @@ def board_dsl(
     events: list[Event],
     eta: dict[str, int | None] | None = None,
     observed_at: str = "",
+    *,
+    mine: MineBoard | None = None,
 ) -> str:
-    """Renders A2UI Express data statements for the ``stack_board`` template."""
-    dm = board_data_model(snapshots, events, eta=eta, observed_at=observed_at)
+    """Renders A2UI Express data statements for the ``stack_board`` template.
+
+    ``mine`` selects the ``--mine`` board, as in ``board_data_model()``.
+    """
+    dm = board_data_model(snapshots, events, eta=eta, observed_at=observed_at, mine=mine)
     lines = [
         f"$/title = {json.dumps(dm['title'])}",
         f"$/subtitle = {json.dumps(dm['subtitle'])}",

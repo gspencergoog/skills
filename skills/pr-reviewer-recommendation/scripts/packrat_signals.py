@@ -24,12 +24,16 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import posixpath
 import shlex
+import shutil
 import sqlite3
+import subprocess
 import sys
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -45,9 +49,18 @@ from reviewer_models import (
 )
 
 DEFAULT_PACKRAT_DB: Path = Path.home() / ".local" / "share" / "packrat" / "repos.sqlite"
+_IMPORT_DEFAULT_PACKRAT_DB: Path = DEFAULT_PACKRAT_DB
+_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "auth_expired",
+    "auth expired",
+    "unauthorized",
+    "401",
+)
 DIRECTORY_EVENT_LIMIT: int = 200
 MAX_DIRECT_FILE_BATCH: int = 400
-VALID_REVIEW_STATES: frozenset[str] = frozenset({"APPROVED", "CHANGES_REQUESTED", "COMMENTED"})
+VALID_REVIEW_STATES: frozenset[str] = frozenset(
+    {"APPROVED", "CHANGES_REQUESTED", "COMMENTED"}
+)
 
 
 def _clean_rel_path(path: str) -> str:
@@ -97,7 +110,9 @@ def _build_backfill_warning(repo_full_name: str) -> str:
 
 def _existing_tables(conn: sqlite3.Connection) -> set[str]:
     """Lists all table names present in the SQLite database."""
-    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'"
+    ).fetchall()
     return {str(row["name"]) for row in rows}
 
 
@@ -107,7 +122,9 @@ def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {str(row["name"]) for row in rows}
 
 
-def _load_repo_row(conn: sqlite3.Connection, repo_full_name: str) -> tuple[int, str, bool] | None:
+def _load_repo_row(
+    conn: sqlite3.Connection, repo_full_name: str
+) -> tuple[int, str, bool] | None:
     """Fetches ``(repo_id, canonical_full_name, prs_backfill_complete)``."""
     repo_cols = _table_columns(conn, "repos")
     if "repo_id" not in repo_cols or "full_name" not in repo_cols:
@@ -170,11 +187,15 @@ def _load_target_pr_metadata(
             title = str(pr_row["title"]) if pr_row["title"] is not None else None
             base_ref = str(pr_row["base_ref"] or "").strip() or None
 
-    pr_files = _query_target_pr_files(conn, repo_id, target_pr) if "pr_files" in tables else ()
+    pr_files = (
+        _query_target_pr_files(conn, repo_id, target_pr) if "pr_files" in tables else ()
+    )
     return author, title, base_ref, pr_files
 
 
-def _register_login_casing(canonical_by_lower: dict[str, str], raw_login: str | None) -> str | None:
+def _register_login_casing(
+    canonical_by_lower: dict[str, str], raw_login: str | None
+) -> str | None:
     """Normalizes a non-bot GitHub login and records its first-seen casing."""
     cleaned = (raw_login or "").strip().lstrip("@")
     if not cleaned or is_bot_identity(cleaned):
@@ -253,7 +274,9 @@ def _ingest_commit_identity_row(
         _record_candidate_login(email_candidates, raw_email, login_lower)
     raw_name = str(row["author_name"] or "").strip()
     if raw_name and not is_bot_identity(raw_name):
-        _record_candidate_login(name_candidates, normalize_multi_token_name(raw_name), login_lower)
+        _record_candidate_login(
+            name_candidates, normalize_multi_token_name(raw_name), login_lower
+        )
 
 
 def _load_commit_identity_maps(
@@ -453,7 +476,9 @@ def _query_directory_reviews(
             LIMIT ?
         """
         for row in conn.execute(query, params).fetchall():
-            event = _row_to_review_event(row, dirpath, True, canonical_by_lower, known_logins)
+            event = _row_to_review_event(
+                row, dirpath, True, canonical_by_lower, known_logins
+            )
             if event is not None:
                 events.append(event)
     return events
@@ -527,7 +552,9 @@ def _thread_row_to_events(
 ) -> list[PackratThreadEvent]:
     """Converts a single ``review_threads`` SQL row into thread events."""
     thread_id = str(row["thread_id"] or "").strip()
-    scope_path = dir_override if is_directory else _clean_rel_path(str(row["file_path"] or ""))
+    scope_path = (
+        dir_override if is_directory else _clean_rel_path(str(row["file_path"] or ""))
+    )
     if not thread_id or not scope_path:
         return []
     timestamp = parse_iso_timestamp_or_zero(row["event_time"])
@@ -619,7 +646,9 @@ def _query_direct_threads(
         """
         rows = conn.execute(query, params).fetchall()
         events.extend(
-            _rows_to_thread_events(rows, False, None, seen_keys, canonical_by_lower, known_logins)
+            _rows_to_thread_events(
+                rows, False, None, seen_keys, canonical_by_lower, known_logins
+            )
         )
     return events
 
@@ -663,7 +692,9 @@ def _query_directory_threads(
         """
         rows = conn.execute(query, params).fetchall()
         events.extend(
-            _rows_to_thread_events(rows, True, dirpath, seen_keys, canonical_by_lower, known_logins)
+            _rows_to_thread_events(
+                rows, True, dirpath, seen_keys, canonical_by_lower, known_logins
+            )
         )
     return events
 
@@ -678,9 +709,13 @@ def _collect_all_known_logins(
     """Collects known logins across pull requests, reviews, and review threads."""
     known: set[str] = set()
     if "pull_requests" in tables:
-        known |= _collect_table_logins(conn, repo_id, "pull_requests", "author", canonical_by_lower)
+        known |= _collect_table_logins(
+            conn, repo_id, "pull_requests", "author", canonical_by_lower
+        )
     if rev_col and "reviews" in tables:
-        known |= _collect_table_logins(conn, repo_id, "reviews", rev_col, canonical_by_lower)
+        known |= _collect_table_logins(
+            conn, repo_id, "reviews", rev_col, canonical_by_lower
+        )
     if "review_threads" in tables:
         known |= _collect_table_logins(
             conn, repo_id, "review_threads", "reviewer", canonical_by_lower
@@ -688,7 +723,9 @@ def _collect_all_known_logins(
     return known
 
 
-def _resolve_reviews_author_column(conn: sqlite3.Connection, tables: set[str]) -> str | None:
+def _resolve_reviews_author_column(
+    conn: sqlite3.Connection, tables: set[str]
+) -> str | None:
     """Detects the reviewer handle column on ``reviews`` (``author`` in packrat DDL)."""
     if "reviews" not in tables:
         return None
@@ -727,7 +764,9 @@ def _query_packrat_db(
 
     rev_col = _resolve_reviews_author_column(conn, tables)
     canonical_by_lower: dict[str, str] = {}
-    known_logins = _collect_all_known_logins(conn, repo_id, tables, rev_col, canonical_by_lower)
+    known_logins = _collect_all_known_logins(
+        conn, repo_id, tables, rev_col, canonical_by_lower
+    )
     sha_map, email_map, name_map = _load_commit_identity_maps(
         conn, repo_id, tables, canonical_by_lower, known_logins
     )
@@ -792,7 +831,9 @@ def _query_packrat_db(
         repo_full_name=canonical_repo,
         prs_backfill_complete=backfill_complete,
         fallback_note=None,
-        backfill_warning=(None if backfill_complete else _build_backfill_warning(canonical_repo)),
+        backfill_warning=(
+            None if backfill_complete else _build_backfill_warning(canonical_repo)
+        ),
         target_pr_author=pr_author,
         target_pr_title=pr_title,
         target_pr_base_ref=pr_base_ref,
@@ -806,37 +847,213 @@ def _query_packrat_db(
     )
 
 
-def load_packrat_signals(
-    repo_full_name: str | None,
-    changed_files: Sequence[str],
-    *,
-    db_path: Path = DEFAULT_PACKRAT_DB,
-    target_pr: int | None = None,
-    repo_dir: str | None = None,
+def _default_db_path() -> Path:
+    if DEFAULT_PACKRAT_DB != _IMPORT_DEFAULT_PACKRAT_DB:
+        return DEFAULT_PACKRAT_DB
+    return Path.home() / ".local" / "share" / "packrat" / "repos.sqlite"
+
+
+def _is_default_db_path(db_path: Path | None) -> bool:
+    if db_path is None:
+        return True
+    resolved = Path(db_path).expanduser().resolve()
+    defaults = {
+        DEFAULT_PACKRAT_DB.expanduser().resolve(),
+        (Path.home() / ".local" / "share" / "packrat" / "repos.sqlite").resolve(),
+    }
+    return resolved in defaults
+
+
+def discover_packrat_cmd(override: Sequence[str] | None = None) -> list[str] | None:
+    """Locates the ``packrat`` CLI executable or companion skill entrypoint."""
+    if override is not None:
+        cleaned = [str(part).strip() for part in override if str(part).strip()]
+        return cleaned or None
+    which_bin = shutil.which("packrat")
+    if which_bin:
+        return [which_bin]
+    home = Path.home()
+    local_bin = home / ".local" / "bin" / "packrat"
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return [str(local_bin)]
+    skill_roots = (
+        Path(__file__).resolve().parents[2],
+        home / ".gemini" / "config" / "skills",
+        home / ".gemini" / "skills",
+        home / ".claude" / "skills",
+        home / ".agents" / "skills",
+    )
+    for skill_root in skill_roots:
+        script = skill_root / "packrat" / "scripts" / "packrat.py"
+        if script.is_file():
+            return [sys.executable or "python3", str(script)]
+    return None
+
+
+def _has_remote_config() -> bool:
+    if os.environ.get("PACKRAT_URL", "").strip():
+        return True
+    env_mode = os.environ.get("PACKRAT_MODE", "").strip().lower()
+    if env_mode == "local":
+        return False
+    if env_mode in {"remote", "auto"}:
+        return True
+    cfg_path = Path.home() / ".config" / "packrat" / "config.json"
+    if not cfg_path.is_file():
+        return False
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    cfg_mode = str(data.get("mode") or "").strip().lower()
+    if cfg_mode == "local":
+        return False
+    return bool(
+        str(data.get("remote_url") or "").strip() or cfg_mode in {"remote", "auto"}
+    )
+
+
+def _should_use_remote_reader(
+    db_path: Path | None,
+    cmd: list[str] | None,
+    packrat_cmd: Sequence[str] | None,
+) -> bool:
+    if not _is_default_db_path(db_path) or cmd is None:
+        return False
+    return packrat_cmd is not None or _has_remote_config()
+
+
+def _invoke_remote_review_signals(
+    cmd: Sequence[str],
+    clean_repo: str,
+    target_pr: int | None,
+    normalized_changed: tuple[str, ...],
+) -> tuple[dict[str, Any] | None, str]:
+    ops = {
+        "review_signals": {
+            "repo": clean_repo,
+            "target_pr": target_pr,
+            "files": list(normalized_changed),
+        }
+    }
+    full_cmd = [*cmd, "reader", "--ops-json", json.dumps(ops), "--json"]
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except (OSError, subprocess.SubprocessError):
+        return None, "error"
+    if proc.returncode != 0:
+        combined = f"{proc.stderr or ''}\n{proc.stdout or ''}".lower()
+        is_auth = any(m in combined for m in _AUTH_ERROR_MARKERS)
+        return None, "auth_expired" if is_auth else "error"
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        return None, "error"
+    if not isinstance(parsed, dict) or not isinstance(
+        parsed.get("review_signals"), dict
+    ):
+        return None, "error"
+    return parsed["review_signals"], ""
+
+
+def _parse_remote_review_events(raw_events: Any) -> tuple[PackratReviewEvent, ...]:
+    events: list[PackratReviewEvent] = []
+    for item in raw_events or ():
+        if not isinstance(item, dict):
+            continue
+        events.append(
+            PackratReviewEvent(
+                pr_number=int(item["pr_number"]),
+                reviewer_login=str(item["reviewer_login"]),
+                state=str(item["state"]),
+                timestamp=int(float(item.get("timestamp") or 0)),
+                scope_path=str(item["scope_path"]),
+                is_directory=bool(item.get("is_directory", False)),
+                pr_changed_files=max(1, int(item.get("pr_changed_files") or 1)),
+            )
+        )
+    return tuple(events)
+
+
+def _parse_remote_thread_events(raw_events: Any) -> tuple[PackratThreadEvent, ...]:
+    events: list[PackratThreadEvent] = []
+    for item in raw_events or ():
+        if not isinstance(item, dict):
+            continue
+        events.append(
+            PackratThreadEvent(
+                thread_id=str(item["thread_id"]),
+                pr_number=int(item["pr_number"]),
+                reviewer_login=str(item["reviewer_login"]),
+                timestamp=int(float(item.get("timestamp") or 0)),
+                scope_path=str(item["scope_path"]),
+                is_directory=bool(item.get("is_directory", False)),
+            )
+        )
+    return tuple(events)
+
+
+def _deserialize_remote_signals(
+    sig: dict[str, Any], clean_repo: str, repo_dir: str | None
 ) -> PackratLoadResult:
-    """Loads historical review, thread, and identity signals from ``repos.sqlite``.
-
-    Opens ``db_path`` strictly in read-only URI mode (``?mode=ro``) after checking
-    ``db_path.is_file()`` so missing databases never create empty files on disk.
-
-    Args:
-        repo_full_name: Canonical GitHub ``owner/name`` repository identifier, or
-            None when the target directory has no GitHub remote.
-        changed_files: Repository-relative paths modified by the target change.
-        db_path: Path to ``packrat``'s ``repos.sqlite`` database.
-        target_pr: Optional pull request number being analyzed (excluded from
-            historical review events and used for offline ``pr_files`` lookup).
-        repo_dir: Optional repository working directory path for sync hints.
-
-    Returns:
-        ``PackratLoadResult`` describing status, fallback/backfill notes, cached
-        target PR metadata, unambiguous identity maps, and review/thread events.
-    """
-    clean_repo = (repo_full_name or "").strip()
-    if not clean_repo:
+    status = str(sig.get("status") or "untracked_repo")
+    if status == "no_github_repo":
         return PackratLoadResult(status="no_github_repo", fallback_note=None)
+    repo_full_name = str(sig.get("repo_full_name") or clean_repo)
+    if status != "ok":
+        return PackratLoadResult(
+            status="untracked_repo",
+            repo_full_name=repo_full_name,
+            fallback_note=_build_fallback_note(
+                repo_full_name, repo_dir, f"{repo_full_name} is not tracked in packrat"
+            ),
+        )
+    backfill_complete = bool(sig.get("prs_backfill_complete", False))
+    return PackratLoadResult(
+        status="ok",
+        repo_full_name=repo_full_name,
+        prs_backfill_complete=backfill_complete,
+        fallback_note=None,
+        backfill_warning=(
+            None if backfill_complete else _build_backfill_warning(repo_full_name)
+        ),
+        target_pr_author=sig.get("target_pr_author"),
+        target_pr_title=sig.get("target_pr_title"),
+        target_pr_base_ref=sig.get("target_pr_base_ref"),
+        target_pr_files=tuple(str(p) for p in (sig.get("target_pr_files") or ())),
+        known_logins=frozenset(str(x) for x in (sig.get("known_logins") or ())),
+        sha_to_login={
+            str(k): str(v) for k, v in (sig.get("sha_to_login") or {}).items()
+        },
+        email_to_login={
+            str(k): str(v) for k, v in (sig.get("email_to_login") or {}).items()
+        },
+        name_to_login={
+            str(k): str(v) for k, v in (sig.get("name_to_login") or {}).items()
+        },
+        review_events=_parse_remote_review_events(sig.get("review_events")),
+        thread_events=_parse_remote_thread_events(sig.get("thread_events")),
+    )
 
-    resolved_db = Path(db_path)
+
+def _load_local_sqlite_signals(
+    resolved_db: Path,
+    clean_repo: str,
+    normalized_changed: tuple[str, ...],
+    target_pr: int | None,
+    repo_dir: str | None,
+) -> PackratLoadResult:
     try:
         exists = resolved_db.is_file()
     except OSError:
@@ -851,16 +1068,17 @@ def load_packrat_signals(
         return PackratLoadResult(
             status="missing_db",
             repo_full_name=clean_repo,
-            fallback_note=_build_fallback_note(clean_repo, repo_dir, "packrat database not found"),
+            fallback_note=_build_fallback_note(
+                clean_repo, repo_dir, "packrat database not found"
+            ),
         )
-
-    cleaned_paths = [_clean_rel_path(path) for path in changed_files]
-    normalized_changed = tuple(dict.fromkeys(p for p in cleaned_paths if p))
     try:
         uri = f"{resolved_db.resolve().as_uri()}?mode=ro"
         with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as conn:
             conn.row_factory = sqlite3.Row
-            return _query_packrat_db(conn, clean_repo, normalized_changed, target_pr, repo_dir)
+            return _query_packrat_db(
+                conn, clean_repo, normalized_changed, target_pr, repo_dir
+            )
     except (sqlite3.Error, OSError):
         return PackratLoadResult(
             status="unreadable_db",
@@ -869,3 +1087,63 @@ def load_packrat_signals(
                 clean_repo, repo_dir, "packrat database could not be read"
             ),
         )
+
+
+def load_packrat_signals(
+    repo_full_name: str | None,
+    changed_files: Sequence[str],
+    *,
+    db_path: Path | None = DEFAULT_PACKRAT_DB,
+    target_pr: int | None = None,
+    repo_dir: str | None = None,
+    packrat_cmd: Sequence[str] | None = None,
+) -> PackratLoadResult:
+    """Loads historical review, thread, and identity signals from ``repos.sqlite`` or ``packrat reader``.
+
+    Opens ``db_path`` strictly in read-only URI mode (``?mode=ro``) after checking
+    ``db_path.is_file()`` so missing databases never create empty files on disk.
+    When ``db_path`` is None or resolves to ``DEFAULT_PACKRAT_DB`` and no local
+    mirror row is ready, queries ``packrat reader`` if remote/auto mode is
+    configured or ``packrat_cmd`` is explicitly provided.
+
+    Args:
+        repo_full_name: Canonical GitHub ``owner/name`` repository identifier, or
+            None when the target directory has no GitHub remote.
+        changed_files: Repository-relative paths modified by the target change.
+        db_path: Path to ``packrat``'s ``repos.sqlite`` database.
+        target_pr: Optional pull request number being analyzed (excluded from
+            historical review events and used for offline ``pr_files`` lookup).
+        repo_dir: Optional repository working directory path for sync hints.
+        packrat_cmd: Optional explicit command argv for invoking ``packrat``.
+
+    Returns:
+        ``PackratLoadResult`` describing status, fallback/backfill notes, cached
+        target PR metadata, unambiguous identity maps, and review/thread events.
+    """
+    clean_repo = (repo_full_name or "").strip()
+    if not clean_repo:
+        return PackratLoadResult(status="no_github_repo", fallback_note=None)
+
+    cleaned_paths = [_clean_rel_path(path) for path in changed_files]
+    normalized_changed = tuple(dict.fromkeys(p for p in cleaned_paths if p))
+    effective_db = (
+        _default_db_path()
+        if db_path is None or db_path == _IMPORT_DEFAULT_PACKRAT_DB
+        else Path(db_path)
+    )
+    local_result = _load_local_sqlite_signals(
+        effective_db, clean_repo, normalized_changed, target_pr, repo_dir
+    )
+    if local_result.status == "ok":
+        return local_result
+
+    cmd = discover_packrat_cmd(packrat_cmd)
+    if _should_use_remote_reader(db_path, cmd, packrat_cmd):
+        assert cmd is not None
+        sig, _err = _invoke_remote_review_signals(
+            cmd, clean_repo, target_pr, normalized_changed
+        )
+        if sig is not None:
+            return _deserialize_remote_signals(sig, clean_repo, repo_dir)
+
+    return local_result

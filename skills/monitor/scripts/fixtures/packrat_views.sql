@@ -91,5 +91,6 @@ CREATE TABLE v_viewer_items (
 CREATE TABLE v_service_health (
   pid INTEGER, started_at TEXT, beat_at TEXT, version TEXT, beat_age_s INTEGER,
   graphql_remaining INTEGER, graphql_reset_at INTEGER, core_remaining INTEGER,
-  core_reset_at INTEGER, active_leases INTEGER, viewer_login TEXT
+  core_reset_at INTEGER, active_leases INTEGER, viewer_login TEXT, last_ok_at TEXT,
+  consecutive_failed_ticks INTEGER DEFAULT 0, viewer_sets_synced_json TEXT DEFAULT '{}'
 );

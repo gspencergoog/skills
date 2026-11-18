@@ -76,7 +76,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "sync_backfill_only": ("github_sync", "sync_backfill_only"),
     "sync_github_metadata": ("github_sync", "sync_github_metadata"),
     "BACKFILL_STREAMS": ("models", "BACKFILL_STREAMS"),
+    "ClientConfig": ("models", "ClientConfig"),
     "EXIT_LOCKED_RETRY": ("models", "EXIT_LOCKED_RETRY"),
+    "HttpHelperError": ("models", "HttpHelperError"),
     "RepoConfig": ("models", "RepoConfig"),
     "SearchFilters": ("models", "SearchFilters"),
     "SyncStats": ("models", "SyncStats"),
@@ -91,9 +93,29 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "RATE_BUDGET_FILENAME": ("rate_budget", "RATE_BUDGET_FILENAME"),
     "RateBudget": ("rate_budget", "RateBudget"),
     "RateSnapshot": ("rate_budget", "RateSnapshot"),
+    "execute_reader_batch": ("reader_ops", "execute_reader_batch"),
+    "HttpCmdTransport": ("remote_client", "HttpCmdTransport"),
+    "SessionTargetResolver": ("remote_client", "SessionTargetResolver"),
+    "exit_code_for_http_error": ("remote_client", "exit_code_for_http_error"),
+    "hybrid_search": ("remote_client", "hybrid_search"),
+    "load_client_config": ("remote_client", "load_client_config"),
+    "remote_add_repo": ("remote_client", "remote_add_repo"),
+    "remote_auth_link": ("remote_client", "remote_auth_link"),
+    "remote_export_repo": ("remote_client", "remote_export_repo"),
+    "remote_health": ("remote_client", "remote_health"),
+    "remote_list_repos": ("remote_client", "remote_list_repos"),
+    "remote_reader_batch": ("remote_client", "remote_reader_batch"),
+    "remote_remove_repo": ("remote_client", "remote_remove_repo"),
+    "remote_sql": ("remote_client", "remote_sql"),
+    "render_sql_table": ("remote_client", "render_sql_table"),
+    "route_sql_mode": ("remote_client", "route_sql_mode"),
+    "run_sql_with_remote": ("remote_client", "run_sql_with_remote"),
     "hybrid_rrf_search": ("search_engine", "hybrid_rrf_search"),
     "add_live_parsers": ("serve_cli", "add_live_parsers"),
+    "cmd_changes_remote": ("serve_cli", "cmd_changes_remote"),
+    "cmd_refresh_remote": ("serve_cli", "cmd_refresh_remote"),
     "cmd_serve": ("serve_cli", "cmd_serve"),
+    "cmd_watch_remote": ("serve_cli", "cmd_watch_remote"),
     "fold_timeline_stats": ("serve_cli", "fold_timeline_stats"),
     "format_service_status": ("serve_cli", "format_service_status"),
     "github_sync_stopped": ("serve_cli", "github_sync_stopped"),
@@ -160,20 +182,63 @@ _EMPTY_TABLE_COUNTS: dict[str, int] = {
 
 def _resolve_db_path(db_path_str: str | None) -> Path:
     """Resolves the target SQLite database path from CLI args or default."""
-    return (
-        Path(db_path_str).expanduser()
-        if db_path_str
-        else Path(_lazy("DEFAULT_DB_PATH"))
-    )
+    if db_path_str:
+        return Path(db_path_str).expanduser()
+    raw_home = os.environ.get("HOME", "").strip()
+    if raw_home:
+        return (
+            Path(raw_home).expanduser()
+            / ".local"
+            / "share"
+            / "packrat"
+            / "repos.sqlite"
+        )
+    return Path(_lazy("DEFAULT_DB_PATH"))
+
+
+def _is_explicit_non_default_db(db_path_str: str | None) -> bool:
+    if not db_path_str:
+        return False
+    resolved = Path(db_path_str).expanduser().resolve()
+    default_db = _resolve_db_path(None).expanduser().resolve()
+    return resolved != default_db
+
+
+def _has_remote_cli_flags(args: argparse.Namespace) -> bool:
+    if bool(getattr(args, "remote", False)):
+        return True
+    if str(getattr(args, "remote_url", None) or "").strip():
+        return True
+    return str(getattr(args, "routing_mode", None) or "").strip().lower() == "remote"
+
+
+def _client_config_for(args: argparse.Namespace) -> Any:
+    """Resolves `ClientConfig` without importing `remote_client` on explicit `--db` local runs."""
+    if _is_explicit_non_default_db(
+        getattr(args, "db", None)
+    ) and not _has_remote_cli_flags(args):
+        if bool(getattr(args, "remote", False)) and bool(getattr(args, "local", False)):
+            raise ValueError("Cannot pass both --remote and --local.")
+        return _lazy("ClientConfig")(mode="local")
+    return _lazy("load_client_config")(args)
+
+
+def _should_use_remote_for_registry_read(cfg: Any, db_path: Path) -> bool:
+    if cfg.mode == "remote":
+        return True
+    return bool(cfg.mode == "auto" and cfg.remote_url and not db_path.is_file())
 
 
 def _open_store(
-    db_path_str: str | None, *, refresh_init_sql: bool = False
+    db_path_str: str | None,
+    *,
+    refresh_init_sql: bool = False,
+    read_only: bool = False,
 ) -> PackratStore:
     """Opens PackratStore and optionally refreshes init.sql."""
     db_path = _resolve_db_path(db_path_str)
-    store = _lazy("PackratStore")(db_path)
-    if refresh_init_sql:
+    store = _lazy("PackratStore")(db_path, read_only=read_only)
+    if refresh_init_sql and not read_only:
         store.write_init_sql()
     return store
 
@@ -643,15 +708,119 @@ def _resolve_active_embedder_id(
     return model_id, None
 
 
+def _filter_remote_repo_dicts(
+    raw_repos: list[dict[str, Any]], repo_arg: Any
+) -> list[dict[str, Any]]:
+    tokens = {t.lower() for t in _parse_repo_tokens(repo_arg)}
+    if not tokens:
+        return raw_repos
+    filtered: list[dict[str, Any]] = []
+    for repo in raw_repos:
+        full_low = str(repo.get("full_name") or "").lower()
+        short_low = full_low.partition("/")[2]
+        if full_low in tokens or short_low in tokens:
+            filtered.append(repo)
+    return filtered
+
+
+def _cmd_status_remote(args: argparse.Namespace, cfg: Any) -> int:
+    tx = _lazy("HttpCmdTransport")(cfg)
+    health = _lazy("remote_health")(tx)
+    repos_resp = _lazy("remote_list_repos")(tx)
+    raw_repos = _filter_remote_repo_dicts(
+        list(repos_resp.get("repos") or []), getattr(args, "repo", None)
+    )
+    payload: dict[str, Any] = {
+        "mode": "remote",
+        "remote_url": cfg.remote_url,
+        "db_path": f"remote:{cfg.remote_url}",
+        "init_sql_path": "",
+        "active_embedder": "remote",
+        "rate_budget": health.get("rate_budget") or {},
+        "service": {
+            "pid": health.get("pid"),
+            "started_at": health.get("started_at"),
+            "beat_at": health.get("beat_at"),
+            "beat_age_s": health.get("beat_age_s"),
+            "version": health.get("version"),
+            "last_ok_at": health.get("last_ok_at"),
+            "consecutive_failed_ticks": health.get("consecutive_failed_ticks", 0),
+            "leases_by_consumer": {},
+        },
+        "disk": health.get("disk"),
+        "owner_id": health.get("owner_id"),
+        "login_verified": health.get("login_verified"),
+        "repos": [
+            {
+                **r,
+                "local_path": None,
+                "counts": {**_EMPTY_TABLE_COUNTS, **(r.get("counts") or {})},
+                "warnings": list(r.get("warnings") or []),
+            }
+            for r in raw_repos
+        ],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    print(f"Remote server: {cfg.remote_url}")
+    print(_lazy("format_service_status")(payload["service"]))
+    for item in payload["repos"]:
+        sha_short = (item.get("last_indexed_sha") or "none")[:10]
+        print(f"\n[{item['full_name']}] (mode={item.get('mode')}, sha={sha_short})")
+    return 0
+
+
+def _cmd_status_missing_local(args: argparse.Namespace, db_path: Path) -> int:
+    if getattr(args, "repo", None):
+        tokens = _parse_repo_tokens(args.repo)
+        if tokens:
+            raise ValueError(f"Repository '{tokens[0]}' is not registered in packrat.")
+    embedder_id, _ = _resolve_active_embedder_id()
+    auto_sync = _lazy("get_auto_sync_status")(db_path=db_path)
+    payload: dict[str, Any] = {
+        "db_path": str(db_path),
+        "init_sql_path": str(db_path.parent / INIT_SQL_FILENAME),
+        "active_embedder": embedder_id,
+        "auto_sync": asdict(auto_sync),
+        "rate_budget": {},
+        "service": {
+            "pid": None,
+            "started_at": None,
+            "beat_at": None,
+            "beat_age_s": None,
+            "version": None,
+            "expected_version": None,
+            "code_stale": False,
+            "last_ok_at": None,
+            "consecutive_failed_ticks": 0,
+            "leases_by_consumer": {},
+        },
+        "repos": [],
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    _print_status_text(payload, auto_sync)
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """Handles `packrat status`."""
-    store = _open_store(args.db)
+    cfg = _client_config_for(args)
+    db_path = _resolve_db_path(args.db)
+    if _should_use_remote_for_registry_read(cfg, db_path):
+        return _cmd_status_remote(args, cfg)
+    if not db_path.is_file():
+        return _cmd_status_missing_local(args, db_path)
+    store = _open_store(args.db, read_only=True)
     try:
         repos = _select_repos(store, args.repo)
         embedder_id, _ = _resolve_active_embedder_id()
         init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
         if not init_sql_path.exists():
-            init_sql_path = store.write_init_sql()
+            with contextlib.suppress(OSError):
+                init_sql_path = store.write_init_sql()
         auto_sync = _lazy("get_auto_sync_status")(db_path=store.db_path)
         verbose = bool(getattr(args, "verbose", False))
         payload: dict[str, Any] = {
@@ -1517,17 +1686,62 @@ def _empty_search_hint(store: PackratStore, repo_arg: str | None) -> str | None:
     return None
 
 
+def _print_search_hit_dicts(
+    hit_dicts: Sequence[dict[str, Any]], *, as_json: bool
+) -> int:
+    if as_json:
+        print(json.dumps(list(hit_dicts), indent=2))
+        return 0
+    if not hit_dicts:
+        print("No matching chunks found.")
+        return 0
+    for idx, hit in enumerate(hit_dicts, start=1):
+        cos_val = hit.get("cosine_score")
+        cos_str = f"{float(cos_val):.3f}" if cos_val is not None else "-"
+        rrf_val = float(hit.get("rrf_score") or 0.0)
+        print(
+            f"{idx}. [{hit.get('repo_full_name')}] ({hit.get('source_kind')}) {hit.get('title')}\n"
+            f"   ref={hit.get('source_ref')} rrf={rrf_val:.4f} "
+            f"bm25_rank={hit.get('bm25_rank') or '-'} vec_rank={hit.get('vector_rank') or '-'} cos={cos_str}\n"
+            f"   {hit.get('snippet')}\n"
+        )
+    return 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Handles `packrat search`."""
-    store = _open_store(args.db)
-    try:
-        kinds = tuple(k.strip() for k in (args.kind or "").split(",") if k.strip())
-        filters = _lazy("SearchFilters")(
-            repo=args.repo,
-            kinds=kinds,
-            path_prefix=args.path,
-            state=args.state,
+    cfg = _client_config_for(args)
+    db_path = _resolve_db_path(args.db)
+    kinds = tuple(k.strip() for k in (args.kind or "").split(",") if k.strip())
+    filters = _lazy("SearchFilters")(
+        repo=args.repo,
+        kinds=kinds,
+        path_prefix=args.path,
+        state=args.state,
+    )
+    if cfg.mode == "remote" or (cfg.mode == "auto" and cfg.remote_url):
+        _, custom_emb = _resolve_active_embedder_id()
+        env = _lazy("hybrid_search")(
+            args.query,
+            cfg,
+            db_path,
+            filters=filters,
+            mode=args.mode,
+            limit=args.limit,
+            embedder=custom_emb,
         )
+        for warn in env.get("warnings") or ():
+            sys.stderr.write(f"Note: {warn}\n")
+        return _print_search_hit_dicts(env.get("hits") or [], as_json=bool(args.json))
+
+    if not db_path.is_file():
+        sys.stderr.write(
+            "Note: no repositories are registered in packrat; run `packrat repo add <owner>/<name>`.\n"
+        )
+        return _print_search_hit_dicts([], as_json=bool(args.json))
+
+    store = _open_store(args.db, read_only=True)
+    try:
         hits = _lazy("hybrid_rrf_search")(
             store,
             query=args.query,
@@ -1539,21 +1753,9 @@ def cmd_search(args: argparse.Namespace) -> int:
             hint = _empty_search_hint(store, args.repo)
             if hint:
                 sys.stderr.write(f"{hint}\n")
-        if args.json:
-            print(json.dumps([asdict(h) for h in hits], indent=2))
-            return 0
-        if not hits:
-            print("No matching chunks found.")
-            return 0
-        for idx, hit in enumerate(hits, start=1):
-            cos_str = f"{hit.cosine_score:.3f}" if hit.cosine_score is not None else "-"
-            print(
-                f"{idx}. [{hit.repo_full_name}] ({hit.source_kind}) {hit.title}\n"
-                f"   ref={hit.source_ref} rrf={hit.rrf_score:.4f} "
-                f"bm25_rank={hit.bm25_rank or '-'} vec_rank={hit.vector_rank or '-'} cos={cos_str}\n"
-                f"   {hit.snippet}\n"
-            )
-        return 0
+        return _print_search_hit_dicts(
+            [asdict(h) for h in hits], as_json=bool(args.json)
+        )
     finally:
         store.close()
 
@@ -1694,17 +1896,16 @@ def _parse_duckdb_json(stdout: str) -> list[dict[str, Any]]:
     return rows
 
 
-def cmd_sql(args: argparse.Namespace) -> int:
-    """Handles `packrat sql` via read-only DuckDB v2.0 with init.sql.
-
-    Prose columns (`body`, `title`, `text`, ...) hold untrusted repository
-    content and are wrapped in `<untrusted_repo_content>` unless `--raw` is set.
-    """
-    store = _open_store(args.db, refresh_init_sql=True)
-    init_sql_path = store.db_path.parent / INIT_SQL_FILENAME
-    store.close()
-
-    raw = bool(getattr(args, "raw", False))
+def _cmd_sql_local_existing(
+    args: argparse.Namespace, db_path: Path, *, raw: bool
+) -> int:
+    init_sql_path = db_path.parent / INIT_SQL_FILENAME
+    if not init_sql_path.exists():
+        store = _open_store(args.db, read_only=True)
+        try:
+            init_sql_path = store.write_init_sql()
+        finally:
+            store.close()
     fmt_flag = f"-{args.format}" if raw else "-json"
     proc = _run_duckdb(init_sql_path, fmt_flag, args.query)
     if proc is None:
@@ -1722,6 +1923,50 @@ def cmd_sql(args: argparse.Namespace) -> int:
         return 0
     sys.stdout.write(_render_sql_table(_wrap_sql_rows(rows), args.format))
     return 0
+
+
+def _emit_local_duckdb_result(res: Any) -> int:
+    if res.stderr:
+        sys.stderr.write(res.stderr)
+    if res.stdout:
+        sys.stdout.write(res.stdout)
+    return int(res.returncode)
+
+
+def _resolve_sql_target(query: str, cfg: Any, db_path: Path) -> str:
+    if cfg.mode == "local" or (cfg.mode == "auto" and not cfg.remote_url):
+        return "local"
+    return str(_lazy("route_sql_mode")(query, cfg, db_path))
+
+
+def cmd_sql(args: argparse.Namespace) -> int:
+    """Handles `packrat sql` via local or remote DuckDB v2.0.
+
+    Prose columns (`body`, `title`, `text`, ...) hold untrusted repository
+    content and are wrapped in `<untrusted_repo_content>` unless `--raw` is set.
+    """
+    cfg = _client_config_for(args)
+    db_path = _resolve_db_path(args.db)
+    raw = bool(getattr(args, "raw", False))
+    with_remote = list(getattr(args, "with_remote", None) or ())
+    if with_remote:
+        res = _lazy("run_sql_with_remote")(
+            args.query, with_remote, cfg, db_path, raw=raw, fmt=args.format
+        )
+        return _emit_local_duckdb_result(res)
+
+    if _resolve_sql_target(args.query, cfg, db_path) == "remote":
+        env = _lazy("remote_sql")(_lazy("HttpCmdTransport")(cfg), args.query, raw=raw)
+        sys.stdout.write(_lazy("render_sql_table")(env.get("rows") or [], args.format))
+        return 0
+
+    if not db_path.is_file():
+        res = _lazy("run_sql_with_remote")(
+            args.query, (), cfg, db_path, raw=raw, fmt=args.format
+        )
+        return _emit_local_duckdb_result(res)
+
+    return _cmd_sql_local_existing(args, db_path, raw=raw)
 
 
 def _split_full_name(full_name: str) -> tuple[str, str] | None:
@@ -1907,32 +2152,118 @@ def _cmd_repo_remove(store: PackratStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_repo_list_remote(tx: Any, args: argparse.Namespace) -> int:
+    data = _lazy("remote_list_repos")(tx, mode=getattr(args, "mode", None))
+    repos = list(data.get("repos") or [])
+    if getattr(args, "json", False):
+        print(json.dumps(repos, indent=2))
+        return 0
+    if not repos:
+        sys.stderr.write(NO_REPOS_MESSAGE.replace("Error: ", ""))
+        return 0
+    for r in repos:
+        mode_val = str(r.get("mode") or "mirror")
+        mode_note = "" if mode_val == "mirror" else f"\tmode={mode_val}"
+        loc = r.get("git_url") or "-"
+        print(
+            f"{r['full_name']}\tbranch={r.get('default_branch') or 'main'}\t"
+            f"git={r.get('git_source') or 'managed'}\tpath={loc}{mode_note}"
+        )
+    return 0
+
+
+def _cmd_repo_add_remote(tx: Any, args: argparse.Namespace) -> int:
+    if getattr(args, "path", None):
+        raise ValueError("--path is not supported with --remote.")
+    src = "none" if getattr(args, "github_only", False) else "managed"
+    resp = _lazy("remote_add_repo")(
+        tx,
+        args.full_name,
+        default_branch=args.branch,
+        git_source=src,
+        git_url=getattr(args, "url", None),
+    )
+    repo_obj = resp.get("repo") or {}
+    if getattr(args, "json", False):
+        print(json.dumps(repo_obj, indent=2))
+    else:
+        print(
+            f"Configured {repo_obj.get('full_name', args.full_name)} on remote "
+            f"(repo_id={repo_obj.get('repo_id')}, git_source={repo_obj.get('git_source', src)})"
+        )
+    return 0
+
+
+def _cmd_repo_remove_remote(tx: Any, args: argparse.Namespace) -> int:
+    resp = _lazy("remote_remove_repo")(tx, args.full_name)
+    if getattr(args, "json", False):
+        print(json.dumps(resp, indent=2))
+    else:
+        print(
+            f"Queued removal of {resp.get('deleted', args.full_name)} "
+            f"(status={resp.get('status', 'pending_delete')})."
+        )
+    return 0
+
+
+def _cmd_repo_remote(args: argparse.Namespace, cfg: Any) -> int:
+    tx = _lazy("HttpCmdTransport")(cfg)
+    action = str(args.repo_action)
+    if action == "list":
+        return _cmd_repo_list_remote(tx, args)
+    if action == "add":
+        return _cmd_repo_add_remote(tx, args)
+    if action == "remove":
+        return _cmd_repo_remove_remote(tx, args)
+    raise ValueError(f"packrat repo {action} is not supported in remote mode.")
+
+
+def _cmd_repo_list_local(store: PackratStore, args: argparse.Namespace) -> int:
+    repos = store.list_repos(mode=getattr(args, "mode", None))
+    if args.json:
+        print(json.dumps([asdict(r) for r in repos], indent=2))
+        return 0
+    if not repos:
+        sys.stderr.write(NO_REPOS_MESSAGE.replace("Error: ", ""))
+        return 0
+    for r in repos:
+        mode_note = "" if r.is_mirror else f"\tmode={r.mode}"
+        loc = r.local_path or (r.git_url or "-")
+        print(
+            f"{r.full_name}\tbranch={r.default_branch}\tgit={r.git_source}\tpath={loc}{mode_note}"
+        )
+    return 0
+
+
+def _dispatch_repo_store_action(store: PackratStore, args: argparse.Namespace) -> int:
+    if args.repo_action in ("add", "set-git", "set-path"):
+        return _cmd_repo_register(store, args)
+    if args.repo_action == "rename":
+        return _cmd_repo_rename(store, args)
+    if args.repo_action == "remove":
+        return _cmd_repo_remove(store, args)
+    return _cmd_repo_list_local(store, args)
+
+
 def cmd_repo(args: argparse.Namespace) -> int:
     """Handles `packrat repo {list,add,set-git,set-path,rename,remove}`."""
-    mutating = args.repo_action in ("add", "set-git", "set-path", "rename", "remove")
-    store = _open_store(args.db, refresh_init_sql=mutating)
-    try:
-        if args.repo_action in ("add", "set-git", "set-path"):
-            return _cmd_repo_register(store, args)
-        if args.repo_action == "rename":
-            return _cmd_repo_rename(store, args)
-        if args.repo_action == "remove":
-            return _cmd_repo_remove(store, args)
-
-        repos = store.list_repos(mode=getattr(args, "mode", None))
-        if args.json:
-            print(json.dumps([asdict(r) for r in repos], indent=2))
-            return 0
-        if not repos:
-            sys.stderr.write(NO_REPOS_MESSAGE.replace("Error: ", ""))
-            return 0
-        for r in repos:
-            mode_note = "" if r.is_mirror else f"\tmode={r.mode}"
-            loc = r.local_path or (r.git_url or "-")
-            print(
-                f"{r.full_name}\tbranch={r.default_branch}\tgit={r.git_source}\tpath={loc}{mode_note}"
-            )
+    cfg = _client_config_for(args)
+    db_path = _resolve_db_path(args.db)
+    is_list = args.repo_action == "list"
+    if (is_list and _should_use_remote_for_registry_read(cfg, db_path)) or (
+        not is_list and cfg.mode == "remote"
+    ):
+        return _cmd_repo_remote(args, cfg)
+    if is_list and not db_path.is_file():
+        print("[]") if args.json else sys.stderr.write(
+            NO_REPOS_MESSAGE.replace("Error: ", "")
+        )
         return 0
+
+    mutating = not is_list
+    store = _open_store(args.db, refresh_init_sql=mutating, read_only=is_list)
+    try:
+        return _dispatch_repo_store_action(store, args)
     finally:
         store.close()
 
@@ -2386,8 +2717,44 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export_remote(args: argparse.Namespace, cfg: Any) -> int:
+    tokens = _parse_repo_tokens(args.repo)
+    if len(tokens) != 1 or "/" not in tokens[0]:
+        raise ValueError(
+            "Remote export requires exactly one `--repo <owner>/<name>` repository."
+        )
+    dest = Path(args.dest).expanduser()
+    if dest.exists() and not getattr(args, "force", False):
+        if dest.is_dir():
+            raise ValueError(f"Export destination is an existing directory: {dest}")
+        raise ValueError(
+            f"Export destination already exists: {dest} (pass --force to overwrite)."
+        )
+    if dest.is_dir():
+        raise ValueError(f"Export destination is an existing directory: {dest}")
+    res = _lazy("remote_export_repo")(
+        _lazy("HttpCmdTransport")(cfg),
+        tokens[0],
+        dest,
+        if_none_match=getattr(args, "if_none_match", None),
+    )
+    if args.json:
+        print(json.dumps(res, indent=2))
+    elif res.get("not_modified"):
+        print(f"Not modified (ETag {res.get('etag')}); {dest} is already current.")
+    else:
+        print(
+            f"Exported {tokens[0]} from {cfg.remote_url} to {dest} "
+            f"({_format_byte_size(int(res.get('bytes_written') or 0))})"
+        )
+    return 0
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Handles `packrat export`."""
+    cfg = _client_config_for(args)
+    if cfg.mode == "remote":
+        return _cmd_export_remote(args, cfg)
     store = _open_store(args.db, refresh_init_sql=False)
     try:
         repos = _select_mirror_repos(store, args.repo)
@@ -2424,6 +2791,175 @@ def cmd_export(args: argparse.Namespace) -> int:
         store.close()
 
 
+_ANALYTICAL_READER_OPS = ("repo_probe", "context", "review_signals")
+_LIVE_READER_OPS = ("health", "viewer_items", "items", "known_keys", "stack_neighbors")
+
+
+def _split_csv_flags(values: Sequence[str] | None) -> list[str]:
+    if not values:
+        return []
+    return [p.strip() for raw in values for p in str(raw).split(",") if p.strip()]
+
+
+def _parse_ops_json_source(raw_ops_json: str) -> dict[str, Any]:
+    text = sys.stdin.read() if raw_ops_json == "-" else raw_ops_json
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid --ops-json payload: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise TypeError("--ops-json must decode to a JSON object.")
+    return dict(loaded)
+
+
+def _apply_context_flag(
+    ops: dict[str, Any], raw_ctx: str, extra_files: list[str], args: argparse.Namespace
+) -> None:
+    repo_part, sep, inline_files = raw_ctx.partition(":")
+    files = list(extra_files)
+    if sep and inline_files:
+        files.extend(p.strip() for p in inline_files.split(",") if p.strip())
+    ctx_obj: dict[str, Any] = {"repo": repo_part.strip(), "files": files}
+    if getattr(args, "exclude_pr", None) is not None:
+        ctx_obj["exclude_pr"] = int(args.exclude_pr)
+    if getattr(args, "exclude_head_sha", None):
+        ctx_obj["exclude_head_sha"] = str(args.exclude_head_sha)
+    ops["context"] = ctx_obj
+
+
+def _apply_review_signals_flag(
+    ops: dict[str, Any], raw_sig: str, extra_files: list[str]
+) -> None:
+    repo_part, sep, pr_part = raw_sig.partition(":")
+    sig_obj: dict[str, Any] = {"repo": repo_part.strip(), "files": list(extra_files)}
+    if sep and pr_part.strip():
+        sig_obj["target_pr"] = int(pr_part.strip())
+    ops["review_signals"] = sig_obj
+
+
+def _build_reader_ops(args: argparse.Namespace) -> dict[str, Any]:
+    ops: dict[str, Any] = {}
+    if getattr(args, "ops_json", None):
+        ops.update(_parse_ops_json_source(str(args.ops_json)))
+    if getattr(args, "health", False):
+        ops["health"] = True
+    if getattr(args, "viewer_items", None) is not None:
+        sets = list(args.viewer_items)
+        ops["viewer_items"] = {"sets": sets} if sets else True
+    for attr, op_name in (
+        ("items", "items"),
+        ("known_keys", "known_keys"),
+        ("stack_neighbors", "stack_neighbors"),
+    ):
+        parsed_keys = _split_csv_flags(getattr(args, attr, None))
+        if parsed_keys:
+            ops[op_name] = {"keys": parsed_keys}
+    if getattr(args, "repo_probe", None):
+        ops["repo_probe"] = {"repo": str(args.repo_probe).strip()}
+    extra_files = _split_csv_flags(getattr(args, "files", None))
+    if getattr(args, "context", None):
+        _apply_context_flag(ops, str(args.context), extra_files, args)
+    if getattr(args, "review_signals", None):
+        _apply_review_signals_flag(ops, str(args.review_signals), extra_files)
+    if not ops:
+        raise ValueError(
+            "packrat reader requires --ops-json or at least one operation flag."
+        )
+    return ops
+
+
+def _execute_local_reader_ops(db_path: Path, ops: dict[str, Any]) -> dict[str, Any]:
+    store = (
+        _lazy("PackratStore")(db_path, read_only=True)
+        if db_path.is_file()
+        else _lazy("PackratStore")(":memory:")
+    )
+    try:
+        return dict(_lazy("execute_reader_batch")(store, ops))
+    finally:
+        store.close()
+
+
+def _op_repo_is_local_mirror(db_path: Path, op_val: Any) -> bool:
+    if not db_path.is_file() or not isinstance(op_val, dict):
+        return False
+    slug = str(op_val.get("repo") or "").strip().lower()
+    if not slug:
+        return False
+    store = _lazy("PackratStore")(db_path, read_only=True)
+    try:
+        repo = store.get_repo(slug)
+        return bool(repo is not None and repo.is_mirror)
+    finally:
+        store.close()
+
+
+def _split_reader_ops_by_target(
+    ops: dict[str, Any], cfg: Any, db_path: Path
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if cfg.mode == "local" or (cfg.mode == "auto" and not cfg.remote_url):
+        return dict(ops), {}
+    if cfg.mode == "remote":
+        return {}, dict(ops)
+    resolver = _lazy("SessionTargetResolver")(cfg, db_path)
+    local_ops: dict[str, Any] = {}
+    remote_ops: dict[str, Any] = {}
+    for key, val in ops.items():
+        if key in _ANALYTICAL_READER_OPS:
+            dest = local_ops if _op_repo_is_local_mirror(db_path, val) else remote_ops
+        else:
+            dest = remote_ops if resolver.is_remote else local_ops
+        dest[key] = val
+    return local_ops, remote_ops
+
+
+def cmd_reader(args: argparse.Namespace) -> int:
+    """Handles `packrat reader` batch queries across local and remote stores."""
+    ops = _build_reader_ops(args)
+    cfg = _client_config_for(args)
+    db_path = _resolve_db_path(args.db)
+    local_ops, remote_ops = _split_reader_ops_by_target(ops, cfg, db_path)
+    merged: dict[str, Any] = {}
+    if local_ops:
+        merged.update(_execute_local_reader_ops(db_path, local_ops))
+    if remote_ops:
+        tx = _lazy("HttpCmdTransport")(cfg)
+        merged.update(_lazy("remote_reader_batch")(tx, remote_ops))
+    ordered = {k: merged[k] for k in ops if k in merged}
+    for k, v in merged.items():
+        if k not in ordered:
+            ordered[k] = v
+    print(json.dumps(ordered) if args.json else json.dumps(ordered, indent=2))
+    return 0
+
+
+def cmd_auth(args: argparse.Namespace) -> int:
+    """Handles `packrat auth link [--github-user LOGIN] [--json]`."""
+    cfg = _lazy("load_client_config")(args)
+    login = (
+        str(getattr(args, "github_user", None) or cfg.github_user or "").strip() or None
+    )
+    resp = _lazy("remote_auth_link")(_lazy("HttpCmdTransport")(cfg), login)
+    if getattr(args, "json", False):
+        print(json.dumps(resp, indent=2))
+    else:
+        print(
+            f"Linked {resp.get('owner_id')} -> @{resp.get('github_login')} "
+            f"(verified={resp.get('login_verified')})"
+        )
+    return 0
+
+
+def _dispatch_remote_live(args: argparse.Namespace, cfg: Any) -> int:
+    tx = _lazy("HttpCmdTransport")(cfg)
+    func_name = getattr(args.store_func, "__name__", "")
+    if func_name == "cmd_watch":
+        return int(_lazy("cmd_watch_remote")(args, tx))
+    if func_name == "cmd_changes":
+        return int(_lazy("cmd_changes_remote")(args, tx))
+    return int(_lazy("cmd_refresh_remote")(args, tx))
+
+
 def cmd_live(args: argparse.Namespace) -> int:
     """Dispatches `serve`, `watch`, `changes`, and `refresh` (see serve_cli.py).
 
@@ -2433,11 +2969,145 @@ def cmd_live(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args.db)
     if args.command_kind == "serve":
         return _lazy("cmd_serve")(args, db_path)
-    store = _lazy("PackratStore")(db_path)
+    cfg = _client_config_for(args)
+    if cfg.mode != "local":
+        resolver = _lazy("SessionTargetResolver")(cfg, db_path)
+        if resolver.is_remote:
+            return _dispatch_remote_live(args, cfg)
+    func_name = getattr(args.store_func, "__name__", "")
+    if func_name == "cmd_changes" and not db_path.is_file():
+        payload: dict[str, Any] = (
+            {"reset": True, "seq": 0}
+            if int(args.since) > 0
+            else {"seq": 0, "changes": []}
+        )
+        print(json.dumps(payload) if args.json else json.dumps(payload, indent=2))
+        return 0
+    store = _lazy("PackratStore")(db_path, read_only=(func_name == "cmd_changes"))
     try:
         return int(args.store_func(args, store))
     finally:
         store.close()
+
+
+def _add_routing_args(
+    parser: argparse.ArgumentParser,
+    *,
+    is_root: bool = False,
+    include_mode: bool = True,
+) -> None:
+    """Registers `--mode`, `--remote-url`, `--remote`, and `--local` routing flags."""
+    str_default: Any = None if is_root else argparse.SUPPRESS
+    bool_default: Any = False if is_root else argparse.SUPPRESS
+    if include_mode:
+        parser.add_argument(
+            "--mode",
+            choices=("local", "remote", "auto"),
+            dest="routing_mode",
+            default=str_default,
+            help="Client routing mode (local, remote, or auto).",
+        )
+    parser.add_argument(
+        "--remote-url",
+        dest="remote_url",
+        default=str_default,
+        help="Remote HTTP v1 packrat server base URL.",
+    )
+    parser.add_argument(
+        "--remote",
+        dest="remote",
+        action="store_true",
+        default=bool_default,
+        help="Force remote HTTP v1 mode for this command.",
+    )
+    parser.add_argument(
+        "--local",
+        dest="local",
+        action="store_true",
+        default=bool_default,
+        help="Force local SQLite mode for this command.",
+    )
+
+
+def _add_reader_and_auth_parsers(sub: Any) -> None:
+    p_reader = sub.add_parser(
+        "reader",
+        help="Execute typed JSON batch queries against local or remote packrat.",
+    )
+    p_reader.add_argument(
+        "--ops-json",
+        help="JSON object describing reader operations (or '-' to read stdin).",
+    )
+    p_reader.add_argument(
+        "--health", action="store_true", help="Include service health snapshot."
+    )
+    p_reader.add_argument(
+        "--viewer-items",
+        nargs="*",
+        default=None,
+        metavar="SET",
+        help="Include viewer set items (optional set filter names).",
+    )
+    p_reader.add_argument(
+        "--items",
+        action="append",
+        metavar="KEY",
+        help="Fetch live/basic rows for item keys (repeatable or comma-separated).",
+    )
+    p_reader.add_argument(
+        "--known-keys",
+        action="append",
+        metavar="KEY",
+        help="Resolve canonical item keys (repeatable or comma-separated).",
+    )
+    p_reader.add_argument(
+        "--stack-neighbors",
+        action="append",
+        metavar="KEY",
+        help="Resolve open PR stack neighbors (repeatable or comma-separated).",
+    )
+    p_reader.add_argument(
+        "--repo-probe", metavar="REPO", help="Probe repository sync and backfill state."
+    )
+    p_reader.add_argument(
+        "--context",
+        metavar="REPO[:FILE,...]",
+        help="Fetch historical hotspots, review threads, and related items.",
+    )
+    p_reader.add_argument(
+        "--review-signals",
+        metavar="REPO[:PR]",
+        help="Fetch historical review and thread signals for reviewer recommendation.",
+    )
+    p_reader.add_argument(
+        "--files",
+        action="append",
+        metavar="PATH",
+        help="Changed file paths for --context or --review-signals.",
+    )
+    p_reader.add_argument(
+        "--exclude-pr", type=int, default=None, help="Exclude PR number from --context."
+    )
+    p_reader.add_argument(
+        "--exclude-head-sha",
+        default=None,
+        help="Exclude PR matching head SHA from --context.",
+    )
+    p_reader.add_argument("--json", action="store_true", help="Emit compact JSON.")
+    _add_routing_args(p_reader)
+    p_reader.set_defaults(func=cmd_reader)
+
+    p_auth = sub.add_parser("auth", help="Manage remote multi-user identity linking.")
+    auth_sub = p_auth.add_subparsers(dest="auth_action", required=True)
+    p_auth_link = auth_sub.add_parser(
+        "link", help="Link caller identity to a GitHub login on the remote server."
+    )
+    p_auth_link.add_argument(
+        "--github-user", default=None, help="GitHub login handle to associate."
+    )
+    p_auth_link.add_argument("--json", action="store_true", help="Emit JSON output.")
+    _add_routing_args(p_auth_link)
+    p_auth_link.set_defaults(func=cmd_auth)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2447,6 +3117,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Local multi-repo SQLite WAL + DuckDB + offline 384-dim vector mirror.",
     )
     parser.add_argument("--db", help="Override SQLite database path.")
+    _add_routing_args(parser, is_root=True)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_status = sub.add_parser(
@@ -2462,6 +3133,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also count rows of items-mode repositories (slower on large databases).",
     )
+    _add_routing_args(p_status)
     p_status.set_defaults(func=cmd_status)
 
     p_sync = sub.add_parser(
@@ -2590,6 +3262,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=12, help="Max results to return."
     )
     p_search.add_argument("--json", action="store_true", help="Emit JSON output.")
+    _add_routing_args(p_search, include_mode=False)
     p_search.set_defaults(func=cmd_search)
 
     p_sql = sub.add_parser(
@@ -2607,6 +3280,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable <untrusted_repo_content> wrapping of prose columns.",
     )
+    p_sql.add_argument(
+        "--with-remote",
+        dest="with_remote",
+        action="append",
+        metavar="ALIAS=SQL",
+        default=None,
+        help="Stage a remote /api/v1/sql subquery as a local DuckDB temp view (repeatable).",
+    )
+    _add_routing_args(p_sql)
     p_sql.set_defaults(func=cmd_sql)
 
     p_repo = sub.add_parser("repo", help="Manage tracked repositories.")
@@ -2619,6 +3301,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Only list repositories in this mode.",
     )
+    _add_routing_args(p_repo_list, include_mode=False)
     p_repo_list.set_defaults(func=cmd_repo)
 
     p_repo_add = repo_sub.add_parser("add", help="Register or update a repository.")
@@ -2643,6 +3326,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_repo_add.add_argument(
         "--branch", default=None, help="Canonical default branch name (default: main)."
     )
+    p_repo_add.add_argument("--json", action="store_true", help="Emit JSON output.")
+    _add_routing_args(p_repo_add)
     p_repo_add.set_defaults(func=cmd_repo)
 
     p_repo_set_git = repo_sub.add_parser(
@@ -2707,6 +3392,8 @@ def build_parser() -> argparse.ArgumentParser:
         "remove", help="Stop tracking a repository and delete its synced data."
     )
     p_repo_remove.add_argument("full_name", help="Repository in <owner>/<name> format.")
+    p_repo_remove.add_argument("--json", action="store_true", help="Emit JSON output.")
+    _add_routing_args(p_repo_remove)
     p_repo_remove.set_defaults(func=cmd_repo)
 
     p_install = sub.add_parser(
@@ -2791,7 +3478,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress progress output on stderr.",
     )
+    p_export.add_argument(
+        "--if-none-match",
+        default=None,
+        help="Optional ETag for conditional remote export (`304 Not Modified`).",
+    )
     p_export.add_argument("--json", action="store_true", help="Emit JSON output.")
+    _add_routing_args(p_export)
     p_export.set_defaults(func=cmd_export)
 
     p_import = sub.add_parser(
@@ -2871,8 +3564,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_git_prune.add_argument("--json", action="store_true", help="Emit JSON output.")
     p_git_prune.set_defaults(func=cmd_git)
 
+    _add_reader_and_auth_parsers(sub)
     _lazy("add_parsers_parser")(sub)
-    _lazy("add_live_parsers")(sub, cmd_live)
+    _lazy("add_live_parsers")(sub, cmd_live, _add_routing_args)
     return parser
 
 
@@ -2886,9 +3580,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (ValueError, _lazy("SchemaTooNewError")) as exc:
+    except (ValueError, TypeError, _lazy("SchemaTooNewError")) as exc:
         sys.stderr.write(f"Error: {exc}\n")
         return 2
+    except _lazy("HttpHelperError") as exc:
+        sys.stderr.write(f"Error [{exc.code}]: {exc.message}\n")
+        return int(_lazy("exit_code_for_http_error")(exc))
     except sqlite3.OperationalError as exc:
         text = str(exc)
         if "locked" in text.lower() or "busy" in text.lower():

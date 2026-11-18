@@ -9,6 +9,7 @@ Check `prs[pr].mine` before taking any action:
 - When `mine` is `true` (the authenticated GitHub user authored the pull request), the monitor daemon collects events, sends a notification message to the conversation via `agentapi send-message`, sets an `AckGate`, and waits for an acknowledgment. The main agent handles all code edits, branch rebases, merge conflict resolutions, flaky-CI reruns, and review feedback dashboards.
 - When `mine` is `false` in author mode, the pull request is watch-only. `monitor_prs.py` updates the `stack_board` pane in place, and neither agent ever pushes commits, reruns workflows, or changes branches on that pull request.
 - Under `--reviews` (reviewer mode), `monitor_prs.py` tracks incoming and active reviews across the user's review queue (`mine` is `false` on every reviewed pull request). By default in `--reviews --daemon`, the daemon updates the A2UI review-queue pane (`REVIEW_BOARD_COMPONENTS`), `last.json`, and `events.jsonl` in the background without waking the main agent. When `--wake-on-review` is passed, the daemon sends an `agentapi send-message` batch notification on actionable reviewer events. Neither agent ever changes branches, pushes commits, or reruns CI jobs on reviewed pull requests.
+- Under `--mine`, every watched pull request is the user's (`mine` is `true`), so the routing below applies to each event. The events reach the main agent only when the daemon was started with `--wake`. Then an actionable event wakes the conversation, and the passive events seen in the same debounce window travel with it. Without `--wake`, `--mine --daemon` updates the pane, `last.json`, and `events.jsonl` in the background and never wakes the main agent.
 - While `/monitor` is active, `monitor_prs.py` owns the `stack_board` surface (`surfaceId: "monitor"`) in the A2UI Pane and clears stale surfaces on each sync. Neither agent may call `render_a2ui` to open a separate `progress_board`, `stack_board`, or `git-stack` surface during CI remediation or stack rebases.
 
 ## 2. Daemon Control Commands (`control.jsonl`)
@@ -27,7 +28,9 @@ echo '{"ack": 1}' >> <state-dir>/control.jsonl
 
 ## 3. Routing by `suggested_action`
 
-Each item in `events[]` includes `actionable` (`true` or `false`) and an advisory `suggested_action` field. When `--actionable-only` is passed, passive events (`actionable == false`) update `state.json`, `board.a2ui`, and the live A2UI Pane JSONL store in place without waking the conversation.
+Each item in `events[]` includes `actionable` (`true` or `false`) and an advisory `suggested_action` field. When `--actionable-only` is passed, passive events (`actionable == false`) update `state.json`, `board.a2ui`, and the live A2UI Pane JSONL store in place without waking the conversation. `--actionable-only` has no effect under `--mine`.
+
+`pr_added` and `pr_removed` (under `--mine` only) are passive and need no action: the daemon has already added or removed the board row. Mention them in the summary when they arrive in a batch.
 
 ### `rerun_ci` (Flaky Check Guard in the Main Agent)
 

@@ -18,6 +18,21 @@ class ReviewRole(StrEnum):
     REVIEWER = "reviewer"
 
 
+class Membership(StrEnum):
+    """Which pull requests a monitor session watches.
+
+    This is separate from ``ReviewRole``: ``--mine`` changes its watched set during
+    the run, as the review queue does, while the viewer stays the author.
+    """
+
+    STATIC = "static"
+    """Positional targets, with optional ``--stack`` expansion."""
+    REVIEW_QUEUE = "review_queue"
+    """The viewer's review queue (``--reviews``)."""
+    MINE = "mine"
+    """Every open pull request the viewer authored (``--mine``)."""
+
+
 class ReviewStep(IntEnum):
     """Five-step progression index for a pull request in the reviewer queue."""
 
@@ -82,6 +97,8 @@ EVENT_KINDS: tuple[str, ...] = (
     "stack_parent",
     "approval_dismissed",
     "auto_merge",
+    "pr_added",
+    "pr_removed",
 )
 
 FAILED_CONCLUSIONS: frozenset[str] = frozenset(
@@ -750,6 +767,8 @@ class MonitorState:
     reruns: dict[str, list[str]] = field(default_factory=dict)
     reported_threads: dict[str, dict[str, str]] = field(default_factory=dict)
     daemon: dict[str, Any] = field(default_factory=dict)
+    recent_retired: list[dict[str, Any]] = field(default_factory=list)
+    """Rows that recently left the ``--mine`` board, as ``{"pr", "title", "state", "at"}``."""
 
     @classmethod
     def empty(cls) -> MonitorState:
@@ -765,7 +784,7 @@ class MonitorState:
 
     def to_dict(self) -> dict[str, Any]:
         """Serializes the monitor state into a JSON-compatible dictionary."""
-        return {
+        data: dict[str, Any] = {
             "schema": self.schema,
             "snapshots": {k: v.to_dict() for k, v in self.snapshots.items()},
             "notifications_last_modified": self.notifications_last_modified,
@@ -775,6 +794,9 @@ class MonitorState:
             "reported_threads": {k: dict(v) for k, v in self.reported_threads.items()},
             "daemon": dict(self.daemon),
         }
+        if self.recent_retired:
+            data["recent_retired"] = [dict(entry) for entry in self.recent_retired]
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> MonitorState:
@@ -809,4 +831,9 @@ class MonitorState:
             reruns={rekey(k): [str(x) for x in v] for k, v in (data.get("reruns") or {}).items()},
             reported_threads=reported,
             daemon=dict(data.get("daemon") or {}),
+            recent_retired=[
+                dict(entry)
+                for entry in (data.get("recent_retired") or [])
+                if isinstance(entry, dict)
+            ],
         )

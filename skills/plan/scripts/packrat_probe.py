@@ -37,6 +37,12 @@ _TABLE_COUNT_NAMES: tuple[str, ...] = (
     "review_threads",
 )
 _BACKFILL_STREAMS: tuple[str, ...] = ("issues", "prs", "discussions")
+_AUTH_ERROR_MARKERS: tuple[str, ...] = (
+    "auth_expired",
+    "auth expired",
+    "unauthorized",
+    "401",
+)
 
 _REMOTE_SECTION_RE = re.compile(
     r'^\s*\[\s*remote\s+(?:"((?:[^"\\]|\\.)+)"|\.([A-Za-z0-9_.-]+))\s*\]\s*(?:[#;].*)?$',
@@ -602,6 +608,244 @@ def _build_unregistered_result(
     )
 
 
+def _is_default_db_path(db_path: Path | None) -> bool:
+    """Returns whether `db_path` is None or resolves to the default user DB."""
+    if db_path is None:
+        return True
+    return db_path.expanduser().resolve() == _default_db_path().expanduser().resolve()
+
+
+def _has_remote_config() -> bool:
+    """Checks environment variables and `~/.config/packrat/config.json` for remote routing."""
+    if os.environ.get("PACKRAT_URL", "").strip():
+        return True
+    env_mode = os.environ.get("PACKRAT_MODE", "").strip().lower()
+    if env_mode == "local":
+        return False
+    if env_mode in {"remote", "auto"}:
+        return True
+    cfg_path = Path.home() / ".config" / "packrat" / "config.json"
+    if not cfg_path.is_file():
+        return False
+    try:
+        data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    cfg_mode = str(data.get("mode") or "").strip().lower()
+    if cfg_mode == "local":
+        return False
+    return bool(
+        str(data.get("remote_url") or "").strip() or cfg_mode in {"remote", "auto"}
+    )
+
+
+def _should_use_remote_reader(
+    db_path: Path | None,
+    cmd: list[str] | None,
+    packrat_cmd: Sequence[str] | None,
+) -> bool:
+    """Returns True when default DB mode should query `packrat reader`."""
+    if not _is_default_db_path(db_path) or cmd is None:
+        return False
+    return packrat_cmd is not None or _has_remote_config()
+
+
+def _is_auth_expired_text(text: str) -> bool:
+    low = text.lower()
+    return any(marker in low for marker in _AUTH_ERROR_MARKERS)
+
+
+def _format_stream_backfill_warning(
+    stream: str, entry: Any, repo_slug: str
+) -> str | None:
+    if not isinstance(entry, dict) or entry.get("done_at") is not None:
+        return None
+    if entry.get("cursor") is not None:
+        return f"{stream} backfill incomplete (resumes on next `packrat sync --repo {repo_slug}`)"
+    return f"{stream} backfill incomplete (run `packrat sync --repo {repo_slug}`)"
+
+
+def _remote_warnings_from_probe(
+    probe_data: dict[str, Any], repo_slug: str
+) -> list[str]:
+    """Formats backfill warnings in `packrat_probe.py` exact format from `repo_probe`."""
+    mode = str(probe_data.get("mode") or "mirror")
+    backfill = probe_data.get("backfill")
+    if mode == "items":
+        return []
+    if isinstance(backfill, dict) and backfill:
+        return [
+            msg
+            for stream in _BACKFILL_STREAMS
+            if (
+                msg := _format_stream_backfill_warning(
+                    stream, backfill.get(stream), repo_slug
+                )
+            )
+        ]
+    return [str(w) for w in (probe_data.get("warnings") or []) if str(w)]
+
+
+def _invoke_remote_repo_probe(
+    cmd: Sequence[str], repo_slug: str
+) -> tuple[dict[str, Any] | None, str]:
+    """Runs `packrat reader` with a single `repo_probe` op without `--db`."""
+    ops = {"repo_probe": {"repo": repo_slug}}
+    full_cmd = [*cmd, "reader", "--ops-json", json.dumps(ops), "--json"]
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=15.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "timeout"
+    except (OSError, subprocess.SubprocessError):
+        return None, "error"
+    if proc.returncode != 0:
+        combined = f"{proc.stderr or ''}\n{proc.stdout or ''}"
+        return None, "auth_expired" if _is_auth_expired_text(combined) else "error"
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        return None, "error"
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("repo_probe"), dict):
+        return None, "error"
+    return parsed["repo_probe"], ""
+
+
+def _build_remote_degraded_result(
+    *,
+    repo: str,
+    checkout_str: str | None,
+    ephemeral: bool,
+    resolved_db: Path,
+    cmd: list[str] | None,
+    err_reason: str,
+) -> PackratProbeResult:
+    detail = (
+        f"Remote packrat authentication expired for `{repo}`"
+        if err_reason == "auth_expired"
+        else f"Remote packrat query failed for `{repo}`"
+    )
+    return PackratProbeResult(
+        status="unavailable",
+        available=False,
+        synced=False,
+        repo=repo,
+        checkout_root=checkout_str,
+        is_ephemeral_checkout=ephemeral,
+        db_path=str(resolved_db),
+        packrat_cmd=cmd,
+        user_note=f"Note: {detail}; falling back to local discovery.",
+    )
+
+
+def _build_remote_probe_result(
+    probe_data: dict[str, Any],
+    *,
+    fallback_repo: str,
+    ref_lookup_root: Path,
+    checkout_str: str | None,
+    ephemeral: bool,
+    resolved_db: Path,
+    cmd: list[str] | None,
+) -> PackratProbeResult:
+    """Maps a `repo_probe` JSON object into a `PackratProbeResult`."""
+    if not probe_data.get("found"):
+        return _build_unregistered_result(
+            repo=fallback_repo,
+            checkout_str=checkout_str,
+            ephemeral=ephemeral,
+            resolved_db=resolved_db,
+            cmd=cmd,
+        )
+    repo_slug = str(probe_data.get("repo") or fallback_repo)
+    default_branch = str(probe_data.get("default_branch") or "main")
+    raw_last = probe_data.get("last_indexed_sha")
+    last_indexed_sha = str(raw_last) if raw_last else None
+    raw_counts = probe_data.get("counts")
+    counts = (
+        {str(k): int(v) for k, v in raw_counts.items()}
+        if isinstance(raw_counts, dict)
+        else {}
+    )
+    for name in _TABLE_COUNT_NAMES:
+        counts.setdefault(name, 0)
+
+    git_dirs = _locate_git_dirs(ref_lookup_root)
+    common_dir = git_dirs[2] if git_dirs is not None else None
+    local_sha, ref_label = _resolve_local_canonical_sha(common_dir, default_branch)
+    warnings = _remote_warnings_from_probe(probe_data, repo_slug)
+    if last_indexed_sha and local_sha and last_indexed_sha.lower() != local_sha.lower():
+        warnings.append(
+            f"SHA drift: last_indexed_sha ({last_indexed_sha[:12]}) differs from "
+            f"local {ref_label} ({local_sha[:12]}); run `packrat sync --repo {repo_slug}`"
+        )
+
+    synced = counts.get("chunks", 0) > 0
+    status = "ready" if synced else ("not_synced" if cmd is not None else "unavailable")
+    return PackratProbeResult(
+        status=status,
+        available=synced or (cmd is not None),
+        synced=synced,
+        repo=repo_slug,
+        checkout_root=checkout_str,
+        is_ephemeral_checkout=ephemeral,
+        db_path=str(resolved_db),
+        packrat_cmd=cmd,
+        default_branch=default_branch,
+        last_indexed_sha=last_indexed_sha,
+        local_canonical_sha=local_sha,
+        counts=counts,
+        warnings=warnings,
+        user_note=_build_plan_user_note(
+            status, repo_slug, checkout_str, has_repo_row=True
+        ),
+    )
+
+
+def _probe_local_sqlite(
+    *,
+    resolved_db: Path,
+    repo: str,
+    ref_lookup_root: Path,
+    checkout_str: str | None,
+    ephemeral: bool,
+    cmd: list[str] | None,
+) -> PackratProbeResult | None:
+    conn = _connect_readonly_sqlite(resolved_db)
+    if conn is None:
+        return None
+    try:
+        try:
+            row = conn.execute(
+                "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
+                (repo,),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row is None:
+            return None
+        return _build_registered_result(
+            conn=conn,
+            row=row,
+            fallback_repo=repo,
+            ref_lookup_root=ref_lookup_root,
+            checkout_str=checkout_str,
+            ephemeral=ephemeral,
+            resolved_db=resolved_db,
+            cmd=cmd,
+        )
+    finally:
+        conn.close()
+
+
 def probe_packrat(
     root: Path,
     *,
@@ -613,7 +857,8 @@ def probe_packrat(
     """Probes packrat availability, repository registration, and index freshness.
 
     Opens `repos.sqlite` strictly in read-only mode without creating database
-    files on disk or running git network commands.
+    files on disk or running git network commands, falling back to
+    `packrat reader` when using the default DB without a ready local mirror.
 
     Args:
         root: Target workspace directory to inspect.
@@ -652,46 +897,47 @@ def probe_packrat(
             user_note="",
         )
 
-    conn = _connect_readonly_sqlite(resolved_db)
-    if conn is None:
-        return _build_unregistered_result(
-            repo=repo,
-            checkout_str=checkout_str,
-            ephemeral=ephemeral,
-            resolved_db=resolved_db,
-            cmd=cmd,
-        )
+    ref_lookup_root = local_checkout if local_checkout is not None else root
+    local_result = _probe_local_sqlite(
+        resolved_db=resolved_db,
+        repo=repo,
+        ref_lookup_root=ref_lookup_root,
+        checkout_str=checkout_str,
+        ephemeral=ephemeral,
+        cmd=cmd,
+    )
+    if local_result is not None and local_result.status == "ready":
+        return local_result
 
-    try:
-        try:
-            row = conn.execute(
-                "SELECT * FROM repos WHERE lower(full_name) = lower(?)",
-                (repo,),
-            ).fetchone()
-        except sqlite3.Error:
-            row = None
-
-        if row is None:
-            return _build_unregistered_result(
+    if _should_use_remote_reader(db_path, cmd, packrat_cmd):
+        assert cmd is not None
+        remote_data, err = _invoke_remote_repo_probe(cmd, repo)
+        if remote_data is None:
+            return local_result or _build_remote_degraded_result(
                 repo=repo,
                 checkout_str=checkout_str,
                 ephemeral=ephemeral,
                 resolved_db=resolved_db,
                 cmd=cmd,
+                err_reason=err,
             )
-
-        return _build_registered_result(
-            conn=conn,
-            row=row,
+        return _build_remote_probe_result(
+            remote_data,
             fallback_repo=repo,
-            ref_lookup_root=local_checkout if local_checkout is not None else root,
+            ref_lookup_root=ref_lookup_root,
             checkout_str=checkout_str,
             ephemeral=ephemeral,
             resolved_db=resolved_db,
             cmd=cmd,
         )
-    finally:
-        conn.close()
+
+    return local_result or _build_unregistered_result(
+        repo=repo,
+        checkout_str=checkout_str,
+        ephemeral=ephemeral,
+        resolved_db=resolved_db,
+        cmd=cmd,
+    )
 
 
 def _build_registered_result(

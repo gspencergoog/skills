@@ -62,7 +62,14 @@ class TestPackratCli(unittest.TestCase):
             with mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(
                     packrat.main(
-                        ["--db", db_path, "repo", "add", "octo-org/widgets", "--github-only"]
+                        [
+                            "--db",
+                            db_path,
+                            "repo",
+                            "add",
+                            "octo-org/widgets",
+                            "--github-only",
+                        ]
                     ),
                     0,
                 )
@@ -1317,13 +1324,17 @@ class TestLiveCli(unittest.TestCase):
         tl.assert_called_once()
         self.assertEqual(tl.call_args.args[1].full_name, "Octo-Org/Widgets")
         self.assertEqual(tl.call_args.kwargs["mode"], TimelineMode.ALL)
-        self.assertEqual(tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES)
+        self.assertEqual(
+            tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES
+        )
         self.assertTrue(tl.call_args.kwargs["drain_xrefs"])
 
         rc, _, err, tl = self._sync_with_fake_timeline("--backfill-only")
         self.assertEqual(rc, 0, err)
         self.assertEqual(tl.call_args.kwargs["mode"], TimelineMode.BACKFILL)
-        self.assertEqual(tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES)
+        self.assertEqual(
+            tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES
+        )
         self.assertFalse(tl.call_args.kwargs["drain_xrefs"])
 
         incomplete = SyncStats(
@@ -1345,7 +1356,9 @@ class TestLiveCli(unittest.TestCase):
         )
         self.assertEqual(rc, 0, err)
         self.assertEqual(tl.call_args.kwargs["mode"], TimelineMode.ALL)
-        self.assertEqual(tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES)
+        self.assertEqual(
+            tl.call_args.kwargs["max_batches"], packrat.SYNC_TIMELINE_MAX_BATCHES
+        )
 
     def test_sync_no_timeline_and_stopped_github_sync_skip_timeline(self) -> None:
         from models import SyncStats
@@ -1724,6 +1737,8 @@ class TestWave4Cli(unittest.TestCase):
             "db_store.py",
             "db_import.py",
             "live_store.py",
+            "personal_store.py",
+            "reader_ops.py",
             "db_migrations.py",
             "db_schema.py",
             "benchmark_vectors.py",
@@ -2211,7 +2226,9 @@ class TestImportCli(_PortabilityCliFixture):
 
     def test_dry_run_writes_nothing_and_reports_named_freshness_keys(self) -> None:
         missing = self.tmp_path / "nowhere" / "repos.sqlite"
-        rc, out, err = self._run("import", str(self.src), "--dry-run", "--json", db=missing)
+        rc, out, err = self._run(
+            "import", str(self.src), "--dry-run", "--json", db=missing
+        )
         self.assertEqual(rc, 0, err)
         payload = json.loads(out)
         self.assertTrue(payload["dry_run"])
@@ -2229,12 +2246,16 @@ class TestImportCli(_PortabilityCliFixture):
         store.close()
         init_sql = self.dest_dir / "init.sql"
         before = (init_sql.stat().st_mtime_ns, self.dest.stat().st_size)
-        rc_e, out_e, err_e = self._run("import", str(self.src), "--dry-run", db=self.dest)
+        rc_e, out_e, err_e = self._run(
+            "import", str(self.src), "--dry-run", db=self.dest
+        )
         self.assertEqual(rc_e, 0, err_e)
         self.assertIn("Dry run: would import", out_e)
         self.assertIn("promoted  octo-org/widgets", out_e)
         self.assertIn("added  octo-org/gadgets", out_e)
-        self.assertEqual(before, (init_sql.stat().st_mtime_ns, self.dest.stat().st_size))
+        self.assertEqual(
+            before, (init_sql.stat().st_mtime_ns, self.dest.stat().st_size)
+        )
         check = packrat.PackratStore(self.dest)
         try:
             self.assertEqual(check.get_repo("Octo-Org/Widgets").mode, "items")
@@ -2244,7 +2265,9 @@ class TestImportCli(_PortabilityCliFixture):
     def test_import_promotes_adds_skips_and_hands_off_to_readers(self) -> None:
         store = self._seed_recipient()
         store.close()
-        rc, out, err = self._run("import", str(self.src), "--progress", "off", db=self.dest)
+        rc, out, err = self._run(
+            "import", str(self.src), "--progress", "off", db=self.dest
+        )
         self.assertEqual(rc, 0, err)
         self.assertIn("promoted  octo-org/widgets", out)
         self.assertIn("added  octo-org/gadgets", out)
@@ -2255,7 +2278,9 @@ class TestImportCli(_PortabilityCliFixture):
             self.assertEqual(local.local_path, "/tmp/recipient/local")
             widgets = store.get_repo("octo-org/widgets")
             self.assertEqual(widgets.repo_id, self.stub_id)
-            self.assertEqual((widgets.full_name, widgets.mode), ("Octo-Org/Widgets", "mirror"))
+            self.assertEqual(
+                (widgets.full_name, widgets.mode), ("Octo-Org/Widgets", "mirror")
+            )
             self.assertIsNone(widgets.local_path)
             self.assertEqual(len(store.active_watches(0.0)), 2)
             queued = sorted(store.peek_refresh_requests())
@@ -2267,14 +2292,18 @@ class TestImportCli(_PortabilityCliFixture):
         finally:
             store.close()
 
-        rc_c, out_c, err_c = self._run("changes", "--since", "0", "--json", db=self.dest)
+        rc_c, out_c, err_c = self._run(
+            "changes", "--since", "0", "--json", db=self.dest
+        )
         self.assertEqual(rc_c, 0, err_c)
         feed = json.loads(out_c)["changes"]
         pr_rows = [c for c in feed if c["kind"] == "pr"]
         self.assertEqual([c["item_key"] for c in pr_rows], ["Octo-Org/Widgets#11"])
         self.assertEqual(pr_rows[0]["fields"], ["pr", "checks", "reviews", "threads"])
 
-        with mock.patch("search_engine.get_default_embedder", return_value=self.embedder):
+        with mock.patch(
+            "search_engine.get_default_embedder", return_value=self.embedder
+        ):
             rc_s, out_s, err_s = self._run(
                 "search", "OAuth2 bearer token refresh", "--json", db=self.dest
             )
@@ -2307,19 +2336,29 @@ class TestImportCli(_PortabilityCliFixture):
         )
         self.assertEqual(rc, 0, err)
         payload = json.loads(out)
-        self.assertEqual([o["full_name"] for o in payload["outcomes"]], ["octo-org/gadgets"])
+        self.assertEqual(
+            [o["full_name"] for o in payload["outcomes"]], ["octo-org/gadgets"]
+        )
         self.assertTrue(payload["outcomes"][0]["bound_local_path"])
 
         # Skipped repositories still bind --path; the short name resolves too.
         rc_skip, out_skip, err_skip = self._run(
-            "import", str(self.src), "--repo", "gadgets", "--path", str(checkout), db=self.dest
+            "import",
+            str(self.src),
+            "--repo",
+            "gadgets",
+            "--path",
+            str(checkout),
+            db=self.dest,
         )
         self.assertEqual(rc_skip, 0, err_skip)
         self.assertIn("skipped_older  octo-org/gadgets", out_skip)
         self.assertIn("bound --path", out_skip)
         store = packrat.PackratStore(self.dest)
         try:
-            self.assertEqual(store.get_repo("octo-org/gadgets").local_path, str(checkout.resolve()))
+            self.assertEqual(
+                store.get_repo("octo-org/gadgets").local_path, str(checkout.resolve())
+            )
             self.assertIsNone(store.get_repo("octo-org/widgets"))
         finally:
             store.close()
@@ -2330,7 +2369,13 @@ class TestImportCli(_PortabilityCliFixture):
         self.assertEqual(rc_multi, 2)
         self.assertIn("single repository", err_multi)
         rc_nogit, _, err_nogit = self._run(
-            "import", str(self.src), "--repo", "widgets", "--path", str(self.tmp_path), db=self.dest
+            "import",
+            str(self.src),
+            "--repo",
+            "widgets",
+            "--path",
+            str(self.tmp_path),
+            db=self.dest,
         )
         self.assertEqual(rc_nogit, 2)
         self.assertIn(".git", err_nogit)
@@ -2350,12 +2395,16 @@ class TestImportCli(_PortabilityCliFixture):
         with acquire_sync_lock(self.dest, mode="skip") as held:
             self.assertTrue(held.acquired)
             started = _time.monotonic()
-            rc, _, err = self._run("import", str(self.src), "--repo", "nope/nothing", db=self.dest)
+            rc, _, err = self._run(
+                "import", str(self.src), "--repo", "nope/nothing", db=self.dest
+            )
             self.assertEqual(rc, 2)
             self.assertIn("nope/nothing", err)
             self.assertLess(_time.monotonic() - started, 5.0)
 
-        busy = SyncLockInfo(acquired=False, lock_path=self.dest_dir / "sync.lock", holder_pid=4242)
+        busy = SyncLockInfo(
+            acquired=False, lock_path=self.dest_dir / "sync.lock", holder_pid=4242
+        )
 
         @contextlib.contextmanager
         def fake_lock(*_args: object, **_kwargs: object):
@@ -2369,7 +2418,9 @@ class TestImportCli(_PortabilityCliFixture):
         too_new = self.tmp_path / "too_new.sqlite"
         shutil.copyfile(self.src, too_new)
         conn = sqlite3.connect(too_new)
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (99, 'x')")
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (99, 'x')"
+        )
         conn.commit()
         conn.close()
         rc_new, _, err_new = self._run("import", str(too_new), db=self.dest)
@@ -2410,7 +2461,9 @@ class TestImportCli(_PortabilityCliFixture):
             "_verify_before_commit",
             side_effect=sqlite3.DatabaseError("boom"),
         ):
-            rc_h, out_h, err_h = self._run("import", str(self.src), "--progress", "off", db=self.dest)
+            rc_h, out_h, err_h = self._run(
+                "import", str(self.src), "--progress", "off", db=self.dest
+            )
         self.assertEqual(rc_h, 1)
         self.assertIn("failed  octo-org/gadgets", out_h)
         self.assertIn("boom", err_h)
@@ -2434,13 +2487,22 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
             db = tmp_path / "repos.sqlite"
             work = tmp_path / "work"
             subprocess.run(["git", "init", "-b", "main", str(work)], check=True)
-            subprocess.run(["git", "-C", str(work), "config", "user.name", "A"], check=True)
-            subprocess.run(["git", "-C", str(work), "config", "user.email", "a@b.c"], check=True)
+            subprocess.run(
+                ["git", "-C", str(work), "config", "user.name", "A"], check=True
+            )
+            subprocess.run(
+                ["git", "-C", str(work), "config", "user.email", "a@b.c"], check=True
+            )
             (work / "m.py").write_text("def hello():\n    return 1\n", encoding="utf-8")
             subprocess.run(["git", "-C", str(work), "add", "."], check=True)
             subprocess.run(["git", "-C", str(work), "commit", "-m", "init"], check=True)
 
-            self.assertEqual(self._run("repo", "add", "octo-org/widgets", "--path", str(work), db=db)[0], 0)
+            self.assertEqual(
+                self._run(
+                    "repo", "add", "octo-org/widgets", "--path", str(work), db=db
+                )[0],
+                0,
+            )
             self.assertEqual(self._run("sync", "--git-only", db=db)[0], 0)
 
             rc_st, out_st, _ = self._run("status", db=db)
@@ -2454,7 +2516,9 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
             by_name = {r["parser"]: r for r in pdata["parsers"]}
             self.assertEqual(by_name["py-ast"]["host_state"], "present")
 
-            rc_dis, out_dis, _ = self._run("parsers", "disable", "py-ast", "--reindex", "--json", db=db)
+            rc_dis, out_dis, _ = self._run(
+                "parsers", "disable", "py-ast", "--reindex", "--json", db=db
+            )
             self.assertEqual(rc_dis, 0)
             self.assertEqual(json.loads(out_dis)["reindexed_files"], 1)
 
@@ -2462,7 +2526,9 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
             self.assertEqual(rc_en, 0)
             self.assertEqual(json.loads(out_en)["override"], "enabled")
 
-            rc_conf, _, _ = self._run("parsers", "test", "--conformance", "--json", db=db)
+            rc_conf, _, _ = self._run(
+                "parsers", "test", "--conformance", "--json", db=db
+            )
             self.assertEqual(rc_conf, 0)
 
             with mock.patch("parsers_cli._load_parser_build", return_value=None):
@@ -2476,7 +2542,13 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
     def test_parsers_build_test_dispatch_and_per_platform_status(self) -> None:
         import parser_build
         import parsers_cli
-        from parsers.stamps import PlatformStamp, Stamp, binary_name, source_sha256, write_stamp
+        from parsers.stamps import (
+            PlatformStamp,
+            Stamp,
+            binary_name,
+            source_sha256,
+            write_stamp,
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2500,7 +2572,9 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
                     },
                 ),
             )
-            (dart_dir / binary_name("dart-analyzer", "linux-x86_64")).write_bytes(b"\x7fELF")
+            (dart_dir / binary_name("dart-analyzer", "linux-x86_64")).write_bytes(
+                b"\x7fELF"
+            )
 
             store = packrat.PackratStore(db)
             try:
@@ -2559,27 +2633,37 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
 
             seen_caps: dict[str, object] = {}
 
-            def fake_git(store_obj: object, repo: object, **kwargs: object) -> SyncStats:
+            def fake_git(
+                store_obj: object, repo: object, **kwargs: object
+            ) -> SyncStats:
                 seen_caps["max_reparse_files"] = kwargs.get("max_reparse_files")
                 store_obj.set_parser_fingerprint(repo.repo_id, ".py=py-ast@1")  # type: ignore[attr-defined]
                 return SyncStats(repo_full_name=repo.full_name)  # type: ignore[attr-defined]
 
-            def fake_embed(store_obj: object, repo_id: int, **kwargs: object) -> EmbeddingSyncResult:
+            def fake_embed(
+                store_obj: object, repo_id: int, **kwargs: object
+            ) -> EmbeddingSyncResult:
                 seen_caps["max_embed_chunks"] = kwargs.get("max_chunks")
                 return EmbeddingSyncResult(embedded_count=5, capped=True)
 
             with (
-                mock.patch("packrat.probe_gh_auth", return_value=packrat.GhAuthProbe(ok=True)),
+                mock.patch(
+                    "packrat.probe_gh_auth", return_value=packrat.GhAuthProbe(ok=True)
+                ),
                 mock.patch("packrat.sync_git_codebase", side_effect=fake_git),
                 mock.patch("packrat.sync_repo_embeddings", side_effect=fake_embed),
                 mock.patch(
                     "packrat.sync_github_metadata",
-                    side_effect=lambda _s, r, **_k: SyncStats(repo_full_name=r.full_name),
+                    side_effect=lambda _s, r, **_k: SyncStats(
+                        repo_full_name=r.full_name
+                    ),
                 ),
             ):
                 rc, out, _ = self._run("sync", "--auto", "--json", "--quiet", db=db)
             self.assertEqual(rc, 0)
-            self.assertEqual(seen_caps, {"max_reparse_files": 1500, "max_embed_chunks": 15000})
+            self.assertEqual(
+                seen_caps, {"max_reparse_files": 1500, "max_embed_chunks": 15000}
+            )
             payload = json.loads(out)
             self.assertTrue(payload["results"][0]["embed_capped"])
 
@@ -2595,7 +2679,9 @@ class TestParsersCliAndAutoCaps(unittest.TestCase):
 class TestManagedGitCliTransitions(unittest.TestCase):
     """Covers `repo add` defaults, `set-git`, `packrat git`, `status`, `sync --no-fetch`, and `import --clone-now`."""
 
-    def test_repo_add_defaults_to_managed_and_set_git_transitions_and_git_commands(self) -> None:
+    def test_repo_add_defaults_to_managed_and_set_git_transitions_and_git_commands(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             db = str(base / "repos.sqlite")
@@ -2604,7 +2690,15 @@ class TestManagedGitCliTransitions(unittest.TestCase):
 
             with mock.patch("sys.stdout", io.StringIO()):
                 rc = packrat.main(
-                    ["--db", db, "repo", "add", "octo/widgets", "--url", "git@github.com:octo/widgets.git"]
+                    [
+                        "--db",
+                        db,
+                        "repo",
+                        "add",
+                        "octo/widgets",
+                        "--url",
+                        "git@github.com:octo/widgets.git",
+                    ]
                 )
             self.assertEqual(rc, 0)
 
@@ -2613,7 +2707,9 @@ class TestManagedGitCliTransitions(unittest.TestCase):
                 self.assertEqual(packrat.main(["--db", db, "status", "--json"]), 0)
             st = json.loads(out.getvalue())
             self.assertEqual(st["repos"][0]["git_source"], "managed")
-            self.assertEqual(st["repos"][0]["git_url"], "git@github.com:octo/widgets.git")
+            self.assertEqual(
+                st["repos"][0]["git_url"], "git@github.com:octo/widgets.git"
+            )
             self.assertEqual(st["repos"][0]["git_state"], "pending")
 
             # Seed fake bare dir and confirm set-git path --keep-git keeps it vs default removes it.
@@ -2626,7 +2722,16 @@ class TestManagedGitCliTransitions(unittest.TestCase):
             with mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(
                     packrat.main(
-                        ["--db", db, "repo", "set-git", "octo/widgets", "path", str(checkout), "--keep-git"]
+                        [
+                            "--db",
+                            db,
+                            "repo",
+                            "set-git",
+                            "octo/widgets",
+                            "path",
+                            str(checkout),
+                            "--keep-git",
+                        ]
                     ),
                     0,
                 )
@@ -2634,53 +2739,453 @@ class TestManagedGitCliTransitions(unittest.TestCase):
 
             # Bare repo add on an existing path checkout keeps path with a note.
             err_note = io.StringIO()
-            with mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", err_note):
-                self.assertEqual(packrat.main(["--db", db, "repo", "add", "octo/widgets"]), 0)
+            with (
+                mock.patch("sys.stdout", io.StringIO()),
+                mock.patch("sys.stderr", err_note),
+            ):
+                self.assertEqual(
+                    packrat.main(["--db", db, "repo", "add", "octo/widgets"]), 0
+                )
             self.assertIn("keeping existing path binding", err_note.getvalue())
 
             # Switch to none removes directory (orphan) when switching from managed.
             with mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(
-                    packrat.main(["--db", db, "repo", "set-git", "octo/widgets", "managed"]), 0
+                    packrat.main(
+                        ["--db", db, "repo", "set-git", "octo/widgets", "managed"]
+                    ),
+                    0,
                 )
             out_prune = io.StringIO()
             with mock.patch("sys.stdout", out_prune):
-                self.assertEqual(packrat.main(["--db", db, "git", "prune", "--dry-run"]), 0)
+                self.assertEqual(
+                    packrat.main(["--db", db, "git", "prune", "--dry-run"]), 0
+                )
             with mock.patch("sys.stdout", io.StringIO()):
                 self.assertEqual(
-                    packrat.main(["--db", db, "repo", "set-git", "octo/widgets", "none"]), 0
+                    packrat.main(
+                        ["--db", db, "repo", "set-git", "octo/widgets", "none"]
+                    ),
+                    0,
                 )
             self.assertFalse(fake_dir.exists())
 
-    def test_sync_no_fetch_skips_pre_lock_clone_and_import_clone_now_runs_after_lock(self) -> None:
+    def test_sync_no_fetch_skips_pre_lock_clone_and_import_clone_now_runs_after_lock(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             db = str(base / "dest.sqlite")
             src_db = base / "src.sqlite"
             src = packrat.PackratStore(src_db)
-            src.register_repo("octo", "widgets", git_source="managed", update_binding=True)
+            src.register_repo(
+                "octo", "widgets", git_source="managed", update_binding=True
+            )
             exp_db = base / "exp.sqlite"
             src.export_database(exp_db)
             src.close()
 
             with mock.patch("packrat.ensure_git") as mock_ensure:
                 mock_ensure.return_value = mock.Mock(
-                    error="", new_tip="abc123", remote_default_branch="", timed_out=False
+                    error="",
+                    new_tip="abc123",
+                    remote_default_branch="",
+                    timed_out=False,
                 )
                 with mock.patch("sys.stdout", io.StringIO()):
-                    rc = packrat.main(["--db", db, "import", str(exp_db), "--clone-now", "--quiet"])
+                    rc = packrat.main(
+                        ["--db", db, "import", str(exp_db), "--clone-now", "--quiet"]
+                    )
                 self.assertEqual(rc, 0)
                 self.assertEqual(mock_ensure.call_count, 1)
 
             # `--no-fetch` skips pre-lock ensure_git / check_remote.
-            with mock.patch("packrat.ensure_git") as mock_ensure2, mock.patch("packrat.check_remote") as mock_chk:
+            with (
+                mock.patch("packrat.ensure_git") as mock_ensure2,
+                mock.patch("packrat.check_remote") as mock_chk,
+            ):
                 with mock.patch("sys.stdout", io.StringIO()):
                     rc_sync = packrat.main(
-                        ["--db", db, "sync", "--git-only", "--no-fetch", "--repo", "octo/widgets", "--quiet"]
+                        [
+                            "--db",
+                            db,
+                            "sync",
+                            "--git-only",
+                            "--no-fetch",
+                            "--repo",
+                            "octo/widgets",
+                            "--quiet",
+                        ]
                     )
                 self.assertEqual(rc_sync, 0)
                 mock_ensure2.assert_not_called()
                 mock_chk.assert_not_called()
+
+
+class TestRemoteAndHybridCli(unittest.TestCase):
+    """End-to-end loopback HTTP server + CLI routing, `--with-remote`, `reader`, and hygiene."""
+
+    def setUp(self) -> None:
+        from embedder import DeterministicHashEmbedder, sync_repo_embeddings
+        from http_server import PackratHttpServer
+        from models import (
+            IssueRecord,
+            PrRecord,
+            SeedRepoSpec,
+            ServerConfig,
+            TextChunk,
+            compute_content_sha256,
+        )
+        from personal_store import ChangeNotifier, PersonalStore
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self.tmp.name)
+        self.server_dir = self.base / "server"
+        self.server_dir.mkdir(parents=True)
+        self.server_db = self.server_dir / "repos.sqlite"
+        self.personal_db = self.server_dir / "personal.sqlite"
+        self.embedder = DeterministicHashEmbedder()
+        self.notifier = ChangeNotifier()
+
+        pstore = PersonalStore(self.personal_db, notifier=self.notifier)
+        store = packrat.PackratStore(self.server_db, personal_store=pstore)
+        try:
+            repo = store.register_repo("flutter", "genui", git_source="none")
+            store.upsert_issues(
+                [
+                    IssueRecord(
+                        repo_id=repo.repo_id,
+                        number=12,
+                        title="Remote shader compilation timeout",
+                        state="OPEN",
+                        updated_at="2026-11-12T00:00:00Z",
+                        body="Shader warm-up exceeds deadline on cold caches.",
+                    )
+                ]
+            )
+            store.upsert_pull_requests(
+                [
+                    PrRecord(
+                        repo_id=repo.repo_id,
+                        number=99,
+                        title="Fix shader warm-up deadline",
+                        state="OPEN",
+                        author="alice",
+                        base_ref="main",
+                        head_ref="fix-shader",
+                        head_sha="deadbeef" * 5,
+                        updated_at="2026-11-13T00:00:00Z",
+                        url="https://github.com/flutter/genui/pull/99",
+                    )
+                ]
+            )
+            title = "Issue #12: Remote shader compilation timeout"
+            body = "Shader warm-up exceeds deadline on cold caches."
+            store.upsert_chunks(
+                [
+                    TextChunk(
+                        chunk_id="flutter/genui#issue:12",
+                        repo_id=repo.repo_id,
+                        source_kind="issue",
+                        source_ref="flutter/genui#12",
+                        item_number=12,
+                        title=title,
+                        text=body,
+                        content_sha256=compute_content_sha256(title, body),
+                        is_untrusted=True,
+                        updated_at="2026-11-12T00:00:00Z",
+                    )
+                ]
+            )
+            sync_repo_embeddings(store, None, embedder=self.embedder)
+            store.write_heartbeat(
+                12345,
+                "packrat-serve/2+000000000000",
+                now=time.time(),
+                last_ok_at="2026-11-14T00:00:00Z",
+                consecutive_failed_ticks=0,
+            )
+        finally:
+            store.close()
+            pstore.close()
+
+        cfg = ServerConfig(
+            allowlisted_orgs=("flutter", "a2ui-project"),
+            admin_users=("local",),
+            default_git_source="none",
+            allowed_git_protocols=("https",),
+            repos=(SeedRepoSpec(full_name="flutter/genui", git_source="none"),),
+        )
+        self.http_server = PackratHttpServer(
+            "127.0.0.1:0",
+            self.server_db,
+            self.personal_db,
+            server_config=cfg,
+            notifier=self.notifier,
+            embedder=self.embedder,
+            public_repo_checker=lambda _o, _n, _tx: True,
+        )
+        self.thread = threading.Thread(
+            target=self.http_server.serve_forever, daemon=True
+        )
+        self.thread.start()
+        self.base_url = self.http_server.base_url
+
+    def tearDown(self) -> None:
+        self.http_server.shutdown()
+        self.http_server.server_close()
+        self.thread.join(timeout=5.0)
+        self.tmp.cleanup()
+
+    def _run_cli(
+        self,
+        *argv: str,
+        home: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> tuple[int, str, str]:
+        import os
+
+        from remote_client import resolve_duckdb_bin
+
+        duck_bin = resolve_duckdb_bin()
+        env = dict(os.environ)
+        env["DUCKDB_BIN"] = duck_bin
+        if home is not None:
+            env["HOME"] = str(home)
+        if extra_env:
+            env.update(extra_env)
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch("sys.stdout", out),
+            mock.patch("sys.stderr", err),
+            mock.patch(
+                "packrat.get_default_embedder",
+                return_value=self.embedder,
+                create=True,
+            ),
+        ):
+            rc = packrat.main(list(argv))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_empty_home_remote_search_sql_with_remote_reader_and_auth_link(
+        self,
+    ) -> None:
+        empty_home = self.base / "empty_home"
+        empty_home.mkdir()
+        cfg_dir = empty_home / ".config" / "packrat"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "config.json").write_text(
+            json.dumps({"mode": "auto", "remote_url": self.base_url}),
+            encoding="utf-8",
+        )
+
+        # 1. `--mode remote search` and `--mode remote repo list`
+        rc, out, err = self._run_cli(
+            "--mode", "remote", "search", "shader warm-up", "--json", home=empty_home
+        )
+        self.assertEqual(rc, 0, err)
+        hits = json.loads(out)
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["repo_full_name"], "flutter/genui")
+
+        rc, out, err = self._run_cli(
+            "--mode",
+            "remote",
+            "repo",
+            "list",
+            "--mode",
+            "mirror",
+            "--json",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)[0]["full_name"], "flutter/genui")
+
+        # 2. Direct `sql` + `sql --with-remote` (both non-empty and 0-row semicolon-terminated)
+        rc, out, err = self._run_cli(
+            "sql",
+            "--format",
+            "json",
+            "SELECT number, title FROM v_pull_requests WHERE repo = 'flutter/genui'",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        rows = json.loads(out)
+        self.assertEqual(rows[0]["number"], 99)
+        self.assertIn("<untrusted_repo_content", rows[0]["title"])
+
+        rc, out, err = self._run_cli(
+            "sql",
+            "--format",
+            "json",
+            "--with-remote",
+            "r_prs=SELECT number, author FROM v_pull_requests WHERE repo = 'flutter/genui'",
+            "--with-remote",
+            "r_empty=SELECT number, title FROM v_pull_requests WHERE 1 = 0;",
+            "SELECT p.number, p.author, (SELECT COUNT(*) FROM r_empty) AS empty_n FROM r_prs p",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        joined = json.loads(out)
+        self.assertEqual(joined, [{"number": 99, "author": "alice", "empty_n": 0}])
+
+        # 3. `packrat reader` and `packrat auth link`
+        rc, out, err = self._run_cli(
+            "reader",
+            "--health",
+            "--repo-probe",
+            "flutter/genui",
+            "--known-keys",
+            "flutter/genui#99",
+            "--json",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        rb = json.loads(out)
+        self.assertEqual(rb["health"]["pid"], 12345)
+        self.assertTrue(rb["repo_probe"]["found"])
+        self.assertEqual(rb["known_keys"], {"flutter/genui#99": "flutter/genui#99"})
+
+        rc, out, err = self._run_cli(
+            "auth", "link", "--github-user", "alice", "--json", home=empty_home
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["github_login"], "alice")
+
+        # Verify zero local SQLite files were created in empty_home!
+        self.assertFalse(
+            (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+        )
+
+    def test_remote_watch_changes_refresh_onboard_and_export_import(self) -> None:
+        empty_home = self.base / "live_home"
+        empty_home.mkdir()
+
+        # Pre- and post-subcommand `--remote-url` / `--remote` flags
+        rc, out, err = self._run_cli(
+            "--remote-url",
+            self.base_url,
+            "watch",
+            "add",
+            "--remote",
+            "--consumer",
+            "monitor",
+            "--id",
+            "conv1",
+            "--json",
+            "--",
+            "flutter/genui#99",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["leased"], ["flutter/genui#99"])
+
+        rc, out, err = self._run_cli(
+            "--remote-url",
+            self.base_url,
+            "--remote",
+            "changes",
+            "--since",
+            "999999999",
+            "--json",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertTrue(json.loads(out)["reset"])
+
+        rc, out, err = self._run_cli(
+            "refresh",
+            "--remote",
+            "--remote-url",
+            self.base_url,
+            "--json",
+            "--",
+            "flutter/genui#99",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["requested"], ["flutter/genui#99"])
+
+        # `repo add --remote --github-only`
+        rc, out, err = self._run_cli(
+            "repo",
+            "add",
+            "a2ui-project/a2ui",
+            "--remote",
+            "--remote-url",
+            self.base_url,
+            "--github-only",
+            "--json",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(json.loads(out)["full_name"], "a2ui-project/a2ui")
+
+        # `export --remote` + `import` into a local recipient DB
+        snap_file = self.base / "genui_export.sqlite"
+        rc, out, err = self._run_cli(
+            "export",
+            str(snap_file),
+            "--repo",
+            "flutter/genui",
+            "--remote",
+            "--remote-url",
+            self.base_url,
+            "--json",
+            home=empty_home,
+        )
+        self.assertEqual(rc, 0, err)
+        exp_res = json.loads(out)
+        self.assertTrue(snap_file.is_file())
+        self.assertTrue(exp_res["etag"])
+
+        dest_db = self.base / "recipient" / "repos.sqlite"
+        rc_imp, out_imp, err_imp = self._run_cli(
+            "--db", str(dest_db), "import", str(snap_file), "--json", home=empty_home
+        )
+        self.assertEqual(rc_imp, 0, err_imp)
+        self.assertEqual(json.loads(out_imp)["added_count"], 1)
+
+    def test_empty_home_local_read_only_commands_create_zero_files(self) -> None:
+        cold_home = self.base / "cold_local"
+        cold_home.mkdir()
+        for argv in (
+            ("status", "--json"),
+            ("search", "anything", "--json"),
+            ("repo", "list", "--json"),
+            ("reader", "--health", "--repo-probe", "octo/widgets", "--json"),
+            ("changes", "--since", "0", "--json"),
+            ("sql", "--format", "json", "SELECT COUNT(*) AS n FROM v_pull_requests"),
+        ):
+            with self.subTest(argv=argv):
+                rc, _, err = self._run_cli(*argv, home=cold_home)
+                self.assertEqual(rc, 0, err)
+        self.assertFalse((cold_home / ".local" / "share" / "packrat").exists())
+
+    def test_zero_corp_internal_strings_across_packrat_skill(self) -> None:
+        skill_root = Path(packrat.__file__).resolve().parent.parent
+        forbidden = tuple(
+            "".join(parts)
+            for parts in (
+                ("sso_", "client"),
+                (".cr.gclb", ".goog"),
+                ("uber", "proxy"),
+                ("corp", "run"),
+                ("google3/", "experimental"),
+            )
+        )
+        offenders: list[str] = []
+        for path in sorted(skill_root.rglob("*")):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            if path.suffix not in (".py", ".md", ".sql", ".json", ".toml", ".sh"):
+                continue
+            text = path.read_text(encoding="utf-8", errors="ignore").lower()
+            for token in forbidden:
+                if token in text:
+                    offenders.append(f"{path.relative_to(skill_root)}:{token}")
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

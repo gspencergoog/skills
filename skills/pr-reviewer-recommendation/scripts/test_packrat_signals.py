@@ -17,17 +17,20 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from packrat_signals import load_packrat_signals
+from packrat_signals import discover_packrat_cmd, load_packrat_signals
 from reviewer_models import parse_iso_timestamp_or_zero
 
 PACKRAT_TEST_SCHEMA = """
@@ -175,13 +178,17 @@ class TestPackratSignalsFallbackAndSchema(unittest.TestCase):
     def test_unreadable_db_for_corrupt_bytes_and_empty_schema(self) -> None:
         corrupt = self.tmp_dir / "corrupt.sqlite"
         corrupt.write_bytes(b"not a valid sqlite header")
-        res_corrupt = load_packrat_signals("octo-org/widgets", ["src/button.py"], db_path=corrupt)
+        res_corrupt = load_packrat_signals(
+            "octo-org/widgets", ["src/button.py"], db_path=corrupt
+        )
         self.assertEqual(res_corrupt.status, "unreadable_db")
         self.assertIn("--repo octo-org/widgets", res_corrupt.fallback_note or "")
 
         empty_db = self.tmp_dir / "empty.sqlite"
         sqlite3.connect(empty_db).close()
-        res_empty = load_packrat_signals("octo-org/widgets", ["src/button.py"], db_path=empty_db)
+        res_empty = load_packrat_signals(
+            "octo-org/widgets", ["src/button.py"], db_path=empty_db
+        )
         self.assertEqual(res_empty.status, "unreadable_db")
 
     def test_untracked_repo_and_incomplete_backfill_warning(self) -> None:
@@ -197,7 +204,9 @@ class TestPackratSignalsFallbackAndSchema(unittest.TestCase):
             untracked.fallback_note or "",
         )
 
-        tracked = load_packrat_signals("OCTO-ORG/WIDGETS", ["src/button.py"], db_path=db_path)
+        tracked = load_packrat_signals(
+            "OCTO-ORG/WIDGETS", ["src/button.py"], db_path=db_path
+        )
         self.assertEqual(tracked.status, "ok")
         self.assertEqual(tracked.repo_full_name, "octo-org/widgets")
         self.assertFalse(tracked.prs_backfill_complete)
@@ -228,7 +237,9 @@ class TestPackratSignalsFallbackAndSchema(unittest.TestCase):
         finally:
             conn.close()
 
-        res = load_packrat_signals("octo-org/widgets", ["src/button.py"], db_path=db_path)
+        res = load_packrat_signals(
+            "octo-org/widgets", ["src/button.py"], db_path=db_path
+        )
         self.assertEqual(res.status, "ok")
         self.assertFalse(res.prs_backfill_complete)
         self.assertIsNotNone(res.backfill_warning)
@@ -264,9 +275,27 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
                 "INSERT INTO reviews (repo_id, review_id, pr_number, author, state, submitted_at) VALUES (?, ?, 10, ?, ?, ?)",
                 [
                     (self.repo_id, "R_alice", "alice-dev", "APPROVED", None),
-                    (self.repo_id, "R_self", "PR-Author", "COMMENTED", "2026-02-02T01:00:00Z"),
-                    (self.repo_id, "R_bot", "dependabot[bot]", "COMMENTED", "2026-02-02T01:00:00Z"),
-                    (self.repo_id, "R_dismissed", "carol-dev", "DISMISSED", "2026-02-02T01:00:00Z"),
+                    (
+                        self.repo_id,
+                        "R_self",
+                        "PR-Author",
+                        "COMMENTED",
+                        "2026-02-02T01:00:00Z",
+                    ),
+                    (
+                        self.repo_id,
+                        "R_bot",
+                        "dependabot[bot]",
+                        "COMMENTED",
+                        "2026-02-02T01:00:00Z",
+                    ),
+                    (
+                        self.repo_id,
+                        "R_dismissed",
+                        "carol-dev",
+                        "DISMISSED",
+                        "2026-02-02T01:00:00Z",
+                    ),
                 ],
             )
             thread_comments = json.dumps(
@@ -275,8 +304,14 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
                     {"author": {"login": "pr-author"}, "body": "Done"},
                     {"author": None, "body": "Deleted ghost user"},
                     {"author": {"login": "bob-octo"}, "body": "Agreed"},
-                    {"author": {"login": "bob-octo"}, "body": "Second reply same thread"},
-                    {"author": {"login": "copilot-pull-request-reviewer"}, "body": "Bot note"},
+                    {
+                        "author": {"login": "bob-octo"},
+                        "body": "Second reply same thread",
+                    },
+                    {
+                        "author": {"login": "copilot-pull-request-reviewer"},
+                        "body": "Bot note",
+                    },
                 ]
             )
             conn.executemany(
@@ -295,7 +330,14 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
                         thread_comments,
                     ),
                     ("T_bad_json", self.repo_id, "dora-dev", None, None, "{malformed"),
-                    ("T_obj_json", self.repo_id, None, None, None, '{"unexpected": true}'),
+                    (
+                        "T_obj_json",
+                        self.repo_id,
+                        None,
+                        None,
+                        None,
+                        '{"unexpected": true}',
+                    ),
                 ],
             )
 
@@ -373,7 +415,9 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
         dir_rev = next(e for e in result.review_events if e.is_directory)
         self.assertEqual(direct_rev.reviewer_login, "alice-dev")
         self.assertEqual(direct_rev.scope_path, "src/widgets/button.py")
-        self.assertEqual(direct_rev.timestamp, parse_iso_timestamp_or_zero("2026-02-02T00:00:00Z"))
+        self.assertEqual(
+            direct_rev.timestamp, parse_iso_timestamp_or_zero("2026-02-02T00:00:00Z")
+        )
         self.assertEqual(direct_rev.pr_changed_files, 3)
 
         self.assertEqual(dir_rev.reviewer_login, "erin-dev")
@@ -434,9 +478,13 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
         self.assertEqual(result.target_pr_title, "Target offline PR")
         self.assertEqual(result.target_pr_base_ref, "main")
         self.assertEqual(result.target_pr_files, ("src/widgets/dialog.py",))
-        self.assertEqual([e.reviewer_login for e in result.review_events], ["hist-reviewer"])
+        self.assertEqual(
+            [e.reviewer_login for e in result.review_events], ["hist-reviewer"]
+        )
 
-    def test_commit_identity_linkage_skips_merge_commits_and_ambiguous_keys(self) -> None:
+    def test_commit_identity_linkage_skips_merge_commits_and_ambiguous_keys(
+        self,
+    ) -> None:
         conn = sqlite3.connect(self.db_path)
         try:
             conn.executemany(
@@ -446,8 +494,22 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
                 ) VALUES (?, ?, 'MERGED', ?, ?, ?, ?, '2026-03-20T00:00:00Z')
                 """,
                 [
-                    (self.repo_id, 21, "alice-dev", "Feature A", "sha_head_a", "sha_merge_21"),
-                    (self.repo_id, 22, "bob-octo", "Squash B", "sha_head_b", "sha_squash_22"),
+                    (
+                        self.repo_id,
+                        21,
+                        "alice-dev",
+                        "Feature A",
+                        "sha_head_a",
+                        "sha_merge_21",
+                    ),
+                    (
+                        self.repo_id,
+                        22,
+                        "bob-octo",
+                        "Squash B",
+                        "sha_head_b",
+                        "sha_squash_22",
+                    ),
                     (self.repo_id, 23, "carol-dev", "Feature C", "sha_head_c", None),
                 ],
             )
@@ -517,13 +579,17 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
         finally:
             conn.close()
 
-        result = load_packrat_signals("octo-org/widgets", ["src/app.py"], db_path=self.db_path)
+        result = load_packrat_signals(
+            "octo-org/widgets", ["src/app.py"], db_path=self.db_path
+        )
         self.assertEqual(result.sha_to_login.get("sha_head_a"), "alice-dev")
         self.assertEqual(result.sha_to_login.get("sha_squash_22"), "bob-octo")
         self.assertNotIn("sha_merge_21", result.sha_to_login)
         self.assertNotIn("sha_sync_21", result.sha_to_login)
 
-        self.assertEqual(result.email_to_login.get("alice@widgets.example"), "alice-dev")
+        self.assertEqual(
+            result.email_to_login.get("alice@widgets.example"), "alice-dev"
+        )
         self.assertEqual(result.email_to_login.get("bob@widgets.example"), "bob-octo")
         self.assertNotIn("jane@widgets.example", result.email_to_login)
         self.assertNotIn("shared@widgets.example", result.email_to_login)
@@ -532,6 +598,180 @@ class TestPackratReviewsThreadsAndIdentities(unittest.TestCase):
         self.assertEqual(result.name_to_login.get("bob octo"), "bob-octo")
         self.assertNotIn("maintainer jane", result.name_to_login)
         self.assertNotIn("alex", result.name_to_login)
+
+
+class TestPackratSignalsRemoteReader(unittest.TestCase):
+    """Tests remote `packrat reader` deserialization and git-only fallback."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp_dir = Path(self._tmp.name)
+
+    def test_discover_packrat_cmd_respects_override_and_which(self) -> None:
+        self.assertIsNone(discover_packrat_cmd([]))
+        self.assertEqual(discover_packrat_cmd(["/opt/packrat"]), ["/opt/packrat"])
+        with mock.patch("shutil.which", return_value="/usr/bin/packrat"):
+            self.assertEqual(discover_packrat_cmd(), ["/usr/bin/packrat"])
+
+    def test_remote_review_signals_offline_pr_without_local_db(self) -> None:
+        empty_home = self.tmp_dir / "empty_home"
+        empty_home.mkdir()
+        remote_resp = {
+            "review_signals": {
+                "status": "ok",
+                "repo_full_name": "octo-org/widgets",
+                "prs_backfill_complete": True,
+                "target_pr_author": "pr-owner",
+                "target_pr_title": "Add remote mode",
+                "target_pr_base_ref": "main",
+                "target_pr_files": ["src/widgets/dialog.py"],
+                "known_logins": ["alice-dev", "bob-octo"],
+                "sha_to_login": {"sha_1": "alice-dev"},
+                "email_to_login": {"alice@widgets.example": "alice-dev"},
+                "name_to_login": {"alice dev": "alice-dev"},
+                "review_events": [
+                    {
+                        "pr_number": 50,
+                        "reviewer_login": "alice-dev",
+                        "state": "APPROVED",
+                        "timestamp": 1739577600.0,
+                        "scope_path": "src/widgets/dialog.py",
+                        "is_directory": False,
+                        "pr_changed_files": 2,
+                    }
+                ],
+                "thread_events": [
+                    {
+                        "thread_id": "T_50",
+                        "pr_number": 50,
+                        "reviewer_login": "bob-octo",
+                        "timestamp": 1739577605,
+                        "scope_path": "src/widgets",
+                        "is_directory": True,
+                    }
+                ],
+            }
+        }
+        seen_cmds: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            seen_cmds.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(remote_resp), "")
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"HOME": str(empty_home), "PACKRAT_URL": "https://packrat.example"},
+            ),
+            mock.patch("shutil.which", return_value="/usr/bin/packrat"),
+            mock.patch("subprocess.run", side_effect=fake_run),
+        ):
+            res = load_packrat_signals(
+                "octo-org/widgets",
+                [],
+                db_path=None,
+                target_pr=99,
+            )
+
+        self.assertEqual(len(seen_cmds), 1)
+        cmd = seen_cmds[0]
+        self.assertNotIn("--db", cmd)
+        self.assertEqual(cmd[:3], ["/usr/bin/packrat", "reader", "--ops-json"])
+        self.assertEqual(
+            json.loads(cmd[3]),
+            {
+                "review_signals": {
+                    "repo": "octo-org/widgets",
+                    "target_pr": 99,
+                    "files": [],
+                }
+            },
+        )
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.repo_full_name, "octo-org/widgets")
+        self.assertTrue(res.prs_backfill_complete)
+        self.assertEqual(res.target_pr_author, "pr-owner")
+        self.assertEqual(res.target_pr_title, "Add remote mode")
+        self.assertEqual(res.target_pr_base_ref, "main")
+        self.assertEqual(res.target_pr_files, ("src/widgets/dialog.py",))
+        self.assertEqual(res.known_logins, frozenset({"alice-dev", "bob-octo"}))
+        self.assertEqual(res.sha_to_login, {"sha_1": "alice-dev"})
+        self.assertEqual(res.email_to_login, {"alice@widgets.example": "alice-dev"})
+        self.assertEqual(res.name_to_login, {"alice dev": "alice-dev"})
+        self.assertEqual(len(res.review_events), 1)
+        self.assertEqual(res.review_events[0].reviewer_login, "alice-dev")
+        self.assertEqual(res.review_events[0].timestamp, 1739577600)
+        self.assertEqual(len(res.thread_events), 1)
+        self.assertEqual(res.thread_events[0].thread_id, "T_50")
+        self.assertTrue(res.thread_events[0].is_directory)
+        self.assertFalse(
+            (empty_home / ".local" / "share" / "packrat" / "repos.sqlite").exists()
+        )
+
+    def test_remote_error_and_unconfigured_skip_subprocesses(self) -> None:
+        empty_home = self.tmp_dir / "empty_home_no_cfg"
+        empty_home.mkdir()
+        clean_env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in {"PACKRAT_URL", "PACKRAT_MODE"}
+        }
+        clean_env["HOME"] = str(empty_home)
+
+        with (
+            mock.patch.dict(os.environ, clean_env, clear=True),
+            mock.patch("subprocess.run") as run_mock,
+        ):
+            res_unconf = load_packrat_signals(
+                "octo-org/widgets", ["src/app.py"], db_path=None
+            )
+        run_mock.assert_not_called()
+        self.assertEqual(res_unconf.status, "missing_db")
+
+        with (
+            mock.patch.dict(os.environ, clean_env, clear=True),
+            mock.patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["packrat"], 4, "", "auth_expired"
+                ),
+            ),
+        ):
+            res_auth = load_packrat_signals(
+                "octo-org/widgets",
+                ["src/app.py"],
+                db_path=None,
+                packrat_cmd=["packrat"],
+            )
+        self.assertEqual(res_auth.status, "missing_db")
+
+        with (
+            mock.patch.dict(os.environ, clean_env, clear=True),
+            mock.patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    ["packrat"],
+                    0,
+                    json.dumps(
+                        {
+                            "review_signals": {
+                                "status": "untracked_repo",
+                                "repo_full_name": "octo-org/widgets",
+                            }
+                        }
+                    ),
+                    "",
+                ),
+            ),
+        ):
+            res_untracked = load_packrat_signals(
+                "octo-org/widgets",
+                ["src/app.py"],
+                db_path=None,
+                packrat_cmd=["packrat"],
+            )
+        self.assertEqual(res_untracked.status, "untracked_repo")
 
 
 if __name__ == "__main__":

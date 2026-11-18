@@ -21,6 +21,7 @@ from models import (
     ItemCommentRecord,
     LatestReviewRecord,
     OpinionatedReviewRecord,
+    PendingDeleteError,
     PrLiveRecord,
     ReviewRequestRecord,
     ThreadActivityRecord,
@@ -47,7 +48,7 @@ fragment HotPrFields on PullRequest {
   closedAt
   createdAt
   updatedAt
-  repository { nameWithOwner }
+  repository { nameWithOwner isPrivate }
   author { login __typename }
   baseRefName
   headRefName
@@ -169,14 +170,17 @@ def build_hot_query(targets: Sequence[tuple[str, int]]) -> str:
     return f"query {{\n  rateLimit {{ cost remaining resetAt }}\n{body}\n}}\n\n{HOT_PR_FRAGMENT}\n"
 
 
-def build_node_id_query(keys: Sequence[str]) -> str:
+def build_node_id_query(
+    keys: Sequence[str], *, include_is_private: bool = False
+) -> str:
     """Builds an aliased `repository { pullRequest(number:) { id } }` lookup for `keys`."""
+    priv = "isPrivate " if include_is_private else ""
     blocks = []
     for i, key in enumerate(keys):
         owner, name, number = parse_item_key(key)
         blocks.append(
             f"  k{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
-            f"{{ pullRequest(number: {number}) {{ id }} }}"
+            f"{{ {priv}pullRequest(number: {number}) {{ id }} }}"
         )
     return "query {\n" + "\n".join(blocks) + "\n}\n"
 
@@ -593,6 +597,7 @@ class HotRefresher:
         batch_size: int = HOT_BATCH_SIZE,
         worker: str = "hot",
         priority: Priority = Priority.HOT,
+        forbid_private: bool = False,
     ) -> None:
         """Initializes the worker.
 
@@ -602,22 +607,32 @@ class HotRefresher:
             batch_size: PRs per GraphQL query.
             worker: Worker name recorded in `api_calls`.
             priority: Budget priority of every call.
+            forbid_private: Skip private repository PRs before `ensure_items_repo`.
         """
         self.transport = transport
         self.store = store
         self.batch_size = max(1, batch_size)
         self.worker = worker
         self.priority = priority
+        self.forbid_private = forbid_private
         self._node_ids: dict[str, str] = {}
 
-    def _query(self, query: str) -> dict[str, Any]:
-        """Runs `query` through the transport and returns its `data` object."""
-        payload = self.transport.graphql(
+    def _query(
+        self, query: str, *, transport: GraphqlTransport | None = None
+    ) -> dict[str, Any]:
+        """Runs `query` through `transport` (or `self.transport`) and returns `data`."""
+        active_transport = self.transport if transport is None else transport
+        payload = active_transport.graphql(
             query, {}, worker=self.worker, priority=self.priority
         )
         return _dict(payload.get("data"))
 
-    def resolve_node_ids(self, keys: Sequence[str]) -> dict[str, str]:
+    def resolve_node_ids(
+        self,
+        keys: Sequence[str],
+        *,
+        transport: GraphqlTransport | None = None,
+    ) -> dict[str, str]:
         """Returns GraphQL node ids for `keys`, looking up and saving missing ones.
 
         Keys whose PR does not exist (or is not visible) are left out.
@@ -634,16 +649,26 @@ class HotRefresher:
         missing = [k for k in uncached if k not in known]
         for start in range(0, len(missing), NODE_ID_BATCH_SIZE):
             chunk = missing[start : start + NODE_ID_BATCH_SIZE]
-            self._fetch_missing_node_ids(chunk, known)
+            self._fetch_missing_node_ids(chunk, known, transport=transport)
         return known
 
     def _fetch_missing_node_ids(
-        self, chunk: Sequence[str], known: dict[str, str]
+        self,
+        chunk: Sequence[str],
+        known: dict[str, str],
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> None:
         """Queries GraphQL for one chunk of missing PR node IDs and caches them."""
-        data = self._query(build_node_id_query(chunk))
+        data = self._query(
+            build_node_id_query(chunk, include_is_private=self.forbid_private),
+            transport=transport,
+        )
         for i, key in enumerate(chunk):
-            node_id = _dict(_dict(data.get(f"k{i}")).get("pullRequest")).get("id")
+            repo_data = _dict(data.get(f"k{i}"))
+            if self.forbid_private and repo_data.get("isPrivate") is True:
+                continue
+            node_id = _dict(repo_data.get("pullRequest")).get("id")
             if node_id:
                 nid = str(node_id)
                 self.store.set_node_id(key, nid)
@@ -651,14 +676,20 @@ class HotRefresher:
                 self._node_ids[key] = nid
 
     def _extra_threads(
-        self, node_id: str, after: str | None
+        self,
+        node_id: str,
+        after: str | None,
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> list[ThreadActivityRecord]:
         """Fetches review threads beyond the first page."""
         out: list[ThreadActivityRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
             conn = _dict(
-                self._query(build_threads_page_query(node_id, after)).get("node")
+                self._query(
+                    build_threads_page_query(node_id, after), transport=transport
+                ).get("node")
             ).get("reviewThreads")
             out.extend(t for t in map(parse_thread, _nodes(conn)) if t)
             after = _page_info(conn)
@@ -666,16 +697,22 @@ class HotRefresher:
         return out
 
     def _extra_contexts(
-        self, node_id: str, number: int, after: str | None
+        self,
+        node_id: str,
+        number: int,
+        after: str | None,
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> list[CheckRunRecord]:
         """Fetches head-commit check contexts beyond the first page."""
         out: list[CheckRunRecord] = []
         pages = 0
         while after and pages < MAX_EXTRA_PAGES:
             node = _dict(
-                self._query(build_contexts_page_query(node_id, number, after)).get(
-                    "node"
-                )
+                self._query(
+                    build_contexts_page_query(node_id, number, after),
+                    transport=transport,
+                ).get("node")
             )
             conn = _dict(_rollup(node).get("contexts"))
             out.extend(c for c in map(parse_check_context, _nodes(conn)) if c)
@@ -683,15 +720,25 @@ class HotRefresher:
             pages += 1
         return out
 
-    def _complete(self, snap: HotPrSnapshot, node: dict[str, Any]) -> None:
+    def _complete(
+        self,
+        snap: HotPrSnapshot,
+        node: dict[str, Any],
+        *,
+        transport: GraphqlTransport | None = None,
+    ) -> None:
         """Adds follow-up pages of threads and check contexts to `snap` when needed."""
         node_id = str(node.get("id") or "")
         snap.threads.extend(
-            self._extra_threads(node_id, _page_info(node.get("reviewThreads")))
+            self._extra_threads(
+                node_id, _page_info(node.get("reviewThreads")), transport=transport
+            )
         )
         contexts = _dict(_rollup(node).get("contexts"))
         snap.checks.extend(
-            self._extra_contexts(node_id, snap.record.number, _page_info(contexts))
+            self._extra_contexts(
+                node_id, snap.record.number, _page_info(contexts), transport=transport
+            )
         )
 
     def _write_threads(
@@ -800,6 +847,8 @@ class HotRefresher:
         fp: tuple[str | None, str | None, str | None, int | None],
         canon_key: str,
         unchanged_keys: list[str],
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> str | None:
         """Handles a PR whose `(updated_at, head_sha)` matches `fp` (only rollup/checks may differ)."""
         contexts = _dict(_rollup(node).get("contexts"))
@@ -815,7 +864,9 @@ class HotRefresher:
             return None
         checks = _parse_check_contexts(contexts)
         node_id = str(node.get("id") or "")
-        checks.extend(self._extra_contexts(node_id, rec.number, after_ctx))
+        checks.extend(
+            self._extra_contexts(node_id, rec.number, after_ctx, transport=transport)
+        )
         changed = bool(self.store.upsert_pr_live(rec))
         if rec.head_sha:
             changed |= self.store.replace_check_runs(
@@ -834,12 +885,19 @@ class HotRefresher:
         | None = None,
         unchanged_keys: list[str] | None = None,
         repo_cache: dict[str, Any] | None = None,
+        transport: GraphqlTransport | None = None,
     ) -> str | None:
         """Parses, completes, and stores one PR node; returns its key when it changed."""
-        repo_name = str(_dict(node.get("repository")).get("nameWithOwner") or "")
+        repo_dict = _dict(node.get("repository"))
+        if self.forbid_private and repo_dict.get("isPrivate") is True:
+            return None
+        repo_name = str(repo_dict.get("nameWithOwner") or "")
         if "/" not in repo_name or node.get("number") is None:
             return None
-        repo = self._resolve_node_repo(node, repo_name, requested_key, repo_cache)
+        try:
+            repo = self._resolve_node_repo(node, repo_name, requested_key, repo_cache)
+        except PendingDeleteError:
+            return None
         rec = parse_pr_live(repo.repo_id, node)
         canon_key = format_item_key(repo.owner, repo.name, rec.number)
         if isinstance(rec.node_id, str) and rec.node_id:
@@ -850,9 +908,11 @@ class HotRefresher:
             and unchanged_keys is not None
             and (rec.updated_at, rec.head_sha) == (fp[0], fp[1])
         ):
-            return self._apply_rollup_only(rec, node, fp, canon_key, unchanged_keys)
+            return self._apply_rollup_only(
+                rec, node, fp, canon_key, unchanged_keys, transport=transport
+            )
         snap = parse_hot_node(repo.repo_id, node)
-        self._complete(snap, node)
+        self._complete(snap, node, transport=transport)
         if not self._write(snap):
             return None
         return canon_key
@@ -861,14 +921,16 @@ class HotRefresher:
         self,
         targets: Sequence[tuple[str, int]],
         requested_keys: Sequence[str] | None,
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> list[str]:
         """Splits a failed batch in half and refreshes each sub-batch."""
         mid = len(targets) // 2
         left_keys = requested_keys[:mid] if requested_keys is not None else None
         right_keys = requested_keys[mid:] if requested_keys is not None else None
-        return self._refresh_batch(targets[:mid], left_keys) + self._refresh_batch(
-            targets[mid:], right_keys
-        )
+        return self._refresh_batch(
+            targets[:mid], left_keys, transport=transport
+        ) + self._refresh_batch(targets[mid:], right_keys, transport=transport)
 
     def _batch_fingerprints(
         self, requested_keys: Sequence[str] | None
@@ -891,14 +953,18 @@ class HotRefresher:
         self,
         targets: Sequence[tuple[str, int]],
         requested_keys: Sequence[str] | None = None,
+        *,
+        transport: GraphqlTransport | None = None,
     ) -> list[str]:
         """Refreshes one batch of `(node_id, number)` targets, splitting on transient errors."""
         try:
-            data = self._query(build_hot_query(targets))
+            data = self._query(build_hot_query(targets), transport=transport)
         except GhApiError as exc:
             if len(targets) <= 1 or exc.status in (401, 403):
                 raise
-            return self._split_refresh_batch(targets, requested_keys)
+            return self._split_refresh_batch(
+                targets, requested_keys, transport=transport
+            )
         fingerprints = self._batch_fingerprints(requested_keys)
         unchanged_keys: list[str] = []
         repo_cache: dict[str, Any] = {}
@@ -918,13 +984,19 @@ class HotRefresher:
                 fingerprints=fingerprints,
                 unchanged_keys=unchanged_keys,
                 repo_cache=repo_cache,
+                transport=transport,
             )
             if key:
                 changed.append(key)
         self._touch_unchanged(unchanged_keys)
         return changed
 
-    def refresh_hot(self, keys: Sequence[str]) -> list[str]:
+    def refresh_hot(
+        self,
+        keys: Sequence[str],
+        *,
+        transport: GraphqlTransport | None = None,
+    ) -> list[str]:
         """Refreshes the PRs in `keys` and returns the item keys whose stored data changed.
 
         Keys that aren't PRs (or aren't visible) are skipped. HOT is never
@@ -932,13 +1004,17 @@ class HotRefresher:
         which raises `RateLimited` (a `BudgetDeferred`) from the transport.
         """
         unique_keys = list(dict.fromkeys(keys))
-        node_ids = self.resolve_node_ids(unique_keys)
+        node_ids = self.resolve_node_ids(unique_keys, transport=transport)
         resolved_keys = [k for k in unique_keys if k in node_ids]
         targets = [(node_ids[k], parse_item_key(k)[2]) for k in resolved_keys]
         changed: list[str] = []
         for start in range(0, len(targets), self.batch_size):
             end = start + self.batch_size
             changed.extend(
-                self._refresh_batch(targets[start:end], resolved_keys[start:end])
+                self._refresh_batch(
+                    targets[start:end],
+                    resolved_keys[start:end],
+                    transport=transport,
+                )
             )
         return changed

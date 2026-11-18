@@ -8,15 +8,17 @@ monitor_prs.py [PR ...] --state FILE [options]
 
 | Flag | Default | Description |
 | :--- | :--- | :--- |
-| `PR` | required in author mode (forbidden with `--reviews`) | Pull request targets: `owner/repo#N`, `https://github.com/owner/repo/pull/N`, or `N` with `--repo` |
-| `--repo OWNER/REPO` | none | Default repository for bare pull request numbers in author mode, or optional repository filter under `--reviews` |
+| `PR` | required in author mode (forbidden with `--reviews` and `--mine`) | Pull request targets: `owner/repo#N`, `https://github.com/owner/repo/pull/N`, or `N` with `--repo` |
+| `--repo OWNER/REPO` | none | Default repository for bare pull request numbers in author mode, or optional repository filter under `--reviews` and `--mine` |
 | `--reviews` | `false` | Watch the authenticated user's open review queue across all repositories (or within `--repo`). Incompatible with positional `PR` arguments, `--stack`, and `--until all-green` |
 | `--wake-on-review` | `false` | Send `agentapi send-message` wake notifications on actionable reviewer events under `--reviews --daemon` (requires `--reviews`) |
+| `--mine` | `false` | Watch every open pull request the authenticated user authored, drafts included, as the set changes, reading only from `packrat`. Treats `--source auto` as `packrat`. Incompatible with positional `PR` arguments, `--reviews`, `--stack`, `--source github`, and any `--until` other than `none` |
+| `--wake` | `false` | Send `agentapi send-message` wake notifications on actionable events under `--mine --daemon` (requires `--mine`) |
 | `--stack` | `false` | Expand each target pull request to include its parent chain and direct child pull requests (up to 60 total) |
 | `--state FILE` | required | Path to the JSON state snapshot file (created automatically on first run) |
 | `--events LIST` | all kinds | Comma-separated subset of `EVENT_KINDS` (or `REVIEWER_EVENT_KINDS` under `--reviews`) that should wake the caller |
-| `--actionable-only` | `false` | Update `state.json`, `board.a2ui`, and the A2UI Pane board file in place on passive events (a dismissed board is not recreated); exit `0` only on actionable events |
-| `--until MODE` | `closed` (`none` with `--reviews`) | Terminal condition for exit code `3`: `merged`, `closed`, `all-green`, or `none` |
+| `--actionable-only` | `false` | Update `state.json`, `board.a2ui`, and the A2UI Pane board file in place on passive events (a dismissed board is not recreated); exit `0` only on actionable events. No effect under `--mine` |
+| `--until MODE` | `closed` (`none` with `--reviews` or `--mine`) | Terminal condition for exit code `3`: `merged`, `closed`, `all-green`, or `none` |
 | `--timeout SECONDS` | none | Exit with code `2` when no matching event occurs within this duration |
 | `--debounce SECONDS` | `20` | Fixed window after the first matching wake event to collect follow-on transitions (`0` disables) |
 | `--poll SECONDS` | `120` | Targeted GraphQL refresh interval in seconds. Refetches only flagged pull requests (notifications, `PENDING` CI, `UNKNOWN` mergeability, pending debounce, `control.jsonl` `pushed_sha`) and makes no call when none are flagged. With `--no-notifications`, every step is a full refresh |
@@ -36,7 +38,7 @@ monitor_prs.py [PR ...] --state FILE [options]
 | `--control FILE` | `<state-dir>/control.jsonl` | Path to the control commands file for daemon mode |
 | `--reminder SECONDS` | `1800` | Re-notify conversation if an active batch remains unacknowledged (`0` disables) |
 | `--notify-scope SCOPE` | `mine` | Which pull request events trigger conversation notifications: `mine` (viewer PRs + terminal) or `all` |
-| `--source MODE` | `auto` | Data source: `packrat` (read a running `packrat serve`), `github` (poll GitHub directly), or `auto` (`packrat` when its heartbeat is fresh, else `github`) |
+| `--source MODE` | `auto` | Data source: `packrat` (read a running `packrat serve`), `github` (poll GitHub directly), or `auto` (`packrat` when its heartbeat is fresh, else `github`). `--mine` treats `auto` as `packrat` and rejects `github` |
 | `--packrat-db FILE` | `~/.local/share/packrat/repos.sqlite` | `packrat` database to read in `packrat` mode |
 | `--stale-days DAYS` | `30` | Days of inactivity before unrequested `Waiting on author` or `Approved` pull requests move into the bottom **Muted & Dormant** drawer under `--reviews` (`0` disables) |
 | `--overrides-file FILE` | `~/.config/monitor/review_overrides.json` (`$XDG_CONFIG_HOME/monitor/review_overrides.json` when set) | Cross-session reviewer overrides JSON storing mutes, dormant pins, and watermarked discussion triage entries |
@@ -54,9 +56,9 @@ When multiple conditions hold on the same tick, precedence is **terminal (`3`) >
 | Exit code | `exit_reason` | JSON on `stdout` | Meaning |
 | :--- | :--- | :--- | :--- |
 | `0` | `change` (or `snapshot` with `--once`, or `stopped` with `--daemon`) | Yes | Matching wake events were collected, `--once` completed, or daemon received `{"stop": true}` |
-| `1` | none | No (diagnostics on `stderr`) | Invalid arguments, corrupt state file, startup error, or 5 consecutive GitHub failures |
+| `1` | none | No (diagnostics on `stderr`) | Invalid arguments, corrupt state file, startup error (under `--mine`, also a `packrat` service that isn't running or has never synced the `authored_open` viewer set), or 5 consecutive GitHub failures |
 | `2` | `timeout` | Yes (`events: []`) | `--timeout` elapsed with no matching wake events |
-| `3` | `terminal` | Yes | Every watched pull request satisfied `--until` (`merged`, `closed`, or `all-green`) |
+| `3` | `terminal` | Yes | Every watched pull request satisfied `--until` (`merged`, `closed`, or `all-green`). Never under `--reviews` or `--mine`, whose `--until` is `none` |
 | `4` | `already_running` | Yes (when `--output` or `--daemon`) | Another daemon process holds the liveness lock for this state directory |
 | `130` | interrupted | No (state saved) | Interrupted by `SIGINT` |
 | `143` | interrupted | No (state saved) | Terminated by `SIGTERM` |
@@ -65,7 +67,7 @@ When multiple conditions hold on the same tick, precedence is **terminal (`3`) >
 
 To keep agent context usage minimal, `a2ui` in `stdout` and `--output` carries only the file path (`dsl_file`, which assigns `$/title`, `$/subtitle`, `$/status`, `$/statusTone`, `$/statusPulse`, `$/steps`, `$/items`, and `$/ackLabel` for the `stack_board` template) and the result of the direct `a2ui-pane` store update (`store_updated` and `store_status`), rather than embedding the full A2UI Express DSL string in `stdout`.
 
-`store_status` is one of `written` (the board file `conversations/<conversationId>/monitor.jsonl` was replaced), `unchanged` (same components and `items`, so nothing was written), `dismissed` (the board file is missing and this tick may not recreate it: no actionable event, no `--once`, and not the process's first sync), or `unavailable` (no store directory, invalid ids, lock timeout, or a legacy flat store still waiting for migration). `store_updated` is `true` only for `written`. Fall back to `render_a2ui` only on `unavailable`.
+`store_status` is one of `written` (the board file `conversations/<conversationId>/monitor.jsonl` was replaced), `unchanged` (same components and `items`, so nothing was written), `dismissed` (the board file is missing and this tick may not recreate it: no actionable event, no `--once`, and not the process's first sync), or `unavailable` (no store directory, invalid ids, lock timeout, or a legacy flat store still waiting for migration). `store_updated` is `true` only for `written`. Fall back to `render_a2ui` only on `unavailable`. Under `--mine`, a tick whose title, subtitle, or source badge changed is written even when the rows did not.
 
 Example:
 
@@ -164,6 +166,28 @@ Example:
 
 `source` is `packrat` while the data comes from `packrat serve`, and `github` in direct mode or after a fallback (see `--source`).
 
+### My Open PRs Fields and Board (`--mine`)
+
+Under `--mine`, `source` is always `packrat`, and the top-level payload also emits:
+
+| Field | Type | Meaning |
+| :--- | :--- | :--- |
+| `membership` | string | `"mine"` |
+| `source_state` | string | `"live"`, `"stale"` (`packrat` is unhealthy, so the board keeps its last rows and nothing is retired), or `"catching_up"` (`packrat` recovered and the watched rows are being refetched) |
+| `stale_since` | string or `null` | ISO-8601 time the source turned stale, cleared when it is `live` again |
+| `total_open` | integer | Open pull requests in the `authored_open` set at the last discovery, before the 60-PR cap |
+| `pending` | integer | Pull requests in the set that `packrat` has no open row for yet, so they have no board row |
+| `recent_retired` | array | Rows that left the board in the last 24 hours, oldest first, as in `state.json` (see the state file layout) |
+
+`prs` holds only the rows on the board. The other modes' payloads are unchanged.
+
+The board uses the `stack_board` template with these differences:
+
+- `$/title` is `### My Open PRs (N)`, where `N` is `total_open`.
+- `$/items` are sorted by repository, then stack root, stack depth, and pull request number. An item's `id` is `PR <number>` when every row and recent removal is in one repository. Otherwise it is `<repo>#<number>` (for example `a2ui#4248`), or `<owner>/<repo>#<number>` for repositories whose short names collide.
+- `$/subtitle` starts with the counts, for example `14 open (2 draft) across 2 repos`. It adds `N pending`, and `showing <rows> of N` (usually `showing 60 of N`) when the cap leaves pull requests off the board. Then comes one note per removal state, newest first, with up to three labels and `+N more`: `merged today: a2ui#4153`, `closed today: ...`, or `removed today: ...`. It ends with `membership as of HH:MM UTC` when `packrat` last synced the set over 30 minutes ago, and then the source note `via packrat`.
+- `$/status` is `packrat stale since HH:MM UTC` (tone `warning`) while `source_state` is `stale`, and `catching up · HH:MM UTC` while it is `catching_up`. Otherwise it follows the author board.
+
 ### Reviewer Snapshot and Board Fields (`--reviews`)
 
 Each `PrSnapshot` in `prs` includes viewer-specific review and turn-detection fields used by `classify_review_turn(snap, viewer)`:
@@ -201,6 +225,10 @@ Cross-session overrides in `~/.config/monitor/review_overrides.json` use schema 
 | `stack_parent` | Watched parent PR's `state` becomes `MERGED` or `CLOSED` | `true` on `MERGED` | `rebase_onto_base` (`MERGED`), else `null` |
 | `approval_dismissed` | Previous approver disappears from `approvals` without entering `changes_requested` when `head_sha` changes | `false` | `null` |
 | `auto_merge` | `auto_merge` boolean toggles | `false` | `null` |
+| `pr_added` | Under `--mine` only: a pull request in the `authored_open` set gets its first board row (`from: null`, `to: "OPEN"`, `detail: {"draft": bool}`). The first sync of a fresh state emits none; a restart emits one for each row the saved state lacks | `false` | `null` |
+| `pr_removed` | Under `--mine` only: a row leaves the board because its pull request left the set while still open, for example when its repository was archived (`from: "OPEN"`, `to: null`). `detail.reason` is `left_set` when a fresh row confirmed it, or `left_set_unconfirmed` when `packrat` did not refetch it within 10 minutes | `false` | `null` |
+
+Under `--mine`, a `terminal` event also removes the row from the board in the same tick. `pr_added` and `pr_removed` never wake the conversation on their own.
 
 ### Event Kinds in Reviewer Mode (`REVIEWER_EVENT_KINDS`, `--reviews`)
 
@@ -229,3 +257,4 @@ The state file is written atomically (`tmp` + `os.replace`) and holds:
 - `pushed_shas`: map of `owner/repo#N` to the last commit SHA pushed by the agent.
 - `reruns`: map of `owner/repo#N` to `["<check>@<head_sha>", ...]` tokens already rerun.
 - `reported_threads`: map of `owner/repo#N` to `{thread_id: last_comment_at}` watermarks recorded after each successful `emit`. Entries for merged or closed pull requests are pruned automatically.
+- `recent_retired` (optional, written by `--mine` only when non-empty): list of `{"pr", "title", "state", "at"}` entries for rows that left the board, oldest first. `state` is `MERGED`, `CLOSED`, or `REMOVED` (the pull request left the set while open), and `at` is an ISO-8601 time. It holds at most 20 entries and drops those older than 24 hours. A state file without it loads as empty, so the schema version is unchanged.
