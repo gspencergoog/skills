@@ -16,7 +16,9 @@ It understands these plan conventions:
 
 from __future__ import annotations
 
+import os
 import re
+import shlex
 from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 
@@ -30,6 +32,10 @@ TRACK_HEADING_RE = re.compile(
 )
 HEADING_VERIFICATION_RE = re.compile(
     r"^(?:(?:track|phase)(?:\s+[\w.-]+)?\s+verification(?:\s+command)?|verification(?:\s+command)?)\s*:?\s*$",
+    re.IGNORECASE,
+)
+HEADING_WAVE_FOOTER_RE = re.compile(
+    r"^Wave\s+(?P<wave_id>[\w.-]+)\b.*?\b(?:barrier|verifier|verification)\b",
     re.IGNORECASE,
 )
 INLINE_PARALLEL_WAVE_RE = re.compile(
@@ -55,6 +61,31 @@ TRACK_VERIFICATION_RE = re.compile(
     r"^\s*[-*+]?\s*\*\*verification(?:\s+command)?\s*:?\*\*\s*:?\s*(?P<alt_cmd>.*)$",
     re.IGNORECASE,
 )
+WAVE_VERIFICATION_RE = re.compile(
+    r"\*\*wave\b[^*\n]*verification\b[^*\n]*\*\*\s*:?\s*(?P<cmd>.*)$",
+    re.IGNORECASE,
+)
+WAVE_BARRIER_RE = re.compile(
+    r"\*\*wave\b[^*\n]*(?:barrier|verifier)\b[^*\n]*\*\*|wave\s+barrier\s+command\s*:",
+    re.IGNORECASE,
+)
+COMMIT_HANDOFF_RE = re.compile(
+    r"\b(?:commit|committed|merge|merged)\b.{0,80}\b(?:before|prior|wave\s+[\w.-]+|fan-?out|worktree|share|parallel)\b"
+    r"|\b(?:before|prior\s+to)\b.{0,40}\b(?:fan-?out|spawning|wave\s+[\w.-]+)\b.{0,40}\b(?:commit|merge)\b",
+    re.IGNORECASE,
+)
+CONSUMES_RE = re.compile(
+    r"^\s*[-*+]?\s*\*\*Consumes\s*:?\*\*\s*:?\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
+PRODUCES_RE = re.compile(
+    r"^\s*[-*+]?\s*\*\*Produces\s*:?\*\*\s*:?\s*(?P<value>.*?)\s*$",
+    re.IGNORECASE,
+)
+_INLINE_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1")
+_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SHELL_OPERATORS = frozenset({"&&", "||", ";", "|"})
+_SHELL_GROUP_TOKENS = frozenset({"(", ")", "{", "}", "!"})
 LIST_FILE_ACTION_RE = re.compile(
     r"^\s*(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:\*\*)?\[(?P<action>NEW|MODIFY|DELETE|RENAME)\](?:\*\*)?\s+"
     r"(?:\[(?P<label>[^\]]+)\]\((?P<link>[^\)]+)\)|`?(?P<path>[^\s`\)]+)`?)",
@@ -106,6 +137,14 @@ class OpenQuestion:
 
 
 @dataclass(frozen=True)
+class ShellSegment:
+    """One command segment parsed from a shell verification string."""
+
+    argv: tuple[str, ...]
+    cwd: str | None = None
+
+
+@dataclass(frozen=True)
 class WaveInfo:
     wave_id: str
     title: str
@@ -113,6 +152,9 @@ class WaveInfo:
     model_tier: str | None
     line: int
     has_verifier: bool = False
+    verification: str | None = None
+    has_barrier: bool = False
+    mentions_commit_handoff: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +177,8 @@ class TrackInfo:
     file_actions: list[FileAction] = field(default_factory=list)
     verification: str | None = None
     has_verification: bool = False
+    consumes: str | None = None
+    produces: str | None = None
     line: int = 0
     heading_level: int = 4
     title: str = ""
@@ -407,6 +451,27 @@ def _heading_title(text: str) -> str:
     return _strip_mode_tag(rest) if sep else ""
 
 
+def _try_wave_footer_heading(state: _WaveState, text: str) -> bool:
+    wave_footer = HEADING_WAVE_FOOTER_RE.match(text)
+    if (
+        not wave_footer
+        or state.wave_id != wave_footer.group("wave_id")
+        or state.wave_index < 0
+    ):
+        return False
+    wave_obj = state.waves[state.wave_index]
+    lowered = text.lower()
+    state.waves[state.wave_index] = replace(
+        wave_obj,
+        has_barrier=wave_obj.has_barrier
+        or "barrier" in lowered
+        or "verifier" in lowered,
+        has_verifier=wave_obj.has_verifier or "verifier" in lowered,
+    )
+    state.track = None
+    return True
+
+
 def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> None:
     if state.wave_id is not None and level <= state.wave_level:
         state.wave_id, state.wave_level, state.track = None, 0, None
@@ -431,6 +496,9 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
 
     if state.track is not None and level <= state.track.heading_level:
         state.track = None
+
+    if _try_wave_footer_heading(state, text):
+        return
 
     wave = WAVE_HEADING_RE.match(text)
     if wave:
@@ -469,11 +537,143 @@ def _set_model_tier(state: _WaveState, tier: str) -> None:
         )
 
 
-def _set_wave_verifier(state: _WaveState) -> None:
-    if state.wave_id is not None and state.wave_index >= 0:
-        wave = state.waves[state.wave_index]
-        if not wave.has_verifier:
-            state.waves[state.wave_index] = replace(wave, has_verifier=True)
+def extract_command_text(raw: str) -> str:
+    """Extracts the first inline backtick code span when present, else stripped text."""
+    stripped = raw.strip()
+    if not stripped:
+        return ""
+    for match in _INLINE_CODE_SPAN_RE.finditer(stripped):
+        span = match.group(2).strip()
+        if span:
+            return span
+    return stripped.strip("`").strip()
+
+
+def _advance_cwd(current_cwd: str | None, target: str) -> str | None:
+    if not target or target == "-":
+        return None
+    if os.path.isabs(target) or target.startswith("~"):
+        return target
+    return (
+        os.path.normpath(os.path.join(current_cwd, target)) if current_cwd else target
+    )
+
+
+def _split_raw_tokens(command: str) -> list[list[str]]:
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    groups: list[list[str]] = []
+    current: list[str] = []
+    for token in lexer:
+        if token in _SHELL_OPERATORS:
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        if token in ("(", ")"):
+            if current:
+                groups.append(current)
+                current = []
+            groups.append([token])
+            continue
+        current.append(token)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _strip_group_prefixes(tokens: list[str]) -> list[str]:
+    idx = 0
+    while idx < len(tokens) and (
+        tokens[idx] in _SHELL_GROUP_TOKENS or _ENV_ASSIGN_RE.match(tokens[idx])
+    ):
+        idx += 1
+    while idx < len(tokens) and tokens[-1] in ("}", ")"):
+        tokens = tokens[:-1]
+    return tokens[idx:]
+
+
+def _process_shell_group(
+    group: list[str],
+    cwd: str | None,
+    cwd_stack: list[str | None],
+    segments: list[ShellSegment],
+) -> str | None:
+    if group == ["("]:
+        cwd_stack.append(cwd)
+        return cwd
+    if group == [")"]:
+        return cwd_stack.pop() if cwd_stack else cwd
+    argv = _strip_group_prefixes(group)
+    if not argv:
+        return cwd
+    if argv[0] == "cd":
+        return _advance_cwd(cwd, argv[1] if len(argv) > 1 else "")
+    segments.append(ShellSegment(argv=tuple(argv), cwd=cwd))
+    return cwd
+
+
+def split_shell_segments(command: str) -> list[ShellSegment]:
+    """Splits a shell verification command into segments while preserving quoted operators, subshells, and `cd` state."""
+    cleaned = extract_command_text(command)
+    if not cleaned:
+        return []
+    try:
+        groups = _split_raw_tokens(cleaned)
+    except ValueError:
+        return []
+
+    segments: list[ShellSegment] = []
+    cwd: str | None = None
+    cwd_stack: list[str | None] = []
+    for group in groups:
+        cwd = _process_shell_group(group, cwd, cwd_stack, segments)
+    return segments
+
+
+def _update_wave_from_line(state: _WaveState, line: str) -> bool:
+    """Updates active wave metadata and returns True when `line` begins a wave footer."""
+    if state.wave_id is None or state.wave_index < 0:
+        return False
+    wave = state.waves[state.wave_index]
+    updates: dict[str, object] = {}
+    is_wave_footer = False
+    if VERIFIER_RE.search(line) and not wave.has_verifier:
+        updates["has_verifier"] = True
+    if WAVE_BARRIER_RE.search(line):
+        is_wave_footer = True
+        if not wave.has_barrier:
+            updates["has_barrier"] = True
+    if COMMIT_HANDOFF_RE.search(line) and not wave.mentions_commit_handoff:
+        updates["mentions_commit_handoff"] = True
+    wave_ver = WAVE_VERIFICATION_RE.search(line)
+    if wave_ver:
+        is_wave_footer = True
+        cmd = extract_command_text(wave_ver.group("cmd") or "")
+        if cmd:
+            updates["verification"] = cmd
+    if updates:
+        state.waves[state.wave_index] = replace(wave, **updates)
+    return is_wave_footer
+
+
+def _update_track_from_line(track: TrackInfo, line: str) -> None:
+    consumes = CONSUMES_RE.match(line)
+    if consumes:
+        track.consumes = consumes.group("value").strip() or "(multiline)"
+        return
+    produces = PRODUCES_RE.match(line)
+    if produces:
+        track.produces = produces.group("value").strip() or "(multiline)"
+        return
+    verification = TRACK_VERIFICATION_RE.search(line)
+    if verification:
+        track.has_verification = True
+        raw_cmd = extract_command_text(
+            verification.group("cmd") or verification.group("alt_cmd") or ""
+        )
+        if raw_cmd:
+            track.verification = raw_cmd
 
 
 def _extract_file_action(
@@ -496,8 +696,8 @@ def _extract_file_action(
 
 
 def _handle_body_line(state: _WaveState, line_num: int, line: str) -> None:
-    if VERIFIER_RE.search(line):
-        _set_wave_verifier(state)
+    if _update_wave_from_line(state, line):
+        state.track = None
 
     tier = MODEL_TIER_RE.match(line)
     if tier:
@@ -513,18 +713,8 @@ def _handle_body_line(state: _WaveState, line_num: int, line: str) -> None:
             state.track.files.append(action.raw_path)
             state.track.file_actions.append(action)
 
-    if state.track is None:
-        return
-    verification = TRACK_VERIFICATION_RE.search(line)
-    if verification:
-        state.track.has_verification = True
-        raw_cmd = (
-            (verification.group("cmd") or verification.group("alt_cmd") or "")
-            .strip()
-            .strip("`")
-        )
-        if raw_cmd:
-            state.track.verification = raw_cmd
+    if state.track is not None:
+        _update_track_from_line(state.track, line)
 
 
 def _parse_waves(lines: list[str]) -> _WaveState:

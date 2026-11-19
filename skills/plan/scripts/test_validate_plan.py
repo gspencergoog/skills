@@ -98,6 +98,7 @@ None currently blocking.
 
 ### Wave 1: Foundation [Sequential]
 - **Model tier**: Claude Fable 5.1 High
+Commit Wave 1 changes before spawning Wave 2 share workers.
 - [ ] [MODIFY] [lib/types.py](file:///lib/types.py)
   - Add shared protocol types.
 
@@ -107,6 +108,8 @@ None currently blocking.
 
 #### Track 2A: Parser Module
 - **Model tier**: Gemini Pro Next
+- **Consumes**: `Wave 1: shared protocol types`
+- **Produces**: `parse_input()`
 - [ ] [MODIFY] [lib/parser.py](file:///lib/parser.py)
   - Update parser implementation.
 - [ ] [NEW] [tests/test_parser.py](file:///tests/test_parser.py)
@@ -116,12 +119,17 @@ None currently blocking.
 
 #### Track 2B: Lexer Module
 - **Model tier**: Gemini Pro Next
+- **Consumes**: `Wave 1: shared protocol types`
+- **Produces**: `tokenize()`
 - [ ] [MODIFY] [lib/lexer.py](file:///lib/lexer.py)
   - Update lexer implementation.
 - [ ] [NEW] [tests/test_lexer.py](file:///tests/test_lexer.py)
   - Add lexer unit tests.
 
 **Track 2B Verification**: `pytest tests/test_lexer.py`
+
+**Wave 2 Verifier & Barrier Gate**:
+- Merge Track 2A and Track 2B before Wave 3 starts.
 
 ### Wave 3: Integration [Sequential]
 - **Model tier**: Claude Fable 5.1 High
@@ -982,6 +990,285 @@ None.
             validator.content = LIGHTWEIGHT_PLAN
             validator.validate()
             self.assertEqual(mock_parse.call_count, 2)
+
+    def test_track_verification_scope_unscoped_vs_scoped(self) -> None:
+        unscoped_cases = [
+            "ruff check .",
+            "uvx ruff check .",
+            "uv run pytest",
+            "pytest -q",
+            "cargo clippy",
+            "eslint .",
+            "(ruff check .)",
+            "(cd sub && pytest) && ruff check .",
+            "cd /tmp/worktree && ruff check .",
+            "npx --package eslint eslint .",
+        ]
+        for cmd in unscoped_cases:
+            plan = VALID_PARALLEL_WAVE_PLAN.replace(
+                "**Track 2A Verification**: `pytest tests/test_parser.py`",
+                f"**Track 2A Verification**: `{cmd}`",
+            )
+            issues = PlanValidator(plan, strict=False).validate()
+            self.assertEqual(
+                len(
+                    [
+                        i
+                        for i in issues
+                        if not i.is_error and "unscoped" in i.message.lower()
+                    ]
+                ),
+                1,
+                f"Expected unscoped warning for {cmd!r}, got {issues}",
+            )
+            strict_errors = [
+                i for i in PlanValidator(plan, strict=True).validate() if i.is_error
+            ]
+            self.assertEqual(
+                len(strict_errors), 1, f"Expected strict error for {cmd!r}"
+            )
+
+        scoped_cases = [
+            "ruff check --config ruff.toml lib/parser.py",
+            "uvx ruff check lib/parser.py",
+            "pytest -k test_parse",
+            "cargo clippy -p parser",
+            "uv run --directory python/pkg_a pytest",
+            "uv run --package pkg_a pytest",
+            "pnpm --filter @scope/pkg_a eslint .",
+            "env -C python/pkg_a pytest",
+            "yarn --cwd web eslint .",
+            "cd python/pkg_a && pytest",
+            "(cd python/pkg_a && ruff check .)",
+        ]
+        for cmd in scoped_cases:
+            plan = VALID_PARALLEL_WAVE_PLAN.replace(
+                "**Track 2A Verification**: `pytest tests/test_parser.py`",
+                f"**Track 2A Verification**: `{cmd}`",
+            )
+            issues = PlanValidator(plan, strict=True).validate()
+            self.assertEqual(
+                issues, [], f"Unexpected issue for scoped {cmd!r}: {issues}"
+            )
+
+    def test_check_tools_opt_in_and_missing_binary_or_script(self) -> None:
+        (self.workspace / "scripts").mkdir(parents=True)
+        (self.workspace / "scripts/existing.py").write_text("# ok", encoding="utf-8")
+        (self.workspace / "sub").mkdir(parents=True)
+        (self.workspace / "sub/local.py").write_text("# ok", encoding="utf-8")
+        (self.workspace / "lib").mkdir(parents=True)
+        (self.workspace / "tests").mkdir(parents=True)
+        (self.workspace / "lib/types.py").write_text("# ok", encoding="utf-8")
+        (self.workspace / "lib/parser.py").write_text("# ok", encoding="utf-8")
+        (self.workspace / "lib/lexer.py").write_text("# ok", encoding="utf-8")
+        fake_bin = self.workspace / "bin/fake_uvx"
+        fake_bin.parent.mkdir(parents=True)
+        fake_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        ws_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "file:///lib/", f"file://{self.workspace}/lib/"
+        ).replace("file:///tests/", f"file://{self.workspace}/tests/")
+
+        plan_missing_bin = ws_plan.replace(
+            "**Track 2A Verification**: `pytest tests/test_parser.py`",
+            "**Track 2A Verification**: `no_such_runner_xyz tests/test_parser.py`",
+        )
+        # Opt-in: disabled by default
+        self.assertEqual(
+            PlanValidator(
+                plan_missing_bin, workspace_dir=self.workspace, strict=True
+            ).validate(),
+            [],
+        )
+        with mock.patch(
+            "validate_plan.shutil.which",
+            side_effect=lambda b: "/usr/bin/" + b if b == "pytest" else None,
+        ):
+            issues = PlanValidator(
+                plan_missing_bin,
+                workspace_dir=self.workspace,
+                strict=False,
+                check_tools=True,
+            ).validate()
+            self.assertEqual(len(issues), 1)
+            self.assertFalse(issues[0].is_error)
+            self.assertIn("no_such_runner_xyz", issues[0].message)
+
+        # Complex valid command: tilde path, env wrapper, python3 -m, planned [NEW] script,
+        # cd subdir, uncreated worktree cd fallback, quoted '|' in jq, and prose wrapper.
+        plan_complex = (
+            ws_plan.replace(
+                f"- [ ] [MODIFY] [lib/types.py](file://{self.workspace}/lib/types.py)",
+                f"- [ ] [MODIFY] [lib/types.py](file://{self.workspace}/lib/types.py)\n- [ ] [NEW] [scripts/planned_new.py](file://{self.workspace}/scripts/planned_new.py)",
+                1,
+            )
+            .replace(
+                "**Wave 1 Verification**: `pytest tests/test_types.py`",
+                "**Wave 1 Verification**: Run `(cd sub && env FOO=1 python3 local.py) && uv run --directory sub python3 local.py && command -v python3 && python3 \"$f\" && python3 -m unittest && python3 -c 'print(1)'` to verify.",
+            )
+            .replace(
+                "**Track 2A Verification**: `pytest tests/test_parser.py`",
+                "**Track 2A Verification**: `cd /nonexistent/worktree_2a && python3 scripts/existing.py | jq -e '(.a | length) == 0'` (plus Dart MCP `run_tests`)",
+            )
+            .replace(
+                "**Track 2B Verification**: `pytest tests/test_lexer.py`",
+                "**Track 2B Verification**: `~/fake_uvx ruff check lib/lexer.py && out=$(python3 scripts/planned_new.py)`",
+            )
+        )
+        with (
+            mock.patch(
+                "validate_plan.shutil.which",
+                side_effect=lambda b: (
+                    f"/usr/bin/{b}"
+                    if b in {"python3", "env", "jq", "pytest", "uv"}
+                    else None
+                ),
+            ),
+            mock.patch(
+                "validate_plan.os.path.expanduser",
+                side_effect=lambda p: str(fake_bin) if p == "~/fake_uvx" else p,
+            ),
+        ):
+            issues = PlanValidator(
+                plan_complex,
+                workspace_dir=self.workspace,
+                strict=True,
+                check_tools=True,
+            ).validate()
+            self.assertEqual(issues, [])
+
+        # Missing script flagged under --check-tools
+        plan_missing_script = ws_plan.replace(
+            "**Track 2A Verification**: `pytest tests/test_parser.py`",
+            "**Track 2A Verification**: `python3 scripts/missing_script.py`",
+        )
+        with mock.patch(
+            "validate_plan.shutil.which",
+            side_effect=lambda b: (
+                f"/usr/bin/{b}" if b in {"python3", "pytest"} else None
+            ),
+        ):
+            issues = PlanValidator(
+                plan_missing_script,
+                workspace_dir=self.workspace,
+                strict=True,
+                check_tools=True,
+            ).validate()
+            self.assertEqual(len(issues), 1)
+            self.assertIn("missing_script.py", issues[0].message)
+
+    def test_parallel_handoff_gates_barrier_and_share_commit(self) -> None:
+        no_barrier = VALID_PARALLEL_WAVE_PLAN.replace(
+            "**Wave 2 Verifier & Barrier Gate**:\n- Merge Track 2A and Track 2B before Wave 3 starts.",
+            "",
+        )
+        issues = PlanValidator(no_barrier, strict=False).validate()
+        self.assertEqual(len(issues), 1)
+        self.assertIn("barrier", issues[0].message.lower())
+
+        no_commit_handoff = VALID_PARALLEL_WAVE_PLAN.replace(
+            "Commit Wave 1 changes before spawning Wave 2 share workers.", ""
+        )
+        issues = PlanValidator(no_commit_handoff, strict=False).validate()
+        self.assertEqual(len(issues), 1)
+        self.assertIn("share", issues[0].message.lower())
+
+        # Non-share dedicated worktrees should not require share commit warning
+        worktree_strategy = no_commit_handoff.replace(
+            '`workspace: "share"`', "dedicated linked git worktrees"
+        )
+        self.assertEqual(PlanValidator(worktree_strategy, strict=True).validate(), [])
+
+        # HTML comment mentioning workspace: "share" should not trigger share commit warning
+        comment_only_share = worktree_strategy.replace(
+            "dedicated linked git worktrees",
+            'dedicated linked git worktrees\n<!-- Note: `workspace: "share"` isolates only the primary repo. -->',
+        )
+        self.assertEqual(PlanValidator(comment_only_share, strict=True).validate(), [])
+
+    def test_track_interfaces_multi_wave_vs_single_wave(self) -> None:
+        missing_iface = VALID_PARALLEL_WAVE_PLAN.replace(
+            "- **Consumes**: `Wave 1: shared protocol types`\n- **Produces**: `parse_input()`\n",
+            "",
+        )
+        issues = PlanValidator(missing_iface, strict=False).validate()
+        self.assertEqual(len(issues), 1)
+        self.assertIn("Consumes", issues[0].message)
+        self.assertEqual(len(PlanValidator(missing_iface, strict=True).validate()), 1)
+
+        # Single-wave parallel plan is exempt from Consumes/Produces warning
+        single_wave = """# Single Wave Parallel Plan
+
+## At a glance
+
+- **Goal:** Refactor two independent modules in parallel.
+- **Shape:** 1 wave with 2 parallel tracks.
+- **Decisions needed from you:** none.
+- **Biggest risk:** None.
+- **Not doing:** Cross-module changes.
+
+## Execution Strategy & Parallelization
+
+| Setting | Value |
+| :--- | :--- |
+| Orchestration | `/swarm` with 2 author workers |
+
+## Open Questions
+
+None currently blocking.
+
+## Phased Implementation Plan
+
+### Wave 1: Parallel Refactor [Parallel]
+
+#### Track 1A: Alpha
+- **Model tier**: parallel author pool
+- [ ] [MODIFY] [a.py](file:///a.py)
+**Track 1A Verification**: `pytest tests/test_a.py`
+
+#### Track 1B: Beta
+- **Model tier**: parallel author pool
+- [ ] [MODIFY] [b.py](file:///b.py)
+**Track 1B Verification**: `pytest tests/test_b.py`
+
+## Verification Plan
+- Run `pytest`
+"""
+        self.assertEqual(PlanValidator(single_wave, strict=True).validate(), [])
+
+    def test_cli_check_tools_flag(self) -> None:
+        plan_file = self.workspace / "plan.md"
+        plan_file.write_text(
+            VALID_PARALLEL_WAVE_PLAN.replace(
+                "**Track 2A Verification**: `pytest tests/test_parser.py`",
+                "**Track 2A Verification**: `definitely_missing_bin_123 tests/test_parser.py`",
+            ),
+            encoding="utf-8",
+        )
+        (self.workspace / "lib").mkdir(parents=True)
+        for rel in ("lib/types.py", "lib/parser.py", "lib/lexer.py"):
+            (self.workspace / rel).write_text("# ok", encoding="utf-8")
+        out = io.StringIO()
+        err = io.StringIO()
+        with (
+            mock.patch(
+                "validate_plan.shutil.which",
+                side_effect=lambda b: "/usr/bin/pytest" if b == "pytest" else None,
+            ),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            rc = main(
+                [
+                    str(plan_file),
+                    "--workspace",
+                    str(self.workspace),
+                    "--check-tools",
+                    "--strict",
+                ]
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("definitely_missing_bin_123", out.getvalue())
 
 
 if __name__ == "__main__":

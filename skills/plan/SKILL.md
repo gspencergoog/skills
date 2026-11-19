@@ -66,7 +66,7 @@ Ground every step of the plan in real repository facts while keeping token usage
    - Raw branch or PR diffs `<= 500` lines: `duckdb` with `diff_macros.sql` (`read_diff_lines`, `read_diff_hunks`).
    - Branch or PR diffs `> 500` lines (AST churn and signature drift): `stage_diffs.py` and `staged_diff_macros.sql` ([context-indexer](../context-indexer/SKILL.md)).
    - Worktree symbol graphs and blast radius: `sem impact <file>` ([sem-semantic-info](../sem-semantic-info/SKILL.md)) and language MCP tools (`find_definition`, `analyze_files`).
-3. Inspect package manifests (`package.json`, `pubspec.yaml`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to find exact build commands, test runners, and linters.
+3. Inspect package manifests (`package.json`, `pubspec.yaml`, `pyproject.toml`, `Cargo.toml`, `go.mod`) to find exact build commands, test runners, and linters, then run the batched read-only pre-flight check in [codebase_discovery.md](references/codebase_discovery.md#read-only-pre-flight-command--history-check) (`git status --short`, `command -v` for planned binaries, `<script> --help` for repo-local scripts, and `git log -n 5 --oneline -- <target_files>` when `packrat` is not `"ready"`).
 4. Identify shared chokepoint files such as barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`), central registries, `CHANGELOG.md`, and high-contention paths from `v_file_hotspots` when `packrat` is `"ready"`. Isolate those chokepoints into sequential waves.
 
 ### 3. Select Plan Depth
@@ -102,17 +102,23 @@ Draft the plan according to the chosen template and write it using `write_file` 
 - Include a Mermaid architecture or wave-DAG diagram following [mermaid-diagrams](../mermaid-diagrams/SKILL.md) for multi-component or multi-wave workflows.
 - Enforce function maintainability budgets ($\le 15$ per [cognitive-complexity](../cognitive-complexity/SKILL.md)).
 - Give every wave and parallel track a `- **Model tier**:` line naming the model that should execute it (top-tier for design-heavy or risky work, a lighter tier for rote edits).
-- End every sequential wave and parallel track with a runnable test command (`**Track 2A Verification**:` or `**Wave 1 Verification**:`) and a wave-barrier gate.
+- In multi-wave plans, give every parallel track (`#### Track NA`) `- **Consumes**:` and `- **Produces**:` interface contract lines naming what it reads from earlier waves and exposes to later waves (use `None` for standalone or leaf tracks).
+- End every sequential wave and parallel track with a runnable verification command (`**Wave 1 Verification**:` or `**Track 2A Verification**:`) and a wave-barrier gate. Parallel track verification commands must be **file-scoped** to the track's owned files (never directory-wide linters such as `ruff check .` or `eslint .`, or bare `pytest`, which can fail on unrelated files outside track ownership).
+- When parallel tracks use `/swarm` with `workspace: "share"`, follow four handoff rules:
+  1. Commit (or merge to the base branch) Wave 1 before spawning Wave 2 `workspace: "share"` workers, and state that commit handoff in Wave 1.
+  2. Include an explicit merge-back step in the `[Parallel]` wave barrier before the next sequential wave starts.
+  3. Remember that `workspace: "share"` isolates only the primary workspace repository; use dedicated git worktrees or a sequential wave for tracks touching a second repo.
+  4. In repositories with untracked local environments (`node_modules`, `.venv`), note the worktree bootstrap step (`yarn install`, `uv sync`) or shared environment path in track verification setup.
 
 ### 5. Automated Plan Validation
 
 Run [validate_plan.py](scripts/validate_plan.py) to check structure, code fence balance, file path integrity, and parallel wave disjointness:
 
 ```bash
-python3 <skill-dir>/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace> [--workspace <extra-repo>]
+python3 <skill-dir>/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace> [--workspace <extra-repo>] [--check-tools]
 ```
 
-Pass `--workspace` multiple times for multi-repo plans (the first workspace is primary; extra workspaces resolve paths in secondary repositories).
+Pass `--workspace` multiple times for multi-repo plans (the first workspace is primary; extra workspaces resolve paths in secondary repositories). Pass `--check-tools` (opt-in) to verify that external binaries and repo-local scripts cited in verification commands exist in `PATH` or the target workspace.
 
 The validator checks:
 
@@ -120,10 +126,11 @@ The validator checks:
 - Task list items do not contain inline heading hashes (`- [ ] #### ...`).
 - Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace (or is created by an earlier wave), and `[NEW]` files do not collide with existing files.
 - Parallel tracks within the same `[Parallel]` wave edit strictly disjoint file sets (emitting `ERROR` on any intra-wave file collision).
-- Every parallel track (`#### Track NA`) includes its own verification command (`WARNING` by default, `ERROR` with `--strict`).
+- Every parallel track (`#### Track NA`) includes its own file-scoped verification command (`WARNING` by default, `ERROR` with `--strict`); directory-wide linters (`ruff check .`, `eslint .`) and bare `pytest` on parallel tracks emit a warning.
 - No unresolved placeholders (`TODO`, `TBD`, `implement rest here`) remain.
 - The brief layer is complete (errors by default): At a glance comes first with its fields and word budget, brief sentences average at most 20 words, every `Q<n>` has 2 or more options and exactly one `(Recommended)`, plans with 2 or more waves have a PR or commit table, and every parallel track has a model tier. Lightweight plans need only Goal, Decisions needed from you, and Not doing.
-- Consistency, prose, and workspace boundary checks (`WARNING` by default, `ERROR` with `--strict`): `Decisions needed from you` in `## At a glance` matches `## Open Questions`, no em-dashes appear outside code fences, no `(default)` option prefixes appear in `## Open Questions`, and parallel tracks do not edit files outside the primary workspace.
+- Consistency, prose, handoff, contract, and workspace boundary checks (`WARNING` by default, `ERROR` with `--strict`): `Decisions needed from you` in `## At a glance` matches `## Open Questions`, no em-dashes appear outside code fences, no `(default)` option prefixes appear in `## Open Questions`, parallel tracks do not edit files outside the primary workspace, `[Parallel]` waves followed by another wave include a wave-barrier gate, sequential waves preceding a `workspace: "share"` parallel wave include a commit handoff note, and parallel tracks in multi-wave plans include `- **Consumes**:` or `- **Produces**:` contracts.
+- Optional tool availability check (`--check-tools`, `WARNING` by default, `ERROR` with `--strict`): verifies that external binaries and repo-local scripts invoked in planned verification commands exist in `PATH` or the workspace.
 
 Resolve all reported validation errors before proceeding. A passing run ends with a `NEXT:` line (`next_step` in `--json`) that points to Step 6.
 
@@ -156,7 +163,8 @@ To prevent confirmation bias from the drafting steps, run this review whenever `
 ### 8. After Proceed: Progress & Landing
 
 1. Execute the approved waves using the orchestrator specified in the plan's `Execution Strategy` table:
-   - When `/swarm` is specified for a parallel wave, initialize the swarm via `swarm(action="add")` with `workspace: "share"` (or `"branch"`). Assign workers to their planned model tiers (for example, `model: "auto"` for author tracks).
+   - When `/swarm` is specified for a parallel wave, commit (or merge to the base branch) Wave 1 before spawning `workspace: "share"` (or `"branch"`) workers via `swarm(action="add")`. Assign workers to their planned model tiers (for example, `model: "auto"` for author tracks).
+   - At the parallel wave barrier, run the barrier gate and merge parallel track branches back into the base branch before starting Wave 3 (or the next sequential wave).
    - Do not downgrade parallel waves to sequential execution or ad-hoc `invoke_subagent` calls due to quota concerns. Swarm manages quota by distributing models across buckets and supports model failover at runtime via `swarm(action="model")`.
 2. Drive a `progress_board` pane with one item per wave and track using `python3 <skill-dir>/scripts/plan_surfaces.py progress <plan.md>` for the initial render, then pass `--running`, `--done`, `--failed`, and `--delta` for data-only updates at each wave barrier (see [post_plan_ui.md](references/post_plan_ui.md#24-wave-progress-template-progress_board)). Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
 3. After the last wave, render the landing `confirm_gate` (code review, commit, PR) using [post_plan_ui.md](references/post_plan_ui.md), or its fallback question when `render_a2ui` is unavailable.

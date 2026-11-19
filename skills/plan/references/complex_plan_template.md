@@ -83,6 +83,7 @@ None currently blocking.
 ### Execution Strategy & Parallel Verification Matrix
 
 Pick concrete model IDs for each tier from your environment's model list.
+<!-- Note: `workspace: "share"` isolates only the primary repository; use dedicated git worktrees or a sequential wave for tracks modifying a secondary repository, and list any untracked environment bootstrap (`yarn install`, `uv sync`) in track verification setup. -->
 
 | Wave / Track        | Execution Mode    | Orchestrator / Role                         | Model Tier              | Workspace Isolation                | Owned Files / Scope                            | Verification Gate                          |
 | :------------------ | :---------------- | :------------------------------------------ | :---------------------- | :--------------------------------- | :--------------------------------------------- | :----------------------------------------- |
@@ -112,6 +113,7 @@ Introduce non-breaking abstractions, backward-compatibility shims, and shared in
   - Route base contract through adapter
 
 **Wave 1 Verification**: `[Commands to run compatibility and regression suites]`
+**Wave 1 Handoff**: Commit Wave 1 changes before spawning Wave 2 `workspace: "share"` workers.
 
 ---
 
@@ -125,13 +127,15 @@ Implement the new subsystems and migrate independent packages or modules concurr
 - **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/subsystem_a.ext`, `tests/test_subsystem_a.ext`
 - **Must Not Touch**: `path/to/subsystem_b.ext`, `path/to/exports.ext`, `CHANGELOG.md`
+- **Consumes**: Wave 1 adapter and shared contract (`path/to/shim.ext`)
+- **Produces**: Package A v2 subsystem in `path/to/subsystem_a.ext` (or `None` if standalone)
 
 - [ ] [NEW] [subsystem_a.ext](file:///absolute/path/to/subsystem_a.ext)
   - Implement Subsystem A logic against Wave 1 contract
 - [ ] [MODIFY] [test_subsystem_a.ext](file:///absolute/path/to/tests/test_subsystem_a.ext)
   - Add unit and regression tests for Subsystem A
 
-**Track 2A Verification**: `[Scoped test & static analysis command for Track 2A]`
+**Track 2A Verification**: `[File-scoped test & static analysis command for Track 2A (include worktree env bootstrap such as yarn install or uv sync if needed)]`
 
 #### Track 2B: [Package B / Subsystem B]
 
@@ -139,18 +143,21 @@ Implement the new subsystems and migrate independent packages or modules concurr
 - **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/subsystem_b.ext`, `tests/test_subsystem_b.ext`
 - **Must Not Touch**: `path/to/subsystem_a.ext`, `path/to/exports.ext`, `CHANGELOG.md`
+- **Consumes**: Wave 1 adapter and shared contract (`path/to/shim.ext`)
+- **Produces**: Package B v2 consumers in `path/to/subsystem_b.ext` (or `None` if standalone)
 
 - [ ] [MODIFY] [subsystem_b.ext](file:///absolute/path/to/subsystem_b.ext)
   - Switch Package B consumers to Wave 1 contract
 - [ ] [MODIFY] [test_subsystem_b.ext](file:///absolute/path/to/tests/test_subsystem_b.ext)
   - Update Package B test suite
 
-**Track 2B Verification**: `[Scoped test & static analysis command for Track 2B]`
+**Track 2B Verification**: `[File-scoped test & static analysis command for Track 2B (include worktree env bootstrap if needed)]`
 
 **Wave 2 Verifier & Barrier Gate**:
 
-- Peer `verifier` confirms zero out-of-scope file edits, runs Track 2A and Track 2B test suites, and checks cognitive complexity ($\le 15$).
-- Wave barrier command: `[Cross-package integration test command before Wave 3 begins]`
+- Peer `verifier` confirms zero out-of-scope file edits, runs file-scoped Track 2A and Track 2B test suites, and checks cognitive complexity ($\le 15$).
+- Merge Track 2A and Track 2B branches back into the base branch before Wave 3 starts.
+- Wave barrier command: `[Cross-package integration test command after merge-back, before Wave 3 begins]`
 
 ---
 

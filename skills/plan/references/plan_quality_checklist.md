@@ -33,21 +33,26 @@ ______________________________________________________________________
 
 - [ ] The plan reuses existing utilities, models, or patterns in the codebase instead of inventing duplicate logic.
 - [ ] Key function signatures, data models, or interface definitions are explicitly drafted in the plan.
+- [ ] Parallel tracks in multi-wave plans declare `- **Consumes**:` and `- **Produces**:` interface contracts (or `None` when standalone) so sibling tracks and downstream waves agree on boundaries.
+- [ ] When renaming symbols, changing signatures, or introducing lazy imports, callers and mock targets (`mock.patch`, `patch(`, `vi.mock`, `jest.mock`) are audited and assigned to the owning track.
 - [ ] Functions and modules adhere to cognitive complexity limits (cognitive complexity $\le 15$, per the `cognitive-complexity` skill).
 
 ## 5. Phasing, Parallelism & Verifiability
 
 - [ ] Independent work units are grouped into parallel tracks (`#### Track NA`) inside `[Parallel]` waves, separated from sequential foundation and integration waves (Sandwich Wave topology).
-- [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions) and stay within the primary workspace (or use explicit per-repo worktree isolation, since `validate_plan.py` warns on out-of-workspace parallel edits).
+- [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions) and stay within the primary workspace (or use explicit per-repo worktree isolation or a sequential wave for secondary repositories, since `workspace: "share"` isolates only the primary repository and `validate_plan.py` warns on out-of-workspace parallel edits).
 - [ ] Every wave and parallel track specifies `- **Model tier**:` matching its complexity, picking concrete model tiers from your environment's model list rather than relying on stale hardcoded model names.
 - [ ] Shared chokepoint files (barrel exports such as `index.ts`, `lib/*.dart`, `__init__.py`, central registries, and `CHANGELOG.md`) are isolated in sequential foundation or integration waves.
 - [ ] Multi-track plans specify the orchestration mode (`/swarm` with `1` verifier per `2-4` authors or `/run-workflow` `parallel()`) and workspace mode (`share`, `branch`, `worktree`, or `inherit`).
+- [ ] When parallel tracks use `workspace: "share"`, the preceding sequential wave includes an explicit commit-before-fanout handoff note, and the `[Parallel]` wave barrier merges parallel track branches back into the base branch before the next sequential wave starts.
+- [ ] In repositories with untracked local environments (`node_modules`, `.venv`), parallel track verification setup notes the worktree bootstrap step (`yarn install`, `uv sync`) or shared environment path.
 - [ ] Every sequential wave and every parallel track includes an explicit, targeted verification command (`**Track NA Verification**:` or `**Wave N Verification**:`) plus a wave-barrier gate before the next wave begins.
 - [ ] Each file entry describes concrete changes, methods touched, and error handling added.
 
 ## 6. Verification & Safety
 
-- [ ] Test commands match the project's actual test runner and configuration (`pytest`, `cargo test`, `flutter test`, `npm test`).
+- [ ] Test commands match the project's actual test runner and configuration (`pytest`, `cargo test`, `flutter test`, `npm test`), and external binaries or repo-local scripts are verified via `command -v` (or `validate_plan.py --check-tools`) with invoked flags checked via `<script> --help`.
+- [ ] Parallel track verification commands are file-scoped to each track's owned files rather than directory-wide linters (`ruff check .`, `eslint .`) or bare `pytest`.
 - [ ] Specific edge cases, error conditions, and boundary values are listed for testing.
 - [ ] Clear criteria and steps are provided for landing changes (`## Landing`) and rolling back if issues occur.
 

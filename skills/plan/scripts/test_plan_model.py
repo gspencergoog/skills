@@ -5,10 +5,13 @@ import unittest
 
 from plan_model import (
     FULL_GLANCE_FIELDS,
+    ShellSegment,
+    extract_command_text,
     find_section,
     parse_plan,
     section_text,
     sentence_stats,
+    split_shell_segments,
 )
 
 FULL_PLAN = """# Improve the widget
@@ -311,6 +314,145 @@ class EdgeCaseTest(unittest.TestCase):
         self.assertEqual(doc.tracks[1].files, ["/b.py"])
         self.assertFalse(doc.tracks[0].has_verification)
         self.assertFalse(doc.tracks[1].has_verification)
+
+    def test_wave_verification_barrier_commit_handoff_and_track_interfaces(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 1: Base [Sequential]\n\n"
+            "Commit Wave 1 before spawning Wave 2 share workers.\n\n"
+            "- [ ] [NEW] [base.py](file:///base.py)\n\n"
+            "**Wave 1 Verification**: Run `pytest tests/test_base.py` to check.\n\n"
+            "### Wave 2: Core [Parallel]\n\n"
+            "#### Track 2A: Reader\n"
+            "- **Model tier**: parallel author pool\n"
+            "- **Consumes**: `Wave 1: BaseModel`\n"
+            "- **Produces**: `parse_reader(text: str) -> BaseModel`\n"
+            "- [ ] [NEW] [reader.py](file:///reader.py)\n"
+            "**Track 2A Verification**: `pytest tests/test_reader.py`\n\n"
+            "**Wave 2 Verifier & Barrier Gate**:\n"
+            "- Merge Track 2A back before Wave 3.\n"
+        )
+        self.assertEqual(doc.waves[0].verification, "pytest tests/test_base.py")
+        self.assertTrue(doc.waves[0].mentions_commit_handoff)
+        self.assertFalse(doc.waves[0].has_barrier)
+        self.assertTrue(doc.waves[1].has_barrier)
+        self.assertTrue(doc.waves[1].has_verifier)
+        self.assertEqual(doc.tracks[0].consumes, "`Wave 1: BaseModel`")
+        self.assertEqual(
+            doc.tracks[0].produces, "`parse_reader(text: str) -> BaseModel`"
+        )
+
+    def test_wave_footer_heading_and_body_clear_active_track_and_multiline_interfaces(
+        self,
+    ):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 2: Core [Parallel]\n\n"
+            "#### Track 2A: Reader\n"
+            "- **Model tier**: parallel author pool\n"
+            "- **Consumes**:\n"
+            "  - `Wave 1: BaseModel`\n"
+            "- **Produces**:\n"
+            "  - `parse_reader()`\n"
+            "- [ ] [NEW] [reader.py](file:///reader.py)\n"
+            "**Track 2A Verification**: `pytest tests/test_reader.py`\n\n"
+            "#### Wave 2 Verifier & Barrier Gate\n"
+            "- **Verification**: `ruff check .`\n\n"
+            "### Wave 3: Followup [Parallel]\n\n"
+            "#### Track 3A: Writer\n"
+            "- **Model tier**: parallel author pool\n"
+            "- [ ] [NEW] [writer.py](file:///writer.py)\n"
+            "**Track 3A Verification**: `pytest tests/test_writer.py`\n\n"
+            "**Wave 3 Verification**: `pytest`\n"
+            "- **Verification**: `ruff check .`\n"
+        )
+        self.assertEqual([w.wave_id for w in doc.waves], ["2", "3"])
+        self.assertTrue(doc.waves[0].has_barrier)
+        self.assertTrue(doc.waves[0].has_verifier)
+        self.assertEqual(doc.tracks[0].consumes, "(multiline)")
+        self.assertEqual(doc.tracks[0].produces, "(multiline)")
+        # Wave footer heading and body cleared state.track so trailing Verification
+        # bullets did not overwrite Track 2A or Track 3A verification.
+        self.assertEqual(doc.tracks[0].verification, "pytest tests/test_reader.py")
+        self.assertEqual(doc.tracks[1].verification, "pytest tests/test_writer.py")
+        self.assertEqual(doc.waves[1].verification, "pytest")
+
+
+class ShellSegmentTest(unittest.TestCase):
+    def test_extract_command_text_prefers_first_backtick_span_and_double_backticks(
+        self,
+    ):
+        self.assertEqual(
+            extract_command_text("Run `pytest tests/a.py` to verify."),
+            "pytest tests/a.py",
+        )
+        self.assertEqual(
+            extract_command_text("`pytest a.py` (plus Dart MCP `run_tests`)"),
+            "pytest a.py",
+        )
+        self.assertEqual(
+            extract_command_text("``python3 -c 'print(\"`x`\")'`` and prose"),
+            "python3 -c 'print(\"`x`\")'",
+        )
+        self.assertEqual(extract_command_text("pytest tests/a.py"), "pytest tests/a.py")
+
+    def test_split_shell_segments_subshells_braces_negation_and_command_subst(self):
+        self.assertEqual(
+            split_shell_segments("(cd sub && python3 local.py) && pytest tests/a.py"),
+            [
+                ShellSegment(argv=("python3", "local.py"), cwd="sub"),
+                ShellSegment(argv=("pytest", "tests/a.py"), cwd=None),
+            ],
+        )
+        self.assertEqual(
+            split_shell_segments("out=$(python3 scripts/lint.py)"),
+            [ShellSegment(argv=("python3", "scripts/lint.py"), cwd=None)],
+        )
+        self.assertEqual(
+            split_shell_segments("! rg TODO src/ && { pytest tests/a.py; }"),
+            [
+                ShellSegment(argv=("rg", "TODO", "src/"), cwd=None),
+                ShellSegment(argv=("pytest", "tests/a.py"), cwd=None),
+            ],
+        )
+
+    def test_split_shell_segments_preserves_cd_and_quoted_pipe(self):
+        cmd = (
+            "cd /tmp/worktree && env FOO=1 BAR=2 python3 scripts/run.py --flag "
+            "| jq -e '(.items | length) == 0'"
+        )
+        segments = split_shell_segments(cmd)
+        self.assertEqual(
+            segments,
+            [
+                ShellSegment(
+                    argv=(
+                        "env",
+                        "FOO=1",
+                        "BAR=2",
+                        "python3",
+                        "scripts/run.py",
+                        "--flag",
+                    ),
+                    cwd="/tmp/worktree",
+                ),
+                ShellSegment(
+                    argv=("jq", "-e", "(.items | length) == 0"),
+                    cwd="/tmp/worktree",
+                ),
+            ],
+        )
+
+    def test_split_shell_segments_strips_env_prefix_and_handles_nested_cd(self):
+        cmd = "cd sub && cd nested && A2UI_PANE_PYTHON=~/venv/bin/python3 python3 -m unittest"
+        segments = split_shell_segments(cmd)
+        self.assertEqual(
+            segments,
+            [ShellSegment(argv=("python3", "-m", "unittest"), cwd="sub/nested")],
+        )
+
+    def test_split_shell_segments_malformed_quotes_returns_empty(self):
+        self.assertEqual(split_shell_segments("pytest 'unclosed"), [])
 
 
 class SentenceStatsTest(unittest.TestCase):

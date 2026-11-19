@@ -91,7 +91,7 @@ None currently blocking.
 | Setting        | Value                                                                                                                          |
 | :------------- | :----------------------------------------------------------------------------------------------------------------------------- |
 | Orchestration  | [`/swarm` (named author + verifier workers) \| `/run-workflow` (`parallel()` script)]                                          |
-| Workspaces     | [`share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree` \| `inherit` (read-only verifier)] |
+| Workspaces     | [`share` (per-author primary-repo copy) \| `branch` (isolated clone) \| dedicated `git worktree` (for secondary repos) \| `inherit` (read-only verifier)] |
 | Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks]                                                                         |
 | Chokepoints    | [Barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`) or registries isolated in Wave 1 or Wave 3]                          |
 | Model tiers    | [Pick concrete model IDs from your environment's model list: top-tier model for architecture and coordination; parallel author pool for disjoint tracks] |
@@ -109,6 +109,7 @@ Define shared data structures and interfaces that parallel tracks build against.
   - Implement input validation helpers
 
 **Wave 1 Verification**: `[Command to verify Wave 1, e.g. npm run typecheck or pytest tests/unit/test_types.py]`
+**Wave 1 Handoff**: Commit Wave 1 changes before spawning Wave 2 `workspace: "share"` workers.
 
 ---
 
@@ -122,6 +123,8 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 - **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/service_a.ext`, `tests/test_service_a.ext`
 - **Must Not Touch**: `path/to/handler_b.ext`, `path/to/index.ext`
+- **Consumes**: `TypeName` and validation helpers from Wave 1 (`path/to/types.ext`)
+- **Produces**: `process_request()` in `path/to/service_a.ext` (or `None` if standalone)
 
 - [ ] [MODIFY] [service_a.ext](file:///absolute/path/to/service_a.ext)
   - Implement `process_request()` using `[reused_helper]`
@@ -129,7 +132,7 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 - [ ] [NEW] [test_service_a.ext](file:///absolute/path/to/tests/test_service_a.ext)
   - Add unit tests for `process_request()`
 
-**Track 2A Verification**: `[Scoped test & lint command for Track 2A, e.g. pytest tests/test_service_a.ext]`
+**Track 2A Verification**: `[File-scoped test & lint command for Track 2A, e.g. pytest tests/test_service_a.ext (include worktree env bootstrap such as uv sync or yarn install if needed)]`
 
 #### Track 2B: [Subsystem / Component B]
 
@@ -137,18 +140,21 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 - **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/handler_b.ext`, `tests/test_handler_b.ext`
 - **Must Not Touch**: `path/to/service_a.ext`, `path/to/index.ext`
+- **Consumes**: `TypeName` from Wave 1 (`path/to/types.ext`)
+- **Produces**: Request dispatcher in `path/to/handler_b.ext` (or `None` if standalone)
 
 - [ ] [NEW] [handler_b.ext](file:///absolute/path/to/handler_b.ext)
   - Implement request dispatching for Component B
 - [ ] [NEW] [test_handler_b.ext](file:///absolute/path/to/tests/test_handler_b.ext)
   - Add unit tests for handler dispatching
 
-**Track 2B Verification**: `[Scoped test & lint command for Track 2B, e.g. pytest tests/test_handler_b.ext]`
+**Track 2B Verification**: `[File-scoped test & lint command for Track 2B, e.g. pytest tests/test_handler_b.ext (include worktree env bootstrap if needed)]`
 
 **Wave 2 Verifier & Barrier Gate**:
 
-- Peer `verifier` checks that Track 2A and Track 2B stayed within their owned file boundaries and passed track-local tests.
-- Wave barrier command: `[Combined test & static analysis command before Wave 3 starts]`
+- Peer `verifier` checks that Track 2A and Track 2B stayed within their owned file boundaries and passed file-scoped track tests.
+- Merge Track 2A and Track 2B branches back into the base branch before Wave 3 starts.
+- Wave barrier command: `[Combined test & static analysis command after merge-back, before Wave 3 starts]`
 
 ---
 
