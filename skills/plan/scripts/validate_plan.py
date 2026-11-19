@@ -20,6 +20,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 from plan_model import (
     FULL_GLANCE_FIELDS,
     LIGHTWEIGHT_GLANCE_FIELDS,
@@ -27,7 +31,9 @@ from plan_model import (
     TrackInfo,
     WaveInfo,
     find_section,
+    is_closing_fence,
     iter_non_fenced_lines,
+    parse_opening_fence,
     parse_plan,
     section_text,
     sentence_stats,
@@ -36,9 +42,20 @@ from plan_model import (
 
 BRIEF_MAX_AVG_SENTENCE_WORDS = 20
 GLANCE_MAX_WORDS = 180
+PROPORTION_MIN_LINES = 250
+PROPORTION_MAX_CODE_RATIO = 0.35
 NEXT_STEP_MESSAGE = (
     "NEXT: present the brief, then run plan_surfaces.py questions <plan> "
     "and render the post-plan worksheet (review checkbox in the footer)."
+)
+NEXT_STEP_LIGHTWEIGHT_ZERO_Q = (
+    "NEXT: 0 open questions on a lightweight plan; in interactive mode skip "
+    "the worksheet and review (unless review was requested) and present the "
+    "brief with Proceed (in --auto, run Step 7 per Core Rule 6)."
+)
+NEXT_STEP_STANDARD_ZERO_Q = (
+    "NEXT: 0 open questions; skip the empty worksheet, run Step 7 independent "
+    "review if not yet reviewed, then present the reviewed brief and plan_overview."
 )
 
 _ENV_ASSIGN_TOKEN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
@@ -622,20 +639,55 @@ def _uses_share_workspace(exec_text: str) -> bool:
     return bool(_SHARE_WORKSPACE_RE.search(cleaned))
 
 
+def _count_non_mermaid_fence_lines(lines: Sequence[str]) -> tuple[int, bool]:
+    """Returns `(non_mermaid_body_lines, has_unclosed_fence)` under CommonMark fence rules."""
+    body_lines = 0
+    in_fence = False
+    fence_char = ""
+    open_len = 0
+    is_mermaid = False
+
+    for line in lines:
+        if not in_fence:
+            opened = parse_opening_fence(line)
+            if opened is not None:
+                fence_char, open_len, is_mermaid = opened
+                in_fence = True
+        elif is_closing_fence(line, fence_char, open_len):
+            in_fence = False
+        elif not is_mermaid:
+            body_lines += 1
+
+    return body_lines, in_fence
+
+
+def _next_step_message(doc: PlanDocument) -> str:
+    """Returns the context-aware NEXT instruction for a validated plan."""
+    if doc.questions:
+        return NEXT_STEP_MESSAGE
+    if doc.is_lightweight:
+        return NEXT_STEP_LIGHTWEIGHT_ZERO_Q
+    return NEXT_STEP_STANDARD_ZERO_Q
+
+
 @dataclass
 class ValidationIssue:
     is_error: bool
     message: str
     line_num: int | None = None
     file_path: str | None = None
+    advisory: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "severity": "ERROR" if self.is_error else "WARNING",
             "message": self.message,
             "line_num": self.line_num,
             "file_path": self.file_path,
         }
+        if self.advisory:
+            payload["advisory"] = True
+        return payload
 
     def __str__(self) -> str:
         level = "ERROR" if self.is_error else "WARNING"
@@ -646,6 +698,8 @@ class ValidationIssue:
 class PlanValidator:
     BRIEF_MAX_AVG_SENTENCE_WORDS = BRIEF_MAX_AVG_SENTENCE_WORDS
     GLANCE_MAX_WORDS = GLANCE_MAX_WORDS
+    PROPORTION_MIN_LINES = PROPORTION_MIN_LINES
+    PROPORTION_MAX_CODE_RATIO = PROPORTION_MAX_CODE_RATIO
 
     BRIEF_SECTION_PATTERNS = (
         r"^at a glance\b",
@@ -729,6 +783,7 @@ class PlanValidator:
         self._check_questions()
         self._check_pr_table()
         self._check_code_blocks()
+        self._check_code_fence_ratio()
         self._check_task_list_headings()
         self._check_placeholders()
         self._check_prose_rules()
@@ -949,17 +1004,14 @@ class PlanValidator:
         block_start_line = 0
 
         for i, line in enumerate(self.lines, start=1):
-            stripped = line.strip()
-            if stripped.startswith(("```", "~~~")):
-                current_char = stripped[0]
-                current_len = len(stripped) - len(stripped.lstrip(current_char))
-                if not in_code_block:
+            if not in_code_block:
+                opened = parse_opening_fence(line)
+                if opened is not None:
+                    fence_char, fence_len, _ = opened
                     in_code_block = True
-                    fence_char = current_char
-                    fence_len = current_len
                     block_start_line = i
-                elif current_char == fence_char and current_len >= fence_len:
-                    in_code_block = False
+            elif is_closing_fence(line, fence_char, fence_len):
+                in_code_block = False
 
         if in_code_block:
             self.issues.append(
@@ -967,6 +1019,30 @@ class PlanValidator:
                     is_error=True,
                     message=f"Unclosed code fence starting at line {block_start_line}",
                     line_num=block_start_line,
+                )
+            )
+
+    def _check_code_fence_ratio(self) -> None:
+        """Advises when non-Mermaid fenced code body lines exceed 35% of a >250-line plan."""
+        total_lines = len(self.lines)
+        if total_lines <= self.PROPORTION_MIN_LINES:
+            return
+        code_lines, has_unclosed = _count_non_mermaid_fence_lines(self.lines)
+        if has_unclosed:
+            return
+        ratio = code_lines / total_lines
+        if ratio > self.PROPORTION_MAX_CODE_RATIO:
+            pct = ratio * 100
+            max_pct = int(self.PROPORTION_MAX_CODE_RATIO * 100)
+            self.issues.append(
+                ValidationIssue(
+                    is_error=False,
+                    advisory=True,
+                    message=(
+                        f"Non-Mermaid fenced code blocks account for {code_lines}/{total_lines} "
+                        f"lines ({pct:.1f}%, advisory threshold {max_pct}%); prefer function "
+                        "signatures, contracts, and test assertions instead of full function bodies."
+                    ),
                 )
             )
 
@@ -1705,22 +1781,33 @@ def _read_plan_content(plan_file: str | None) -> str | None:
     return sys.stdin.read()
 
 
+def _has_fatal_failure(
+    errors: Sequence[ValidationIssue],
+    warnings: Sequence[ValidationIssue],
+    strict: bool,
+) -> bool:
+    """Returns whether validation fails after excluding advisory warnings from strict mode."""
+    strict_warnings = [w for w in warnings if not w.advisory]
+    return bool(errors) or (strict and bool(strict_warnings))
+
+
 def _print_human_results(
     issues: list[ValidationIssue],
     errors: list[ValidationIssue],
     warnings: list[ValidationIssue],
     strict: bool,
     quiet: bool,
+    next_step: str = NEXT_STEP_MESSAGE,
 ) -> None:
     """Formats and prints human-readable validation results."""
     if issues and not quiet:
         for issue in issues:
             print(str(issue))
 
-    if not errors and not (strict and warnings):
+    if not _has_fatal_failure(errors, warnings, strict):
         if not quiet:
             print(f"✓ Plan passed validation ({len(warnings)} warning(s)).")
-            print(NEXT_STEP_MESSAGE)
+            print(next_step)
     else:
         print(
             f"✗ Plan validation failed: {len(errors)} error(s), {len(warnings)} warning(s).",
@@ -1768,6 +1855,7 @@ def _print_json_results(
     is_valid: bool,
     quiet: bool = False,
     file_action_count: int = 0,
+    next_step: str = NEXT_STEP_MESSAGE,
 ) -> None:
     """Formats and prints JSON validation results."""
     output_payload: dict[str, Any] = {
@@ -1778,7 +1866,7 @@ def _print_json_results(
         "file_action_count": file_action_count,
     }
     if is_valid and not quiet:
-        output_payload["next_step"] = NEXT_STEP_MESSAGE
+        output_payload["next_step"] = next_step
     print(json.dumps(output_payload, indent=2))
 
 
@@ -1804,7 +1892,8 @@ def main(argv: list[str] | None = None) -> int:
 
     errors = [issue for issue in issues if issue.is_error]
     warnings = [issue for issue in issues if not issue.is_error]
-    has_fatal_failure = bool(errors) or (args.strict and bool(warnings))
+    has_fatal_failure = _has_fatal_failure(errors, warnings, args.strict)
+    next_step = _next_step_message(validator.doc)
 
     if args.json:
         _print_json_results(
@@ -1814,9 +1903,12 @@ def main(argv: list[str] | None = None) -> int:
             not has_fatal_failure,
             args.quiet,
             validator.doc.file_action_count,
+            next_step,
         )
     else:
-        _print_human_results(issues, errors, warnings, args.strict, args.quiet)
+        _print_human_results(
+            issues, errors, warnings, args.strict, args.quiet, next_step
+        )
 
     return 1 if has_fatal_failure else 0
 

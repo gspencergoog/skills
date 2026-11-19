@@ -35,7 +35,14 @@ Always pass `conversationId` from the session metadata or `$ANTIGRAVITY_CONVERSA
 
 ### 2.1 Post-Plan Worksheet (`dsl` only, no `template`)
 
-Generate the Express worksheet from the validated plan:
+On 0-question plans, skip the post-plan worksheet (matching `SKILL.md` Step 6):
+
+- Lightweight 0-question plans skip both the worksheet and Step 7 independent review (unless the user explicitly asked for a review) and present directly with the **Proceed** button.
+- Standard and complex 0-question plans skip the empty worksheet and run Step 7 independent review immediately before presenting, fold clear blocker or major fixes in (or render `triage_matrix` if 3 or more findings remain), render `plan_overview` for multi-wave plans, and present the reviewed brief with **Proceed** in a single pause.
+
+`plan_surfaces.py questions` still supports 0-question plans (rendering only the notes field and footer review checkbox) if invoked explicitly.
+
+When a plan has 1 or more open questions, generate the Express worksheet from the validated plan:
 
 ```bash
 python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md>
@@ -47,7 +54,7 @@ The script emits a standalone Express surface (`surface("plan-decisions", sendDa
 2. Each `### Q<n>` in `## Open Questions` becomes a block with a `Q<n>` badge header and `ChoiceCards($/qN/options, $/qN/choice)`. Each option card carries `value`, `label` (`"<letter> · <text>"`), `description` (the option's consequence), and `badge: "Recommended"` with `tone: "success"` on the recommended option, followed by a quiet `{value: "defer", label: "Defer", quiet: true}` toggle. Each block preselects the recommended letter.
 3. The shared footer has one notes field (`$/notes`), a review checkbox (`CheckBox("Run an independent review of this plan (recommended)", $/review)` with `$/review = true`), and one primary button sending `Event("submit_plan_decisions", {review: $/review, q1: $/q1/choice, ..., notes: $/notes})`.
 
-Render the worksheet by passing the script's stdout as `dsl` (do **not** set `template`). Use `mode: "inline"` for 0 to 2 open questions (including zero-question plans that show only the notes field and footer review checkbox), and switch to `mode: "pane"` for 3 or more open questions:
+Render the worksheet by passing the script's stdout as `dsl` (do **not** set `template`). Use `mode: "inline"` for 1 to 2 open questions, and switch to `mode: "pane"` for 3 or more open questions:
 
 ```json
 {
@@ -82,7 +89,7 @@ python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md> --no-re
 
 ### 2.2 Review Findings Triage (`template: "triage_matrix"`)
 
-When the review checkbox is checked (or the fallback answer is Yes) and the reviewer reports 3 or more findings, save the fenced `json` array (`[{id, severity, title, summary, evidence}]`) to `<scratch>/findings.json`. Run:
+When an independent review runs (on 0-question standard or complex plans, or when the review checkbox is checked or the fallback answer is Yes) and the reviewer reports 3 or more findings, save the fenced `json` array (`[{id, severity, title, summary, evidence}]`) to `<scratch>/findings.json`. Run:
 
 ```bash
 python3 <skill-dir>/scripts/plan_surfaces.py triage <scratch>/findings.json
@@ -251,11 +258,11 @@ When `render_a2ui` is unavailable, fall back in the three-tier order:
 2. Tier 2 (Host question tool, such as `ask_question` or `AskUserQuestion`): Pass `--format ask-question` to `plan_surfaces.py questions` or `plan_surfaces.py triage` for a JSON question list with `(Recommended)` first.
 3. Tier 3 (Chat turn boundary): Pass `--format markdown` to `plan_surfaces.py questions` or `plan_surfaces.py triage` for a numbered Markdown prompt, output it in chat, and end your turn.
 
-Fallbacks happen at the same point in the workflow as the surface they replace. The plan artifact stays the source of truth in every tier.
+Fallbacks happen at the same point in the workflow as the surface they replace. The zero-question fast path from Step 6 applies across all three tiers: on 0-question plans, skip the post-plan worksheet or question prompt (lightweight 0-question plans present directly with **Proceed**; standard and complex 0-question plans run Step 7 independent review immediately before presenting). `plan_surfaces.py questions` still supports 0-question plans across all `--format` modes if invoked explicitly. The plan artifact stays the source of truth in every tier.
 
 | Surface             | Tier 2: host question tool                                                                                                                                                                                   | Tier 3: chat                                                                                                                      |
 | :------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------- |
-| Post-plan worksheet | One `ask_question` call: the review item first, then one question per `Q<n>`, with the recommended option first and labeled `(Recommended)`. Split into several calls if the tool limits the question count. | A numbered list (review item first, then each `Q<n>` with lettered options and the recommendation marked). End the turn and wait. |
+| Post-plan worksheet (1 or more open questions) | One `ask_question` call: the review item first, then one question per `Q<n>`, with the recommended option first and labeled `(Recommended)`. Split into several calls if the tool limits the question count. | A numbered list (review item first, then each `Q<n>` with lettered options and the recommendation marked). End the turn and wait. |
 | Review triage       | One multi-select question per severity group ("Apply these findings?"), with the blocker and major findings preselected.                                                                                     | A short table of findings with a proposed disposition for each. Ask for overrides and end the turn.                               |
 | Plan overview       | Not needed. The At a glance section and wave diagram in the artifact already serve as the overview.                                                                                                          | Same: no extra chat output.                                                                                                       |
 | Wave progress       | Not applicable.                                                                                                                                                                                              | One short status line in chat at each wave barrier, plus ticked checkboxes in the plan artifact.                                  |

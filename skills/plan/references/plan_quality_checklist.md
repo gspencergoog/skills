@@ -33,6 +33,8 @@ ______________________________________________________________________
 
 - [ ] The plan reuses existing utilities, models, or patterns in the codebase instead of inventing duplicate logic.
 - [ ] Key function signatures, data models, or interface definitions are explicitly drafted in the plan.
+- [ ] The plan follows the Proportion Rule: it keeps exact function signatures, schema keys, and test assertions rather than full function bodies, and non-Mermaid fenced code body lines stay at or below 35% on plans over 250 lines.
+- [ ] For bug fixes and refactors, `## Design` answers in one sentence whether this is the right architectural layer rather than patching a symptom downstream.
 - [ ] Parallel tracks in multi-wave plans declare `- **Consumes**:` and `- **Produces**:` interface contracts (or `None` when standalone) so sibling tracks and downstream waves agree on boundaries.
 - [ ] When renaming symbols, changing signatures, or introducing lazy imports, callers and mock targets (`mock.patch`, `patch(`, `vi.mock`, `jest.mock`) are audited and assigned to the owning track.
 - [ ] Functions and modules adhere to cognitive complexity limits (cognitive complexity $\le 15$, per the `cognitive-complexity` skill).
@@ -41,6 +43,7 @@ ______________________________________________________________________
 
 - [ ] Independent work units are grouped into parallel tracks (`#### Track NA`) inside `[Parallel]` waves, separated from sequential foundation and integration waves (Sandwich Wave topology).
 - [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions) and stay within the primary workspace (or use explicit per-repo worktree isolation or a sequential wave for secondary repositories, since `workspace: "share"` isolates only the primary repository and `validate_plan.py` warns on out-of-workspace parallel edits).
+- [ ] `### PRs` (or `### Commits`) follows PR-splitting discipline: it separates schema, proto, or config precursors and mechanical refactors from behavioral changes, keeps production code and unit tests in the same PR, and splits only independently reviewable green units.
 - [ ] Every wave and parallel track specifies `- **Model tier**:` matching its complexity, picking concrete model tiers from your environment's model list rather than relying on stale hardcoded model names.
 - [ ] Shared chokepoint files (barrel exports such as `index.ts`, `lib/*.dart`, `__init__.py`, central registries, and `CHANGELOG.md`) are isolated in sequential foundation or integration waves.
 - [ ] Multi-track plans specify the orchestration mode (`/swarm` with `1` verifier per `2-4` authors or `/run-workflow` `parallel()`) and workspace mode (`share`, `branch`, `worktree`, or `inherit`).
@@ -54,6 +57,7 @@ ______________________________________________________________________
 - [ ] Test commands match the project's actual test runner and configuration (`pytest`, `cargo test`, `flutter test`, `npm test`), and external binaries or repo-local scripts are verified via `command -v` (or `validate_plan.py --check-tools`) with invoked flags checked via `<script> --help`.
 - [ ] Parallel track verification commands are file-scoped to each track's owned files rather than directory-wide linters (`ruff check .`, `eslint .`) or bare `pytest`.
 - [ ] Specific edge cases, error conditions, and boundary values are listed for testing.
+- [ ] `### Edge Cases` applies the Review Focus rule: it lists 3 to 5 implied failure modes the prompt did not state explicitly and assigns each one to a specific wave or track test.
 - [ ] Clear criteria and steps are provided for landing changes (`## Landing`) and rolling back if issues occur.
 
 ## 7. Prose & Communication Standards (Two-Layer Audit)
@@ -99,16 +103,20 @@ Do not modify, create, or delete any file in the workspace. Do not spawn subagen
 ### 6. Reference Artifacts
 <Links to prior discussion artifacts, brainstorming docs, RFCs, or staged md_chunk_NN.md files>
 
+### 7. Claimed Commands & Paths
+<Compact list of files touched ([NEW], [MODIFY], [DELETE]) and commands or flags invoked so the reviewer can batch-verify them in 1 to 2 calls>
+
 ---
 
 ## Instructions for Reviewer
 
 Review the plan against <skill-dir>/references/plan_quality_checklist.md:
 1. Audit Intent & Alignment: Verify the plan satisfies the briefing packet, honors constraints and non-goals, and aligns with recorded Decisions without re-litigating them.
-2. Audit Grounding & File Integrity: Verify that all files marked [MODIFY] or [DELETE] exist on disk in the target workspace.
+2. Audit Grounding & File Integrity: Batch-verify Claimed Commands & Paths against the target workspace (verify that all files marked [MODIFY] or [DELETE] exist on disk and invoked binaries or flags work).
 3. Audit Parallelism, Model Tiers & File Disjointness: Verify that parallel tracks within the same wave own strictly disjoint files, specify a model tier, isolate shared chokepoint files into sequential waves, and define per-track verification commands.
 4. Audit Brief & Technical Feasibility: Check the two-layer prose rules, verify test commands against repo scripts, evaluate edge cases and failure modes, and verify wave/phase dependency ordering.
 5. Address Focus Areas: Explicitly investigate each focus question or risk raised by the planner.
+6. Ground Blocker and Major Findings: Every `"blocker"` and `"major"` finding must cite a direct tool verification (`file:line`, `<cmd> --help` output, or `sem impact` caller list) in its `evidence` field rather than unverified assumptions.
 
 Format your review report with:
 - Summary verdict (Approved / Revisions Required)
@@ -126,7 +134,7 @@ Format your review report with:
     "severity": "blocker",
     "title": "Short finding title",
     "summary": "One or two sentences explaining the defect and its consequence.",
-    "evidence": "Section or file path and line numbers"
+    "evidence": "Direct tool verification: file:line, <cmd> --help output, or sem impact caller list"
   }
 ]
 ```

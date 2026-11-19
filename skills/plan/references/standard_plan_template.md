@@ -78,6 +78,8 @@ None currently blocking.
 
 ## Design
 
+[For fixes or refactors, state in one sentence why this is the right architectural layer rather than patching a symptom downstream.]
+
 [Explain the proposed approach, data model changes, component interactions, and interface definitions.]
 
 ### Key Interfaces & Signatures
@@ -182,9 +184,11 @@ Wire parallel tracks into shared chokepoint files, entry points, and documentati
 
 ### Edge Cases
 
-1. [Edge case 1, e.g. empty input, null values, or timeout handling]
-2. [Edge case 2, e.g. concurrent access or duplicate IDs]
-3. [Edge case 3, e.g. error propagation when downstream service is unavailable]
+<!-- Review Focus: list 3 to 5 implied failure modes the prompt did not state explicitly, and assign each one to a specific wave or track test. -->
+
+1. [Implied failure mode 1, e.g. empty input, null values, or timeout handling (verified in Track 2A unit test)]
+2. [Implied failure mode 2, e.g. concurrent access or duplicate IDs (verified in Track 2B unit test)]
+3. [Implied failure mode 3, e.g. error propagation when downstream service is unavailable (verified in Wave 3 integration test)]
 
 ### Manual Verification
 

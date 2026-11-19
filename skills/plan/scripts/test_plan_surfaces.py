@@ -134,7 +134,7 @@ flowchart TD
 | ---: | :--- | :--- | :--- |
 | 1 | `a2ui-project/a2ui` | `feat(core): gate pre-1.0 envelope fields` | 1, 2 |
 | 2 | `a2ui-project/a2ui` | `feat(v1.0)!: prefix component envelope` | 3, 4 |
-| 3 | `google3` | `Roll //third_party/a2ui` | 5 |
+| 3 | `downstream` | `Roll vendor/a2ui` | 5 |
 | 4 | `a2ui-project/a2ui` | `refactor(v1.0)!: drop legacy bare fallback` | 6 |
 
 ## Open Questions
@@ -203,7 +203,7 @@ None currently blocking.
 **Wave 4 Verifier & Barrier Gate**:
 - Peer `verifier` checks all agent outputs.
 
-### Wave 5: Google3 Roll & Local Sync [Sequential]
+### Wave 5: Downstream Roll & Local Sync [Sequential]
 
 - **Model tier**: Gemini Pro Next
 - [ ] [MODIFY] [BUILD](file:///repo/BUILD)
@@ -697,7 +697,7 @@ class OverviewSurfaceTest(unittest.TestCase):
             '        W4T2["4C · Dart a2ui_agent & a2ui_cli"]',
             '        W4T3["4D · Conformance, Blueprints & Docs"]',
             "    end",
-            '    W5["Wave 5 · Google3 Roll & Local Sync (PR 3)"]',
+            '    W5["Wave 5 · Downstream Roll & Local Sync (PR 3)"]',
             '    W6["Wave 6 · Drop Legacy v1.0 Bare Fallback (PR 4)"]',
             "    W1 --> W2",
             "    W2 --> W3",

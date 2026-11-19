@@ -216,23 +216,44 @@ class PlanDocument:
         return tuple(t for t in self.tracks if t.wave_id not in seq_waves)
 
 
+def parse_opening_fence(line: str) -> tuple[str, int, bool] | None:
+    """Parses a CommonMark opening fence into `(fence_char, fence_len, is_mermaid)`."""
+    stripped = line.lstrip()
+    if not stripped.startswith(("```", "~~~")):
+        return None
+    fence_char = stripped[0]
+    rest = stripped.lstrip(fence_char)
+    if fence_char == "`" and "`" in rest:
+        return None
+    fence_len = len(stripped) - len(rest)
+    info = rest.strip()
+    first_token = info.split(None, 1)[0].lower() if info else ""
+    return fence_char, fence_len, first_token == "mermaid"
+
+
+def is_closing_fence(line: str, fence_char: str, open_len: int) -> bool:
+    """Returns whether `line` closes an active CommonMark fence."""
+    stripped = line.lstrip()
+    if not stripped.startswith(fence_char * open_len):
+        return False
+    return stripped.lstrip(fence_char).strip() == ""
+
+
 def iter_non_fenced_lines(lines: list[str]) -> Iterator[tuple[int, str]]:
     """Yields (1-based line number, line) for lines outside fenced code blocks."""
     in_block = False
     fence_char = ""
     fence_len = 0
     for i, line in enumerate(lines, start=1):
-        stripped = line.strip()
-        if stripped.startswith(("```", "~~~")):
-            char = stripped[0]
-            length = len(stripped) - len(stripped.lstrip(char))
-            if not in_block:
-                in_block, fence_char, fence_len = True, char, length
-            elif char == fence_char and length >= fence_len:
-                in_block = False
-            continue
         if not in_block:
+            opened = parse_opening_fence(line)
+            if opened is not None:
+                fence_char, fence_len, _ = opened
+                in_block = True
+                continue
             yield i, line
+        elif is_closing_fence(line, fence_char, fence_len):
+            in_block = False
 
 
 def _parse_sections(lines: list[str]) -> tuple[str, tuple[Section, ...]]:

@@ -9,11 +9,13 @@ ______________________________________________________________________
 > [!IMPORTANT]
 > **Slice Before Reading (`>= 350` lines)**: Never call `read_file` (`view_file`) on a whole file of 350 or more lines. Index its section spans (`duckdb` or `stage_markdown.py` for Markdown) or symbol lines (`rg -n` or `sem` for code) first, then read only `StartLine`..`EndLine`.
 
+Keep discovery proportional to task size: batch independent read-only calls in parallel and aim for a soft target of 8 to 12 read-only calls for a standard plan before drafting. Skip prior-session DuckDB queries when a design doc or spec is already active in the current conversation, or when the task is a lightweight 1 to 2 file edit.
+
 Choose the lightest discovery tool that fits the target format and size:
 
 | Target Artifact & Size | Tool to Use | Why It Saves Tokens & Time |
 | :--- | :--- | :--- |
-| Prior conversation decisions, related sessions, or past `*plan*.md` artifacts | [duckdb](../../duckdb/SKILL.md) (`duckdb -batch -dark-mode` over `conversation_summaries.db` + `read_md_sections('<conversation-artifact-dir>/../*/*plan*.md')`) | Recovers settled architectural rulings, non-goals, and file inventories in one 200 ms SQL query instead of re-auditing the repository. |
+| Prior conversation decisions, related sessions, or past `*plan*.md` artifacts (when no design doc is active and task spans more than 2 files) | [duckdb](../../duckdb/SKILL.md) two-step scoped query (Recipe E): pick at most 3 to 5 conversation IDs from `conversation_summaries.db`, then pass only those paths to `read_md_sections([...])` | Recovers settled architectural rulings, non-goals, and file inventories without globbing all of `brain/` or loading unrelated sessions. |
 | Historical GitHub issues, PRs, review threads, file hotspots, and `upstream/main` symbols or docs | [packrat_probe.py](../scripts/packrat_probe.py) preflight, then [packrat](../../packrat/SKILL.md) (`packrat search` and `packrat sql` over `v_file_hotspots`, `v_code_symbols`, `v_doc_sections`) | Probes sync status in under 50 ms and queries indexed history, churn hotspots, and review themes offline without GitHub API pagination. |
 | Fast point lookups and source files `< 350` lines (`< 15 KB`) | `rg -n` and `fd` ([unix-cli-best-practices](../../unix-cli-best-practices/SKILL.md)), then `read_file` with `StartLine`..`EndLine` | Finds exact symbol definitions and call sites in under 5 ms without loading whole modules. |
 | Markdown specs, blueprints, or audits `>= 350` lines or `10+` files | `duckdb` with [markdown_macros.sql](../../duckdb/scripts/markdown_macros.sql) (`read_md_sections`, `read_md_code_blocks`) | Extracts ATX heading hierarchies, breadcrumbs, and `line_start..subtree_line_end` spans in 70 to 300 ms with zero disk staging. |
@@ -103,6 +105,38 @@ WHERE repo = 'octo-org/widgets' AND symbol_name ILIKE '%Focus%';
 "
 ```
 
+#### E. Query Scoped Prior-Session Plans
+
+Skip this recipe when a design doc or spec is already active in the current conversation, or when the task is a lightweight 1 to 2 file edit. Otherwise, run a two-step DuckDB query so you inspect only 3 to 5 relevant prior sessions instead of globbing all of `brain/`:
+
+```bash
+# Step 1: Pick at most 3 to 5 relevant top-level conversation IDs for the current workspace
+duckdb -batch -dark-mode -c "
+ATTACH '$(ls -t "$HOME"/.gemini/*/conversation_summaries.db | head -n 1)' AS db (TYPE SQLITE, READ_ONLY);
+SELECT
+  conversation_id,
+  title,
+  strftime(last_modified_time, '%Y-%m-%d %H:%M') AS modified
+FROM db.conversation_summaries
+WHERE workspace_uris ILIKE '%<workspace-name>%'
+  AND coalesce(parent_conversation_id, '') = ''
+  AND coalesce(nesting_depth, 0) = 0
+ORDER BY last_modified_time DESC
+LIMIT 5;
+"
+
+# Step 2: Pass only those specific plan artifact directories into read_md_sections(...)
+duckdb -batch -dark-mode \
+  -init <skills-dir>/duckdb/scripts/markdown_macros.sql -c "
+SELECT file_path, section_id, level, heading, line_start, subtree_line_end
+FROM read_md_sections([
+  '<brain-dir>/<conversation-id-1>/*plan*.md',
+  '<brain-dir>/<conversation-id-2>/*plan*.md'
+])
+WHERE level <= 2;
+"
+```
+
 ______________________________________________________________________
 
 ## 2. Project Ecosystem & Tooling Detection
@@ -118,6 +152,9 @@ Inspect root manifest files to identify the language runtime, dependency manager
 | `go.mod` | Go | `go test ./...` | `golangci-lint`, `go vet` |
 | `pom.xml`, `build.gradle`, `build.gradle.kts` | Java / Kotlin | `mvn test`, `./gradlew test` | `checkstyle`, `ktlint`, `detekt` |
 | `CMakeLists.txt`, `Makefile` | C / C++ | `ctest`, `make test` | `clang-tidy`, `cppcheck` |
+| `BUILD`, `BUILD.bazel`, `WORKSPACE`, `MODULE.bazel` | Bazel | `bazel test //...` | `bazel build //...`, `bazel query 'rdeps(//..., <target>)'` |
+
+In large monorepos configured with dedicated code search tools, use the workspace-configured code search tool in place of raw `rg` or `fd`.
 
 ### Checking Manifests
 

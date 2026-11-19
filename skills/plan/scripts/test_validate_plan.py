@@ -4,13 +4,27 @@
 import io
 import json
 import shutil
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
-from validate_plan import NEXT_STEP_MESSAGE, PlanValidator, main
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from validate_plan import (
+    NEXT_STEP_LIGHTWEIGHT_ZERO_Q,
+    NEXT_STEP_MESSAGE,
+    NEXT_STEP_STANDARD_ZERO_Q,
+    PROPORTION_MAX_CODE_RATIO,
+    PROPORTION_MIN_LINES,
+    PlanValidator,
+    _count_non_mermaid_fence_lines,
+    main,
+)
 
 VALID_PLAN = """# Feature: Add Cache Invalidation
 
@@ -569,18 +583,43 @@ None.
         self.assertEqual(issues, [])
 
     def test_cli_human_output_next_line_and_quiet(self) -> None:
-        plan_file = self.workspace / "plan.md"
-        plan_file.write_text(VALID_PLAN, encoding="utf-8")
+        lightweight_file = self.workspace / "lightweight.md"
+        lightweight_file.write_text(VALID_PLAN, encoding="utf-8")
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            exit_code = main([str(plan_file)])
+            exit_code = main([str(lightweight_file)])
         self.assertEqual(exit_code, 0)
-        self.assertIn(NEXT_STEP_MESSAGE, buf.getvalue())
+        self.assertIn(NEXT_STEP_LIGHTWEIGHT_ZERO_Q, buf.getvalue())
+
+        standard_file = self.workspace / "standard.md"
+        standard_file.write_text(VALID_PARALLEL_WAVE_PLAN, encoding="utf-8")
+        std_buf = io.StringIO()
+        with redirect_stdout(std_buf):
+            std_code = main([str(standard_file)])
+        self.assertEqual(std_code, 0)
+        self.assertIn(NEXT_STEP_STANDARD_ZERO_Q, std_buf.getvalue())
+
+        question_plan = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 1 (Q1).",
+        ).replace(
+            "None currently blocking.",
+            "### Q1: Should TTL be configurable?\n"
+            "- (Recommended) A: Yes. Consequence: callers can override TTL.\n"
+            "- B: No. Consequence: simpler API.\n",
+        )
+        question_file = self.workspace / "question.md"
+        question_file.write_text(question_plan, encoding="utf-8")
+        q_buf = io.StringIO()
+        with redirect_stdout(q_buf):
+            q_code = main([str(question_file)])
+        self.assertEqual(q_code, 0)
+        self.assertIn(NEXT_STEP_MESSAGE, q_buf.getvalue())
 
         quiet_buf = io.StringIO()
         with redirect_stdout(quiet_buf):
-            quiet_code = main([str(plan_file), "--quiet"])
+            quiet_code = main([str(lightweight_file), "--quiet"])
         self.assertEqual(quiet_code, 0)
         self.assertEqual(quiet_buf.getvalue(), "")
 
@@ -591,26 +630,68 @@ None.
         with redirect_stdout(out_buf), redirect_stderr(err_buf):
             bad_code = main([str(bad_file)])
         self.assertEqual(bad_code, 1)
-        self.assertNotIn(NEXT_STEP_MESSAGE, out_buf.getvalue())
+        self.assertNotIn("NEXT:", out_buf.getvalue())
 
     def test_cli_json_output(self) -> None:
-        plan_file = self.workspace / "plan.md"
-        plan_file.write_text(VALID_PLAN, encoding="utf-8")
+        lightweight_file = self.workspace / "lightweight.md"
+        lightweight_file.write_text(VALID_PLAN, encoding="utf-8")
 
         buf = io.StringIO()
         with redirect_stdout(buf):
-            exit_code = main([str(plan_file), "--json"])
+            exit_code = main([str(lightweight_file), "--json"])
 
         self.assertEqual(exit_code, 0)
         data = json.loads(buf.getvalue())
         self.assertTrue(data["valid"])
         self.assertEqual(data["errors"], [])
         self.assertEqual(data["file_action_count"], 2)
-        self.assertEqual(data["next_step"], NEXT_STEP_MESSAGE)
+        self.assertEqual(data["next_step"], NEXT_STEP_LIGHTWEIGHT_ZERO_Q)
+
+        standard_3file_plan = VALID_PLAN.replace(
+            "- [ ] [NEW] [lib/ttl.py](file:///lib/ttl.py)\n  - Implement time-to-live helper.",
+            "- [ ] [NEW] [lib/ttl.py](file:///lib/ttl.py)\n  - Implement time-to-live helper.\n"
+            "- [ ] [MODIFY] [lib/evict.py](file:///lib/evict.py)\n  - Wire eviction hook.",
+        )
+        standard_file = self.workspace / "standard.md"
+        standard_file.write_text(standard_3file_plan, encoding="utf-8")
+        std_buf = io.StringIO()
+        with redirect_stdout(std_buf):
+            std_code = main([str(standard_file), "--json"])
+        self.assertEqual(std_code, 0)
+        std_data = json.loads(std_buf.getvalue())
+        self.assertEqual(std_data["file_action_count"], 3)
+        self.assertEqual(std_data["next_step"], NEXT_STEP_STANDARD_ZERO_Q)
+
+        wave_file = self.workspace / "wave.md"
+        wave_file.write_text(VALID_PARALLEL_WAVE_PLAN, encoding="utf-8")
+        wave_buf = io.StringIO()
+        with redirect_stdout(wave_buf):
+            wave_code = main([str(wave_file), "--json"])
+        self.assertEqual(wave_code, 0)
+        self.assertEqual(
+            json.loads(wave_buf.getvalue())["next_step"], NEXT_STEP_STANDARD_ZERO_Q
+        )
+
+        question_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 1 (Q1).",
+        ).replace(
+            "None currently blocking.",
+            "### Q1: Split into two PRs instead of three commits?\n"
+            "- (Recommended) A: Keep three commits. Consequence: matches wave barriers.\n"
+            "- B: Split into two PRs. Consequence: separate reviews.\n",
+        )
+        question_file = self.workspace / "question.md"
+        question_file.write_text(question_plan, encoding="utf-8")
+        q_buf = io.StringIO()
+        with redirect_stdout(q_buf):
+            q_code = main([str(question_file), "--json"])
+        self.assertEqual(q_code, 0)
+        self.assertEqual(json.loads(q_buf.getvalue())["next_step"], NEXT_STEP_MESSAGE)
 
         quiet_buf = io.StringIO()
         with redirect_stdout(quiet_buf):
-            quiet_code = main([str(plan_file), "--json", "--quiet"])
+            quiet_code = main([str(lightweight_file), "--json", "--quiet"])
         self.assertEqual(quiet_code, 0)
         quiet_data = json.loads(quiet_buf.getvalue())
         self.assertNotIn("next_step", quiet_data)
@@ -1269,6 +1350,212 @@ None currently blocking.
             )
         self.assertEqual(rc, 1)
         self.assertIn("definitely_missing_bin_123", out.getvalue())
+
+    @staticmethod
+    def _build_plan_with_code_and_prose(
+        total_lines: int,
+        code_body_lines: int,
+        extra_blocks: str = "",
+    ) -> str:
+        base_lines = VALID_PLAN.splitlines()
+        extra_block_lines = extra_blocks.splitlines() if extra_blocks else []
+        fence_lines = (
+            [
+                "```python",
+                *[f"def sig_{i}() -> None: ..." for i in range(code_body_lines)],
+                "```",
+            ]
+            if code_body_lines > 0
+            else []
+        )
+        used = len(base_lines) + len(extra_block_lines) + len(fence_lines)
+        assert used <= total_lines, f"used {used} > total_lines {total_lines}"
+        prose_padding = [f"- Check case {i}." for i in range(total_lines - used)]
+        all_lines = [*base_lines, *prose_padding, *extra_block_lines, *fence_lines]
+        assert len(all_lines) == total_lines
+        return "\n".join(all_lines) + "\n"
+
+    def test_code_fence_ratio_short_plans_exempt(self) -> None:
+        short_plan = self._build_plan_with_code_and_prose(
+            total_lines=120, code_body_lines=60
+        )
+        self.assertEqual(PlanValidator(short_plan, strict=True).validate(), [])
+
+        boundary_plan = self._build_plan_with_code_and_prose(
+            total_lines=PROPORTION_MIN_LINES, code_body_lines=140
+        )
+        self.assertEqual(len(boundary_plan.splitlines()), 250)
+        self.assertEqual(PlanValidator(boundary_plan, strict=True).validate(), [])
+
+    def test_code_fence_ratio_within_budget_passes(self) -> None:
+        exact_35_pct_plan = self._build_plan_with_code_and_prose(
+            total_lines=300,
+            code_body_lines=int(300 * PROPORTION_MAX_CODE_RATIO),
+        )
+        self.assertEqual(PlanValidator(exact_35_pct_plan, strict=True).validate(), [])
+
+    def test_code_fence_ratio_advisory_warning_and_strict_cli_pass(self) -> None:
+        bloated_plan = self._build_plan_with_code_and_prose(
+            total_lines=260, code_body_lines=120
+        )
+        issues = PlanValidator(bloated_plan, strict=False).validate()
+        self.assertEqual(len(issues), 1)
+        self.assertFalse(issues[0].is_error)
+        self.assertTrue(issues[0].advisory)
+        self.assertIn("120/260", issues[0].message)
+        self.assertIn("46.2%", issues[0].message)
+        self.assertIn("35%", issues[0].message)
+        self.assertIn("signatures", issues[0].message)
+
+        strict_issues = PlanValidator(bloated_plan, strict=True).validate()
+        self.assertEqual(len(strict_issues), 1)
+        self.assertFalse(strict_issues[0].is_error)
+        self.assertTrue(strict_issues[0].advisory)
+
+        plan_file = self.workspace / "bloated.md"
+        plan_file.write_text(bloated_plan, encoding="utf-8")
+
+        json_buf = io.StringIO()
+        with redirect_stdout(json_buf):
+            json_rc = main([str(plan_file), "--strict", "--json"])
+        self.assertEqual(json_rc, 0)
+        payload = json.loads(json_buf.getvalue())
+        self.assertTrue(payload["valid"])
+        self.assertEqual(payload["errors"], [])
+        self.assertEqual(len(payload["warnings"]), 1)
+        self.assertTrue(payload["warnings"][0]["advisory"])
+        self.assertEqual(payload["next_step"], NEXT_STEP_LIGHTWEIGHT_ZERO_Q)
+
+        human_buf = io.StringIO()
+        with redirect_stdout(human_buf):
+            human_rc = main([str(plan_file), "--strict"])
+        self.assertEqual(human_rc, 0)
+        human_out = human_buf.getvalue()
+        self.assertIn("[WARNING]", human_out)
+        self.assertIn("✓ Plan passed validation (1 warning(s)).", human_out)
+        self.assertIn(NEXT_STEP_LIGHTWEIGHT_ZERO_Q, human_out)
+
+        # Non-advisory warnings must still fail --strict even alongside an advisory warning.
+        mixed_plan = (
+            VALID_PARALLEL_WAVE_PLAN.replace(
+                '| Orchestration | `/swarm` with 2 author workers (`workspace: "share"`) |',
+                "| Orchestration | Sequential single agent |",
+            )
+            + "\n```python\n"
+            + "\n".join(f"x_{i} = {i}" for i in range(200))
+            + "\n```\n"
+        )
+        mixed_file = self.workspace / "mixed.md"
+        mixed_file.write_text(mixed_plan, encoding="utf-8")
+        mixed_buf = io.StringIO()
+        with redirect_stdout(mixed_buf):
+            mixed_rc = main([str(mixed_file), "--strict", "--json"])
+        self.assertEqual(mixed_rc, 1)
+        mixed_payload = json.loads(mixed_buf.getvalue())
+        self.assertFalse(mixed_payload["valid"])
+        self.assertEqual(len(mixed_payload["warnings"]), 2)
+
+    def test_code_fence_ratio_excludes_mermaid_variants(self) -> None:
+        mermaid_blocks = "\n".join(
+            [
+                "```mermaid",
+                *[f"    N{i} --> N{i + 1}" for i in range(50)],
+                "```",
+                "~~~MERMAID",
+                *[f"    M{i} --> M{i + 1}" for i in range(50)],
+                "~~~",
+                '```mermaid title="wave-dag"',
+                *[f"    K{i} --> K{i + 1}" for i in range(50)],
+                "```",
+            ]
+        )
+        plan = self._build_plan_with_code_and_prose(
+            total_lines=270,
+            code_body_lines=20,
+            extra_blocks=mermaid_blocks,
+        )
+        code_lines, has_unclosed = _count_non_mermaid_fence_lines(plan.splitlines())
+        self.assertEqual((code_lines, has_unclosed), (20, False))
+        self.assertEqual(PlanValidator(plan, strict=True).validate(), [])
+
+    def test_code_fence_ratio_commonmark_nested_and_non_closing_fences(self) -> None:
+        nested_lines = [
+            "````markdown",
+            "```python",
+            "def example() -> None: ...",
+            "```",
+            "````",
+        ]
+        self.assertEqual(_count_non_mermaid_fence_lines(nested_lines), (3, False))
+
+        trailing_text_lines = [
+            "```python",
+            "alpha = 1",
+            "```not-a-close",
+            "beta = 2",
+            "```",
+            "Use ```inline``` code span in prose.",
+        ]
+        self.assertEqual(
+            _count_non_mermaid_fence_lines(trailing_text_lines), (3, False)
+        )
+
+        # Verify PlanValidator handles nested 4-backtick fences and ```not-a-close lines cleanly.
+        extra = (
+            "````markdown\n"
+            "```python\n"
+            "def inner() -> None: ...\n"
+            "```\n"
+            "````\n"
+            "```python\n"
+            "first = 1\n"
+            "```not-a-close\n"
+            "second = 2\n"
+            "```"
+        )
+        valid_plan = self._build_plan_with_code_and_prose(
+            total_lines=260,
+            code_body_lines=20,
+            extra_blocks=extra,
+        )
+        self.assertEqual(PlanValidator(valid_plan, strict=True).validate(), [])
+
+        # Regression: mid-document ```not-a-close (with TODO/em-dash inside the fence)
+        # and line-leading ```inline``` prose spans before ## Proposed Changes must not
+        # desync plan_model.iter_non_fenced_lines from validate_plan's fence checks.
+        mid_doc_plan = VALID_PLAN.replace(
+            "## Proposed Changes",
+            (
+                "## Design\n\n"
+                "```python\n"
+                "alpha = 1\n"
+                "```not-a-close\n"
+                "# TODO: em-dash inside fence \u2014 must be ignored\n"
+                "```\n\n"
+                "```inline``` code span at start of prose line.\n\n"
+                "## Proposed Changes"
+            ),
+            1,
+        )
+        self.assertEqual(PlanValidator(mid_doc_plan, strict=True).validate(), [])
+
+    def test_code_fence_ratio_unclosed_fence_suppresses_ratio_warning(self) -> None:
+        unclosed_plan = (
+            self._build_plan_with_code_and_prose(total_lines=140, code_body_lines=0)
+            + "```python\n"
+            + "\n".join(f"line_{i} = {i}" for i in range(150))
+            + "\n"
+        )
+        self.assertGreater(len(unclosed_plan.splitlines()), PROPORTION_MIN_LINES)
+        code_lines, has_unclosed = _count_non_mermaid_fence_lines(
+            unclosed_plan.splitlines()
+        )
+        self.assertEqual((code_lines, has_unclosed), (150, True))
+
+        issues = PlanValidator(unclosed_plan, strict=False).validate()
+        self.assertEqual(len(issues), 1)
+        self.assertTrue(issues[0].is_error)
+        self.assertIn("Unclosed code fence", issues[0].message)
 
 
 if __name__ == "__main__":

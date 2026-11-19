@@ -78,6 +78,8 @@ None currently blocking.
 
 ## Design
 
+[For fixes or refactors, state in one sentence why this is the right architectural layer rather than patching a symptom downstream.]
+
 [Describe the target architecture, modular boundaries, and wave-by-wave migration progression.]
 
 ### Execution Strategy & Parallel Verification Matrix
@@ -187,9 +189,11 @@ Wire public barrel exports, remove legacy shims, and update documentation and ch
 
 ### Edge Cases & Failure Scenarios
 
-1. [Failure scenario 1, e.g. network partition during transition]
-2. [Failure scenario 2, e.g. mixed version data serialization]
-3. [Failure scenario 3, e.g. concurrent schema migrations]
+<!-- Review Focus: list 3 to 5 implied failure modes the prompt did not state explicitly, and assign each one to a specific wave or track test. -->
+
+1. [Implied failure scenario 1, e.g. network partition during transition (verified in Track 2A unit test)]
+2. [Implied failure scenario 2, e.g. mixed version data serialization (verified in Track 2B unit test)]
+3. [Implied failure scenario 3, e.g. concurrent schema migrations (verified in Wave 3 integration test)]
 
 ### Performance & Complexity Audit
 
