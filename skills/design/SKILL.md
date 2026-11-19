@@ -48,42 +48,69 @@ flowchart LR
    - Symbol call graphs and blast radius via `sem` ([sem-semantic-info](../sem-semantic-info/SKILL.md)).
    - Prior pull requests, issues, and design discussions via [packrat](../packrat/SKILL.md).
    - Past transcripts, benchmark logs, or Markdown corpora via `duckdb` and [context-indexer](../context-indexer/SKILL.md).
-2. Ask up-front scope questions before drafting only when core problem boundaries, target repositories, or portability constraints are genuinely ambiguous. Render an inline `assumption_ledger` (`genui`) or use your host's question tool to confirm 2 to 5 inferred facts. When the prompt and codebase already bound the problem, proceed directly to Phase 2 without a pre-draft gate.
-3. When Phase 1 finds 4 or more baseline metrics sharing one unit (`ms`, `tokens`, `%`, or lines), render a compact inline `Chart` (`height=190`).
+2. Check whether the prompt bundles two or more independent designs. When it does, propose an ordering and design them one at a time instead of combining unrelated specs.
+3. Challenge weak premises directly and surface the strongest counter-argument to the user's opening hunch first, with zero filler praise.
+4. When given competing docs, issues, or notes, run contradiction triage before proposing options (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)):
+   - Map *Competing Paths* where input artifacts pull in incompatible directions.
+   - Surface *Blind Spots* omitted across all inputs, such as failure paths or callers.
+   - Expose *Implicit Assumptions* that the inputs rely on without proof.
+5. Ask up-front scope questions only when core boundaries, target repositories, or portability rules remain genuinely ambiguous. Render an inline `assumption_ledger` (`genui`) or use your host's question tool to check 2 to 5 inferred facts; otherwise go straight to Phase 2.
+6. When Phase 1 finds 4 or more baseline metrics sharing one unit (`ms`, `tokens`, `%`, or lines), render a compact inline `Chart` (`height=190`).
 
 ### Phase 2: Diverge and Ask
 
-Write the design artifact in the session artifact directory (`<conversation-artifact-dir>/`) using [design_convergence_and_ui.md](references/design_convergence_and_ui.md). Keep the Phase 2 draft scannable (`150` to `250` lines, at most `2,000` words):
+Write the design artifact in `<conversation-artifact-dir>/` using [design_convergence_and_ui.md](references/design_convergence_and_ui.md). Keep the Phase 2 draft scannable (`150` to `250` lines, at most `2,000` words):
 
-1. Open with an `At a Glance` block (`<= 80` words) stating the problem, hard constraints, and recommended synthesis.
-2. Summarize the current baseline with clickable `[basename](file:///...)` links, then list 2 to 4 explicit `Non-Goals`. Dismiss unviable strawman options in 1 to 2 sentences under `Non-Goals` instead of giving them full option sections.
-3. Present 2 to 4 viable options (or orthogonal design axes) with one `flowchart` or `sequenceDiagram` per distinct architecture ([mermaid-diagrams](../mermaid-diagrams/SKILL.md)) and **one** unified comparison table. Never repeat the same tradeoffs in both prose bullets and a separate Pros/Cons table.
-4. When 2 or more open decisions exist, pair the artifact link with an interactive decision surface instead of trailing prose questions:
+1. Open with an objective-isolated `At a Glance` block (`<= 80` words). State `Problem` using measurable outcomes or pain points without naming a solution mechanism, followed by user-stated `Hard Constraints` and the `Recommended Direction`.
+2. Summarize the baseline with clickable `[basename](file:///...)` links:
+   - List 2 to 4 `Non-Goals` covering out-of-scope work and 1 to 2 sentence dismissals of strawman options.
+   - Pair them with `Anti-Goals` naming failure outcomes that disqualify a working design, such as silent fallbacks or manual migrations.
+3. Settle routine, reversible defaults inline tagged `[assumed: say otherwise]` instead of turning minor details into questions. Treat only user-stated requirements and code invariants as hard constraints.
+4. Rank 2 to 4 decision criteria (such as `Consistency > Latency > Complexity`) before scoring options so every criterion row in the `Tradeoff Matrix` comes from an explicit priority.
+5. Present 2 to 4 viable options (or orthogonal axes) anchored against the simplest honest baseline:
+   - State the baseline first, such as extending an existing module, keeping a manual step, or doing nothing.
+   - Use Design-It-Twice structural contrast (such as a deep, minimal interface vs. a flexible, seamed boundary) rather than minor variations of one approach.
+   - Include one `flowchart` or `sequenceDiagram` per distinct architecture ([mermaid-diagrams](../mermaid-diagrams/SKILL.md)) and one unified `Tradeoff Matrix` with the ranked criteria plus a `Deletion cost` row. Never repeat tradeoffs in prose bullets and a separate Pros/Cons table.
+6. When 2 or more open decisions exist, pair the artifact link with an interactive decision surface instead of trailing prose questions:
    - When `render_a2ui` is available (`a2ui-pane`), read `genui` and call `a2ui_instructions` once per session. Treat named templates (`consequence_cards`, `comparison_matrix`, `decision_batch`) and improvised A2UI Express (`dsl` without `template`, such as axis mixers, `Tabs`, or `Slider` tuners) as co-equal peers.
-   - On **Architecture or feature design** and **Empirical audit and redesign** sessions (omitted for **Creative, naming, or demo ideation**), include a pre-checked independent review option (`runReview` = `true` by default): mount `CheckBox("Run independent design review after convergence (recommended)", $/runReview)` in the shared footer when authoring custom Express `dsl`, or append a preselected `Yes (Recommended)` / `No` review item when using `template: "decision_batch"`, `ask_question`, or a numbered chat list (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
-   - Use `"multipleSelection"` chips or separate per-axis pickers whenever options can combine into a hybrid.
-   - For more than 4 deep forks, step through them one by one in the pane using a `Stepper` Decision Deck (`mode: "pane"`, `replace: true`).
+   - Include a pre-checked review toggle (`runReview` = `true`) on architectural and empirical sessions; omit it for creative ideation.
+   - Add a footer fast-path escape hatch (`Accept remaining defaults and converge now`) kept separate from per-question defaults (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
+   - Use `"multipleSelection"` chips or per-axis pickers when options combine into hybrids. For more than 4 deep forks, step through one fork per turn with a `Stepper` Decision Deck (`mode: "pane"`, `replace: true`).
    - When `a2ui-pane` is unavailable, use your host's question tool (`ask_question` or `AskUserQuestion`) or a numbered chat list (`(Recommended)` first), then wait.
-5. Keep your chat message brief: link the artifact (and `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` after any pane render, or `<agent-embed>` for inline surfaces) without repeating the artifact's body.
+7. Detect premise shifts across turns. When a reply or write-in invalidates an earlier premise, flag affected downstream choices and revisit those forks. Cap resets at 2 strikes before opening a direct tie-breaker surface.
+8. Keep chat replies brief: link the artifact and active UI surface (`[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` or `<agent-embed>`) without repeating the body. On multi-turn Phase 2 sessions, append a 2-line `Settled | Open` ledger in chat (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
 
 ### Phase 3: Converge into a Design Spec
 
 Once decisions arrive on an architectural or feature session, update the **same** artifact in place using the Phase 3 skeleton in [design_convergence_and_ui.md](references/design_convergence_and_ui.md):
 
-1. Promote the chosen or combined hybrid architecture to the primary `Architecture & Design` section.
-2. Collapse rejected candidates into a compact `Alternatives Considered` table (`Option | Why Not Selected | Revisit If`) so `/plan` inherits one clean specification without dead-branch prose.
-3. Move answered questions into `Settled Decisions` with dates and rationale.
-4. Fill in the concrete design pieces needed before planning:
-   - `Data Model & API Contracts` with concrete types, schemas, or signatures checked against [canonical_api_design.md](../review-core/references/canonical_api_design.md).
-   - `Lifecycle, State & Failure Modes` using `stateDiagram-v2`, `sequenceDiagram`, or `erDiagram` where state or schemas change, plus recovery and rollback behavior.
-   - `Rollout, Migration & Expected PR Split` (3 to 6 bullets) and a 3 to 5 bullet `Verification & Benchmark Sketch`.
-5. Run `analyze_prose.py` ([write-prose](../write-prose/SKILL.md)) on the converged artifact and fix any flagged AI-isms, em-dashes, complex sentences, or inline-header list overuse.
-6. **Post-Process Design Review (When Requested)**: When the user left the Phase 2 independent review option enabled (or asked to review the converged spec), invoke [design-review](../design-review/SKILL.md) in `--post-design` mode passing a `< 4 KB` `Design Briefing Packet` (`Spec Path`, `Target Workspace`, `Core Problem & Goal`, `Hard Constraints`, `Explicit Non-Goals`, and locked `Settled Decisions`). If `0` `critical`/`high` findings and fewer than `3` items surface, fold minor polish into the converged spec and append a compact `## Design Review Sign-Off` note summarizing disproved hypotheses. If any `critical`/`high` blocker or `3+` items appear, render the `scorecard` and `triage_matrix` surfaces so the user selects which revisions to apply before `/plan`.
-7. Conclude with non-mutating next steps tailored to the session, such as running `/plan` or exploring an edge case deeper. Do not offer to edit code or open GitHub issues directly until the user leaves design mode.
+1. Write directly as the final design without narrating brainstorm history or discarded drafts, and omit empty optional sections instead of writing `"N/A"`.
+2. Promote the chosen or hybrid design to `Architecture & Component Design` and collapse rejected options into a compact `Alternatives Considered` table (`Option | Summary | Why Not Selected | Revisit If`).
+3. Format `Settled Decisions` with dates and the Rational Decision Formula (*"Because [priority], we chose [design], accepting [downside]"*):
+   - Record each answered fork with the priority that drove the choice and the accepted tradeoff.
+   - List secondary choices left to `/plan` or the implementer under `Deferred Decisions`.
+4. Fill in concrete specifications ready for `/plan`:
+   - Enforce the Mechanism Rule on load-bearing steps: name the actor, inputs, exact contract or command, empty/missing/failure behavior, and ranking tie-breaks.
+   - Cite a primary source (code, benchmark, or doc) for every numeric target, timeout, cap, or count, or tag it `[proposed]` or `[assumed]`.
+   - Mark deltas in brownfield Mermaid diagrams with `[NEW]`, `[MODIFIED]`, and plain existing nodes plus a legend. Separate Module View (packages and interfaces) from Runtime View (processes and sequences) when both are complex.
+   - Check `Data Model & API Contracts` against [canonical_api_design.md](../review-core/references/canonical_api_design.md) and elide unchanged fields with `...` on modified types instead of pasting full declarations.
+   - Specify `Lifecycle, State & Failure Modes` with state, sequence, or ER diagrams and rollback behavior. Allow concise EARS invariants (`WHEN` / `WHILE` / `IF ... THEN`) for stateful designs.
+   - Add `Rollout, Migration & Expected PR Split` (3 to 6 bullets) and `Verification & Benchmark Sketch` (3 to 5 bullets).
+5. Run a silent stakeholder check (implementer, operator, caller, security), placing answers into their matching sections without adding a meta-checklist.
+6. Run a lightweight Goldfish self-check so a fresh agent with zero chat history can draft `/plan` without guessing. Make this check thorough when `--post-design` review is unchecked, and sort every gap into three piles:
+   - `Answered in repo` to check in code and fill directly.
+   - `Minor (Builder Call)` to settle inline with `[assumed: say otherwise]`.
+   - `User Decision` to ask as one focused question.
+7. Run `analyze_prose.py` ([write-prose](../write-prose/SKILL.md)) on the converged artifact and fix any flagged AI-isms, em-dashes, complex sentences, or inline-header list overuse.
+8. When the review option stays enabled (or the user requests review), invoke [design-review](../design-review/SKILL.md) in `--post-design` mode:
+   - Pass a `< 4 KB` `Design Briefing Packet` containing `Spec Path`, `Target Workspace`, `Core Problem & Goal`, `Hard Constraints`, `Explicit Non-Goals`, optional `Anti-Goals`, locked `Settled Decisions`, and optional `Deferred Decisions`.
+   - Fold minor polish and append `## Design Review Sign-Off` when `0` `critical`/`high` findings and `< 3` items surface.
+   - Render `scorecard` and `triage_matrix` when `critical`/`high` blockers or `3+` items appear so the user selects revisions before `/plan`.
+9. Conclude with non-mutating next steps such as running `/plan` or probing an edge case deeper. Do not offer to edit code or open issues until the user leaves design mode.
 
 ## Relationship to Other Skills
 
 - Use [grill-me](../grill-me/SKILL.md) for targeted alignment interviews on an existing task or mid-flight pivot when a full design exploration artifact is unnecessary.
-- Use [design-review](../design-review/SKILL.md) to run an evidence-capped architectural and tradeoff audit on a converged spec or existing module (`--post-design` runs this automatically after Phase 3 when kept checked).
+- Use [design-review](../design-review/SKILL.md) for an evidence-capped audit of a converged spec or existing module (`--post-design` runs this after Phase 3 when checked).
 - Use [plan](../plan/SKILL.md) once Phase 3 converges on a direction and you need file-level `[NEW]` / `[MODIFY]` tasks, parallel execution waves, and verification gates.
 - Do not use this workflow when evaluating the read-only blast radius and migration cost of one already-chosen change rather than comparing open design alternatives.

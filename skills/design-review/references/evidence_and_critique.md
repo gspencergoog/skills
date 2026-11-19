@@ -15,7 +15,7 @@ Apply the shared evidence tiers (`Executed`, `Read`, `Fetched`, `Deduction`, `Sp
 
 ## Design-Specific Critique Rules
 
-1. **The Settled-Decision Boundary**: When the target spec or `Design Briefing Packet` lists `Settled Decisions` (`D1...`), treat those choices as fixed user constraints. Never re-litigate a settled tradeoff on stylistic preference. Challenge a settled decision only when `Read`, `Executed`, or line-cited `Deduction` proves a `critical` or `high` feasibility, compatibility, or security blocker.
+1. **The Settled-Decision Boundary**: Treat `Settled Decisions` (`D1...`), `Deferred Decisions`, and `[assumed: ...]` defaults in the spec, `design_context.json`, or `Design Briefing Packet` as intentional scope boundaries. Never re-litigate settled tradeoffs or flag deferred or `[assumed]` choices as missing on stylistic preference. Challenge them only when `Read`, `Executed`, or line-cited `Deduction` proves a `critical` or `high` One-Way Door, feasibility, compatibility, or security blocker.
 2. **The Simpler-Baseline Test**: Before filing an abstraction recommendation, verify it reduces net complexity. Flag proposed layers, daemons, or plugin hooks when extending an existing module or function meets the same falsifiable goal with fewer moving parts.
 3. **Subjective Objection Filter**: Drop vague advice ("add monitoring", "consider caching", "may not scale") unless `Why` names a concrete failure mode, corrupted invariant, or change-amplification path.
 4. **Cross-View Search Before Incompleteness**: Before claiming a state, error, or migration step is undefined, check all sections, tables, Mermaid diagrams, and linked repository files.

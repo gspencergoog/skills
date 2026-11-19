@@ -17,7 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -87,6 +87,13 @@ _COMPILED_DOOR_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = tuple(
 _DECISION_LINE_RE = re.compile(
     r"^\s*(?:[-*+]|\d+\.)\s+\*\*(?P<id>[DQ]\d+[^*]*)\*\*:?\s*(?P<rest>.+)$"
 )
+_ASSUMED_TAG_RE = re.compile(r"\[assumed(?::[^\]]*)?\]", re.IGNORECASE)
+_DEFERRED_HEADING_RE = re.compile(
+    r"^(?P<hashes>#{2,3})\s+Deferred\s+Decisions\b", re.IGNORECASE
+)
+_ATX_HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+")
+_BULLET_LINE_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+(?P<text>.+)$")
+_FENCE_RE = re.compile(r"^\s*(?P<fence>`{3,}|~{3,})(?P<rest>.*)$")
 
 
 @dataclass(frozen=True)
@@ -355,21 +362,98 @@ def resolve_staged_links(md_links_path: Path, repo_root: Path) -> list[dict[str,
     return broken
 
 
+def _iter_non_fenced_lines(lines: Sequence[str]) -> Iterator[str]:
+    """Yields lines outside Markdown backtick or tilde fenced code blocks."""
+    fence_char = ""
+    fence_len = 0
+    for line in lines:
+        match = _FENCE_RE.match(line)
+        if not fence_char:
+            if match:
+                fence = match.group("fence")
+                fence_char = fence[0]
+                fence_len = len(fence)
+                continue
+            yield line
+            continue
+        if (
+            match
+            and match.group("fence")[0] == fence_char
+            and len(match.group("fence")) >= fence_len
+            and not match.group("rest").strip()
+        ):
+            fence_char = ""
+            fence_len = 0
+
+
+def _read_non_fenced_lines(path: Path) -> list[str]:
+    """Reads non-fenced lines from a Markdown file, returning empty on OSError."""
+    try:
+        raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return []
+    return list(_iter_non_fenced_lines(raw_lines))
+
+
 def _extract_settled_decisions(md_files: Sequence[Path]) -> list[str]:
     """Extracts recorded D<n> or Q<n> decision lines from Markdown files."""
     decisions: list[str] = []
     for path in md_files:
-        try:
-            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-        except OSError:
-            continue
-        for line in lines:
+        for line in _read_non_fenced_lines(path):
             match = _DECISION_LINE_RE.match(line)
             if match:
                 decisions.append(
                     f"{match.group('id').strip()}: {match.group('rest').strip()}"
                 )
     return decisions
+
+
+def _next_deferred_level(line: str, active_level: int) -> int | None:
+    """Returns updated Deferred Decisions heading level if line is a heading, else None."""
+    heading = _ATX_HEADING_RE.match(line)
+    if not heading:
+        return None
+    deferred_head = _DEFERRED_HEADING_RE.match(line)
+    if deferred_head:
+        return len(deferred_head.group("hashes"))
+    if active_level and len(heading.group("hashes")) <= active_level:
+        return 0
+    return active_level
+
+
+def _extract_file_deferred_decisions(lines: Sequence[str]) -> list[str]:
+    """Extracts bullet items under Deferred Decisions headings from non-fenced lines."""
+    deferred: list[str] = []
+    active_level = 0
+    for line in lines:
+        next_level = _next_deferred_level(line, active_level)
+        if next_level is not None:
+            active_level = next_level
+            continue
+        if not active_level:
+            continue
+        bullet = _BULLET_LINE_RE.match(line)
+        if bullet:
+            deferred.append(bullet.group("text").strip())
+    return deferred
+
+
+def _extract_deferred_decisions(md_files: Sequence[Path]) -> list[str]:
+    """Extracts bullet items under '## Deferred Decisions' or '### Deferred Decisions'."""
+    deferred: list[str] = []
+    for path in md_files:
+        deferred.extend(_extract_file_deferred_decisions(_read_non_fenced_lines(path)))
+    return deferred
+
+
+def _extract_assumed_defaults(md_files: Sequence[Path]) -> list[str]:
+    """Extracts non-fenced lines containing inline '[assumed]' or '[assumed: ...]' tags."""
+    assumed: list[str] = []
+    for path in md_files:
+        for line in _read_non_fenced_lines(path):
+            if _ASSUMED_TAG_RE.search(line):
+                assumed.append(line.strip())
+    return assumed
 
 
 def _format_stage_input(path: Path, repo_root: Path) -> str:
@@ -413,6 +497,8 @@ def stage_design_markdown(
             "broken_links": [],
             "mermaid_count": 0,
             "settled_decisions": [],
+            "deferred_decisions": [],
+            "assumed_defaults": [],
         }
     staged_dir = scratch_dir / "staged_md"
     staged_dir.mkdir(parents=True, exist_ok=True)
@@ -455,6 +541,8 @@ def stage_design_markdown(
         "broken_links": resolve_staged_links(staged_dir / "md_links.jsonl", repo_root),
         "mermaid_count": mermaid_count,
         "settled_decisions": _extract_settled_decisions(md_files),
+        "deferred_decisions": _extract_deferred_decisions(md_files),
+        "assumed_defaults": _extract_assumed_defaults(md_files),
     }
 
 

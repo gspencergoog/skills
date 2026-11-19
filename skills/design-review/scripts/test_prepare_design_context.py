@@ -241,6 +241,59 @@ class PrepareDesignContextTests(unittest.TestCase):
             self.assertEqual(pdc.count_substantive_lines([schema_file], root), 10)
             self.assertEqual(pdc.count_substantive_lines([md_file], root), 4)
 
+    def test_extract_deferred_decisions_and_assumed_defaults_skips_fences(self) -> None:
+        """Extracts deferred decisions and inline assumed tags while ignoring code fences."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            spec = root / "spec.md"
+            spec.write_text(
+                "# Feature Design\n\n"
+                "Retry timeout is 5s [assumed: say otherwise].\n"
+                "Payload size caps at 1 MB [assumed].\n\n"
+                "## Deferred Decisions\n"
+                "- Exact retry backoff multiplier left to /plan.\n"
+                "1. Log format wording for debug mode.\n\n"
+                "## Next Section\n"
+                "- This bullet belongs to Next Section.\n\n"
+                "### Deferred Decisions\n"
+                "- Sub-section deferred item.\n\n"
+                "## Higher Heading\n"
+                "- Bullet after higher heading should not leak.\n\n"
+                "```markdown\n"
+                "## Deferred Decisions\n"
+                "- Fenced bullet should be ignored.\n"
+                "Cache TTL is 60s [assumed: say otherwise].\n"
+                "```\n\n"
+                "~~~\n"
+                "### Deferred Decisions\n"
+                "- Tilde-fenced bullet should also be ignored.\n"
+                "Tilde line [assumed].\n"
+                "~~~\n",
+                encoding="utf-8",
+            )
+            out_dir = root / "out"
+            ctx = pdc.build_design_context(["spec.md"], root, out_dir)
+            md = ctx["markdown"]
+            self.assertEqual(
+                md["deferred_decisions"],
+                [
+                    "Exact retry backoff multiplier left to /plan.",
+                    "Log format wording for debug mode.",
+                    "Sub-section deferred item.",
+                ],
+            )
+            self.assertEqual(
+                md["assumed_defaults"],
+                [
+                    "Retry timeout is 5s [assumed: say otherwise].",
+                    "Payload size caps at 1 MB [assumed].",
+                ],
+            )
+
+            empty = pdc.stage_design_markdown([], root, root / "empty_out")
+            self.assertEqual(empty["deferred_decisions"], [])
+            self.assertEqual(empty["assumed_defaults"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

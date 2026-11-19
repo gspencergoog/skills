@@ -1,8 +1,14 @@
 # Design Convergence & Interactive UI Guide (`design`)
 
-This reference provides the decision-to-UI routing table and the Phase 2 and Phase 3 artifact skeletons for `/design`.
+This reference provides the decision-to-UI routing table, footer and multi-turn mechanics, and the Phase 2 and Phase 3 artifact skeletons for `/design`.
 
-## 1. Decision-to-UI Routing (`genui` Templates + Improvised Express)
+## Table of Contents
+
+- [1. Decision-to-UI Routing](#1-decision-to-ui-routing)
+- [2. Phase 2 Artifact Skeleton](#2-phase-2-artifact-skeleton)
+- [3. Phase 3 Artifact Skeleton](#3-phase-3-artifact-skeleton)
+
+## 1. Decision-to-UI Routing
 
 Whenever Phase 2 raises 2 or more decisions, render an interactive surface instead of trailing prose questions. Treat built-in `genui` templates and bespoke A2UI Express (`dsl` without `template`) as co-equal choices. Always call `a2ui_instructions` once per session before writing custom `dsl`.
 
@@ -20,13 +26,24 @@ Whenever Phase 2 raises 2 or more decisions, render an interactive surface inste
 
 Copy-pasteable Express v1.0 snippets for all four improvised patterns live in `genui`'s `references/templates.md` under `## Improvising Custom A2UI Express Surfaces`.
 
-### Pre-Checked Independent Design Review Option (`runReview`)
+### Footer Controls: Review Toggle (`runReview`) & Fast-Path Escape Hatch
 
-For **Architecture or feature design** and **Empirical audit and redesign** sessions (skip for **Creative, naming, or demo ideation**), include a preselected review toggle so Phase 3 automatically runs `/design-review --post-design` with a `< 4 KB` `Design Briefing Packet`:
+On architectural and empirical sessions (skip `runReview` for creative ideation), pair a preselected review toggle with a global fast-path exit (`Accept remaining defaults and converge now`). Place that fast-path exit in the shared footer or as a standalone final item, separate from per-question options:
 
-- **Custom A2UI Express (`dsl` without `template`)**: Set `$/runReview = true`, mount `review_check = CheckBox("Run independent design review after convergence (recommended)", $/runReview)` inside the shared footer `Row([review_check, submit_btn], "spaceBetween", "center")`, and pass `runReview: $/runReview` in the `Event(...)` context. Never declare an unmounted `CheckBox` inside a named template (`consequence_cards`, `comparison_matrix`, `decision_batch`), which fails orphan validation.
-- **`template: "decision_batch"`**: Append a final item `{prompt: "Post-convergence design review", hint: "Runs a clean-room /design-review --post-design check on the converged spec.", options: [{value: "yes", label: "Yes · Clean-room review", badge: "Recommended", tone: "success"}, {value: "no", label: "No · Skip review"}], choice: ["yes"]}`.
-- **Tier 2 / Tier 3 Fallback (`ask_question` / `AskUserQuestion` or numbered chat)**: Include `"Run an independent design review on the converged spec?"` with `"(Recommended) Yes"` listed first.
+- In custom A2UI Express (`dsl` without `template`), set `$/runReview = true` and mount `review_check = CheckBox("Run independent design review after convergence (recommended)", $/runReview)` in the shared footer `Row`. Mount `fast_btn = Button(Text("Accept remaining defaults and converge now"), "default", Event("converge_defaults", {runReview: $/runReview, _oneShot: true, _group: "design_submit"}))` beside `submit_btn` (using the same `_group: "design_submit"` so clicking either disables both) and pass `runReview: $/runReview` in both `Event(...)` payloads. Never declare an unmounted `CheckBox` or `Button` inside a named template (`consequence_cards`, `comparison_matrix`, `decision_batch`), which fails orphan validation.
+- In `template: "decision_batch"`, append a preselected review item `{prompt: "Post-convergence design review", hint: "Runs a clean-room /design-review --post-design check on the converged spec.", options: [{value: "yes", label: "Yes · Clean-room review", badge: "Recommended", tone: "success"}, {value: "no", label: "No · Skip review"}], choice: ["yes"]}` and a separate final fast-path item `{prompt: "Convergence pace", options: [{value: "review_answers", label: "Use selections above", badge: "Default"}, {value: "converge_now", label: "Accept remaining defaults and converge now"}], choice: ["review_answers"]}`.
+- On Tier 2 or Tier 3 fallbacks (`ask_question`, `AskUserQuestion`, or numbered chat), ask `"Run an independent design review on the converged spec?"` with `"(Recommended) Yes"` first. Offer `"Accept remaining defaults and converge now"` as a separate final item or footer note. When chosen, apply each question's `(Recommended)` choice plus all inline `[assumed: say otherwise]` defaults and converge into Phase 3.
+
+### Multi-Turn `Settled | Open` Ledger & Backtracking
+
+When Phase 2 spans multiple turns (such as a `Stepper` Deck or premise-shift backtrack), append a 2-line ledger in chat. This keeps progress visible without rereading the draft:
+
+```markdown
+Settled: D1 (<chosen option>), D2 (<chosen axis>) | Assumed: <N> inline [assumed: say otherwise] defaults
+Open: <active fork IDs and topics> (<strikes>/2 backtrack resets used, if any)
+```
+
+If an answer or write-in invalidates an earlier premise, move the affected `Settled` entries back to `Open` and revisit only those forks. Cap premise resets at 2 strikes before rendering one direct tie-breaker surface instead of looping.
 
 ### Cross-Harness Fallback (When `a2ui-pane` Is Not Installed)
 
@@ -35,39 +52,53 @@ For **Architecture or feature design** and **Empirical audit and redesign** sess
 
 ______________________________________________________________________
 
-## 2. Phase 2 Artifact Skeleton (Diverge & Ask)
+## 2. Phase 2 Artifact Skeleton
 
-Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20` words per sentence, zero em-dashes, one comparison table):
+Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20` words per sentence, zero em-dashes, one comparison table). State routine, reversible defaults inline tagged `[assumed: say otherwise]` rather than promoting them to `Open Decisions`:
 
 ```markdown
 # <Topic>: Design Options
 
 ## At a Glance
-- **Problem**: <1-2 sentences grounded in current code or metrics>
-- **Hard Constraints**: <runtime, compatibility, or scope limits>
-- **Recommended Direction**: <1-sentence synthesis and why>
+- **Problem**: <1-2 measurable outcome or pain sentences grounded in code or metrics; zero solution mechanisms>
+- **Hard Constraints**: <user-stated runtime, compatibility, or scope limits>
+- **Recommended Direction**: <1-sentence synthesis and why it beats the simplest baseline>
 
 ## Current Baseline & Pain Points
-<Short evidence summary with clickable [file](file:///...) links; pair with an inline Chart in chat when >=4 shared-unit metrics exist.>
+<Short evidence summary with clickable [file](file:///...) links; pair with an inline Chart in chat when >= 4 shared-unit metrics exist. Tag routine inferred defaults inline as [assumed: say otherwise].>
 
-## Constraints & Non-Goals
-- <Constraint 1>
-- **Non-Goal**: <Dismiss strawman or out-of-scope approach in 1-2 sentences rather than a full Option section.>
+## Contradiction Triage *(include only when given multiple competing docs, issues, or notes)*
+- **Competing Paths**: <where input artifacts propose incompatible directions>
+- **Blind Spots**: <failure modes, callers, or limits omitted across inputs>
+- **Implicit Assumptions**: <unstated premises the inputs depend on>
+
+## Constraints, Non-Goals & Anti-Goals
+- <User-stated hard constraint or verified code invariant>
+- <Routine default choice> `[assumed: say otherwise]`
+- **Non-Goal**: <Out-of-scope work, or 1-2 sentence dismissal of an unviable strawman option>
+- **Anti-Goal**: <Failure outcome that disqualifies a working design, such as silent fallbacks or manual migrations>
+
+## Ranked Decision Criteria
+1. **<Criterion 1>** > 2. **<Criterion 2>** > 3. **<Criterion 3>** *(derived before scoring; drives Tradeoff Matrix rows)*
 
 ## Candidate Approaches (or Orthogonal Design Axes)
+
+### Simplest Baseline: <Extend Existing Module / Manual Step / Do Nothing>
+<1 short paragraph stating the minimum viable baseline every heavier option must beat.>
 
 ### Option A: <Name> (Recommended)
 <Core mechanism in 1 short paragraph + Mermaid flowchart or sequenceDiagram when structural flow differs.>
 
-### Option B: <Name>
+### Option B: <Name> *(Design-It-Twice structural contrast, e.g., deep/minimal vs. flexible/seamed)*
 <Core mechanism in 1 short paragraph + diagram if structurally distinct.>
 
 ### Tradeoff Matrix
-| Criterion | Option A (Recommended) | Option B |
-| :--- | :--- | :--- |
-| Blast radius | ... | ... |
-| Complexity | ... | ... |
-| Operational risk | ... | ... |
+| Criterion (Ranked) | Simplest Baseline | Option A (Recommended) | Option B |
+| :--- | :--- | :--- | :--- |
+| 1. <Criterion 1> | ... | ... | ... |
+| 2. <Criterion 2> | ... | ... | ... |
+| 3. <Criterion 3> | ... | ... | ... |
+| Deletion cost | ... | ... | ... |
 
 ## Open Decisions
 <Brief pointer to the interactive A2UI surface rendered in this turn (or numbered fallback questions).>
@@ -75,30 +106,34 @@ Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20`
 
 ______________________________________________________________________
 
-## 3. Phase 3 Artifact Skeleton (In-Place Converged Design Spec)
+## 3. Phase 3 Artifact Skeleton
 
-When user decisions arrive on an architectural or feature task, update the **existing** artifact in place so `/plan` reads one authoritative design file:
+When decisions arrive on an architectural or feature task, update the **existing** artifact in place as the final specification. Do not narrate earlier brainstorm turns, and omit empty optional sections instead of writing `"N/A"`:
 
 ```markdown
 # <Topic>: Converged Design
 
 ## At a Glance
-- **Problem**: <1-2 sentences>
+- **Problem**: <1-2 objective-isolated sentences>
 - **Chosen Direction**: <Selected or combined hybrid architecture>
 - **Status**: Converged; ready for `/plan`
 
 ## Settled Decisions
-- **D1 (YYYY-MM-DD)**: <Chosen option or hybrid combination and rationale>
-- **D2 (YYYY-MM-DD)**: <Chosen threshold, axis, or constraint>
+- **D1 (YYYY-MM-DD)**: Because <priority or hard constraint>, we chose <design>, accepting <specific downside>.
+- **D2 (YYYY-MM-DD)**: Because <priority>, we chose <threshold or boundary>, accepting <specific downside>.
+
+## Deferred Decisions *(omit section if none)*
+- <Secondary choice intentionally left to `/plan` or the implementer, with guardrails if needed>
 
 ## Architecture & Component Design
-<Unified prose and Mermaid architecture diagram for the chosen design.>
+<Unified prose and Mermaid architecture diagram(s). Tag brownfield deltas with `[NEW]`, `[MODIFIED]`, and plain existing nodes plus a 1-line legend; split Module View (packages/interfaces) from Runtime View (processes/sequences) when both are complex. Apply the Mechanism Rule (actor, inputs, exact contract/command, empty/missing/failure behavior, ranking tie-breaks). Cite primary sources for numbers or tag `[proposed]` / `[assumed: say otherwise]`.>
 
 ## Data Model & API Contracts
-<Concrete types, schemas, wire envelopes, or function signatures verified against `review-core/references/canonical_api_design.md`.>
+<Structural types, schemas, wire envelopes, or function signatures verified against `review-core/references/canonical_api_design.md`. Elide unchanged fields with `...` on modified structs, classes, schemas, or protos instead of copying full declarations.>
 
 ## Lifecycle, State & Failure Modes
-<Mermaid stateDiagram-v2, sequenceDiagram, or erDiagram where applicable, plus timeout, retry, compatibility, and rollback behavior.>
+<Mermaid stateDiagram-v2, sequenceDiagram, or erDiagram where applicable, plus timeout, retry, empty/missing input handling, tie-breaks, and rollback behavior.>
+- *(Optional EARS invariants for stateful protocols)* `WHEN <event> WHILE <state>, <actor> SHALL <action>; IF <failure>, THEN <fallback>.`
 
 ## Rollout, Migration & Expected PR Split
 1. <Wave / PR 1 scope>
@@ -110,8 +145,9 @@ When user decisions arrive on an architectural or feature task, update the **exi
 ## Alternatives Considered
 | Option | Summary | Why Not Selected | Revisit If |
 | :--- | :--- | :--- | :--- |
+| Simplest Baseline | <1-line summary> | <Criterion where it fell short> | <Trigger condition> |
 | <Rejected Option B> | <1-line summary> | <Key tradeoff> | <Trigger condition> |
 
-## Design Review Sign-Off
-<Included when `--post-design` ran cleanly: overall principle score, verdict, and 1 to 3 disproved pre-mortem or simpler-baseline hypotheses.>
+## Design Review Sign-Off *(omit section when `--post-design` was skipped)*
+<Overall principle score, verdict, and 1 to 3 disproved pre-mortem or simpler-baseline hypotheses.>
 ```

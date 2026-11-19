@@ -14,7 +14,7 @@ Use this rubric when `prepare_design_context.py` classifies the target as `mode:
 ## Staged Context and Pre-Checks
 
 Start from `<conversation-scratch-dir>/design_context.json` produced by `prepare_design_context.py`:
-- Inspect `door_classification.overall` (`one-way` or `two-way`), matched `signals`, `markdown.broken_links`, `markdown.mermaid_count`, and `markdown.settled_decisions`.
+- Inspect `door_classification.overall` (`one-way` or `two-way`), matched `signals`, `markdown.broken_links`, `markdown.mermaid_count`, `markdown.settled_decisions`, `markdown.deferred_decisions`, and `markdown.assumed_defaults`.
 - Report any entry in `markdown.broken_links` as `Executed` evidence of a broken target (`high` for missing contracts or code targets, `medium` for reference links).
 - For large specs (`> 500` lines) staged under `markdown.staged_dir`, read the `md_chunk_*.md` files in sequence. Query `md_sections.jsonl`, `md_tables.jsonl`, and `md_requirements.jsonl` via `staged_md_macros.sql` to inventory RFC 2119 keywords (`MUST`, `SHOULD`) and option tables.
 
@@ -23,7 +23,7 @@ Start from `<conversation-scratch-dir>/design_context.json` produced by `prepare
 Evaluate `problem-scope` before critiquing mechanisms:
 - Decouple the problem from the proposed mechanism. The problem statement must describe user pain, bottlenecks, or failure rates without assuming the solution ("p95 lookup exceeds 400 ms", not "add a daemon"). Flag solution-smuggled problem statements as `high` or `medium` under `problem-scope`.
 - Require falsifiable goals. Every goal and normative claim must map to a pass/fail test or numeric threshold. Flag subjective targets ("fast", "flexible", "clean", "minimal overhead") that a test or benchmark cannot disprove.
-- Check `Non-Goals` for realistic boundary guards. Flag missing non-goals only when adjacent scope creep is a concrete risk, and state that risk in `Why`.
+- Check `Non-Goals` for realistic boundary guards, and check that proposed mechanisms avoid any stated `Anti-Goals`. Flag missing non-goals only when adjacent scope creep is a concrete risk, and state that risk in `Why`.
 
 ## Rational Decision Formula and Simpler Baseline
 
@@ -50,5 +50,11 @@ Calibrate scrutiny and `Door` tags (`one-way` vs. `two-way`) under `evolution-fi
 ## Goldfish Self-Containment and Downstream Impact
 
 Check that the document can be implemented safely inside the target repository:
-- Run the **Goldfish Test** (`ergonomics-coherence`): assume an engineer or coding agent has only this document and linked repository files, with zero chat history. Flag silent assumptions, unstated preconditions, undefined error states, or unresolved questions that a core path depends on.
+- Run the **Goldfish Test** (`ergonomics-coherence`): assume an engineer or coding agent has only this document and linked repository files, with zero chat history.
+- Apply the **echo lens** (`Verbatim Quote` vs. `GUESSED` vs. `NOT STATED`) to core paths, contracts, and error states to expose vague claims that rely on chat history.
+- Skip flagging items already tagged `[assumed]` or `[assumed: ...]` (`markdown.assumed_defaults`) or recorded under `Deferred Decisions` (`markdown.deferred_decisions` or the briefing packet), unless they break a One-Way Door invariant.
+- Apply the **3-Pile Builder Readiness Triage** to classify remaining underspecification gaps:
+  - For `Answered in repo` gaps, check the codebase directly and report the exact file and symbol instead of filing an open question.
+  - For `Minor (Builder Call)` gaps, do not escalate above `low`, and suggest an inline `[assumed: say otherwise]` default.
+  - For `User Decision` gaps where a core path cannot be planned without guessing, file `Q1..Q3` or a `medium` or `high` finding under `ergonomics-coherence`.
 - Run a **Downstream Impact Pass** across up to 10 existing repository files (linked code modules, callers, schemas, manifests, or sibling skills). Check that every referenced file and symbol exists on disk and that the spec lists all downstream files needing updates.

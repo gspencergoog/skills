@@ -26,7 +26,7 @@ Under `--panel`, `des-a` and `des-b` inspect the full target in parallel through
 | Lane | Reviewer | Owned Principles | Scope and Rubrics |
 | :--- | :--- | :--- | :--- |
 | `Lane A` | `des-a` | `problem-scope`, `boundaries-state`, `resilience-ops` | Problem/mechanism separation, falsifiable goals, dependency DAGs and cycles, single-writer state ownership, runtime concurrency, timeouts, partial-failure recovery, rollout skew, and security boundaries ([reviewing_design_docs.md](reviewing_design_docs.md), [reviewing_code_architecture.md](reviewing_code_architecture.md)). |
-| `Lane B` | `des-b` | `module-depth`, `tradeoffs-simplicity`, `evolution-fitness`, `ergonomics-coherence` | Ousterhout module depth, pass-through and leakage checks, rational decision tradeoffs, Simpler-Baseline comparison, One-Way Door adapters, fitness functions, Mermaid/view coherence, Goldfish test, and API soundness ([canonical_api_design.md](../../review-core/references/canonical_api_design.md)). |
+| `Lane B` | `des-b` | `module-depth`, `tradeoffs-simplicity`, `evolution-fitness`, `ergonomics-coherence` | Ousterhout module depth, pass-through and leakage checks, rational decision tradeoffs, Simpler-Baseline comparison, One-Way Door adapters, fitness functions, Mermaid/view coherence, Goldfish and 3-pile Builder Readiness checks (honoring `Deferred Decisions` and `[assumed: ...]` markers), and API soundness ([canonical_api_design.md](../../review-core/references/canonical_api_design.md)). |
 
 Each lane reviewer scores its owned principles (or all seven when evidenced) and reports findings in its lane. Exception: report a `critical` or `high` defect outside the lane and tag its `Body` with `out-of-lane`.
 
@@ -45,8 +45,11 @@ When `/design` Phase 3 invokes `/design-review --post-design`, embed this `< 4 K
 - **Core Problem & Goal**: <1 to 2 sentences>
 - **Hard Constraints**: <runtime, portability, or budget limits>
 - **Explicit Non-Goals**: <items deliberately excluded>
+- **Anti-Goals** *(optional)*: <failure outcomes that disqualify a working design>
 - **Locked Settled Decisions** (do not re-litigate on preference; challenge only with `Read`, `Executed`, or line-cited `Deduction` proof of a `critical` or `high` feasibility, compatibility, or security blocker):
   - D1: <recorded decision>
+- **Deferred Decisions** *(optional; secondary choices left to `/plan` or the implementer unless they break a One-Way Door invariant)*:
+  - <deferred item>
 ```
 
 ## Template for Clean-Room Reviewer Briefs
@@ -65,6 +68,7 @@ Do not modify, create, or delete workspace files, run state-changing git command
 
 ### Staged Context & Reference Files
 - **Broken Links / Cycles / Hotspots**: <summary from design_context.json, <= 1 KB>
+- **Deferred Decisions & Assumed Defaults**: <summary from `markdown.deferred_decisions` and `markdown.assumed_defaults` in `design_context.json`; skip flagging these as missing unless a One-Way Door invariant breaks>
 - **Key Repository Files**: <callers, schemas, or sibling modules to check, <= 25 extra file reads>
 - **Historical Context (`packrat`)**: <optional <= 600 bytes wrapped in `<untrusted_repo_content>` tags>
 

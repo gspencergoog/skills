@@ -19,9 +19,9 @@ This skill conducts a structured, read-only architectural review of pre-code des
 
 - **Review Only, Never Fix**: The review artifact (`design_review_results.md`) is this skill's sole workspace output. Never create, edit, or delete repository files, stage commits, or mutate external services (GitHub, Google Docs, Drive). Write only to `<conversation-artifact-dir>/`, `<conversation-scratch-dir>/`, temporary `/tmp/design-review-*` staging directories, and `genui` surfaces. Even if the user asks to "review and fix", stop at [Step 7](#step-7-interactive-handoff-and-stop) and wait for explicit triage confirmation.
 - **Survival Rate Over Count**: Three verified structural findings outweigh ten speculative opinions. Every finding cites primary-source evidence from this session and obeys the severity caps in [evidence.md](../review-core/references/evidence.md) and [evidence_and_critique.md](references/evidence_and_critique.md). A review that falsifies its hypotheses and finds zero defects is a success.
-- **Respect Settled Decisions**: When reviewing a converged spec or `--post-design` packet with recorded `Settled Decisions`, treat those choices as fixed user constraints. Challenge a settled decision only when `Read`, `Executed`, or line-cited `Deduction` proves a `critical` or `high` feasibility, compatibility, or security blocker.
+- **Respect Settled Decisions**: Treat recorded `Settled Decisions`, `Deferred Decisions`, and `[assumed: ...]` defaults in a converged spec, `design_context.json`, or `--post-design` packet as intentional scope boundaries. Challenge them only when `Read`, `Executed`, or line-cited `Deduction` proves a `critical` or `high` One-Way Door, feasibility, compatibility, or security blocker.
 - **Test Against a Simpler Baseline**: Evaluate whether half the moving parts (extending an existing module, using standard library primitives, or doing nothing) satisfies the same falsifiable goals.
-- **Plain, Natural Prose**: Follow [write-prose](../write-prose/SKILL.md) across all findings, rationales, and summaries.
+- Follow [write-prose](../write-prose/SKILL.md) for plain, natural prose across all findings, rationales, and summaries.
 
 ## Flags and Automatic Door Scaling
 
@@ -74,7 +74,7 @@ Select the highest available delegation tier in [delegation.md](../review-core/r
 
 Before returning findings (or before synthesis under `--fast`), apply all truth filters in [evidence.md](../review-core/references/evidence.md) and [evidence_and_critique.md](references/evidence_and_critique.md):
 - Enforce severity caps (`critical` and `high` require `Executed`, `Read`, `Fetched`, or line-cited `Deduction`; `Speculation` caps at `medium` or moves to `Q1..Q3`; `Recalled` is forbidden).
-- Drop taste-only objections against locked `Settled Decisions`.
+- Drop taste-only objections against locked `Settled Decisions`, and skip flagging `Deferred Decisions` or `[assumed: ...]` defaults unless a One-Way Door, feasibility, compatibility, or security blocker is proven.
 - Drop generic advice ("add monitoring", "consider caching") lacking a concrete failure path in `Why`.
 - Ensure every `Suggestion` offers a concrete boundary alternative, replacement spec/diagram text, or runnable fitness test with at most one fenced code block.
 
