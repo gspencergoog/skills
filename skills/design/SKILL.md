@@ -7,8 +7,8 @@ description: >-
   design spec before planning. Use when the user runs /design, asks to design a
   feature, architecture, workflow, or API, wants to brainstorm ideas or explore
   solution approaches, or wants to weigh tradeoffs before committing to a
-  direction. Don't use for file-level execution plans (use plan) or read-only
-  impact evaluation of one specific change.
+  direction. Flags: --panel. Don't use for file-level execution plans (use plan)
+  or read-only impact evaluation of one specific change.
 ---
 
 # Interactive Design and Brainstorming (`design`)
@@ -19,8 +19,15 @@ Keep every repository, remote service, and local configuration untouched through
 
 - Never create, edit, or delete repository files, stage commits, or change worktree state.
 - Never mutate external systems. Do not open or edit GitHub issues or PRs, change Google Docs, Sheets, Slides, or Drive files, or reconfigure plugins.
-- Write only to the session artifact directory (`<conversation-artifact-dir>/*.md`) and to interactive UI surfaces (such as `render_a2ui`). Delete any temporary query files in the session scratch directory (`<conversation-scratch-dir>/`) before ending the turn.
+- Write only to the session artifact directory (`<conversation-artifact-dir>/*.md`), the session scratch directory (`<conversation-scratch-dir>/`), and interactive UI surfaces (such as `render_a2ui`). Delete temporary query files before ending the turn, and delete `panel_*.md` files upon convergence.
 - Never jump from design exploration into implementation unless the user explicitly asks for code changes in a later turn.
+
+## Flags
+
+| Flag | Behavior |
+| :--- | :--- |
+| *(none)* | Runs single-agent recon and divergence in the active session. Never spawn more than two parallel workers unprompted without asking for user approval first. |
+| `--panel` | Strictly opt-in because it spawns up to 4 read-only `panel-*` workers after Phase 1 recon ([panel_divergence.md](references/panel_divergence.md)). |
 
 ## Task-Shape Triage
 
@@ -59,26 +66,30 @@ flowchart LR
 
 ### Phase 2: Diverge and Ask
 
-Write the design artifact in `<conversation-artifact-dir>/` using [design_convergence_and_ui.md](references/design_convergence_and_ui.md). Keep the Phase 2 draft scannable (`150` to `250` lines, at most `2,000` words):
+Produce a scannable Phase 2 draft (`150` to `250` lines, at most `2,000` words) in `<conversation-artifact-dir>/` using [design_convergence_and_ui.md](references/design_convergence_and_ui.md):
 
-1. Open with an objective-isolated `At a Glance` block (`<= 80` words). State `Problem` using measurable outcomes or pain points without naming a solution mechanism, followed by user-stated `Hard Constraints` and the `Recommended Direction`.
-2. Summarize the baseline with clickable `[basename](file:///...)` links:
+1. When `--panel` is active, run multi-perspective divergence before drafting the artifact ([panel_divergence.md](references/panel_divergence.md)):
+   - Write an unanchored brief in `<conversation-scratch-dir>/panel_brief.md` omitting candidate options A/B/C so personas explore independently.
+   - Run Round 1 (2 opposing domain personas plus `panel-red` pre-mortem) and `panel-facts` codebase verification. Default to 1 round plus fact-check, offering Round 2 rebuttals and shared-premise red-teaming only on splits.
+   - Drop any point backed by a `FALSIFIED` claim and act as synthesizer rather than arbiter. Surface unresolved panel splits in the Phase 2 artifact and interactive A2UI decision surface.
+2. Open the artifact with an objective-isolated `At a Glance` block (`<= 80` words). State `Problem` using measurable outcomes or pain points without naming a solution mechanism, followed by user-stated `Hard Constraints` and the `Recommended Direction`.
+3. Summarize the baseline with clickable `[basename](file:///...)` links:
    - List 2 to 4 `Non-Goals` covering out-of-scope work and 1 to 2 sentence dismissals of strawman options.
    - Pair them with `Anti-Goals` naming failure outcomes that disqualify a working design, such as silent fallbacks or manual migrations.
-3. Settle routine, reversible defaults inline tagged `[assumed: say otherwise]` instead of turning minor details into questions. Treat only user-stated requirements and code invariants as hard constraints.
-4. Rank 2 to 4 decision criteria (such as `Consistency > Latency > Complexity`) before scoring options so every criterion row in the `Tradeoff Matrix` comes from an explicit priority.
-5. Present 2 to 4 viable options (or orthogonal axes) anchored against the simplest honest baseline:
+4. Settle routine, reversible defaults inline tagged `[assumed: say otherwise]` instead of turning minor details into questions. Treat only user-stated requirements and code invariants as hard constraints.
+5. Rank 2 to 4 decision criteria (such as `Consistency > Latency > Complexity`) before scoring options so every criterion row in the `Tradeoff Matrix` comes from an explicit priority.
+6. Present 2 to 4 viable options (or orthogonal axes) anchored against the simplest honest baseline:
    - State the baseline first, such as extending an existing module, keeping a manual step, or doing nothing.
    - Use Design-It-Twice structural contrast (such as a deep, minimal interface vs. a flexible, seamed boundary) rather than minor variations of one approach.
    - Include one `flowchart` or `sequenceDiagram` per distinct architecture ([mermaid-diagrams](../mermaid-diagrams/SKILL.md)) and one unified `Tradeoff Matrix` with the ranked criteria plus a `Deletion cost` row. Never repeat tradeoffs in prose bullets and a separate Pros/Cons table.
-6. When 2 or more open decisions exist, pair the artifact link with an interactive decision surface instead of trailing prose questions:
+7. When 2 or more open decisions exist, pair the artifact link with an interactive decision surface instead of trailing prose questions:
    - When `render_a2ui` is available (`a2ui-pane`), read `genui` and call `a2ui_instructions` once per session. Treat named templates (`consequence_cards`, `comparison_matrix`, `decision_batch`) and improvised A2UI Express (`dsl` without `template`, such as axis mixers, `Tabs`, or `Slider` tuners) as co-equal peers.
    - Include a pre-checked review toggle (`runReview` = `true`) on architectural and empirical sessions; omit it for creative ideation.
    - Add a footer fast-path escape hatch (`Accept remaining defaults and converge now`) kept separate from per-question defaults (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
    - Use `"multipleSelection"` chips or per-axis pickers when options combine into hybrids. For more than 4 deep forks, step through one fork per turn with a `Stepper` Decision Deck (`mode: "pane"`, `replace: true`).
    - When `a2ui-pane` is unavailable, use your host's question tool (`ask_question` or `AskUserQuestion`) or a numbered chat list (`(Recommended)` first), then wait.
-7. Detect premise shifts across turns. When a reply or write-in invalidates an earlier premise, flag affected downstream choices and revisit those forks. Cap resets at 2 strikes before opening a direct tie-breaker surface.
-8. Keep chat replies brief: link the artifact and active UI surface (`[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` or `<agent-embed>`) without repeating the body. On multi-turn Phase 2 sessions, append a 2-line `Settled | Open` ledger in chat (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
+8. Detect premise shifts across turns. When a reply or write-in invalidates an earlier premise, flag affected downstream choices and revisit those forks. Cap resets at 2 strikes before opening a direct tie-breaker surface.
+9. Keep chat replies brief: link the artifact and active UI surface (`[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` or `<agent-embed>`) without repeating the body. On multi-turn Phase 2 sessions, append a 2-line `Settled | Open` ledger in chat (see [design_convergence_and_ui.md](references/design_convergence_and_ui.md)).
 
 ### Phase 3: Converge into a Design Spec
 
@@ -102,11 +113,12 @@ Once decisions arrive on an architectural or feature session, update the **same*
    - `Minor (Builder Call)` to settle inline with `[assumed: say otherwise]`.
    - `User Decision` to ask as one focused question.
 7. Run `analyze_prose.py` ([write-prose](../write-prose/SKILL.md)) on the converged artifact and fix any flagged AI-isms, em-dashes, complex sentences, or inline-header list overuse.
-8. When the review option stays enabled (or the user requests review), invoke [design-review](../design-review/SKILL.md) in `--post-design` mode:
+8. When `--panel` ran, cancel any backup timer, tear down `panel-*` workers, and delete temporary `<conversation-scratch-dir>/panel_*.md` files upon convergence so `/design-review --post-design` (`des-*`) runs cleanly.
+9. When the review option stays enabled (or the user requests review), invoke [design-review](../design-review/SKILL.md) in `--post-design` mode:
    - Pass a `< 4 KB` `Design Briefing Packet` containing `Spec Path`, `Target Workspace`, `Core Problem & Goal`, `Hard Constraints`, `Explicit Non-Goals`, optional `Anti-Goals`, locked `Settled Decisions`, and optional `Deferred Decisions`.
    - Fold minor polish and append `## Design Review Sign-Off` when `0` `critical`/`high` findings and `< 3` items surface.
    - Render `scorecard` and `triage_matrix` when `critical`/`high` blockers or `3+` items appear so the user selects revisions before `/plan`.
-9. Conclude with non-mutating next steps such as running `/plan` or probing an edge case deeper. Do not offer to edit code or open issues until the user leaves design mode.
+10. Conclude with non-mutating next steps such as running `/plan` or probing an edge case deeper. Do not offer to edit code or open issues until the user leaves design mode.
 
 ## Relationship to Other Skills
 

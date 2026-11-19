@@ -28,11 +28,13 @@ Copy-pasteable Express v1.0 snippets for all four improvised patterns live in `g
 
 ### Footer Controls: Review Toggle (`runReview`) & Fast-Path Escape Hatch
 
-On architectural and empirical sessions (skip `runReview` for creative ideation), pair a preselected review toggle with a global fast-path exit (`Accept remaining defaults and converge now`). Place that fast-path exit in the shared footer or as a standalone final item, separate from per-question options:
+On architectural and empirical sessions (skip `runReview` for creative ideation), pair a preselected review toggle with a global fast-path exit (`Accept remaining defaults and converge now`). Place that fast-path exit in the shared footer or as a standalone final item, separate from per-question options. Include the optional Round 2 rebuttal control when `--panel` personas split on a load-bearing tradeoff and Round 2 has not run yet (see [panel_divergence.md](panel_divergence.md)):
 
-- In custom A2UI Express (`dsl` without `template`), set `$/runReview = true` and mount `review_check = CheckBox("Run independent design review after convergence (recommended)", $/runReview)` in the shared footer `Row`. Mount `fast_btn = Button(Text("Accept remaining defaults and converge now"), "default", Event("converge_defaults", {runReview: $/runReview, _oneShot: true, _group: "design_submit"}))` beside `submit_btn` (using the same `_group: "design_submit"` so clicking either disables both) and pass `runReview: $/runReview` in both `Event(...)` payloads. Never declare an unmounted `CheckBox` or `Button` inside a named template (`consequence_cards`, `comparison_matrix`, `decision_batch`), which fails orphan validation.
-- In `template: "decision_batch"`, append a preselected review item `{prompt: "Post-convergence design review", hint: "Runs a clean-room /design-review --post-design check on the converged spec.", options: [{value: "yes", label: "Yes · Clean-room review", badge: "Recommended", tone: "success"}, {value: "no", label: "No · Skip review"}], choice: ["yes"]}` and a separate final fast-path item `{prompt: "Convergence pace", options: [{value: "review_answers", label: "Use selections above", badge: "Default"}, {value: "converge_now", label: "Accept remaining defaults and converge now"}], choice: ["review_answers"]}`.
-- On Tier 2 or Tier 3 fallbacks (`ask_question`, `AskUserQuestion`, or numbered chat), ask `"Run an independent design review on the converged spec?"` with `"(Recommended) Yes"` first. Offer `"Accept remaining defaults and converge now"` as a separate final item or footer note. When chosen, apply each question's `(Recommended)` choice plus all inline `[assumed: say otherwise]` defaults and converge into Phase 3.
+- In custom A2UI Express (`dsl` without `template`), set `$/runReview = true` and mount `review_check = CheckBox("Run independent design review after convergence (recommended)", $/runReview)` in the shared footer `Row`. Mount `fast_btn = Button(Text("Accept remaining defaults and converge now"), "default", Event("converge_defaults", {runReview: $/runReview, _oneShot: true, _group: "design_submit"}))` beside `submit_btn`, and pass `runReview: $/runReview` in both `Event(...)` payloads. On a `--panel` split, also mount `r2_btn = Button(Text("Run Round 2 rebuttals"), "default", Event("run_panel_round2", {_oneShot: true, _group: "design_submit"}))` alongside `fast_btn` and `submit_btn`. Sharing `_group: "design_submit"` disables all three on click, and `r2_btn` omits `runReview` since Round 2 returns to Phase 2 rather than converging.
+- In `template: "decision_batch"`, append a preselected review item `{prompt: "Post-convergence design review", hint: "Runs a clean-room /design-review --post-design check on the converged spec.", options: [{value: "yes", label: "Yes · Clean-room review", badge: "Recommended", tone: "success"}, {value: "no", label: "No · Skip review"}], choice: ["yes"]}` and a separate final fast-path item `{prompt: "Convergence pace", options: [{value: "review_answers", label: "Use selections above", badge: "Default"}, {value: "converge_now", label: "Accept remaining defaults and converge now"}], choice: ["review_answers"]}`. On a `--panel` split, add `{value: "round2", label: "Run Round 2 rebuttals before converging"}` inside the existing `"Convergence pace"` item instead of a conflicting separate item.
+- On Tier 2 or Tier 3 fallbacks (`ask_question`, `AskUserQuestion`, or numbered chat), ask `"Run an independent design review on the converged spec?"` with `"(Recommended) Yes"` first. Offer `"Accept remaining defaults and converge now"` as a separate final item or footer note, and offer `"Run Round 2 rebuttals before converging"` alongside it when the panel split. Choosing the fast-path exit applies each question's `(Recommended)` option plus all inline `[assumed: say otherwise]` defaults and converges into Phase 3.
+
+Never declare an unmounted `CheckBox` or `Button` inside a named template (`consequence_cards`, `comparison_matrix`, `decision_batch`), which fails orphan validation.
 
 ### Multi-Turn `Settled | Open` Ledger & Backtracking
 
@@ -54,7 +56,7 @@ ______________________________________________________________________
 
 ## 2. Phase 2 Artifact Skeleton
 
-Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20` words per sentence, zero em-dashes, one comparison table). State routine, reversible defaults inline tagged `[assumed: say otherwise]` rather than promoting them to `Open Decisions`:
+Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20` words per sentence, zero em-dashes, one `Tradeoff Matrix`). State routine, reversible defaults inline tagged `[assumed: say otherwise]` rather than promoting them to `Open Decisions`:
 
 ```markdown
 # <Topic>: Design Options
@@ -99,6 +101,14 @@ Target `150` to `250` lines and at most `2,000` words. Keep prose crisp (`<= 20`
 | 2. <Criterion 2> | ... | ... | ... |
 | 3. <Criterion 3> | ... | ... | ... |
 | Deletion cost | ... | ... | ... |
+
+## Panel Splits & Codebase Audit *(include only under --panel)*
+Verified <X>/<Y> claims; <Z> falsified:
+- `<panel-worker>` (`<Claim ID>`, `FALSIFIED`): assumed <false assumption> vs. verified `<file:line>` (<code truth>); dropped <dependent proposal point>. *(omit bullets when 0 falsified)*
+
+| Trade-off | Competing Views | Resolution |
+| :--- | :--- | :--- |
+| <Disputed dimension> | `panel-<lens1>`: <position> vs. `panel-<lens2>` / `panel-red`: <counter-position> | <Feeds Open Decisions (D1) / Settled by verified code fact> |
 
 ## Open Decisions
 <Brief pointer to the interactive A2UI surface rendered in this turn (or numbered fallback questions).>
