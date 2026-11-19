@@ -215,6 +215,103 @@ class EdgeCaseTest(unittest.TestCase):
             ],
         )
 
+    def test_pr_table_accepts_gfm_narrow_separators(self):
+        doc = parse_plan(
+            "# T\n\n### PRs\n\n| # | Title | Wave |\n| --: | - | :-- |\n| 1 | a | 1 |\n"
+        )
+        self.assertEqual(doc.pr_rows, ({"#": "1", "Title": "a", "Wave": "1"},))
+
+    def test_track_verification_heading_not_parsed_as_parallel_track(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 1: Core [Parallel]\n\n"
+            "#### Track 1A: Parser\n\n"
+            "- **Model tier:** top-tier\n"
+            "- [ ] [MODIFY] [a.py](file:///a.py)\n\n"
+            "##### Track Verification\n\n"
+            "- Run `pytest tests/test_a.py`\n\n"
+            "#### Track 1B: CLI\n\n"
+            "- **Model tier**: parallel author pool\n"
+            "- [ ] [MODIFY] [b.py](file:///b.py)\n\n"
+            "#### Track 1B Verification\n\n"
+            "- Run `pytest tests/test_b.py`\n"
+        )
+        self.assertEqual([t.track_id for t in doc.tracks], ["Track 1A", "Track 1B"])
+        self.assertEqual(doc.tracks[0].model_tier, "top-tier")
+        self.assertTrue(doc.tracks[0].has_verification)
+        self.assertTrue(doc.tracks[1].has_verification)
+        self.assertEqual(doc.tracks[0].heading_level, 4)
+
+    def test_verification_variants_and_multiline(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 2: Core [Parallel]\n\n"
+            "#### Track A: Alpha\n"
+            "- **Model tier**: top-tier\n"
+            "- [ ] [NEW] [a.py](file:///a.py)\n"
+            "- **Verification**: `pytest tests/test_a.py`\n\n"
+            "#### Track B: Beta\n"
+            "- **Model tier**: top-tier\n"
+            "- [ ] [NEW] [b.py](file:///b.py)\n"
+            "**Track B Verification**:\n"
+            "- Run `pytest tests/test_b.py`\n"
+        )
+        self.assertEqual([t.track_id for t in doc.tracks], ["Track A", "Track B"])
+        self.assertTrue(doc.tracks[0].has_verification)
+        self.assertEqual(doc.tracks[0].verification, "pytest tests/test_a.py")
+        self.assertTrue(doc.tracks[1].has_verification)
+        self.assertIsNone(doc.tracks[1].verification)
+
+    def test_file_actions_list_scoped_and_wave_tracked(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 1: Base [Sequential]\n\n"
+            "- [ ] [NEW] [lib/base.py](file:///repo/lib/base.py)\n"
+            "- Mentioning [MODIFY] foo in prose is ignored.\n\n"
+            "### Phase 2A: Reader [Parallel: Wave 2]\n\n"
+            "- **Model tier**: top-tier\n"
+            "- [ ] [MODIFY] [lib/base.py](file:///repo/lib/base.py)\n"
+        )
+        self.assertEqual(doc.file_action_count, 2)
+        self.assertEqual(
+            [(a.action, a.raw_path, a.wave_id, a.track_id) for a in doc.file_actions],
+            [
+                ("NEW", "/repo/lib/base.py", "1", None),
+                ("MODIFY", "/repo/lib/base.py", "2", "Phase 2A"),
+            ],
+        )
+        self.assertEqual(len(doc.parallel_tracks), 1)
+        self.assertEqual(doc.parallel_tracks[0].track_id, "Phase 2A")
+
+    def test_sequential_wave_tracks_excluded_from_parallel_tracks(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 1: Base [Sequential]\n\n"
+            "#### Track 1A: Substep\n"
+            "- [ ] [NEW] [a.py](file:///a.py)\n"
+        )
+        self.assertEqual(len(doc.tracks), 1)
+        self.assertEqual(doc.parallel_tracks, ())
+
+    def test_verification_heading_does_not_swallow_sibling_or_top_section(self):
+        doc = parse_plan(
+            "# T\n\n## Phased Implementation Plan\n\n"
+            "### Wave 2: Core [Parallel]\n\n"
+            "#### Track 2A: Parser\n"
+            "- **Model tier**: top-tier\n"
+            "- [ ] [MODIFY] [a.py](file:///a.py)\n\n"
+            "#### Track 2B: Plan Verification\n"
+            "- **Model tier**: top-tier\n"
+            "- [ ] [MODIFY] [b.py](file:///b.py)\n\n"
+            "## Verification Plan\n\n"
+            "- Run `pytest`\n"
+        )
+        self.assertEqual([t.track_id for t in doc.tracks], ["Track 2A", "Track 2B"])
+        self.assertEqual(doc.tracks[0].files, ["/a.py"])
+        self.assertEqual(doc.tracks[1].files, ["/b.py"])
+        self.assertFalse(doc.tracks[0].has_verification)
+        self.assertFalse(doc.tracks[1].has_verification)
+
 
 class SentenceStatsTest(unittest.TestCase):
     def test_counts_prose_and_ignores_code(self):

@@ -24,8 +24,10 @@ ______________________________________________________________________
 - [ ] The first `##` section is `## At a glance` with the required fields (`Goal`, `Shape`, `Decisions needed from you`, `Biggest risk`, `Not doing`). Lightweight plans require only `Goal`, `Decisions needed from you`, and `Not doing`, and the bullets total 180 words or fewer.
 - [ ] Plans with 2 or more waves include a Mermaid wave diagram and a `### PRs` or `### Commits` table.
 - [ ] Breaking changes, critical trade-offs, and architecture decisions are called out using GitHub alerts (`> [!IMPORTANT]`, `> [!WARNING]`) under `## User Review Required`.
-- [ ] Open questions use `### Q<n>: <title>` headings with 2 or more option bullets (`- (Recommended) A: ... Consequence: ...`) and exactly one `(Recommended)` choice, or `## Open Questions` states `None currently blocking.`
+- [ ] Open questions use `### Q<n>: <title>` headings with 2 or more option bullets (`- (Recommended) A: ... Consequence: ...`), exactly one `(Recommended)` choice, and no `(default)` prefixes, or `## Open Questions` states `None currently blocking.`
+- [ ] `Decisions needed from you` in `## At a glance` matches `## Open Questions` (no `none` while open questions exist, and no `Q<n>` references when `None currently blocking.`).
 - [ ] Answered questions are recorded under `## Decisions` in the agent's own words.
+- [ ] Presenting or re-arming the plan artifact avoids non-artifact `write_file` or `edit_file` calls (such as memory writes) in the same turn, so the Hub **Proceed** button stays visible.
 
 ## 4. Architecture & Reusability
 
@@ -36,8 +38,8 @@ ______________________________________________________________________
 ## 5. Phasing, Parallelism & Verifiability
 
 - [ ] Independent work units are grouped into parallel tracks (`#### Track NA`) inside `[Parallel]` waves, separated from sequential foundation and integration waves (Sandwich Wave topology).
-- [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions).
-- [ ] Every parallel track specifies `- **Model tier**:` matching the complexity of the track.
+- [ ] Parallel tracks within the same wave modify strictly disjoint file sets (`validate_plan.py` reports zero intra-wave file collisions) and stay within the primary workspace (or use explicit per-repo worktree isolation, since `validate_plan.py` warns on out-of-workspace parallel edits).
+- [ ] Every wave and parallel track specifies `- **Model tier**:` matching its complexity, picking concrete model tiers from your environment's model list rather than relying on stale hardcoded model names.
 - [ ] Shared chokepoint files (barrel exports such as `index.ts`, `lib/*.dart`, `__init__.py`, central registries, and `CHANGELOG.md`) are isolated in sequential foundation or integration waves.
 - [ ] Multi-track plans specify the orchestration mode (`/swarm` with `1` verifier per `2-4` authors or `/run-workflow` `parallel()`) and workspace mode (`share`, `branch`, `worktree`, or `inherit`).
 - [ ] Every sequential wave and every parallel track includes an explicit, targeted verification command (`**Track NA Verification**:` or `**Wave N Verification**:`) plus a wave-barrier gate before the next wave begins.

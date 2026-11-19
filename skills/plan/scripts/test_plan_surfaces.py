@@ -6,6 +6,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -388,6 +389,113 @@ class QuestionsSurfaceTest(unittest.TestCase):
         opt_a_pos = md.index("- A:", q2_pos)
         self.assertLess(rec_b_pos, opt_a_pos)
 
+    def test_no_review_across_all_formats_and_layouts(self):
+        for layout in ("cards", "list"):
+            dsl = plan_surfaces.render_questions(
+                self.doc, layout=layout, include_review=False
+            )
+            self.assertNotIn("$/review", dsl)
+            self.assertNotIn("review_check", dsl)
+            self.assertNotIn("CheckBox(", dsl)
+            self.assertIn('footer = Row([submit_btn], "end", "center")', dsl)
+            self.assertIn(
+                'Event("submit_plan_decisions", {q1: $/q1/choice, q2: $/q2/choice, notes: $/notes})',
+                dsl,
+            )
+
+        ask_items = json.loads(
+            plan_surfaces.render_questions(
+                self.doc, fmt="ask-question", include_review=False
+            )
+        )
+        self.assertEqual(len(ask_items), 2)
+        self.assertTrue(ask_items[0]["question"].startswith("Q1:"))
+        self.assertTrue(ask_items[1]["question"].startswith("Q2:"))
+
+        md = plan_surfaces.render_questions(
+            self.doc, fmt="markdown", include_review=False
+        )
+        self.assertNotIn("Run an independent review", md)
+        self.assertTrue(md.startswith("1. **Q1:"))
+        self.assertIn("2. **Q2:", md)
+        self.assertNotIn("3. **", md)
+
+        self.assertEqual(
+            plan_surfaces.render_questions(
+                self.zero_doc, fmt="markdown", include_review=False
+            ),
+            "",
+        )
+
+    def test_only_qids_filtering_order_and_combined_with_no_review(self):
+        three_q_plan = PLAN_WITH_QUESTIONS.replace(
+            "\n## Decisions",
+            (
+                "\n### Q3: Should telemetry be sampled?\n"
+                "- (Recommended) A: Sample at 10%.\n"
+                "- B: Log every event.\n\n## Decisions"
+            ),
+        )
+        three_doc = parse_plan(three_q_plan)
+
+        for layout in ("cards", "list"):
+            dsl = plan_surfaces.render_questions(
+                three_doc,
+                layout=layout,
+                include_review=False,
+                only_qids={"q3", "Q1"},
+            )
+            self.assertIn("q1_block", dsl)
+            self.assertNotIn("q2_block", dsl)
+            self.assertIn("q3_block", dsl)
+            self.assertLess(dsl.index("q1_block"), dsl.index("q3_block"))
+            self.assertNotIn("$/review", dsl)
+            self.assertIn('footer = Row([submit_btn], "end", "center")', dsl)
+            self.assertIn(
+                'Event("submit_plan_decisions", {q1: $/q1/choice, q3: $/q3/choice, notes: $/notes})',
+                dsl,
+            )
+
+        with_review_dsl = plan_surfaces.render_questions(
+            three_doc, include_review=True, only_qids={"q2"}
+        )
+        self.assertNotIn("q1_block", with_review_dsl)
+        self.assertIn("q2_block", with_review_dsl)
+        self.assertNotIn("q3_block", with_review_dsl)
+        self.assertIn("$/review = true", with_review_dsl)
+        self.assertIn(
+            'Event("submit_plan_decisions", {review: $/review, q2: $/q2/choice, notes: $/notes})',
+            with_review_dsl,
+        )
+
+        ask_items = json.loads(
+            plan_surfaces.render_questions(
+                three_doc,
+                fmt="ask-question",
+                include_review=False,
+                only_qids={"q3", "Q1"},
+            )
+        )
+        self.assertEqual([item["question"][:2] for item in ask_items], ["Q1", "Q3"])
+
+        md = plan_surfaces.render_questions(
+            three_doc,
+            fmt="markdown",
+            include_review=False,
+            only_qids={"q3", "Q2"},
+        )
+        self.assertTrue(md.startswith("1. **Q2:"))
+        self.assertIn("2. **Q3:", md)
+        self.assertNotIn("Q1:", md)
+
+    def test_only_qids_unknown_or_empty_raises_value_error(self):
+        with self.assertRaisesRegex(ValueError, "Q99"):
+            plan_surfaces.render_questions(self.doc, only_qids={"Q1", "Q99"})
+        with self.assertRaises(ValueError):
+            plan_surfaces.render_questions(self.doc, only_qids=set())
+        with self.assertRaisesRegex(ValueError, "Q1"):
+            plan_surfaces.render_questions(self.zero_doc, only_qids={"Q1"})
+
 
 class OverviewSurfaceTest(unittest.TestCase):
     def test_overview_contract_keys_and_values(self):
@@ -659,6 +767,132 @@ class TriageSurfaceTest(unittest.TestCase):
         self.assertIn("- (Recommended) Discuss", md)
 
 
+class ProgressSurfaceTest(unittest.TestCase):
+    def setUp(self):
+        self.doc = parse_plan(PLAN_WITH_QUESTIONS)
+        self.light_doc = parse_plan(PLAN_ZERO_QUESTIONS)
+        self.six_wave_doc = parse_plan(SIX_WAVE_ENVELOPE_PLAN)
+
+    def test_full_initial_render_queued_defaults(self):
+        dsl = plan_surfaces.render_progress(self.doc)
+        self.assertIn('$/title = "### Improve the widget"', dsl)
+        self.assertIn('$/subtitle = "Ready to start."', dsl)
+        self.assertIn('$/ackLabel = "Acknowledge"', dsl)
+        self.assertIn(
+            '{label: "**Wave 1:** Foundation", detail: "cache.py", status: "Queued", tone: "neutral"}',
+            dsl,
+        )
+        self.assertIn(
+            '{label: "**Track 2A:** Reader", detail: "reader.py", status: "Queued", tone: "neutral"}',
+            dsl,
+        )
+        self.assertIn(
+            '{label: "**Track 2B:** Writer", detail: "writer.py", status: "Queued", tone: "neutral"}',
+            dsl,
+        )
+
+    def test_flexible_id_matching_and_status_tones(self):
+        dsl = plan_surfaces.render_progress(
+            self.doc,
+            done={"w1"},
+            running={"Track 2A"},
+            failed={"t2b"},
+        )
+        self.assertIn('$/subtitle = "1 of 3 complete (1 running, 1 failed)."', dsl)
+        self.assertIn(
+            '{label: "**Wave 1:** Foundation", detail: "cache.py", status: "Done", tone: "success"}',
+            dsl,
+        )
+        self.assertIn(
+            '{label: "**Track 2A:** Reader", detail: "reader.py", status: "Running", tone: "active"}',
+            dsl,
+        )
+        self.assertIn(
+            '{label: "**Track 2B:** Writer", detail: "writer.py", status: "Failed", tone: "danger"}',
+            dsl,
+        )
+        self.assertNotIn('tone: "error"', dsl)
+
+        alt_dsl = plan_surfaces.render_progress(
+            self.six_wave_doc,
+            done={"Wave 1", "2A", "t2b", "Track 2C", "2d", "3"},
+            running={"W4"},
+            subtitle="Custom wave 4 summary.",
+        )
+        self.assertIn('$/subtitle = "Custom wave 4 summary."', alt_dsl)
+        self.assertEqual(alt_dsl.count('status: "Done", tone: "success"'), 6)
+        self.assertEqual(alt_dsl.count('status: "Running", tone: "active"'), 4)
+        self.assertEqual(alt_dsl.count('status: "Queued", tone: "neutral"'), 2)
+
+    def test_delta_emits_only_subtitle_and_referenced_indices(self):
+        delta_dsl = plan_surfaces.render_progress(
+            self.doc,
+            done={"1"},
+            failed={"2B"},
+            delta=True,
+        )
+        self.assertEqual(
+            delta_dsl.splitlines(),
+            [
+                '$/subtitle = "1 of 3 complete (1 failed)."',
+                '$/items/0/status = "Done"',
+                '$/items/0/tone = "success"',
+                '$/items/2/status = "Failed"',
+                '$/items/2/tone = "danger"',
+            ],
+        )
+        self.assertNotIn("$/title", delta_dsl)
+        self.assertNotIn("$/items =", delta_dsl)
+        self.assertNotIn("$/ackLabel", delta_dsl)
+        self.assertNotIn("$/items/1/", delta_dsl)
+
+        custom_sub_delta = plan_surfaces.render_progress(
+            self.doc,
+            running={"2a"},
+            subtitle="Track 2A running.",
+            delta=True,
+        )
+        self.assertEqual(
+            custom_sub_delta.splitlines(),
+            [
+                '$/subtitle = "Track 2A running."',
+                '$/items/1/status = "Running"',
+                '$/items/1/tone = "active"',
+            ],
+        )
+
+    def test_lightweight_plan_and_file_basename_truncation(self):
+        dsl = plan_surfaces.render_progress(self.light_doc)
+        self.assertIn('$/title = "### Simple cleanup"', dsl)
+        self.assertIn(
+            '$/items = [{label: "**Implementation:** Simple cleanup", detail: "a.py", status: "Queued", tone: "neutral"}]',
+            dsl,
+        )
+
+        done_dsl = plan_surfaces.render_progress(self.light_doc, done={"1"})
+        self.assertIn('$/subtitle = "1 of 1 complete."', done_dsl)
+        self.assertIn('status: "Done", tone: "success"', done_dsl)
+
+        many_files_plan = (
+            "# Multi-file tweak\n\n## Proposed Changes\n\n"
+            "- [ ] [MODIFY] [f1.py](file:///repo/f1.py)\n"
+            "- [ ] [MODIFY] [f2.py](file:///repo/f2.py)\n"
+            "- [ ] [MODIFY] [f3.py](file:///repo/f3.py)\n"
+            "- [ ] [MODIFY] [f4.py](file:///repo/f4.py)\n"
+            "- [ ] [MODIFY] [f5.py](file:///repo/f5.py)\n"
+        )
+        many_dsl = plan_surfaces.render_progress(parse_plan(many_files_plan))
+        self.assertIn('detail: "f1.py, f2.py, f3.py (+2 more)"', many_dsl)
+
+    def test_unknown_progress_id_raises_value_error(self):
+        with self.assertRaisesRegex(ValueError, "W99"):
+            plan_surfaces.render_progress(self.doc, running={"W99"})
+        with self.assertRaisesRegex(ValueError, "2Z"):
+            plan_surfaces.render_progress(self.doc, failed={"2Z"}, delta=True)
+        with self.assertRaises(ValueError):
+            plan_surfaces.render_progress(self.light_doc, done={"W2"})
+
+
 class CliEntrypointTest(unittest.TestCase):
     def test_cli_subcommands(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -680,6 +914,23 @@ class CliEntrypointTest(unittest.TestCase):
             buf = io.StringIO()
             with patch("sys.stdout", buf):
                 rc = plan_surfaces.main(
+                    [
+                        "questions",
+                        str(plan_path),
+                        "--format",
+                        "markdown",
+                        "--no-review",
+                        "--only",
+                        "q2",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertTrue(buf.getvalue().startswith("1. **Q2:"))
+            self.assertNotIn("Q1:", buf.getvalue())
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = plan_surfaces.main(
                     ["questions", str(plan_path), "--layout", "list"]
                 )
             self.assertEqual(rc, 0)
@@ -694,6 +945,46 @@ class CliEntrypointTest(unittest.TestCase):
             self.assertIn(
                 'subgraph W2[\\"Wave 2 · Core (Verifier · PR 2)\\"]',
                 buf.getvalue(),
+            )
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = plan_surfaces.main(
+                    [
+                        "progress",
+                        str(plan_path),
+                        "--done",
+                        "W1",
+                        "--running",
+                        "2A",
+                        "--failed",
+                        "2B",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertIn('status: "Failed", tone: "danger"', buf.getvalue())
+
+            buf = io.StringIO()
+            with patch("sys.stdout", buf):
+                rc = plan_surfaces.main(
+                    [
+                        "progress",
+                        str(plan_path),
+                        "--delta",
+                        "--done",
+                        "2A",
+                        "--subtitle",
+                        "2A done.",
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                buf.getvalue().splitlines(),
+                [
+                    '$/subtitle = "2A done."',
+                    '$/items/1/status = "Done"',
+                    '$/items/1/tone = "success"',
+                ],
             )
 
             six_wave_path = Path(tmpdir) / "six_wave.md"
@@ -723,6 +1014,43 @@ class CliEntrypointTest(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             self.assertEqual(len(json.loads(buf.getvalue())), 4)
+
+    def test_cli_unknown_ids_exit_code_two_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_path = Path(tmpdir) / "plan.md"
+            plan_path.write_text(PLAN_WITH_QUESTIONS, encoding="utf-8")
+
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = plan_surfaces.main(["questions", str(plan_path), "--only", "Q99"])
+            self.assertEqual(rc, 2)
+            self.assertIn("Q99", err.getvalue())
+
+            err = io.StringIO()
+            with patch("sys.stderr", err):
+                rc = plan_surfaces.main(
+                    ["progress", str(plan_path), "--running", "W99"]
+                )
+            self.assertEqual(rc, 2)
+            self.assertIn("W99", err.getvalue())
+
+            script_path = Path(plan_surfaces.__file__).resolve()
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(script_path),
+                    "questions",
+                    str(plan_path),
+                    "--only",
+                    "Q8",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=15,
+            )
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn("Q8", proc.stderr)
 
 
 @unittest.skipUnless(
@@ -832,6 +1160,77 @@ class ExpressCompileSmokeTest(unittest.TestCase):
         self.assertTrue(messages)
         self.assertEqual(messages[0]["createSurface"]["surfaceId"], "smoke-list-test")
 
+    def test_questions_no_review_and_only_compiles_via_express_worker(self):
+        python_bin = os.environ["A2UI_PANE_PYTHON"]
+        doc = parse_plan(PLAN_WITH_QUESTIONS)
+        cards_dsl = plan_surfaces.render_questions(
+            doc,
+            surface_id="smoke-no-review-cards",
+            include_review=False,
+            only_qids={"q2"},
+        )
+        list_dsl = plan_surfaces.render_questions(
+            doc,
+            surface_id="smoke-no-review-list",
+            layout="list",
+            include_review=False,
+            only_qids={"Q1"},
+        )
+        requests = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "op": "init",
+                        "catalogPaths": CATALOG_PATHS,
+                        "version": "1.0",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "op": "compile",
+                        "surfaceId": "smoke-no-review-cards",
+                        "dsl": cards_dsl,
+                        "version": "1.0",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 3,
+                        "op": "compile",
+                        "surfaceId": "smoke-no-review-list",
+                        "dsl": list_dsl,
+                        "version": "1.0",
+                    }
+                ),
+            ]
+        )
+        proc = subprocess.run(
+            [python_bin, str(EXPRESS_WORKER)],
+            input=requests + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        responses = [
+            json.loads(line)
+            for line in proc.stdout.strip().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(responses), 3)
+        for resp in responses:
+            self.assertTrue(resp.get("ok"), resp)
+        self.assertEqual(
+            responses[1]["messages"][0]["createSurface"]["surfaceId"],
+            "smoke-no-review-cards",
+        )
+        self.assertEqual(
+            responses[2]["messages"][0]["createSurface"]["surfaceId"],
+            "smoke-no-review-list",
+        )
+
     def test_overview_dsl_compiles_via_express_worker(self):
         python_bin = os.environ["A2UI_PANE_PYTHON"]
         template_path = (
@@ -890,6 +1289,102 @@ class ExpressCompileSmokeTest(unittest.TestCase):
                 responses[1]["messages"][0]["createSurface"]["surfaceId"],
                 "plan-overview",
             )
+
+    def test_progress_full_and_delta_dsl_compile_via_express_worker(self):
+        python_bin = os.environ["A2UI_PANE_PYTHON"]
+        template_path = (
+            A2UI_PANE_ROOT
+            / "plugin"
+            / "skills"
+            / "genui"
+            / "templates"
+            / "progress_board.a2ui"
+        )
+        template_body = template_path.read_text(encoding="utf-8").strip()
+        doc = parse_plan(PLAN_WITH_QUESTIONS)
+        caller_dsl = plan_surfaces.render_progress(doc, running={"W1"})
+        full_dsl = f'surface("plan-progress", sendDataModel=true)\n{template_body}\n{caller_dsl}'
+        delta_dsl = plan_surfaces.render_progress(
+            doc,
+            done={"W1"},
+            running={"2A"},
+            failed={"2B"},
+            delta=True,
+        )
+        requests = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": 1,
+                        "op": "init",
+                        "catalogPaths": CATALOG_PATHS,
+                        "version": "1.0",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "op": "compile",
+                        "surfaceId": "plan-progress",
+                        "dsl": full_dsl,
+                        "version": "1.0",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 3,
+                        "op": "compile",
+                        "surfaceId": "plan-progress",
+                        "dsl": delta_dsl,
+                        "version": "1.0",
+                    }
+                ),
+            ]
+        )
+        proc = subprocess.run(
+            [python_bin, str(EXPRESS_WORKER)],
+            input=requests + "\n",
+            text=True,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        responses = [
+            json.loads(line)
+            for line in proc.stdout.strip().splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(len(responses), 3)
+        for resp in responses:
+            self.assertTrue(resp.get("ok"), resp)
+        self.assertEqual(
+            responses[1]["messages"][0]["createSurface"]["surfaceId"],
+            "plan-progress",
+        )
+        delta_messages = responses[2]["messages"]
+        self.assertEqual(len(delta_messages), 7)
+        self.assertTrue(
+            all("updateDataModel" in msg for msg in delta_messages),
+            delta_messages,
+        )
+
+    def test_progress_includes_inline_parallel_phases_and_untagged_tracks(self):
+        plan_text = (
+            "# Inline Parallel Plan\n\n"
+            "## Phased Implementation Plan\n\n"
+            "### Wave 1: Base [Sequential]\n"
+            "- [ ] [NEW] [base.py](file:///repo/base.py)\n\n"
+            "### Phase 2A: Reader [Parallel: Wave 2]\n"
+            "- [ ] [MODIFY] [reader.py](file:///repo/reader.py)\n\n"
+            "### Phase 2B: Writer [Parallel: Wave 2]\n"
+            "- [ ] [MODIFY] [writer.py](file:///repo/writer.py)\n"
+        )
+        doc = parse_plan(plan_text)
+        dsl = plan_surfaces.render_progress(doc, done={"W1"}, running={"2A"})
+        self.assertIn("**Wave 1:** Base", dsl)
+        self.assertIn("**Track 2A:** Reader", dsl)
+        self.assertIn("**Track 2B:** Writer", dsl)
+        self.assertIn('status: "Running", tone: "active"', dsl)
 
 
 if __name__ == "__main__":

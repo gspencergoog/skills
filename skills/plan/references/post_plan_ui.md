@@ -30,6 +30,9 @@ Always pass `conversationId` from the session metadata or `$ANTIGRAVITY_CONVERSA
 - After any `mode: "pane"` render, include `[A2UI Pane](sidecar://a2ui-pane/a2ui-pane/)` inline in your chat reply.
 - After any `mode: "inline"` render, include the returned `<agent-embed ...></agent-embed>` tag in your chat reply and end your turn without calling `await_a2ui_action`.
 
+> [!IMPORTANT]
+> **Keep the Hub Proceed button visible**: Never run non-artifact `write_file` or `edit_file` calls (including memory file writes) in the same turn that writes or re-arms the plan artifact. Any non-artifact edit in that turn hides the Hub **Proceed** button. Move memory synthesis or other non-artifact writes to a separate turn.
+
 ### 2.1 Post-Plan Worksheet (`dsl` only, no `template`)
 
 Generate the Express worksheet from the validated plan:
@@ -44,18 +47,16 @@ The script emits a standalone Express surface (`surface("plan-decisions", sendDa
 2. Each `### Q<n>` in `## Open Questions` becomes a block with a `Q<n>` badge header and `ChoiceCards($/qN/options, $/qN/choice)`. Each option card carries `value`, `label` (`"<letter> · <text>"`), `description` (the option's consequence), and `badge: "Recommended"` with `tone: "success"` on the recommended option, followed by a quiet `{value: "defer", label: "Defer", quiet: true}` toggle. Each block preselects the recommended letter.
 3. The shared footer has one notes field (`$/notes`), a review checkbox (`CheckBox("Run an independent review of this plan (recommended)", $/review)` with `$/review = true`), and one primary button sending `Event("submit_plan_decisions", {review: $/review, q1: $/q1/choice, ..., notes: $/notes})`.
 
-Render the worksheet by passing the script's stdout as `dsl` (do **not** set `template`):
+Render the worksheet by passing the script's stdout as `dsl` (do **not** set `template`). Use `mode: "inline"` for 0 to 2 open questions (including zero-question plans that show only the notes field and footer review checkbox), and switch to `mode: "pane"` for 3 or more open questions:
 
 ```json
 {
   "conversationId": "<conversation-id>",
   "surfaceId": "plan-decisions",
-  "mode": "pane",
+  "mode": "inline",
   "dsl": "<stdout of plan_surfaces.py questions>"
 }
 ```
-
-Use `mode: "inline"` when the plan has zero open questions and the worksheet contains only the notes field and footer review checkbox.
 
 If `render_a2ui` fails validation because an older `a2ui-pane` install does not recognize `ChoiceCards`, retry with `--layout list`:
 
@@ -71,7 +72,13 @@ The `list` layout replaces `ChoiceCards` with one letter-badge row and consequen
 | Tier 2 (`--format ask-question`)                         | First question (`"Run an independent review of this plan?"`) | `"(Recommended) Yes"` or `"No"`                                                |
 | Tier 3 (`--format markdown`)                             | Item 1 in the numbered Markdown list                         | User reply of `Yes` (or option 1) vs `No`                                      |
 
-If review findings later invalidate a recorded decision or add new `### Q<n>` questions, render a second worksheet with only the new or changed `Q<n>` blocks. Omit the review checkbox on that second worksheet.
+If review findings later invalidate a recorded decision or add new `### Q<n>` questions, render a second worksheet with only the new or changed `Q<n>` blocks and no review checkbox:
+
+```bash
+python3 <skill-dir>/scripts/plan_surfaces.py questions <path/to/plan.md> --no-review --only Q3,Q4
+```
+
+`--no-review` omits the review checkbox (and `review` from the submit event payload in A2UI, or item 1 in `--format ask-question` and `--format markdown`). `--only` accepts a comma-separated list of question IDs (case-insensitive) and errors on unknown IDs.
 
 ### 2.2 Review Findings Triage (`template: "triage_matrix"`)
 
@@ -121,7 +128,13 @@ The script emits data assignments matching the `plan_overview` contract (`/title
 
 ### 2.4 Wave Progress (`template: "progress_board"`)
 
-After the user clicks **Proceed**, render `progress_board` at the start of Wave 1 with one row per wave and parallel track:
+After the user clicks **Proceed**, generate the initial `progress_board` data lines from the plan (one row per wave and parallel track):
+
+```bash
+python3 <skill-dir>/scripts/plan_surfaces.py progress <path/to/plan.md> --running W1 --subtitle "Wave 1 running."
+```
+
+Render the initial board by passing the script's stdout as `dsl`:
 
 ```json
 {
@@ -129,20 +142,29 @@ After the user clicks **Proceed**, render `progress_board` at the start of Wave 
   "template": "progress_board",
   "surfaceId": "plan-progress",
   "mode": "pane",
-  "dsl": "$/title = \"### Plan execution\"\n$/subtitle = \"Wave 1 running.\"\n$/items = [\n  {label: \"**Wave 1:** Shared parser and contract\", detail: \"plan_model.py\", status: \"Running\", tone: \"active\"},\n  {label: \"**Track 2A:** Validator checks\", detail: \"validate_plan.py\", status: \"Queued\", tone: \"neutral\"},\n  {label: \"**Track 2B:** Post-plan surfaces\", detail: \"plan_surfaces.py\", status: \"Queued\", tone: \"neutral\"},\n  {label: \"**Wave 3:** Skill workflow and commit\", detail: \"SKILL.md\", status: \"Queued\", tone: \"neutral\"}\n]"
+  "dsl": "<stdout of plan_surfaces.py progress>"
 }
 ```
 
-As each wave or track starts and completes, send data-only updates to the same `surfaceId` (`"plan-progress"`):
+As each wave or track starts, finishes, or fails, pass `--delta` to emit data-only updates (`$/subtitle` and `$/items/<idx>/{status,tone}`) for the same `surfaceId` (`"plan-progress"`):
+
+```bash
+python3 <skill-dir>/scripts/plan_surfaces.py progress <path/to/plan.md> \
+  --done W1 --running 2A,2B --subtitle "Wave 2 running (2 tracks)." --delta
+```
+
+Send the `--delta` stdout without repeating `template`:
 
 ```json
 {
   "conversationId": "<conversation-id>",
   "surfaceId": "plan-progress",
   "mode": "pane",
-  "dsl": "$/subtitle = \"Wave 2 running (2 tracks).\"\n$/items/0/status = \"Done\"\n$/items/0/tone = \"success\"\n$/items/1/status = \"Running\"\n$/items/1/tone = \"active\"\n$/items/2/status = \"Running\"\n$/items/2/tone = \"active\""
+  "dsl": "<stdout of plan_surfaces.py progress --delta>"
 }
 ```
+
+Flags `--running`, `--done`, and `--failed` accept comma-separated wave or track IDs (such as `W1`, `1`, `2A`, or `Track 2A`). They map statuses to tones: `"active"` for running, `"success"` for done, `"danger"` for failed, and `"neutral"` for queued items.
 
 ### 2.5 Landing Gate (`template: "confirm_gate"`)
 

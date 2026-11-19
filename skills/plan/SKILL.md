@@ -30,8 +30,9 @@ Use this skill to produce actionable, wave-structured implementation plans for s
    - Set `RequestFeedback: true` in interactive mode to display the **"Proceed"** button in the UI (set `RequestFeedback: false` when `--auto` is active).
    - Set `UserFacing: true` to open the plan in the artifacts panel for inspection or inline comments.
    - Set `Summary: "<multi-line summary>"` to describe the plan's scope and waves.
-4. Do not copy or re-summarize the full plan in chat. In interactive mode, output a concise message linking to the artifact, highlight key open questions or decisions, render the post-plan worksheet (Step 6), and stop to await user approval.
-5. **Unattended mode (`--auto`)**: When `--auto` is passed (for example when invoked by `/fix-something` or another autonomous workflow):
+4. Keep the plan presentation turn artifact-only: never run non-artifact `write_file` or `edit_file` calls (including memory file writes) in the same turn that writes or re-arms the plan artifact, because non-artifact edits in that turn hide the Hub **"Proceed"** button. Perform memory synthesis or other non-artifact writes in a separate turn.
+5. Do not copy or re-summarize the full plan in chat. In interactive mode, output a concise message linking to the artifact, highlight key open questions or decisions, render the post-plan worksheet (Step 6), and stop to await user approval.
+6. **Unattended mode (`--auto`)**: When `--auto` is passed (for example when invoked by `/fix-something` or another autonomous workflow):
    - Resolve non-blocking design choices from codebase evidence and record each choice with its rationale under `## Decisions`, writing `"None currently blocking."` under `## Open Questions` and `"None (auto-resolved under Decisions)."` under `Decisions needed from you` in `## At a glance`. If a genuine scope-blocking ambiguity cannot be resolved from the codebase, specification, or issue description, stop and report the blocker to the caller instead of guessing.
    - Skip the interactive post-plan worksheet (Step 6.3) and **always** run Step 7 (Independent Review), folding all `"blocker"` and `"major"` reviewer findings into the plan in place and re-running `validate_plan.py` before returning control directly to the caller without pausing for **"Proceed"** (Step 7.6).
 
@@ -88,7 +89,7 @@ Draft the plan according to the chosen template and write it using `write_file` 
   - `### Wave 3: Integration, Exports & Cleanup [Sequential]` for barrel exports, central registries, CLI wiring, and end-to-end verification.
 - Isolate shared chokepoint files into sequential foundation or integration waves so parallel tracks never touch the same file path.
 - Specify an **Execution Strategy & Parallelization** table for multi-track plans, selecting the right orchestrator:
-  - `/swarm` (`native_swarm`) when 2 or more tracks edit disjoint files across 3 or more files, pairing `1` verifier per `2-4` authors (`workspace: "share"` or `"branch"`). Multi-track parallel waves (2 or more tracks) must use `/swarm` (or `/run-workflow` for uniform batch scripts), never ad-hoc `invoke_subagent`. Swarm isolates file writes (`workspace: "share"`) and distributes tracks across independent quota pools (such as Gemini Pro Next `auto` or Gemini 4 Argon). It also allows model failover at runtime via `swarm(action="model")`.
+  - `/swarm` (`native_swarm`) when 2 or more tracks edit disjoint files across 3 or more files, pairing `1` verifier per `2-4` authors (`workspace: "share"` or `"branch"`). Multi-track parallel waves (2 or more tracks) must use `/swarm` (or `/run-workflow` for uniform batch scripts), never ad-hoc `invoke_subagent`. Swarm isolates file writes (`workspace: "share"`) and distributes tracks across independent quota pools and model tiers selected from your environment's model list. It also allows model failover at runtime via `swarm(action="model")`.
   - `/run-workflow` (`parallel()` / `pipeline()`) when tracks follow a uniform per-shard recipe across many files or modules.
   - Single-agent sequential execution when the plan touches 1 to 2 files or has a strictly linear dependency chain.
   - Reserve `invoke_subagent` strictly for single-shot, isolated tasks (such as a single read-only reviewer when swarm is not active).
@@ -108,18 +109,21 @@ Draft the plan according to the chosen template and write it using `write_file` 
 Run [validate_plan.py](scripts/validate_plan.py) to check structure, code fence balance, file path integrity, and parallel wave disjointness:
 
 ```bash
-python3 <skill-dir>/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace>
+python3 <skill-dir>/scripts/validate_plan.py <path/to/plan.md> --workspace <path/to/workspace> [--workspace <extra-repo>]
 ```
+
+Pass `--workspace` multiple times for multi-repo plans (the first workspace is primary; extra workspaces resolve paths in secondary repositories).
 
 The validator checks:
 
 - All required structural sections are present and code fences are balanced.
 - Task list items do not contain inline heading hashes (`- [ ] #### ...`).
-- Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace, and `[NEW]` files do not collide with existing files.
+- Every file marked `[MODIFY]` or `[DELETE]` exists on disk in the target workspace (or is created by an earlier wave), and `[NEW]` files do not collide with existing files.
 - Parallel tracks within the same `[Parallel]` wave edit strictly disjoint file sets (emitting `ERROR` on any intra-wave file collision).
 - Every parallel track (`#### Track NA`) includes its own verification command (`WARNING` by default, `ERROR` with `--strict`).
 - No unresolved placeholders (`TODO`, `TBD`, `implement rest here`) remain.
 - The brief layer is complete (errors by default): At a glance comes first with its fields and word budget, brief sentences average at most 20 words, every `Q<n>` has 2 or more options and exactly one `(Recommended)`, plans with 2 or more waves have a PR or commit table, and every parallel track has a model tier. Lightweight plans need only Goal, Decisions needed from you, and Not doing.
+- Consistency, prose, and workspace boundary checks (`WARNING` by default, `ERROR` with `--strict`): `Decisions needed from you` in `## At a glance` matches `## Open Questions`, no em-dashes appear outside code fences, no `(default)` option prefixes appear in `## Open Questions`, and parallel tracks do not edit files outside the primary workspace.
 
 Resolve all reported validation errors before proceeding. A passing run ends with a `NEXT:` line (`next_step` in `--json`) that points to Step 6.
 
@@ -127,9 +131,12 @@ Resolve all reported validation errors before proceeding. A passing run ends wit
 
 When `--auto` is active, skip the interactive worksheet in Step 6.3 and proceed directly to Step 7 (Independent Review).
 
+> [!IMPORTANT]
+> Do not run non-artifact `write_file` or `edit_file` calls (including memory writes) in the same turn that writes or re-arms the plan artifact, or the Hub **"Proceed"** button will be hidden.
+
 1. Output a concise response in chat with a markdown link to the plan artifact. Highlight the At a glance points that need the user's attention: decisions, breaking changes, and risks.
 2. When `packrat_probe.py` returned a non-empty `user_note` for a GitHub repository (`"not_synced"` or `"unavailable"`), append that single-line note to the chat response. Omit the note when `status` is `"ready"` or `"not_github"`.
-3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 3 or fewer questions, `"pane"` otherwise; retry with `--layout list` if `render_a2ui` reports an unknown `ChoiceCards` component). The A2UI worksheet renders each `Q<n>` with `ChoiceCards` and ends with a review checkbox checked by default; the host question and Markdown fallbacks in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`) still list the review item first. Never ask the review question separately.
+3. Render one post-plan worksheet from `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md>` (`render_a2ui` with `dsl`, `mode: "inline"` for 0 to 2 open questions and `mode: "pane"` for 3 or more open questions; retry with `--layout list` if `render_a2ui` reports an unknown `ChoiceCards` component). The A2UI worksheet renders each `Q<n>` with `ChoiceCards` and ends with a review checkbox checked by default; the host question and Markdown fallbacks in [post_plan_ui.md](references/post_plan_ui.md#4-three-tier-fallbacks) (`--format ask-question` or `--format markdown`) still list the review item first. Never ask the review question separately.
 4. When the answers arrive, move each answered question into `## Decisions` by hand, in your own words, and leave deferred questions in place. Re-run `validate_plan.py`.
 
 ### 7. Independent Review (When Requested or When `--auto` Is Active)
@@ -142,8 +149,8 @@ To prevent confirmation bias from the drafting steps, run this review whenever `
    - **Tier 2 (Subagent Tool Available)**: Spawn one read-only subagent (`Agent` or `invoke_subagent` with a read-only research subagent or `self`, setting `enable_subagent_tools: false` and forbidding child subagents).
    - **Tier 3 (Already Inside a Subagent or Swarm Worker)**: Perform the checklist audit directly in-session without spawning further agents.
 3. The reviewer audits the plan against the workspace files and [plan_quality_checklist.md](references/plan_quality_checklist.md) and ends its report with a JSON findings array.
-4. When `--auto` is active, apply all `"blocker"` and `"major"` findings (plus clear `"minor"` fixes) directly to the plan artifact and re-run `validate_plan.py`. In interactive mode, with 3 or more findings, save the array to the scratch directory and render `plan_surfaces.py triage <findings.json>` as a `triage_matrix` before applying anything; with fewer, apply clear fixes directly. Apply the accepted findings and re-run `validate_plan.py`. If findings change a recorded decision or add questions in interactive mode, render a second worksheet with only the new or changed `Q<n>` items and no review item.
-5. For multi-wave plans in interactive mode, render `plan_surfaces.py overview <plan.md>` with `template: "plan_overview"` in the pane (skip it when `--auto` is active or `render_a2ui` is unavailable; the At a glance section already serves as the overview).
+4. When `--auto` is active, apply all `"blocker"` and `"major"` findings (plus clear `"minor"` fixes) directly to the plan artifact and re-run `validate_plan.py`. In interactive mode, with 3 or more findings, save the array to the scratch directory and render `plan_surfaces.py triage <findings.json>` as a `triage_matrix` before applying anything; with fewer, apply clear fixes directly. Apply the accepted findings and re-run `validate_plan.py`. If findings change a recorded decision or add questions in interactive mode, generate a second worksheet with `python3 <skill-dir>/scripts/plan_surfaces.py questions <plan.md> --no-review --only <QID,...>` so it includes only the new or changed `Q<n>` items and omits the review checkbox.
+5. For multi-wave plans in interactive mode, render `plan_surfaces.py overview <plan.md>` with `template: "plan_overview"` in the pane (skip it when `--auto` is active or `render_a2ui` is unavailable; the At a glance section is already the overview).
 6. When `--auto` is active, return control immediately to the caller so execution can proceed from the validated, reviewed plan. In interactive mode, **STOP and do not start executing changes**: wait for the user to review, submit inline comments, or click the **"Proceed"** button in the UI.
 
 ### 8. After Proceed: Progress & Landing
@@ -151,7 +158,7 @@ To prevent confirmation bias from the drafting steps, run this review whenever `
 1. Execute the approved waves using the orchestrator specified in the plan's `Execution Strategy` table:
    - When `/swarm` is specified for a parallel wave, initialize the swarm via `swarm(action="add")` with `workspace: "share"` (or `"branch"`). Assign workers to their planned model tiers (for example, `model: "auto"` for author tracks).
    - Do not downgrade parallel waves to sequential execution or ad-hoc `invoke_subagent` calls due to quota concerns. Swarm manages quota by distributing models across buckets and supports model failover at runtime via `swarm(action="model")`.
-2. Drive a `progress_board` pane with one item per wave and track, updated with data-only lines at each wave barrier. Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
+2. Drive a `progress_board` pane with one item per wave and track using `python3 <skill-dir>/scripts/plan_surfaces.py progress <plan.md>` for the initial render, then pass `--running`, `--done`, `--failed`, and `--delta` for data-only updates at each wave barrier (see [post_plan_ui.md](references/post_plan_ui.md#24-wave-progress-template-progress_board)). Without `render_a2ui`, post one status line per wave barrier and tick the plan's checkboxes.
 3. After the last wave, render the landing `confirm_gate` (code review, commit, PR) using [post_plan_ui.md](references/post_plan_ui.md), or its fallback question when `render_a2ui` is unavailable.
 
 ______________________________________________________________________

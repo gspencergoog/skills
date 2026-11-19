@@ -40,11 +40,11 @@ flowchart TD
 
 ### PRs
 
-|   # | Repo   | PR / Commit                                      | Wave       |
-| --: | :----- | :----------------------------------------------- | :--------- |
-|   1 | [repo] | `feat(scope): add shared types and contracts`    | 1          |
-|   2 | [repo] | `feat(scope): implement service A and handler B` | 2 (2A, 2B) |
-|   3 | [repo] | `feat(scope): wire exports and CLI entry point`  | 3          |
+|    # | Repo   | PR / Commit                                      | Wave       |
+| ---: | :----- | :----------------------------------------------- | :--------- |
+|    1 | [repo] | `feat(scope): add shared types and contracts`    | 1          |
+|    2 | [repo] | `feat(scope): implement service A and handler B` | 2 (2A, 2B) |
+|    3 | [repo] | `feat(scope): wire exports and CLI entry point`  | 3          |
 
 ## User Review Required
 
@@ -94,13 +94,13 @@ None currently blocking.
 | Workspaces     | [`share` (per-author working copy) \| `branch` (isolated clone) \| dedicated `git worktree` \| `inherit` (read-only verifier)] |
 | Verifier ratio | [`1` verifier worker per `2-4` parallel author tracks]                                                                         |
 | Chokepoints    | [Barrel exports (`index.ts`, `lib/*.dart`, `__init__.py`) or registries isolated in Wave 1 or Wave 3]                          |
-| Model tiers    | [Capable model (`pro` / `self`) for architecture and coordination; independent quota pool (`auto`) for parallel author tracks] |
+| Model tiers    | [Pick concrete model IDs from your environment's model list: top-tier model for architecture and coordination; parallel author pool for disjoint tracks] |
 
 ## Phased Implementation Plan
 
 ### Wave 1: Foundation & Shared Contracts [Sequential]
 
-- **Model tier**: [e.g. Claude Fable 5.1 High]
+- **Model tier**: [top-tier model, picked from your environment's model list]
 
 Define shared data structures and interfaces that parallel tracks build against.
 
@@ -119,7 +119,7 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 #### Track 2A: [Subsystem / Component A]
 
 - **Depends on**: Wave 1
-- **Model tier**: [e.g. Gemini Pro Next (`auto`)]
+- **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/service_a.ext`, `tests/test_service_a.ext`
 - **Must Not Touch**: `path/to/handler_b.ext`, `path/to/index.ext`
 
@@ -134,7 +134,7 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 #### Track 2B: [Subsystem / Component B]
 
 - **Depends on**: Wave 1
-- **Model tier**: [e.g. Gemini Pro Next (`auto`)]
+- **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/handler_b.ext`, `tests/test_handler_b.ext`
 - **Must Not Touch**: `path/to/service_a.ext`, `path/to/index.ext`
 
@@ -154,7 +154,7 @@ Independent implementation tracks touching strictly disjoint file sets (`validat
 
 ### Wave 3: Integration, Exports & CLI Surface [Sequential]
 
-- **Model tier**: [e.g. Claude Fable 5.1 High]
+- **Model tier**: [top-tier model, picked from your environment's model list]
 
 Wire parallel tracks into shared chokepoint files, entry points, and documentation.
 

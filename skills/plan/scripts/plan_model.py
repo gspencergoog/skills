@@ -24,7 +24,14 @@ HEADING_RE = re.compile(r"^\s*(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
 WAVE_HEADING_RE = re.compile(
     r"^Wave\s+(?P<wave_id>[\w.-]+)\b\s*:?\s*(?P<rest>.*)$", re.IGNORECASE
 )
-TRACK_HEADING_RE = re.compile(r"^(?P<label>Track\s+[\w.-]+)\b", re.IGNORECASE)
+TRACK_HEADING_RE = re.compile(
+    r"^(?P<label>Track\s+(?:\d+[A-Za-z0-9.-]*|[A-Z](?=\s*[:\-(]|$)))",
+    re.IGNORECASE,
+)
+HEADING_VERIFICATION_RE = re.compile(
+    r"^(?:(?:track|phase)(?:\s+[\w.-]+)?\s+verification(?:\s+command)?|verification(?:\s+command)?)\s*:?\s*$",
+    re.IGNORECASE,
+)
 INLINE_PARALLEL_WAVE_RE = re.compile(
     r"^(?P<label>(?:Phase|Track)\s+[\w.-]+)\b.*?\[Parallel:\s*(?:Wave\s*)?(?P<wave_id>[\w.-]+)\]",
     re.IGNORECASE,
@@ -41,17 +48,20 @@ OPTION_RE = re.compile(
 CONSEQUENCE_SPLIT_RE = re.compile(r"\s+Consequences?:\s*", re.IGNORECASE)
 BULLET_RE = re.compile(r"^\s*[-*+]\s+(?P<text>.+?)\s*$")
 MODEL_TIER_RE = re.compile(
-    r"^\s*[-*+]?\s*\*\*Model tier\*\*\s*:?\s*(?P<tier>.+?)\s*$", re.IGNORECASE
+    r"^\s*[-*+]?\s*\*\*Model tier\s*:?\*\*\s*:?\s*(?P<tier>.+?)\s*$", re.IGNORECASE
 )
 TRACK_VERIFICATION_RE = re.compile(
-    r"\*\*(?:track|phase)\b[^*\n]*verification\b[^*\n]*\*\*\s*:?\s*(?P<cmd>.*)$",
+    r"(?:\*\*|[-*+]\s+\*\*)(?:track|phase)\b[^*\n]*verification\b[^*\n]*\*\*\s*:?\s*(?P<cmd>.*)$|"
+    r"^\s*[-*+]?\s*\*\*verification(?:\s+command)?\s*:?\*\*\s*:?\s*(?P<alt_cmd>.*)$",
     re.IGNORECASE,
 )
-FILE_ACTION_RE = re.compile(
-    r"\[(?:NEW|MODIFY|DELETE|RENAME)\]\s+(?:\[(?P<label>[^\]]+)\]\((?P<link>[^\)]+)\)|`?(?P<path>[^\s`\)]+)`?)",
+LIST_FILE_ACTION_RE = re.compile(
+    r"^\s*(?:[-*+]|\d+\.)\s+(?:\[[ xX]\]\s+)?(?:\*\*)?\[(?P<action>NEW|MODIFY|DELETE|RENAME)\](?:\*\*)?\s+"
+    r"(?:\[(?P<label>[^\]]+)\]\((?P<link>[^\)]+)\)|`?(?P<path>[^\s`\)]+)`?)",
     re.IGNORECASE,
 )
-TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+FILE_ACTION_RE = LIST_FILE_ACTION_RE
+TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
 PR_HEADING_RE = re.compile(r"\b(PRs?|Commits|PR plan)\b", re.IGNORECASE)
 NO_QUESTIONS_RE = re.compile(r"none currently blocking", re.IGNORECASE)
 VERIFIER_RE = re.compile(
@@ -105,14 +115,28 @@ class WaveInfo:
     has_verifier: bool = False
 
 
+@dataclass(frozen=True)
+class FileAction:
+    """A planned file operation parsed from a Markdown list item."""
+
+    action: str  # "NEW" | "MODIFY" | "DELETE" | "RENAME"
+    raw_path: str
+    line: int
+    wave_id: str | None = None
+    track_id: str | None = None
+
+
 @dataclass
 class TrackInfo:
     wave_id: str
     track_id: str
     model_tier: str | None = None
     files: list[str] = field(default_factory=list)
+    file_actions: list[FileAction] = field(default_factory=list)
     verification: str | None = None
+    has_verification: bool = False
     line: int = 0
+    heading_level: int = 4
     title: str = ""
 
 
@@ -130,6 +154,7 @@ class PlanDocument:
     waves: tuple[WaveInfo, ...]
     tracks: tuple[TrackInfo, ...]
     file_action_count: int
+    file_actions: tuple[FileAction, ...] = ()
 
     @property
     def is_lightweight(self) -> bool:
@@ -139,6 +164,12 @@ class PlanDocument:
     @property
     def parallel_waves(self) -> tuple[WaveInfo, ...]:
         return tuple(w for w in self.waves if w.mode == "Parallel")
+
+    @property
+    def parallel_tracks(self) -> tuple[TrackInfo, ...]:
+        """Returns tracks belonging to non-sequential waves (including inline parallel phases)."""
+        seq_waves = {w.wave_id for w in self.waves if w.mode == "Sequential"}
+        return tuple(t for t in self.tracks if t.wave_id not in seq_waves)
 
 
 def iter_non_fenced_lines(lines: list[str]) -> Iterator[tuple[int, str]]:
@@ -348,11 +379,11 @@ def _parse_decisions(
 class _WaveState:
     waves: list[WaveInfo] = field(default_factory=list)
     tracks: list[TrackInfo] = field(default_factory=list)
+    file_actions: list[FileAction] = field(default_factory=list)
     wave_id: str | None = None
     wave_level: int = 0
     wave_index: int = -1
     track: TrackInfo | None = None
-    file_actions: int = 0
 
 
 def _wave_mode(rest: str) -> str:
@@ -378,7 +409,9 @@ def _heading_title(text: str) -> str:
 
 def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> None:
     if state.wave_id is not None and level <= state.wave_level:
-        state.wave_id, state.track = None, None
+        state.wave_id, state.wave_level, state.track = None, 0, None
+    if state.track is not None and level < state.track.heading_level:
+        state.track = None
 
     inline = INLINE_PARALLEL_WAVE_RE.match(text)
     if inline:
@@ -386,10 +419,18 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
             inline.group("wave_id"),
             inline.group("label"),
             line=line_num,
+            heading_level=level,
             title=_heading_title(text),
         )
         state.tracks.append(state.track)
         return
+
+    if state.track is not None and HEADING_VERIFICATION_RE.match(text):
+        state.track.has_verification = True
+        return
+
+    if state.track is not None and level <= state.track.heading_level:
+        state.track = None
 
     wave = WAVE_HEADING_RE.match(text)
     if wave:
@@ -412,13 +453,11 @@ def _handle_heading(state: _WaveState, line_num: int, level: int, text: str) -> 
             state.wave_id,
             track.group("label"),
             line=line_num,
+            heading_level=level,
             title=_heading_title(text),
         )
         state.tracks.append(state.track)
         return
-
-    if state.track is not None and level <= 4:
-        state.track = None
 
 
 def _set_model_tier(state: _WaveState, tier: str) -> None:
@@ -437,10 +476,26 @@ def _set_wave_verifier(state: _WaveState) -> None:
             state.waves[state.wave_index] = replace(wave, has_verifier=True)
 
 
-def _handle_body_line(state: _WaveState, line: str) -> None:
-    actions = list(FILE_ACTION_RE.finditer(line))
-    state.file_actions += len(actions)
+def _extract_file_action(
+    line_num: int, line: str, wave_id: str | None, track_id: str | None
+) -> FileAction | None:
+    m = LIST_FILE_ACTION_RE.match(line)
+    if not m:
+        return None
+    raw_path = m.group("link") or m.group("path") or m.group("label") or ""
+    raw_path = raw_path.removeprefix("file://").split("#")[0].strip()
+    if not raw_path or raw_path.startswith(("http://", "https://")):
+        return None
+    return FileAction(
+        action=m.group("action").upper(),
+        raw_path=raw_path,
+        line=line_num,
+        wave_id=wave_id,
+        track_id=track_id,
+    )
 
+
+def _handle_body_line(state: _WaveState, line_num: int, line: str) -> None:
     if VERIFIER_RE.search(line):
         _set_wave_verifier(state)
 
@@ -449,16 +504,27 @@ def _handle_body_line(state: _WaveState, line: str) -> None:
         _set_model_tier(state, tier.group("tier"))
         return
 
+    eff_wave_id = state.track.wave_id if state.track is not None else state.wave_id
+    eff_track_id = state.track.track_id if state.track is not None else None
+    action = _extract_file_action(line_num, line, eff_wave_id, eff_track_id)
+    if action is not None:
+        state.file_actions.append(action)
+        if state.track is not None:
+            state.track.files.append(action.raw_path)
+            state.track.file_actions.append(action)
+
     if state.track is None:
         return
     verification = TRACK_VERIFICATION_RE.search(line)
     if verification:
-        state.track.verification = verification.group("cmd").strip().strip("`") or None
-    for m in actions:
-        path = m.group("link") or m.group("path") or m.group("label") or ""
-        path = path.removeprefix("file://").split("#")[0].strip()
-        if path and not path.startswith(("http://", "https://")):
-            state.track.files.append(path)
+        state.track.has_verification = True
+        raw_cmd = (
+            (verification.group("cmd") or verification.group("alt_cmd") or "")
+            .strip()
+            .strip("`")
+        )
+        if raw_cmd:
+            state.track.verification = raw_cmd
 
 
 def _parse_waves(lines: list[str]) -> _WaveState:
@@ -470,7 +536,7 @@ def _parse_waves(lines: list[str]) -> _WaveState:
                 state, i, len(heading.group("hashes")), heading.group("text")
             )
         else:
-            _handle_body_line(state, line)
+            _handle_body_line(state, i, line)
     return state
 
 
@@ -493,7 +559,8 @@ def parse_plan(text: str) -> PlanDocument:
         decisions=_parse_decisions(lines, sections),
         waves=tuple(wave_state.waves),
         tracks=tuple(wave_state.tracks),
-        file_action_count=wave_state.file_actions,
+        file_action_count=len(wave_state.file_actions),
+        file_actions=tuple(wave_state.file_actions),
     )
 
 

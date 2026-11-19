@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from validate_plan import NEXT_STEP_MESSAGE, PlanValidator, main
 
@@ -509,7 +510,9 @@ None.
 ## Verification Plan
 - `pytest`
 """
-        errors = [i for i in PlanValidator(inline_missing_tier).validate() if i.is_error]
+        errors = [
+            i for i in PlanValidator(inline_missing_tier).validate() if i.is_error
+        ]
         self.assertEqual(len(errors), 1)
         self.assertIn("Phase 2B", errors[0].message)
         self.assertIn("Model tier", errors[0].message)
@@ -547,7 +550,9 @@ None.
             "Plan contains parallel waves but Execution Strategy does not specify /swarm or /run-workflow orchestration.",
         )
 
-    def test_parallel_orchestration_single_wave_sequential_plan_no_warning(self) -> None:
+    def test_parallel_orchestration_single_wave_sequential_plan_no_warning(
+        self,
+    ) -> None:
         single_wave_plan = VALID_PLAN.replace(
             "### Cache Subsystem\n",
             "### Wave 1: Cache Subsystem [Sequential]\n- **Model tier**: Claude Fable 5.1 High\n",
@@ -601,6 +606,382 @@ None.
         self.assertEqual(quiet_code, 0)
         quiet_data = json.loads(quiet_buf.getvalue())
         self.assertNotIn("next_step", quiet_data)
+
+    def test_pr_table_with_narrow_gfm_separators_passes(self) -> None:
+        narrow_table_plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "| ---: | :--- | :--- |",
+            "| --: | - | :-- |",
+        )
+        issues = PlanValidator(narrow_table_plan, strict=True).validate()
+        self.assertEqual(issues, [])
+
+    def test_track_verification_subheading_and_sequential_track_exempt(self) -> None:
+        plan = VALID_PARALLEL_WAVE_PLAN.replace(
+            "### Wave 1: Foundation [Sequential]\n",
+            "### Wave 1: Foundation [Sequential]\n#### Track 1A: Substep\n",
+        )
+        plan = plan.replace(
+            "- **Model tier**: Gemini Pro Next\n"
+            "- [ ] [MODIFY] [lib/parser.py](file:///lib/parser.py)",
+            "- **Model tier:** Gemini Pro Next\n"
+            "- [ ] [MODIFY] [lib/parser.py](file:///lib/parser.py)",
+        )
+        plan = plan.replace(
+            "**Track 2A Verification**: `pytest tests/test_parser.py`",
+            "##### Track Verification\n- Run `pytest tests/test_parser.py`",
+        )
+        plan = plan.replace(
+            "**Track 2B Verification**: `pytest tests/test_lexer.py`",
+            "#### Track 2B Verification\n- Run `pytest tests/test_lexer.py`",
+        )
+        issues = PlanValidator(plan, strict=True).validate()
+        self.assertEqual(issues, [])
+
+    def test_cross_wave_new_then_modify_delete_and_rename_pass(self) -> None:
+        lib_dir = self.workspace / "lib"
+        tests_dir = self.workspace / "tests"
+        lib_dir.mkdir(parents=True)
+        tests_dir.mkdir(parents=True)
+        for name in ("types.py", "parser.py", "lexer.py"):
+            (lib_dir / name).write_text("# ok", encoding="utf-8")
+
+        created_file = lib_dir / "protocol_v2.py"
+        plan = VALID_PARALLEL_WAVE_PLAN
+        for rel in (
+            "lib/types.py",
+            "lib/parser.py",
+            "lib/lexer.py",
+            "tests/test_parser.py",
+            "tests/test_lexer.py",
+        ):
+            full = self.workspace / rel
+            plan = plan.replace(f"[{rel}](file:///{rel})", f"[{rel}](file://{full})")
+
+        cross_wave_plan = plan.replace(
+            f"- [ ] [MODIFY] [lib/types.py](file://{lib_dir / 'types.py'})\n"
+            "  - Add shared protocol types.",
+            f"- [ ] [NEW] [protocol_v2.py](file://{created_file})\n"
+            "  - Create shared protocol v2 types.",
+        ).replace(
+            f"- [ ] [MODIFY] [lib/types.py](file://{lib_dir / 'types.py'})\n"
+            "  - Export parser and lexer symbols.",
+            f"- [ ] [MODIFY] [protocol_v2.py](file://{created_file})\n"
+            "  - Export parser and lexer symbols.\n"
+            f"- [ ] [RENAME] [protocol_v2.py](file://{created_file}) -> lib/protocol.py",
+        )
+        issues = PlanValidator(
+            cross_wave_plan, workspace_dir=self.workspace, strict=True
+        ).validate()
+        self.assertEqual(issues, [])
+
+        wrong_order_plan = plan.replace(
+            f"- [ ] [MODIFY] [lib/types.py](file://{lib_dir / 'types.py'})\n"
+            "  - Add shared protocol types.",
+            f"- [ ] [MODIFY] [protocol_v2.py](file://{created_file})\n"
+            "  - Update before creation.",
+        ).replace(
+            f"- [ ] [MODIFY] [lib/types.py](file://{lib_dir / 'types.py'})\n"
+            "  - Export parser and lexer symbols.",
+            f"- [ ] [NEW] [protocol_v2.py](file://{created_file})\n"
+            "  - Create too late.",
+        )
+        wrong_errors = [
+            i
+            for i in PlanValidator(
+                wrong_order_plan, workspace_dir=self.workspace
+            ).validate()
+            if i.is_error
+        ]
+        self.assertEqual(len(wrong_errors), 1)
+        self.assertIn(
+            "File marked [MODIFY] does not exist on disk", wrong_errors[0].message
+        )
+
+    def test_rename_source_validation(self) -> None:
+        lib_dir = self.workspace / "lib"
+        lib_dir.mkdir(parents=True)
+        existing_src = lib_dir / "old_retry.py"
+        existing_src.write_text("# retry", encoding="utf-8")
+        missing_src = lib_dir / "missing_retry.py"
+
+        ok_plan = LIGHTWEIGHT_PLAN.replace(
+            "- [ ] [MODIFY] [lib/retry.py](file:///lib/retry.py)",
+            f"- [ ] [RENAME] [{existing_src}](file://{existing_src}) -> lib/retry.py",
+        )
+        self.assertEqual(
+            PlanValidator(
+                ok_plan, workspace_dir=self.workspace, strict=True
+            ).validate(),
+            [],
+        )
+
+        bad_plan = LIGHTWEIGHT_PLAN.replace(
+            "- [ ] [MODIFY] [lib/retry.py](file:///lib/retry.py)",
+            f"- [ ] [RENAME] [{missing_src}](file://{missing_src}) -> lib/retry.py",
+        )
+        errors = [
+            i
+            for i in PlanValidator(bad_plan, workspace_dir=self.workspace).validate()
+            if i.is_error
+        ]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("File marked [RENAME] does not exist on disk", errors[0].message)
+
+    def test_prose_action_tokens_ignored(self) -> None:
+        lib_dir = self.workspace / "lib"
+        lib_dir.mkdir(parents=True)
+        existing = lib_dir / "retry.py"
+        existing.write_text("# retry", encoding="utf-8")
+
+        plan = LIGHTWEIGHT_PLAN.replace(
+            "[lib/retry.py](file:///lib/retry.py)",
+            f"[lib/retry.py](file://{existing})",
+        ).replace(
+            "- Use `< max_retries` instead of `<= max_retries`.",
+            "- Do not [MODIFY] decision_1_catalogs or [DELETE] legacy_table in this step.\n"
+            "In prose, [NEW] phantom_file.py and [RENAME] ghost.py are descriptive text.",
+        )
+        validator = PlanValidator(plan, workspace_dir=self.workspace, strict=True)
+        self.assertEqual(validator.doc.file_action_count, 1)
+        self.assertEqual(validator.validate(), [])
+
+    def test_glance_question_consistency_positive_negative_and_post_decision(
+        self,
+    ) -> None:
+        consistent_open = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 1 (Q1).",
+        ).replace(
+            "None currently blocking.",
+            "### Q1: Should TTL be configurable?\n"
+            "- (Recommended) A: Yes. Consequence: flexible.\n"
+            "- B: No. Consequence: simpler.\n",
+        )
+        self.assertEqual(PlanValidator(consistent_open, strict=True).validate(), [])
+
+        post_decision = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** none. Recorded (Q1).",
+        )
+        self.assertEqual(PlanValidator(post_decision, strict=True).validate(), [])
+
+        zero_prefix = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 0 (Q1 resolved under Decisions).",
+        )
+        self.assertEqual(PlanValidator(zero_prefix, strict=True).validate(), [])
+
+        stale_none = VALID_PLAN.replace(
+            "None currently blocking.",
+            "### Q1: Should TTL be configurable?\n"
+            "- (Recommended) A: Yes. Consequence: flexible.\n"
+            "- B: No. Consequence: simpler.\n",
+        )
+        issues = PlanValidator(stale_none, strict=False).validate()
+        self.assertEqual([i for i in issues if i.is_error], [])
+        self.assertEqual(len(issues), 1)
+        self.assertIn("Decisions needed from you", issues[0].message)
+        strict_errors = [
+            i for i in PlanValidator(stale_none, strict=True).validate() if i.is_error
+        ]
+        self.assertEqual(len(strict_errors), 1)
+
+        stale_qref = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 2 (Q1, Q2).",
+        )
+        qref_issues = PlanValidator(stale_qref, strict=False).validate()
+        self.assertEqual([i for i in qref_issues if i.is_error], [])
+        self.assertEqual(len(qref_issues), 1)
+        self.assertIn("0 open questions", qref_issues[0].message)
+        self.assertEqual(
+            len(
+                [
+                    i
+                    for i in PlanValidator(stale_qref, strict=True).validate()
+                    if i.is_error
+                ]
+            ),
+            1,
+        )
+
+    def test_prose_rules_em_dash_prose_vs_code(self) -> None:
+        backticked = VALID_PLAN.replace(
+            "Add `invalidate_key()` method.",
+            "Strip inline em-dashes (`\u2014`) and double-backticked `` `\u2014` `` tokens.\n\n"
+            "```python\nX = '\u2014'\n```",
+        )
+        self.assertEqual(PlanValidator(backticked, strict=True).validate(), [])
+
+        prose_em_dash = VALID_PLAN.replace(
+            "Add `invalidate_key()` method.",
+            "Add `invalidate_key()` \u2014 invalidating `stale` entries immediately.",
+        )
+        default_issues = PlanValidator(prose_em_dash, strict=False).validate()
+        self.assertEqual([i for i in default_issues if i.is_error], [])
+        self.assertEqual(len(default_issues), 1)
+        self.assertIn("Em-dash", default_issues[0].message)
+
+        strict_issues = PlanValidator(prose_em_dash, strict=True).validate()
+        self.assertEqual(len([i for i in strict_issues if i.is_error]), 1)
+
+    def test_prose_rules_default_option_prefix_vs_legitimate_prose(self) -> None:
+        legit_default = VALID_PLAN.replace(
+            "- **Decisions needed from you:** none.",
+            "- **Decisions needed from you:** 1 (Q1).",
+        ).replace(
+            "None currently blocking.",
+            "### Q1: Should the cache be on by default?\n"
+            "- (Recommended) A: Keep the 5-minute TTL default.\n"
+            "- B: Disable by default.\n",
+        )
+        self.assertEqual(PlanValidator(legit_default, strict=True).validate(), [])
+
+        bad_default_prefix = legit_default.replace(
+            "- B: Disable by default.\n",
+            "- B: Disable by default.\n- (default) C: Use a 1-minute TTL.\n",
+        )
+        warnings = PlanValidator(bad_default_prefix, strict=False).validate()
+        self.assertEqual([i for i in warnings if i.is_error], [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("'(default)' prefix", warnings[0].message)
+
+        strict_errors = [
+            i
+            for i in PlanValidator(bad_default_prefix, strict=True).validate()
+            if i.is_error
+        ]
+        self.assertEqual(len(strict_errors), 1)
+
+    def test_repeatable_workspace_cli_and_extra_workspaces(self) -> None:
+        ws2_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ws2_dir, True)
+
+        (self.workspace / "lib").mkdir(parents=True)
+        (self.workspace / "lib/cache.py").write_text("# ws1", encoding="utf-8")
+        (ws2_dir / "pkg").mkdir(parents=True)
+        ws2_file = ws2_dir / "pkg/remote.py"
+        ws2_file.write_text("# ws2", encoding="utf-8")
+
+        multi_ws_plan = VALID_PLAN.replace(
+            "- [ ] [MODIFY] [lib/cache.py](file:///lib/cache.py)",
+            "- [ ] [MODIFY] `lib/cache.py`",
+        ).replace(
+            "- [ ] [NEW] [lib/ttl.py](file:///lib/ttl.py)",
+            f"- [ ] [MODIFY] [pkg/remote.py](file://{ws2_file})",
+        )
+        plan_file = self.workspace / "multi_plan.md"
+        plan_file.write_text(multi_ws_plan, encoding="utf-8")
+
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            code = main(
+                [
+                    str(plan_file),
+                    "--workspace",
+                    str(self.workspace),
+                    "--workspace",
+                    str(ws2_dir),
+                    "--strict",
+                ]
+            )
+        self.assertEqual(code, 0)
+
+        err_buf = io.StringIO()
+        with redirect_stderr(err_buf):
+            bad_ws_code = main(
+                [
+                    str(plan_file),
+                    "--workspace",
+                    str(self.workspace),
+                    "--workspace",
+                    str(self.workspace / "does_not_exist"),
+                ]
+            )
+        self.assertEqual(bad_ws_code, 2)
+
+    def test_out_of_workspace_parallel_track_warning_and_strict_error(self) -> None:
+        ws2_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ws2_dir, True)
+
+        (self.workspace / "lib").mkdir(parents=True)
+        (self.workspace / "tests").mkdir(parents=True)
+        (self.workspace / "lib/types.py").write_text("# types", encoding="utf-8")
+        (self.workspace / "lib/parser.py").write_text("# parser", encoding="utf-8")
+        (ws2_dir / "lib").mkdir(parents=True)
+        (ws2_dir / "tests").mkdir(parents=True)
+        (ws2_dir / "lib/lexer.py").write_text("# lexer", encoding="utf-8")
+
+        plan = (
+            VALID_PARALLEL_WAVE_PLAN.replace(
+                "[lib/types.py](file:///lib/types.py)",
+                f"[lib/types.py](file://{self.workspace / 'lib/types.py'})",
+            )
+            .replace(
+                "[lib/parser.py](file:///lib/parser.py)",
+                f"[lib/parser.py](file://{self.workspace / 'lib/parser.py'})",
+            )
+            .replace(
+                "[tests/test_parser.py](file:///tests/test_parser.py)",
+                f"[tests/test_parser.py](file://{self.workspace / 'tests/test_parser.py'})",
+            )
+            .replace(
+                "[lib/lexer.py](file:///lib/lexer.py)",
+                f"[lib/lexer.py](file://{ws2_dir / 'lib/lexer.py'})",
+            )
+            .replace(
+                "[tests/test_lexer.py](file:///tests/test_lexer.py)",
+                f"[tests/test_lexer.py](file://{self.workspace / 'tests/test_lexer.py'})",
+            )
+        )
+
+        issues = PlanValidator(
+            plan,
+            workspace_dir=self.workspace,
+            strict=False,
+            extra_workspaces=(ws2_dir,),
+        ).validate()
+        self.assertEqual([i for i in issues if i.is_error], [])
+        self.assertEqual(len(issues), 1)
+        self.assertIn("Track 2B", issues[0].message)
+        self.assertIn("outside primary workspace", issues[0].message)
+
+        strict_issues = PlanValidator(
+            plan,
+            workspace_dir=self.workspace,
+            strict=True,
+            extra_workspaces=(ws2_dir,),
+        ).validate()
+        self.assertEqual(len([i for i in strict_issues if i.is_error]), 1)
+
+    def test_relative_path_resolves_against_extra_workspaces(self) -> None:
+        ws2_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, ws2_dir, ignore_errors=True)
+        (ws2_dir / "pkg").mkdir(parents=True)
+        (ws2_dir / "pkg/remote.py").write_text("# remote", encoding="utf-8")
+
+        plan = LIGHTWEIGHT_PLAN.replace(
+            "[lib/retry.py](file:///lib/retry.py)", "`pkg/remote.py`"
+        )
+        issues = PlanValidator(
+            plan,
+            workspace_dir=self.workspace,
+            strict=True,
+            extra_workspaces=(ws2_dir,),
+        ).validate()
+        self.assertEqual(issues, [])
+
+    def test_validate_does_not_reparse_unchanged_content(self) -> None:
+        from plan_model import parse_plan as real_parse
+
+        with mock.patch("validate_plan.parse_plan", wraps=real_parse) as mock_parse:
+            validator = PlanValidator(VALID_PLAN)
+            self.assertEqual(mock_parse.call_count, 1)
+            validator.validate()
+            self.assertEqual(mock_parse.call_count, 1)
+            validator.content = LIGHTWEIGHT_PLAN
+            validator.validate()
+            self.assertEqual(mock_parse.call_count, 2)
 
 
 if __name__ == "__main__":

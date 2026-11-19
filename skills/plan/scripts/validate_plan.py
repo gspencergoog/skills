@@ -3,7 +3,7 @@
 
 Validates implementation plan markdown files for structural completeness,
 actionable details, placeholder-free content, parallel wave file disjointness,
-and file path integrity against a target workspace.
+and file path integrity against one or more target workspaces.
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ import json
 import os
 import re
 import sys
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,9 @@ from plan_model import (
     FULL_GLANCE_FIELDS,
     LIGHTWEIGHT_GLANCE_FIELDS,
     PlanDocument,
+    TrackInfo,
     find_section,
+    iter_non_fenced_lines,
     parse_plan,
     section_text,
     sentence_stats,
@@ -57,17 +59,6 @@ class ValidationIssue:
         return f"[{level}]{location} {self.message}"
 
 
-@dataclass
-class ParallelTrackSpan:
-    wave_id: str
-    track_id: str
-    heading_line: int
-    heading_level: int
-    file_actions: list[tuple[str, str, str, int]] = field(default_factory=list)
-    has_verification: bool = False
-    model_tier: str | None = None
-
-
 class PlanValidator:
     BRIEF_MAX_AVG_SENTENCE_WORDS = BRIEF_MAX_AVG_SENTENCE_WORDS
     GLANCE_MAX_WORDS = GLANCE_MAX_WORDS
@@ -96,50 +87,9 @@ class PlanValidator:
         ),
     )
 
-    # File action markers: [NEW], [MODIFY], [DELETE], [RENAME]
-    FILE_ACTION_RE = re.compile(
-        r"\[(NEW|MODIFY|DELETE|RENAME)\]\s+(?:\[(?P<label>[^\]]+)\]\((?P<link>[^\)]+)\)|`?(?P<path>[^\s`\)]+)`?)",
-        re.IGNORECASE,
-    )
-
     # Task list items with inline heading hashes (e.g. "- [ ] #### [MODIFY] ...")
     CHECKBOX_HEADING_RE = re.compile(
         r"^\s*(?:(?:[-*+]|\d+\.)\s+)?\[[ xX]\]\s+#{1,6}\s+"
-    )
-
-    # Markdown headings
-    HEADING_RE = re.compile(r"^\s*(?P<hashes>#{1,6})\s+(?P<text>.+?)\s*$")
-
-    # Wave heading: e.g. "### Wave 2: Core Implementation [Parallel]"
-    WAVE_HEADING_RE = re.compile(
-        r"^Wave\s+(?P<wave_id>[\w.-]+)\b(?P<rest>.*)$",
-        re.IGNORECASE,
-    )
-
-    # Track subheading inside a wave: e.g. "#### Track 2A: Linter"
-    TRACK_HEADING_RE = re.compile(
-        r"^(?P<label>Track\s+[\w.-]+)\b",
-        re.IGNORECASE,
-    )
-
-    # Inline parallel wave tag on a Phase or Track heading:
-    # e.g. "### Phase 2A: Core [Parallel: Wave 2]"
-    INLINE_PARALLEL_WAVE_RE = re.compile(
-        r"^(?P<label>(?:Phase|Track)\s+[\w.-]+)\b.*?\[Parallel:\s*(?:Wave\s*)?(?P<wave_id>[\w.-]+)\]",
-        re.IGNORECASE,
-    )
-
-    # Track or phase verification marker inside a parallel track
-    TRACK_VERIFICATION_RE = re.compile(
-        r"(?:\*\*|[-*+]\s+\*\*|^#+\s*)(?:track|phase)\b[^\n*]*verification\b|"
-        r"^\s*[-*+]?\s*\*\*verification(?:\s+command)?\*\*",
-        re.IGNORECASE,
-    )
-
-    # Model tier declaration inside a wave or track
-    MODEL_TIER_RE = re.compile(
-        r"^\s*[-*+]?\s*\*\*Model tier\s*:?\*\*\s*:?\s*(?P<tier>.+?)\s*$",
-        re.IGNORECASE,
     )
 
     # Placeholders that indicate incomplete plans
@@ -151,64 +101,70 @@ class PlanValidator:
         re.compile(r"\binsert code here\b", re.IGNORECASE),
     )
 
+    INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)")
+    DEFAULT_OPTION_PREFIX_RE = re.compile(
+        r"^\s*[-*+]\s+(?:\*\*|`)?(?:\(\s*default\s*\)|[A-Z](?:\*\*|`)?\s*\(\s*default\s*\)\s*:)",
+        re.IGNORECASE,
+    )
+    LEADING_NONE_OR_ZERO_RE = re.compile(r"^(?:none|0)\b", re.IGNORECASE)
+    GLANCE_QUESTION_REF_RE = re.compile(r"^[1-9]\d*\b|\bQ\d+\b", re.IGNORECASE)
+    DECISIONS_BULLET_RE = re.compile(
+        r"^\s*[-*+]\s+\*\*decisions needed from you\s*:?\s*\*\*",
+        re.IGNORECASE,
+    )
+
     def __init__(
         self,
         content: str,
         workspace_dir: Path | None = None,
         strict: bool = False,
-    ):
+        extra_workspaces: Sequence[Path] = (),
+    ) -> None:
         self.content = content
         self.lines = content.splitlines()
         self.workspace_dir = workspace_dir
+        self.extra_workspaces: tuple[Path, ...] = tuple(extra_workspaces)
         self.strict = strict
         self.issues: list[ValidationIssue] = []
+        self._parsed_content = content
         self.doc: PlanDocument = parse_plan(content)
 
     def validate(self) -> list[ValidationIssue]:
         self.issues.clear()
-        self.doc = parse_plan(self.content)
+        if self.content != self._parsed_content:
+            self.lines = self.content.splitlines()
+            self.doc = parse_plan(self.content)
+            self._parsed_content = self.content
+
         self._check_sections()
         self._check_at_a_glance()
+        self._check_glance_question_consistency()
         self._check_brief_readability()
         self._check_questions()
         self._check_pr_table()
         self._check_code_blocks()
         self._check_task_list_headings()
         self._check_placeholders()
+        self._check_prose_rules()
         self._check_file_actions()
-        waves = self._parse_parallel_tracks()
+        waves = self._parallel_waves_map()
         self._check_parallel_waves(waves)
         self._check_model_tiers(waves)
         self._check_parallel_orchestration(self.doc)
         return self.issues
 
-    def _iter_non_fenced_lines(self) -> Iterator[tuple[int, str]]:
-        """Yields (1-based line_num, line) for lines outside fenced code blocks."""
-        in_code_block = False
-        fence_char = ""
-        fence_len = 0
-
-        for i, line in enumerate(self.lines, start=1):
-            stripped = line.strip()
-            if stripped.startswith(("```", "~~~")):
-                current_char = stripped[0]
-                current_len = len(stripped) - len(stripped.lstrip(current_char))
-                if not in_code_block:
-                    in_code_block = True
-                    fence_char = current_char
-                    fence_len = current_len
-                elif current_char == fence_char and current_len >= fence_len:
-                    in_code_block = False
-                continue
-
-            if not in_code_block:
-                yield i, line
+    def _all_workspaces(self) -> tuple[Path, ...]:
+        if self.workspace_dir is None:
+            return self.extra_workspaces
+        return (self.workspace_dir, *self.extra_workspaces)
 
     def _check_sections(self) -> None:
         """Verifies that all required structural sections exist."""
         for pattern, description in self.REQUIRED_SECTION_PATTERNS:
             regex = re.compile(pattern, re.IGNORECASE)
-            found = any(regex.search(line) for _, line in self._iter_non_fenced_lines())
+            found = any(
+                regex.search(line) for _, line in iter_non_fenced_lines(self.lines)
+            )
             if not found:
                 self.issues.append(
                     ValidationIssue(
@@ -218,7 +174,7 @@ class PlanValidator:
                 )
 
     def _check_at_a_glance(self) -> None:
-        """Verifies that '## At a glance' is the first '##' section, has required fields, and is <= 180 words."""
+        """Verifies that '## At a glance' is first, has required fields, and is <= 180 words."""
         glance_section = find_section(self.doc.sections, r"^at a glance\b", level=2)
         if self.doc.at_a_glance is None or glance_section is None:
             self.issues.append(
@@ -268,6 +224,57 @@ class PlanValidator:
                         f"(max {self.GLANCE_MAX_WORDS})."
                     ),
                     line_num=glance_section.start_line,
+                )
+            )
+
+    def _glance_decisions_line(self) -> int | None:
+        section = find_section(self.doc.sections, r"^at a glance\b", level=2)
+        if section is None:
+            return None
+        for i, line in iter_non_fenced_lines(self.lines):
+            if (
+                section.start_line < i <= section.end_line
+                and self.DECISIONS_BULLET_RE.match(line)
+            ):
+                return i
+        return section.start_line
+
+    def _check_glance_question_consistency(self) -> None:
+        """Checks 'Decisions needed from you' in At a glance against Open Questions."""
+        if self.doc.at_a_glance is None:
+            return
+        raw_val = (self.doc.at_a_glance.get("decisions needed from you") or "").strip()
+        if not raw_val:
+            return
+
+        cleaned = raw_val.lstrip("`* ").strip()
+        starts_none = bool(self.LEADING_NONE_OR_ZERO_RE.match(cleaned))
+        q_count = len(self.doc.questions)
+
+        if q_count > 0 and starts_none:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=self.strict,
+                    message=(
+                        f"'## At a glance' says 'Decisions needed from you: {raw_val}' "
+                        f"but '## Open Questions' has {q_count} open question(s)."
+                    ),
+                    line_num=self._glance_decisions_line(),
+                )
+            )
+        elif (
+            q_count == 0
+            and not starts_none
+            and self.GLANCE_QUESTION_REF_RE.search(cleaned)
+        ):
+            self.issues.append(
+                ValidationIssue(
+                    is_error=self.strict,
+                    message=(
+                        f"'## At a glance' says 'Decisions needed from you: {raw_val}' "
+                        "but '## Open Questions' has 0 open questions."
+                    ),
+                    line_num=self._glance_decisions_line(),
                 )
             )
 
@@ -375,7 +382,7 @@ class PlanValidator:
 
     def _check_task_list_headings(self) -> None:
         """Flags task list items that contain inline heading hashes (e.g. '- [ ] #### Item')."""
-        for i, line in self._iter_non_fenced_lines():
+        for i, line in iter_non_fenced_lines(self.lines):
             if self.CHECKBOX_HEADING_RE.search(line):
                 self.issues.append(
                     ValidationIssue(
@@ -389,7 +396,7 @@ class PlanValidator:
 
     def _check_placeholders(self) -> None:
         """Flags unresolved placeholders (TODO, TBD, implement rest)."""
-        for i, line in self._iter_non_fenced_lines():
+        for i, line in iter_non_fenced_lines(self.lines):
             for pattern in self.SUSPICIOUS_PLACEHOLDERS:
                 if pattern.search(line):
                     self.issues.append(
@@ -400,35 +407,67 @@ class PlanValidator:
                         )
                     )
 
-    def _extract_target_path(self, match: re.Match) -> tuple[str, str]:
-        """Extracts the action and resolved path string from a match."""
-        action = match.group(1).upper()
-        link = match.group("link")
-        raw_path = match.group("path")
-        label = match.group("label")
+    def _check_prose_rules(self) -> None:
+        """Flags em-dashes outside inline/fenced code and '(default)' option prefixes."""
+        open_q = find_section(self.doc.sections, r"^open questions\b", level=2)
+        for i, line in iter_non_fenced_lines(self.lines):
+            stripped_code = self.INLINE_CODE_RE.sub("", line)
+            if "\u2014" in stripped_code:
+                self.issues.append(
+                    ValidationIssue(
+                        is_error=self.strict,
+                        message=(
+                            "Em-dash character found outside code fences; rewrite with a "
+                            "colon, comma, parentheses, or separate sentence."
+                        ),
+                        line_num=i,
+                    )
+                )
+            if (
+                open_q is not None
+                and open_q.start_line < i <= open_q.end_line
+                and self.DEFAULT_OPTION_PREFIX_RE.match(line)
+            ):
+                self.issues.append(
+                    ValidationIssue(
+                        is_error=self.strict,
+                        message=(
+                            "Option in '## Open Questions' uses '(default)' prefix; "
+                            "use '(Recommended)' instead."
+                        ),
+                        line_num=i,
+                    )
+                )
 
-        path_str = ""
-        if link:
-            path_str = link.removeprefix("file://")
-        elif raw_path:
-            path_str = raw_path
-        elif label:
-            path_str = label
+    def _resolve_action_file(self, path_str: str) -> Path:
+        """Resolves a planned file path against the primary or extra workspaces."""
+        assert self.workspace_dir is not None
+        if not os.path.isabs(path_str):
+            for ws in self._all_workspaces():
+                ws_candidate = ws / path_str
+                if ws_candidate.exists():
+                    return ws_candidate
+            return self.workspace_dir / path_str
 
-        if "#" in path_str:
-            path_str = path_str.split("#")[0]
-
-        return action, path_str.strip()
+        abs_candidate = Path(path_str)
+        if abs_candidate.exists():
+            return abs_candidate
+        abs_resolved = abs_candidate.resolve()
+        for ws in self._all_workspaces():
+            if abs_resolved.is_relative_to(ws.resolve()):
+                return abs_candidate
+        rel_subpath = path_str.lstrip("/")
+        for ws in self._all_workspaces():
+            ws_candidate = ws / rel_subpath
+            if ws_candidate.exists():
+                return ws_candidate
+        return abs_candidate
 
     def _normalize_action_path(self, path_str: str) -> str:
         """Normalizes a file path so relative and file:// links compare equal."""
         if self.workspace_dir:
             ws_resolved = self.workspace_dir.resolve()
-            candidate = (
-                Path(path_str).resolve()
-                if os.path.isabs(path_str)
-                else (ws_resolved / path_str).resolve()
-            )
+            candidate = self._resolve_action_file(path_str).resolve()
             try:
                 return candidate.relative_to(ws_resolved).as_posix()
             except ValueError:
@@ -439,181 +478,136 @@ class PlanValidator:
             cleaned = cleaned[2:]
         return cleaned.lstrip("/")
 
-    def _validate_workspace_action(
+    def _wave_order_map(self) -> dict[str, int]:
+        """Maps each wave_id to its 0-based order of first appearance."""
+        order: dict[str, int] = {}
+        for wave in self.doc.waves:
+            order.setdefault(wave.wave_id, len(order))
+        for track in self.doc.tracks:
+            order.setdefault(track.wave_id, len(order))
+        for fa in self.doc.file_actions:
+            if fa.wave_id is not None:
+                order.setdefault(fa.wave_id, len(order))
+        return order
+
+    def _validate_new_workspace_file(
         self,
-        action: str,
         path_str: str,
+        resolved_file: Path,
         line_num: int,
-        seen_actions: set[tuple[str, str]],
+        planned_new_paths: set[Path],
     ) -> None:
-        """Validates a single file action against disk when workspace_dir is configured."""
-        if not self.workspace_dir:
-            return
-
-        resolved_file = (
-            Path(path_str) if os.path.isabs(path_str) else self.workspace_dir / path_str
-        )
-
-        if action in ("MODIFY", "DELETE") and not resolved_file.exists():
+        if resolved_file.exists():
             self.issues.append(
                 ValidationIssue(
-                    is_error=True,
+                    is_error=False,
                     message=(
-                        f"File marked [{action}] does not exist on disk: '{path_str}' "
-                        f"(resolved to {resolved_file})"
+                        f"File marked [NEW] already exists on disk: '{path_str}'. "
+                        "Should this be [MODIFY] instead?"
                     ),
                     line_num=line_num,
                     file_path=path_str,
                 )
             )
-        elif action == "NEW":
-            if resolved_file.exists():
-                self.issues.append(
-                    ValidationIssue(
-                        is_error=False,
-                        message=(
-                            f"File marked [NEW] already exists on disk: '{path_str}'. "
-                            "Should this be [MODIFY] instead?"
-                        ),
-                        line_num=line_num,
-                        file_path=path_str,
-                    )
+        has_planned_parent = any(p in resolved_file.parents for p in planned_new_paths)
+        if not resolved_file.parent.exists() and not has_planned_parent:
+            self.issues.append(
+                ValidationIssue(
+                    is_error=False,
+                    message=(
+                        f"Parent directory for new file does not exist yet: "
+                        f"'{resolved_file.parent}'"
+                    ),
+                    line_num=line_num,
+                    file_path=path_str,
                 )
-            has_planned_parent = any(
-                act == "NEW" and Path(p) in resolved_file.parents
-                for act, p in seen_actions
             )
-            if not resolved_file.parent.exists() and not has_planned_parent:
+
+    def _validate_workspace_action(
+        self,
+        action: str,
+        path_str: str,
+        line_num: int,
+        planned_new_paths: set[Path],
+        planned_in_prior_wave: bool = False,
+    ) -> Path | None:
+        """Validates a single file action against disk when workspace_dir is configured."""
+        if not self.workspace_dir:
+            return None
+
+        resolved_file = self._resolve_action_file(path_str)
+        if action in ("MODIFY", "DELETE", "RENAME"):
+            if not resolved_file.exists() and not planned_in_prior_wave:
                 self.issues.append(
                     ValidationIssue(
-                        is_error=False,
+                        is_error=True,
                         message=(
-                            f"Parent directory for new file does not exist yet: "
-                            f"'{resolved_file.parent}'"
+                            f"File marked [{action}] does not exist on disk: '{path_str}' "
+                            f"(resolved to {resolved_file})"
                         ),
                         line_num=line_num,
                         file_path=path_str,
                     )
                 )
+        elif action == "NEW":
+            self._validate_new_workspace_file(
+                path_str, resolved_file, line_num, planned_new_paths
+            )
+        return resolved_file
+
+    @staticmethod
+    def _is_prior_wave(cur_wave_idx: int | None, prior_idx: int | None) -> bool:
+        return (
+            cur_wave_idx is not None
+            and prior_idx is not None
+            and prior_idx < cur_wave_idx
+        )
 
     def _check_file_actions(self) -> None:
-        """Verifies files marked [NEW], [MODIFY], [DELETE] against disk if workspace is set."""
+        """Verifies [NEW], [MODIFY], [DELETE], [RENAME] entries against disk when workspace is set."""
+        if not self.workspace_dir:
+            return
+
+        wave_order = self._wave_order_map()
         seen_actions: set[tuple[str, str]] = set()
+        earliest_new_wave: dict[str, int] = {}
+        planned_new_paths: set[Path] = set()
 
-        for i, line in self._iter_non_fenced_lines():
-            for m in self.FILE_ACTION_RE.finditer(line):
-                action, path_str = self._extract_target_path(m)
-                if not path_str or path_str.startswith(("http://", "https://")):
-                    continue
-                if (action, path_str) in seen_actions:
-                    continue
-                seen_actions.add((action, path_str))
-                self._validate_workspace_action(action, path_str, i, seen_actions)
-
-    def _handle_track_heading(
-        self,
-        line_num: int,
-        level: int,
-        text: str,
-        current_wave_id: str | None,
-        current_wave_level: int,
-        current_track: ParallelTrackSpan | None,
-        waves: dict[str, list[ParallelTrackSpan]],
-    ) -> tuple[str | None, int, ParallelTrackSpan | None]:
-        """Updates wave and track state when a Markdown heading is encountered."""
-        if current_track and level <= current_track.heading_level:
-            current_track = None
-        if current_wave_id and level <= current_wave_level:
-            current_wave_id = None
-            current_wave_level = 0
-
-        inline_match = self.INLINE_PARALLEL_WAVE_RE.match(text)
-        if inline_match:
-            wave_id = inline_match.group("wave_id")
-            track = ParallelTrackSpan(
-                wave_id=wave_id,
-                track_id=inline_match.group("label"),
-                heading_line=line_num,
-                heading_level=level,
+        for fa in self.doc.file_actions:
+            norm_path = self._normalize_action_path(fa.raw_path)
+            cur_wave_idx = wave_order.get(fa.wave_id or "")
+            in_prior_wave = self._is_prior_wave(
+                cur_wave_idx, earliest_new_wave.get(norm_path)
             )
-            waves.setdefault(wave_id, []).append(track)
-            return current_wave_id, current_wave_level, track
 
-        wave_match = self.WAVE_HEADING_RE.match(text)
-        if wave_match:
-            rest = wave_match.group("rest") or ""
-            if "sequential" in rest.lower():
-                return None, 0, None
-            return wave_match.group("wave_id"), level, None
-
-        track_match = self.TRACK_HEADING_RE.match(text)
-        if track_match and current_wave_id:
-            track = ParallelTrackSpan(
-                wave_id=current_wave_id,
-                track_id=track_match.group("label"),
-                heading_line=line_num,
-                heading_level=level,
-            )
-            waves.setdefault(current_wave_id, []).append(track)
-            return current_wave_id, current_wave_level, track
-
-        return current_wave_id, current_wave_level, current_track
-
-    def _update_track_from_line(
-        self, track: ParallelTrackSpan, line_num: int, line: str
-    ) -> None:
-        """Updates a parallel track span with model tier, verification, and file actions."""
-        tier_match = self.MODEL_TIER_RE.match(line)
-        if tier_match:
-            track.model_tier = tier_match.group("tier").strip()
-
-        if self.TRACK_VERIFICATION_RE.search(line):
-            track.has_verification = True
-
-        for m in self.FILE_ACTION_RE.finditer(line):
-            action, path_str = self._extract_target_path(m)
-            if not path_str or path_str.startswith(("http://", "https://")):
-                continue
-            norm_path = self._normalize_action_path(path_str)
-            track.file_actions.append((action, path_str, norm_path, line_num))
-
-    def _parse_parallel_tracks(self) -> dict[str, list[ParallelTrackSpan]]:
-        """Groups parallel tracks by wave_id across non-fenced Markdown lines."""
-        waves: dict[str, list[ParallelTrackSpan]] = {}
-        current_wave_id: str | None = None
-        current_wave_level = 0
-        current_track: ParallelTrackSpan | None = None
-
-        for i, line in self._iter_non_fenced_lines():
-            heading_match = self.HEADING_RE.match(line)
-            if heading_match:
-                level = len(heading_match.group("hashes"))
-                text = heading_match.group("text")
-                current_wave_id, current_wave_level, current_track = (
-                    self._handle_track_heading(
-                        i,
-                        level,
-                        text,
-                        current_wave_id,
-                        current_wave_level,
-                        current_track,
-                        waves,
-                    )
+            if (fa.action, norm_path) not in seen_actions:
+                seen_actions.add((fa.action, norm_path))
+                resolved = self._validate_workspace_action(
+                    fa.action, fa.raw_path, fa.line, planned_new_paths, in_prior_wave
                 )
-            elif current_track is not None:
-                self._update_track_from_line(current_track, i, line)
+                if fa.action == "NEW" and resolved is not None:
+                    planned_new_paths.add(resolved)
 
+            if fa.action == "NEW" and cur_wave_idx is not None:
+                earliest_new_wave[norm_path] = min(
+                    earliest_new_wave.get(norm_path, cur_wave_idx), cur_wave_idx
+                )
+
+    def _parallel_waves_map(self) -> dict[str, list[TrackInfo]]:
+        """Groups non-sequential tracks from plan_model by wave_id."""
+        waves: dict[str, list[TrackInfo]] = {}
+        for track in self.doc.parallel_tracks:
+            waves.setdefault(track.wave_id, []).append(track)
         return waves
 
-    def _check_wave_collisions(
-        self, wave_id: str, tracks: list[ParallelTrackSpan]
-    ) -> None:
+    def _check_wave_collisions(self, wave_id: str, tracks: Sequence[TrackInfo]) -> None:
         """Flags file paths modified by multiple parallel tracks in the same wave."""
         first_seen: dict[str, tuple[str, int, str]] = {}
 
         for track in tracks:
             seen_in_track: set[str] = set()
-            for _, raw_path, norm_path, line_num in track.file_actions:
+            for fa in track.file_actions:
+                norm_path = self._normalize_action_path(fa.raw_path)
                 if norm_path in seen_in_track:
                     continue
                 seen_in_track.add(norm_path)
@@ -624,19 +618,19 @@ class PlanValidator:
                         ValidationIssue(
                             is_error=True,
                             message=(
-                                f"Parallel file collision in Wave {wave_id}: '{raw_path}' "
+                                f"Parallel file collision in Wave {wave_id}: '{fa.raw_path}' "
                                 f"is touched by both {prev_track} (line {prev_line}) and "
-                                f"{track.track_id} (line {line_num}). Isolate shared "
+                                f"{track.track_id} (line {fa.line}). Isolate shared "
                                 "chokepoint files into a sequential wave."
                             ),
-                            line_num=line_num,
-                            file_path=raw_path,
+                            line_num=fa.line,
+                            file_path=fa.raw_path,
                         )
                     )
                 else:
-                    first_seen[norm_path] = (track.track_id, line_num, raw_path)
+                    first_seen[norm_path] = (track.track_id, fa.line, fa.raw_path)
 
-    def _check_track_verifications(self, tracks: list[ParallelTrackSpan]) -> None:
+    def _check_track_verifications(self, tracks: Sequence[TrackInfo]) -> None:
         """Warns (or errors in strict mode) when a parallel track lacks verification."""
         for track in tracks:
             if track.file_actions and not track.has_verification:
@@ -647,28 +641,60 @@ class PlanValidator:
                             f"Parallel track '{track.track_id}' in Wave {track.wave_id} "
                             f"is missing a track verification command (e.g. '**{track.track_id} Verification**:')."
                         ),
-                        line_num=track.heading_line,
+                        line_num=track.line,
                     )
                 )
 
-    def _check_parallel_waves(
-        self, waves: dict[str, list[ParallelTrackSpan]] | None = None
+    def _check_out_of_workspace_parallel_edits(
+        self, wave_id: str, tracks: Sequence[TrackInfo]
     ) -> None:
-        """Validates intra-wave file disjointness and per-track verification."""
+        """Warns when a multi-track parallel wave edits a path outside primary workspace_dir."""
+        if not self.workspace_dir:
+            return
+
+        ws_resolved = self.workspace_dir.resolve()
+        for track in tracks:
+            seen_in_track: set[str] = set()
+            for fa in track.file_actions:
+                norm_path = self._normalize_action_path(fa.raw_path)
+                if norm_path in seen_in_track:
+                    continue
+                seen_in_track.add(norm_path)
+
+                resolved = self._resolve_action_file(fa.raw_path).resolve()
+                if not resolved.is_relative_to(ws_resolved):
+                    self.issues.append(
+                        ValidationIssue(
+                            is_error=self.strict,
+                            message=(
+                                f"Parallel track '{track.track_id}' in Wave {wave_id} modifies "
+                                f"'{fa.raw_path}' outside primary workspace '{ws_resolved}' "
+                                "(swarm workspace 'share' only isolates the primary repository)."
+                            ),
+                            line_num=fa.line,
+                            file_path=fa.raw_path,
+                        )
+                    )
+
+    def _check_parallel_waves(
+        self, waves: dict[str, list[TrackInfo]] | None = None
+    ) -> None:
+        """Validates intra-wave file disjointness, verification, and primary-repo scope."""
         if waves is None:
-            waves = self._parse_parallel_tracks()
+            waves = self._parallel_waves_map()
         for wave_id, tracks in waves.items():
             if len(tracks) < 2:
                 continue
             self._check_wave_collisions(wave_id, tracks)
             self._check_track_verifications(tracks)
+            self._check_out_of_workspace_parallel_edits(wave_id, tracks)
 
     def _check_model_tiers(
-        self, waves: dict[str, list[ParallelTrackSpan]] | None = None
+        self, waves: dict[str, list[TrackInfo]] | None = None
     ) -> None:
         """Errors when a parallel track is missing a '**Model tier**' line."""
         if waves is None:
-            waves = self._parse_parallel_tracks()
+            waves = self._parallel_waves_map()
         for tracks in waves.values():
             for track in tracks:
                 if not track.model_tier:
@@ -679,7 +705,7 @@ class PlanValidator:
                                 f"Parallel track '{track.track_id}' in Wave {track.wave_id} "
                                 "is missing a '**Model tier**:' line."
                             ),
-                            line_num=track.heading_line,
+                            line_num=track.line,
                         )
                     )
 
@@ -718,9 +744,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--workspace",
+        action="append",
         type=str,
         default=None,
-        help="Path to the repository root to verify file paths against disk.",
+        help=(
+            "Path to a repository root to verify file paths against disk "
+            "(repeatable; the first is the primary workspace)."
+        ),
     )
     parser.add_argument(
         "--strict",
@@ -779,7 +809,7 @@ def _print_human_results(
 
 
 def _resolve_workspace_dir(workspace: str | None) -> tuple[Path | None, bool]:
-    """Resolves and validates the workspace directory path."""
+    """Resolves and validates a single workspace directory path."""
     if not workspace:
         return None, True
     workspace_dir = Path(workspace).resolve()
@@ -790,6 +820,25 @@ def _resolve_workspace_dir(workspace: str | None) -> tuple[Path | None, bool]:
         )
         return None, False
     return workspace_dir, True
+
+
+def _resolve_workspace_dirs(
+    workspaces: Sequence[str] | str | None,
+) -> tuple[Path | None, tuple[Path, ...], bool]:
+    """Resolves primary and extra workspace directories from CLI arguments."""
+    if not workspaces:
+        return None, (), True
+    raw_items = [workspaces] if isinstance(workspaces, str) else list(workspaces)
+    resolved: list[Path] = []
+    for item in raw_items:
+        ws_dir, ok = _resolve_workspace_dir(item)
+        if not ok:
+            return None, (), False
+        if ws_dir is not None:
+            resolved.append(ws_dir)
+    if not resolved:
+        return None, (), True
+    return resolved[0], tuple(resolved[1:]), True
 
 
 def _print_json_results(
@@ -820,7 +869,7 @@ def main(argv: list[str] | None = None) -> int:
     if content is None:
         return 2
 
-    workspace_dir, valid_ws = _resolve_workspace_dir(args.workspace)
+    workspace_dir, extra_workspaces, valid_ws = _resolve_workspace_dirs(args.workspace)
     if not valid_ws:
         return 2
 
@@ -828,6 +877,7 @@ def main(argv: list[str] | None = None) -> int:
         content=content,
         workspace_dir=workspace_dir,
         strict=args.strict,
+        extra_workspaces=extra_workspaces,
     )
     issues = validator.validate()
 

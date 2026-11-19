@@ -39,12 +39,12 @@ flowchart TD
 
 ### PRs
 
-|   # | Repo     | PR / Commit                                                 | Companion PR   | Wave   |
-| --: | :------- | :---------------------------------------------------------- | :------------- | :----- |
-|   1 | [repo-a] | `feat(contracts): add v2 adapter and shared types`          | None           | 1      |
-|   2 | [repo-a] | `feat(pkg-a): migrate package A to v2 contract`             | `[repo-b]#142` | 2 (2A) |
-|   3 | [repo-a] | `feat(pkg-b): migrate package B to v2 contract`             | None           | 2 (2B) |
-|   4 | [repo-a] | `refactor(exports): cut over public API and remove v1 shim` | `[repo-b]#143` | 3      |
+|    # | Repo     | PR / Commit                                                 | Companion PR   | Wave   |
+| ---: | :------- | :---------------------------------------------------------- | :------------- | :----- |
+|    1 | [repo-a] | `feat(contracts): add v2 adapter and shared types`          | None           | 1      |
+|    2 | [repo-a] | `feat(pkg-a): migrate package A to v2 contract`             | `[repo-b]#142` | 2 (2A) |
+|    3 | [repo-a] | `feat(pkg-b): migrate package B to v2 contract`             | None           | 2 (2B) |
+|    4 | [repo-a] | `refactor(exports): cut over public API and remove v1 shim` | `[repo-b]#143` | 3      |
 
 ## User Review Required
 
@@ -82,13 +82,15 @@ None currently blocking.
 
 ### Execution Strategy & Parallel Verification Matrix
 
-| Wave / Track        | Execution Mode    | Orchestrator / Role                         | Model Tier               | Workspace Isolation                | Owned Files / Scope                            | Verification Gate                          |
-| :------------------ | :---------------- | :------------------------------------------ | :----------------------- | :--------------------------------- | :--------------------------------------------- | :----------------------------------------- |
-| **Wave 1**          | Sequential        | Coordinator / Single Agent                  | Claude Fable 5.1 High    | Primary workspace or base worktree | Shared interfaces & shims                      | `[Wave 1 typecheck + compatibility suite]` |
-| **Track 2A**        | Parallel (Wave 2) | `/swarm` author (`pkg-a`)                   | Gemini Pro Next (`auto`) | `workspace: "share"`               | `packages/pkg_a/**`                            | `[Track 2A unit tests + linter]`           |
-| **Track 2B**        | Parallel (Wave 2) | `/swarm` author (`pkg-b`)                   | Gemini Pro Next (`auto`) | `workspace: "share"`               | `packages/pkg_b/**`                            | `[Track 2B unit tests + linter]`           |
-| **Wave 2 Verifier** | Parallel Critic   | `/swarm` `verifier` (`1` per `2-4` authors) | Claude Fable 5.1 High    | `workspace: "inherit"` (read-only) | Audits Track 2A & 2B diffs and file bounds     | `[Wave 2 cross-package integration gate]`  |
-| **Wave 3**          | Sequential        | Coordinator / Single Agent                  | Claude Fable 5.1 High    | Primary workspace or merged branch | Barrel exports, `CHANGELOG.md`, legacy removal | `[Full repo regression + code-review]`     |
+Pick concrete model IDs for each tier from your environment's model list.
+
+| Wave / Track        | Execution Mode    | Orchestrator / Role                         | Model Tier              | Workspace Isolation                | Owned Files / Scope                            | Verification Gate                          |
+| :------------------ | :---------------- | :------------------------------------------ | :---------------------- | :--------------------------------- | :--------------------------------------------- | :----------------------------------------- |
+| **Wave 1**          | Sequential        | Coordinator / Single Agent                  | `[top-tier model]`      | Primary workspace or base worktree | Shared interfaces & shims                      | `[Wave 1 typecheck + compatibility suite]` |
+| **Track 2A**        | Parallel (Wave 2) | `/swarm` author (`pkg-a`)                   | `[parallel author pool]` | `workspace: "share"`               | `packages/pkg_a/**`                            | `[Track 2A unit tests + linter]`           |
+| **Track 2B**        | Parallel (Wave 2) | `/swarm` author (`pkg-b`)                   | `[parallel author pool]` | `workspace: "share"`               | `packages/pkg_b/**`                            | `[Track 2B unit tests + linter]`           |
+| **Wave 2 Verifier** | Parallel Critic   | `/swarm` `verifier` (`1` per `2-4` authors) | `[top-tier model]`      | `workspace: "inherit"` (read-only) | Audits Track 2A & 2B diffs and file bounds     | `[Wave 2 cross-package integration gate]`  |
+| **Wave 3**          | Sequential        | Coordinator / Single Agent                  | `[top-tier model]`      | Primary workspace or merged branch | Barrel exports, `CHANGELOG.md`, legacy removal | `[Full repo regression + code-review]`     |
 
 ### Interface & Schema Specifications
 
@@ -100,7 +102,7 @@ None currently blocking.
 
 ### Wave 1: Compatibility Shims & Shared Contracts [Sequential]
 
-- **Model tier**: [e.g. Claude Fable 5.1 High]
+- **Model tier**: [top-tier model, picked from your environment's model list]
 
 Introduce non-breaking abstractions, backward-compatibility shims, and shared interfaces so Wave 2 tracks can run in parallel without editing shared files.
 
@@ -120,7 +122,7 @@ Implement the new subsystems and migrate independent packages or modules concurr
 #### Track 2A: [Package A / Subsystem A]
 
 - **Depends on**: Wave 1
-- **Model tier**: [e.g. Gemini Pro Next (`auto`)]
+- **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/subsystem_a.ext`, `tests/test_subsystem_a.ext`
 - **Must Not Touch**: `path/to/subsystem_b.ext`, `path/to/exports.ext`, `CHANGELOG.md`
 
@@ -134,7 +136,7 @@ Implement the new subsystems and migrate independent packages or modules concurr
 #### Track 2B: [Package B / Subsystem B]
 
 - **Depends on**: Wave 1
-- **Model tier**: [e.g. Gemini Pro Next (`auto`)]
+- **Model tier**: [parallel author pool, picked from your environment's model list]
 - **Owns**: `path/to/subsystem_b.ext`, `tests/test_subsystem_b.ext`
 - **Must Not Touch**: `path/to/subsystem_a.ext`, `path/to/exports.ext`, `CHANGELOG.md`
 
@@ -154,7 +156,7 @@ Implement the new subsystems and migrate independent packages or modules concurr
 
 ### Wave 3: Cutover, Chokepoint Wiring & Cleanup [Sequential]
 
-- **Model tier**: [e.g. Claude Fable 5.1 High]
+- **Model tier**: [top-tier model, picked from your environment's model list]
 
 Wire public barrel exports, remove legacy shims, and update documentation and changelogs once all Wave 2 tracks have merged.
 
