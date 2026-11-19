@@ -57,7 +57,7 @@ Apply specific standards when reviewing tests for libraries, SDKs, or web interf
 
 ## Generative AI and deterministic verification
 
-AI-generated tests can create a coverage illusion by asserting current code behavior—including existing bugs—rather than the actual business requirements.
+AI-generated tests can create a coverage illusion by asserting current code behavior, including existing bugs, rather than the actual business requirements.
 
 Use a structured workflow for AI-assisted tests:
 

@@ -26,10 +26,10 @@ import argparse
 import json
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 _CONTEXT_INDEXER_SCRIPTS = str(
     Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
@@ -40,7 +40,13 @@ if _CONTEXT_INDEXER_SCRIPTS not in sys.path:
 import diff_weight
 from stage_diffs import _extract_file_name, _split_into_file_diffs
 
-DOC_TYPES = ("normative-spec", "design", "blueprint", "reference-doc")
+DOC_TYPES = (
+    "normative-spec",
+    "design",
+    "blueprint",
+    "agent-instructions",
+    "reference-doc",
+)
 PROSE_EXTENSIONS = (".md", ".rst", ".adoc", ".txt")
 SNIFF_BYTES = 8192
 
@@ -48,8 +54,22 @@ RUBRICS = {
     "normative-spec": "references/rubrics/normative_specs.md",
     "design": "references/rubrics/design_docs.md",
     "blueprint": "references/rubrics/blueprints.md",
+    "agent-instructions": "references/rubrics/agent_instructions.md",
     "reference-doc": "references/rubrics/reference_docs.md",
 }
+
+_AGENT_INSTRUCTION_FILES = frozenset(
+    {
+        "skill.md",
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        ".cursorrules",
+        ".clinerules",
+        ".windsurfrules",
+    }
+)
+_AGENT_INSTRUCTION_DIRS = frozenset({"rules", "policies", "prompts", "agents"})
 
 _FRONTMATTER = re.compile(r"\A---\r?\n(.*?)\r?\n---\r?\n", re.DOTALL)
 _BLUEPRINT_TYPE = re.compile(
@@ -118,6 +138,29 @@ def _is_normative_prose(path: PurePosixPath, content: str) -> bool:
     return keyword_lines >= 3
 
 
+def _has_dir_sequence(parts_lower: list[str], sequence: tuple[str, ...]) -> bool:
+    """Returns whether `sequence` appears as contiguous directory segments."""
+    span = len(sequence)
+    return any(
+        tuple(parts_lower[i : i + span]) == sequence
+        for i in range(len(parts_lower) - span + 1)
+    )
+
+
+def _is_agent_instructions(path: PurePosixPath, content: str) -> bool:
+    """Returns whether `path` is an executable agent-instruction document."""
+    del content  # Path-only rule.
+    name_lower = path.name.lower()
+    if name_lower in _AGENT_INSTRUCTION_FILES:
+        return True
+    if path.suffix.lower() not in (".md", ".mdx"):
+        return False
+    dir_parts = [part.lower() for part in path.parts[:-1]]
+    if any(part in _AGENT_INSTRUCTION_DIRS for part in dir_parts):
+        return True
+    return _has_dir_sequence(dir_parts, (".github", "instructions"))
+
+
 def _is_changelog(path: PurePosixPath, content: str) -> bool:
     del content  # Path-only rule.
     return path.name.upper().startswith("CHANGELOG")
@@ -125,6 +168,7 @@ def _is_changelog(path: PurePosixPath, content: str) -> bool:
 
 RULES: tuple[Rule, ...] = (
     Rule("blueprint-frontmatter-or-name", "blueprint", _is_blueprint),
+    Rule("agent-instructions-path", "agent-instructions", _is_agent_instructions),
     Rule("json-schema", "normative-spec", _is_schema),
     Rule("design-headings-or-dir", "design", _is_design),
     Rule("rfc2119-keywords-or-spec-dir", "normative-spec", _is_normative_prose),
@@ -134,14 +178,21 @@ RULES: tuple[Rule, ...] = (
 
 
 def is_document_eligible(path: str, content: str | None = None) -> bool:
-    """Returns True if the file can be classified as a document.
+    """Returns whether `path` can be classified as a document.
 
-    Prose files are always eligible. JSON files are eligible only when they
-    are JSON Schema documents: named *.schema.json, or declaring a
-    json-schema.org meta-schema in their "$schema" key.
+    Prose files (`.md`, `.rst`, `.adoc`, `.txt`), paths matching the
+    agent-instructions rule (including `.cursorrules`, `.clinerules`,
+    `.windsurfrules`, and `.mdx` under agent-instruction directories), and
+    JSON Schema documents (`*.schema.json` or `.json` files declaring a
+    json-schema.org meta-schema) are eligible. Other `.mdx` files stay `code`.
     """
-    name = PurePosixPath(path).name.lower()
-    if name.endswith(PROSE_EXTENSIONS) or name.endswith(".schema.json"):
+    pure = PurePosixPath(path.replace("\\", "/"))
+    name = pure.name.lower()
+    if (
+        _is_agent_instructions(pure, "")
+        or name.endswith(PROSE_EXTENSIONS)
+        or name.endswith(".schema.json")
+    ):
         return True
     return name.endswith(".json") and bool(_JSON_SCHEMA_META.search(content or ""))
 
@@ -167,6 +218,7 @@ RING_LEVELS: dict[int, tuple[str, list[str]]] = {
 }
 
 PANEL_MIN_LINES = 225
+RISK_ESCALATION_MIN_LINES = 350
 FOCUS_MIN_LINES = 400
 
 _CI_DIRS = frozenset({".github", ".gitlab", ".circleci", ".buildkite", "jenkins"})
@@ -295,94 +347,287 @@ _PACKAGE_MANIFESTS = frozenset(
 )
 
 
+_NATIVE_CORE_SUFFIXES = (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs")
+_NATIVE_CORE_DIRS = frozenset({"engine", "native", "runtime", "vm", "core"})
+_PACKAGE_ROOT_ENTRYPOINTS = frozenset(
+    {"index.ts", "index.js", "public-api.ts", "mod.ts"}
+)
+_TEST_FILE_SUFFIXES = (
+    "_test.dart",
+    "_test.py",
+    "_test.go",
+    ".test.ts",
+    ".test.js",
+    ".spec.ts",
+    ".spec.js",
+)
+
+_RISK_SIGNAL_ORDER: tuple[str, ...] = (
+    "concurrency-or-locks",
+    "auth-or-trust-boundary",
+    "schema-or-sql",
+    "subprocess-or-ci-permissions",
+    "retry-or-state-machine",
+)
+_AUTH_PATH_SEGMENTS = frozenset(
+    {"auth", "authn", "authz", "oauth", "oauth2", "rbac", "acl", "jwt", "security"}
+)
+_SCHEMA_PATH_SEGMENTS = frozenset({"migrations", "migration", "alembic"})
+_SCHEMA_FILE_SUFFIXES = (".sql", ".prisma", ".graphql")
+_PROSE_RISK_SKIP_SUFFIXES = (".md", ".mdx", ".rst", ".adoc", ".txt")
+
+_RISK_CODE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "concurrency-or-locks",
+        re.compile(
+            r"\b(?:threading\.(?:Lock|RLock|Semaphore|Condition|Event|Barrier|Thread)"
+            r"|multiprocessing\.(?:Lock|RLock|Queue|Pool|Process|Manager)"
+            r"|asyncio\.(?:Lock|Semaphore|Event|Condition|Barrier|gather|TaskGroup|create_task)"
+            r"|fcntl\.flock|msvcrt\.locking|filelock"
+            r"|Mutex|RwLock|ReentrantLock|synchronized|CountDownLatch"
+            r"|Atomic(?:Integer|Long|Bool|Reference)"
+            r"|std::(?:mutex|lock_guard|unique_lock|shared_mutex|atomic)"
+            r"|sync\.(?:Mutex|RWMutex|WaitGroup)|pthread_mutex"
+            r"|Isolate\.spawn|ReceivePort"
+            r"|acquire_lock|release_lock|with_lock"
+            r"|BEGIN\s+(?:IMMEDIATE|EXCLUSIVE))\b"
+        ),
+    ),
+    (
+        "auth-or-trust-boundary",
+        re.compile(
+            r"\b(?:jwt\.(?:encode|decode|verify)|PyJWT|jsonwebtoken|OAuth2"
+            r"|verify_token|validate_token|check_permission|has_permission"
+            r"|require_auth|authenticate_user|authorize_request"
+            r"|hmac\.compare_digest|secrets\.compare_digest"
+            r"|bcrypt|scrypt|argon2|pbkdf2|hashlib\.pbkdf2_hmac"
+            r"|ssl\.create_default_context|CERT_NONE|check_hostname\s*=\s*False"
+            r"|Access-Control-Allow-Origin|Content-Security-Policy"
+            r"|Set-Cookie|HttpOnly|SameSite|csrf_token|xsrf)\b"
+        ),
+    ),
+    (
+        "schema-or-sql",
+        re.compile(
+            r"\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:TABLE|INDEX|VIEW|TRIGGER|MACRO)"
+            r"|ALTER\s+TABLE|DROP\s+(?:TABLE|INDEX|COLUMN)"
+            r"|INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM"
+            r"|PRAGMA\s+\w+"
+            r"|sqlite3\.connect|duckdb\.connect"
+            r"|op\.(?:add_column|drop_column|create_table|alter_column)"
+            r"|SCHEMA_VERSION|MIGRATION_VERSION|migrate_schema)\b"
+        ),
+    ),
+    (
+        "subprocess-or-ci-permissions",
+        re.compile(
+            r"(?:\b(?:subprocess\.(?:run|Popen|call|check_call|check_output)"
+            r"|os\.(?:system|popen|exec\w*|spawn\w*)|pty\.spawn"
+            r"|asyncio\.create_subprocess_(?:exec|shell)"
+            r"|child_process|execSync|spawnSync|execFile(?:Sync)?"
+            r"|Process\.(?:run|runSync|start)|Command::new|exec\.Command)\b"
+            r"|shell\s*=\s*True)"
+        ),
+    ),
+    (
+        "retry-or-state-machine",
+        re.compile(
+            r"\b(?:exponential_backoff|backoff_seconds|backoff_delay"
+            r"|retry_after|max_retries|retry_count|retry_delay|with_retry"
+            r"|RetryPolicy|BackoffPolicy|tenacity\.retry"
+            r"|state_machine|StateMachine|VALID_TRANSITIONS|STATE_TRANSITIONS"
+            r"|allowed_transitions|transition_to|circuit_breaker|CircuitBreaker"
+            r"|idempotency_key|dead_letter)\b"
+        ),
+    ),
+)
+_CI_PERMISSION_LINE_RE = re.compile(
+    r"^\s*(?:permissions:|pull_request_target\b"
+    r"|id-token:\s*write|contents:\s*write|packages:\s*write"
+    r"|security-events:\s*write|write-all\b)"
+)
+
+
+def _is_ring0_private(parts_lower: list[str], name_lower: str) -> str | None:
+    """Returns a Ring 0 rule name if the path is private, scratch, or a dotfile."""
+    dir_parts = parts_lower[:-1]
+    if any(part in _SCRATCH_DIRS for part in dir_parts):
+        return "scratch-or-sandbox"
+    if any(tag in name_lower for tag in (".scratch.", ".local.", ".private.")):
+        return "scratch-or-private-file"
+    if any(part in _DOTFILE_DIRS for part in dir_parts) or name_lower in _DOTFILE_NAMES:
+        return "personal-dotfiles"
+    if (
+        name_lower.startswith(".")
+        and not any(part in _CI_DIRS for part in parts_lower)
+        and not name_lower.startswith(_TOOL_CONFIG_PREFIXES)
+    ):
+        return "dotfile"
+    return None
+
+
+def _is_ring4_engine(parts_lower: list[str], name_lower: str) -> str | None:
+    """Returns a Ring 4 rule name if the path belongs to a core engine or runtime."""
+    dir_parts = parts_lower[:-1]
+    if any(part in _ENGINE_DIRS for part in dir_parts):
+        return "core-engine-or-runtime"
+    if any(part in _NATIVE_DIRS for part in dir_parts):
+        return "native-or-ffi-plumbing"
+    if name_lower.endswith(_NATIVE_CORE_SUFFIXES) and any(
+        part in _NATIVE_CORE_DIRS for part in parts_lower
+    ):
+        return "native-core-code"
+    return None
+
+
+def _is_ring3_contract(
+    pure: PurePosixPath, parts_lower: list[str], name_lower: str
+) -> str | None:
+    """Returns a Ring 3 rule name if the path is a public contract or library surface."""
+    dir_parts = parts_lower[:-1]
+    if any(part in _SCHEMA_DIRS for part in dir_parts) or name_lower.endswith(
+        (".proto", ".schema.json")
+    ):
+        return "schema-or-protocol-contract"
+    if name_lower in _PACKAGE_MANIFESTS:
+        return "package-manifest-or-api-surface"
+    if any(part in _PUBLIC_EXPORT_DIRS for part in dir_parts):
+        return "public-export-directory"
+    if (
+        len(pure.parts) == 2
+        and pure.parts[0].lower() == "lib"
+        and name_lower.endswith(".dart")
+    ):
+        return "dart-library-entrypoint"
+    if name_lower in _PACKAGE_ROOT_ENTRYPOINTS and len(pure.parts) <= 2:
+        return "package-root-entrypoint"
+    return None
+
+
+def _is_ring1_tooling(parts_lower: list[str], name_lower: str) -> str | None:
+    """Returns a Ring 1 rule name if the path is CI, tooling, test, or repo metadata."""
+    dir_parts = parts_lower[:-1]
+    if any(part in _CI_DIRS for part in dir_parts) or name_lower in _CI_FILES:
+        return "ci-workflow-or-pipeline"
+    if name_lower in _TOOL_CONFIG_FILES or name_lower.startswith(_TOOL_CONFIG_PREFIXES):
+        return "build-or-linter-config"
+    if any(part in _TOOL_SCRIPT_DIRS for part in dir_parts):
+        return "repo-tooling-or-scripts"
+    if (
+        any(part in _TEST_DIRS for part in dir_parts)
+        or name_lower.startswith("test_")
+        or name_lower.endswith(_TEST_FILE_SUFFIXES)
+    ):
+        return "test-suite-or-fixture"
+    if name_lower in _REPO_META_FILES:
+        return "repo-documentation"
+    return None
+
+
 def classify_file_ring(path: str) -> tuple[int, str]:
     """Classifies a single file into a reuse ring (0 to 4) and reason rule."""
     pure = PurePosixPath(path.replace("\\", "/"))
     parts_lower = [p.lower() for p in pure.parts]
     name_lower = pure.name.lower()
 
-    # 1. Scratch / Private / Personal (Ring 0)
-    if any(part in _SCRATCH_DIRS for part in parts_lower[:-1]):
-        return 0, "scratch-or-sandbox"
-    if (
-        ".scratch." in name_lower
-        or ".local." in name_lower
-        or ".private." in name_lower
-    ):
-        return 0, "scratch-or-private-file"
-    if (
-        any(part in _DOTFILE_DIRS for part in parts_lower[:-1])
-        or name_lower in _DOTFILE_NAMES
-    ):
-        return 0, "personal-dotfiles"
-    if (
-        name_lower.startswith(".")
-        and not any(part in _CI_DIRS for part in parts_lower)
-        and not any(name_lower.startswith(p) for p in _TOOL_CONFIG_PREFIXES)
-    ):
-        return 0, "dotfile"
-
-    # 2. Core Engine / Runtimes / Compilers (Ring 4)
-    if any(part in _ENGINE_DIRS for part in parts_lower[:-1]):
-        return 4, "core-engine-or-runtime"
-    if any(part in _NATIVE_DIRS for part in parts_lower[:-1]):
-        return 4, "native-or-ffi-plumbing"
-    if name_lower.endswith((".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".rs")) and any(
-        part in ("engine", "native", "runtime", "vm", "core") for part in parts_lower
-    ):
-        return 4, "native-core-code"
-
-    # 3. Shared Libraries, SDKs & Public Contracts (Ring 3)
-    if any(part in _SCHEMA_DIRS for part in parts_lower[:-1]) or name_lower.endswith(
-        (".proto", ".schema.json")
-    ):
-        return 3, "schema-or-protocol-contract"
-    if name_lower in _PACKAGE_MANIFESTS:
-        return 3, "package-manifest-or-api-surface"
-    if any(part in _PUBLIC_EXPORT_DIRS for part in parts_lower[:-1]):
-        return 3, "public-export-directory"
-    if (
-        len(pure.parts) == 2
-        and pure.parts[0].lower() == "lib"
-        and name_lower.endswith(".dart")
-    ):
-        return 3, "dart-library-entrypoint"
-    if (
-        name_lower in ("index.ts", "index.js", "public-api.ts", "mod.ts")
-        and len(pure.parts) <= 2
-    ):
-        return 3, "package-root-entrypoint"
-
-    # 4. Tooling, CI, Tests & Meta (Ring 1)
-    if any(part in _CI_DIRS for part in parts_lower[:-1]) or name_lower in _CI_FILES:
-        return 1, "ci-workflow-or-pipeline"
-    if name_lower in _TOOL_CONFIG_FILES or any(
-        name_lower.startswith(p) for p in _TOOL_CONFIG_PREFIXES
-    ):
-        return 1, "build-or-linter-config"
-    if any(part in _TOOL_SCRIPT_DIRS for part in parts_lower[:-1]):
-        return 1, "repo-tooling-or-scripts"
-    if (
-        any(part in _TEST_DIRS for part in parts_lower[:-1])
-        or name_lower.startswith("test_")
-        or name_lower.endswith(
-            (
-                "_test.dart",
-                "_test.py",
-                "_test.go",
-                ".test.ts",
-                ".test.js",
-                ".spec.ts",
-                ".spec.js",
-            )
-        )
-    ):
-        return 1, "test-suite-or-fixture"
-    if name_lower in _REPO_META_FILES:
-        return 1, "repo-documentation"
-
-    # 5. Application / Service Business Logic (Ring 2 - Default baseline)
+    if rule := _is_ring0_private(parts_lower, name_lower):
+        return 0, rule
+    if rule := _is_ring4_engine(parts_lower, name_lower):
+        return 4, rule
+    if rule := _is_ring3_contract(pure, parts_lower, name_lower):
+        return 3, rule
+    if rule := _is_ring1_tooling(parts_lower, name_lower):
+        return 1, rule
     return 2, "application-logic"
+
+
+def _is_ci_workflow_path(parts_lower: list[str], name_lower: str) -> bool:
+    """Returns whether the path is a CI workflow definition file."""
+    return (
+        _has_dir_sequence(parts_lower[:-1], (".github", "workflows"))
+        or name_lower in _CI_FILES
+    )
+
+
+def _scan_block_path_risks(file_path: str, found: set[str]) -> bool:
+    """Records path-based risk signals and returns whether the file is a CI workflow."""
+    pure = PurePosixPath(file_path.replace("\\", "/"))
+    parts_lower = [part.lower() for part in pure.parts]
+    dir_parts = parts_lower[:-1]
+    name_lower = pure.name.lower()
+    if any(part in _AUTH_PATH_SEGMENTS for part in dir_parts):
+        found.add("auth-or-trust-boundary")
+    if any(part in _SCHEMA_PATH_SEGMENTS for part in dir_parts) or name_lower.endswith(
+        _SCHEMA_FILE_SUFFIXES
+    ):
+        found.add("schema-or-sql")
+    return _is_ci_workflow_path(parts_lower, name_lower)
+
+
+def _scan_added_risk_line(content: str, is_ci_workflow: bool, found: set[str]) -> None:
+    """Matches one added logic line against high-precision risk-escalation patterns."""
+    if is_ci_workflow and _CI_PERMISSION_LINE_RE.search(content):
+        found.add("subprocess-or-ci-permissions")
+    if not diff_weight.is_logic_line(content):
+        return
+    for signal_name, pattern in _RISK_CODE_PATTERNS:
+        if signal_name not in found and pattern.search(content):
+            found.add(signal_name)
+
+
+def _iter_added_lines(file_block: str) -> list[str]:
+    """Returns the text of added (`+`) hunk lines inside one per-file diff block."""
+    added: list[str] = []
+    in_hunk = False
+    for raw_line in file_block.splitlines():
+        if raw_line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if in_hunk and raw_line.startswith("+") and not raw_line.startswith("+++ "):
+            added.append(raw_line[1:])
+    return added
+
+
+def _is_risk_scan_candidate(file_path: str) -> bool:
+    """Returns whether `file_path` is a production code or CI config file to scan."""
+    if not file_path:
+        return False
+    if diff_weight.classify_low_content_path(file_path) is not None:
+        return False
+    if diff_weight.is_test_path(file_path):
+        return False
+    suffix = PurePosixPath(file_path.replace("\\", "/")).suffix.lower()
+    return suffix not in _PROSE_RISK_SKIP_SUFFIXES
+
+
+def _scan_file_block_risks(block: str, idx: int, found: set[str]) -> None:
+    """Extracts added lines from one file diff block and records matched risk signals."""
+    file_path = _extract_file_name(block, idx)
+    if not _is_risk_scan_candidate(file_path):
+        return
+    added_lines = _iter_added_lines(block)
+    if not added_lines:
+        return
+    is_ci_workflow = _scan_block_path_risks(file_path, found)
+    for line in added_lines:
+        _scan_added_risk_line(line, is_ci_workflow, found)
+
+
+def scan_ring_risk_signals(diff_text: str) -> list[str]:
+    """Scans a unified diff for high-risk signals that justify Ring 1/2 escalation.
+
+    Inspects only added (`+`) logic lines and changed production paths, skipping
+    low-content files, test files, and prose documents. Returns matched signal
+    names in canonical order from `concurrency-or-locks`,
+    `auth-or-trust-boundary`, `schema-or-sql`, `subprocess-or-ci-permissions`,
+    and `retry-or-state-machine`.
+    """
+    if not diff_text:
+        return []
+    found: set[str] = set()
+    for idx, block in enumerate(_split_into_file_diffs(diff_text)):
+        _scan_file_block_risks(block, idx, found)
+    return [sig for sig in _RISK_SIGNAL_ORDER if sig in found]
 
 
 def _score_ring_files(
@@ -402,19 +647,70 @@ def _score_ring_files(
     return scored_files, max(0, max_ring), highest_file, highest_rule
 
 
+def _normalize_risk_signals(risk_signals: Sequence[str] | None) -> list[str]:
+    """Deduplicates non-empty risk signal labels while preserving order."""
+    if not risk_signals:
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in risk_signals:
+        sig = str(raw).strip()
+        if sig and sig not in seen:
+            seen.add(sig)
+            ordered.append(sig)
+    return ordered
+
+
+def _apply_ring_volume_gates(
+    effective_ring: int,
+    level: str,
+    flags: list[str],
+    substantive_lines: float | None,
+    panel_min_lines: int,
+    signals: list[str],
+) -> tuple[str, list[str], bool, str | None]:
+    """Applies Ring 3 volume downgrade and Ring 1/2 2D risk-by-volume escalation."""
+    if substantive_lines is None:
+        return level, flags, False, None
+    if effective_ring == 3 and substantive_lines <= panel_min_lines:
+        reason = (
+            f"substantive_lines ({substantive_lines:g}) <= "
+            f"panel_min_lines ({panel_min_lines})"
+        )
+        return "standard", [], True, reason
+    if (
+        effective_ring in (1, 2)
+        and substantive_lines > RISK_ESCALATION_MIN_LINES
+        and signals
+    ):
+        reason = (
+            f"substantive_lines ({substantive_lines:g}) > "
+            f"risk_escalation_min_lines ({RISK_ESCALATION_MIN_LINES}) "
+            f"with risk_signals ({', '.join(signals)})"
+        )
+        return "panel", ["--panel"], False, reason
+    return level, flags, False, None
+
+
 def classify_ring(
     paths: list[str],
     root: Path | str | None = None,
     substantive_lines: float | None = None,
     panel_min_lines: int = PANEL_MIN_LINES,
-) -> dict:
+    risk_signals: Sequence[str] | None = None,
+) -> dict[str, Any]:
     """Classifies a changeset into an effective ring and default review level.
 
-    When ring == 3 and substantive_lines <= panel_min_lines, returns
-    review_level "standard", flags [], api_mandate True, and a gate_reason
-    string, instead of review_level "panel" and flags ["--panel"].
+    Applies two volume gates when `substantive_lines` is supplied:
+
+    - Ring 3 with `substantive_lines <= panel_min_lines` downgrades to
+      `review_level = "standard"`, `flags = []`, and `api_mandate = True`.
+    - Ring 1 or Ring 2 with `substantive_lines > RISK_ESCALATION_MIN_LINES` and
+      at least one signal in `risk_signals` escalates to `review_level = "panel"`
+      and `flags = ["--panel"]`.
     """
     del root  # Reserved for future manifest inspection.
+    signals = _normalize_risk_signals(risk_signals)
     if not paths:
         level, flags = RING_LEVELS[2]
         return {
@@ -424,6 +720,7 @@ def classify_ring(
             "flags": list(flags),
             "api_mandate": False,
             "gate_reason": None,
+            "risk_signals": signals,
             "summary": (
                 f"{RING_LABELS[2]} -> Review Level: {level.capitalize()} (1 reviewer)"
             ),
@@ -433,23 +730,15 @@ def classify_ring(
         }
 
     scored_files, effective_ring, highest_file, highest_rule = _score_ring_files(paths)
-    level, default_flags = RING_LEVELS[effective_ring]
-    flags = list(default_flags)
-    api_mandate = False
-    gate_reason: str | None = None
-
-    if (
-        effective_ring == 3
-        and substantive_lines is not None
-        and substantive_lines <= panel_min_lines
-    ):
-        level = "standard"
-        flags = []
-        api_mandate = True
-        gate_reason = (
-            f"substantive_lines ({substantive_lines:g}) <= "
-            f"panel_min_lines ({panel_min_lines})"
-        )
+    default_level, default_flags = RING_LEVELS[effective_ring]
+    level, flags, api_mandate, gate_reason = _apply_ring_volume_gates(
+        effective_ring,
+        default_level,
+        list(default_flags),
+        substantive_lines,
+        panel_min_lines,
+        signals,
+    )
 
     summary_extra = f" ({' '.join(flags)})" if flags else " (1 reviewer)"
     summary = (
@@ -464,6 +753,7 @@ def classify_ring(
         "flags": flags,
         "api_mandate": api_mandate,
         "gate_reason": gate_reason,
+        "risk_signals": signals,
         "summary": summary,
         "highest_file": highest_file,
         "highest_rule": highest_rule,
@@ -489,21 +779,30 @@ def classify_combined(
     diff_text: str | None = None,
     *,
     no_content: bool = False,
-) -> dict:
-    """Returns {"ring": ..., "artifacts": [...], "substantive": asdict(stats),
-    "focus_dedicated_allowed": substantive_lines is None or > FOCUS_MIN_LINES}.
+) -> dict[str, Any]:
+    """Returns combined ring, artifact, and substantive diff classification.
+
+    Computes `substantive` diff stats and static `risk_signals` when `diff_text`
+    is supplied, feeding both into `classify_ring`.
     """
     root_path = Path(root)
+    risk_signals: list[str] | None = None
     if diff_text is not None:
         stats = diff_weight.compute_substantive_diff_stats(diff_text)
         substantive_lines: float | None = stats.substantive_lines
+        risk_signals = scan_ring_risk_signals(diff_text)
         if not paths:
             paths = _extract_paths_from_diff(diff_text)
     else:
         stats = diff_weight.SubstantiveDiffStats()
         substantive_lines = None
 
-    ring_result = classify_ring(paths, root_path, substantive_lines=substantive_lines)
+    ring_result = classify_ring(
+        paths,
+        root_path,
+        substantive_lines=substantive_lines,
+        risk_signals=risk_signals,
+    )
     artifacts = [
         classify(path, None if no_content else _read_head(root_path, path))
         for path in paths
@@ -546,8 +845,16 @@ def classify(path: str, content: str | None = None) -> dict:
 
 
 def _read_head(root: Path, path: str) -> str | None:
+    """Reads up to `SNIFF_BYTES` from `root / path`, refusing paths outside `root`."""
+    raw = Path(path.replace("\\", "/"))
+    if raw.is_absolute():
+        return None
     try:
-        with open(root / path, "rb") as handle:
+        resolved_root = root.resolve()
+        target = (resolved_root / raw).resolve()
+        if not target.is_relative_to(resolved_root):
+            return None
+        with open(target, "rb") as handle:
             return handle.read(SNIFF_BYTES).decode("utf-8", errors="replace")
     except OSError:
         return None
@@ -637,8 +944,16 @@ def main(argv: list[str]) -> int:
             if diff_text is not None
             else None
         )
+        risk_signals = (
+            scan_ring_risk_signals(diff_text) if diff_text is not None else None
+        )
         return _write_json(
-            classify_ring(paths, root, substantive_lines=substantive_lines)
+            classify_ring(
+                paths,
+                root,
+                substantive_lines=substantive_lines,
+                risk_signals=risk_signals,
+            )
         )
     results = [
         classify(path, None if args.no_content else _read_head(root, path))

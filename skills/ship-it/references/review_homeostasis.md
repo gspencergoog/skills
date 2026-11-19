@@ -7,7 +7,7 @@ Use this guide during Phase 3 of the `ship-it` workflow to execute iterative API
 **Homeostasis** is reached when a review pass returns **zero `critical`, `high`, `medium`, and `low` findings** (`Questions` excluded) and all public APIs conform to project standards. Answer each Question once (in the commit message or PR description) and carry it no further.
 
 To prevent context window bloat and maintain independent perspectives:
-- Run the Code Review Loop directly from the root session using the `code-review` skill. Only the root session can start a `native_swarm`; it spawns `@rev-a` (`gemini-launch-candidate-high`) on pass 1 and wakes it on later passes. When `swarm` is unavailable, `code-review` falls back to `invoke_subagent` (`TypeName: "self"`, `"Workspace": "inherit"`).
+- Run the Code Review Loop directly from the root session using the `code-review` skill. Only the root session can start a `native_swarm`; it spawns `@rev-a` on the top-tier Gemini model ([delegation.md](../../review-core/references/delegation.md#model-classes)) on pass 1 and wakes it on later passes. When `swarm` is unavailable, `code-review` falls back to `invoke_subagent` (`TypeName: "self"`, `"Workspace": "inherit"`).
 - On pass 1, pass `--api` to `code-review` so the API Review Mandate runs alongside the first review pass; omit `--api` on later passes unless pass 1 produced API findings.
 
 ______________________________________________________________________
@@ -19,7 +19,7 @@ ______________________________________________________________________
 Execute the `code-review` skill on the working directory or branch diff (Steps 1 through 6, skipping Step 7), passing `--api` on pass 1 (and omitting it on later passes unless pass 1 produced API findings):
 
 - **Tier 1 (Jetski root session with `swarm`)**:
-  - Pass 1 spawns `@rev-a` (`model: "gemini-launch-candidate-high"`) with `swarm{action: "add"}` (including the `### API Review Mandate` block from `--api`) and ends the turn. When `@rev-a` posts its report and calls `swarm_wait`, read the report via `read_board` and record the latest `seq` cursor.
+  - Pass 1 spawns `@rev-a` (`model: "<top-tier Gemini ID>"`, resolved per delegation.md) with `swarm{action: "add"}` (including the `### API Review Mandate` block from `--api`) and ends the turn. When `@rev-a` posts its report and calls `swarm_wait`, read the report via `read_board` and record the latest `seq` cursor.
   - Passes 2 through 5 wake the `waiting` `@rev-a` worker via `post_message` (with the new `base_sha`/`head_sha` diff and `Ruled out last pass:` lines) and call `swarm_wait{since: <last_seq>}`.
 - **Tier 2b Fallback (when `swarm` is unavailable)**:
   Invoke a `self` subagent:
@@ -31,7 +31,7 @@ Execute the `code-review` skill on the working directory or branch diff (Steps 1
       "TypeName": "self",
       "Role": "Code Review Auditor",
       "Workspace": "inherit",
-      "Prompt": "Perform a code review with --api following the code-review skill (reading references/reviewer_mandate.md and ../review-core/references/evidence.md) on the changes on this branch. Do not spawn subagents. Return the structured review report via send_message."
+      "Prompt": "Perform a code review with --api following the code-review skill (reading references/reviewer_mandate.md) on the changes on this branch. Do not spawn subagents. Return the structured review report via send_message."
     }
   ]
 }

@@ -1,6 +1,6 @@
 # Reviewer Delegation and Roster
 
-This reference defines the delegation tiers, reviewer roster, quota failover, and worker lifecycle shared by `code-review` (prefix `rev-`) and `design-review` (prefix `des-`).
+This reference defines the delegation tiers, reviewer roster, model classes, quota failover, and worker lifecycle shared by `code-review` (prefix `rev-`) and `design-review` (prefix `des-`).
 
 ## Delegation Tiers
 
@@ -20,24 +20,33 @@ Select the highest available tier from this hierarchy:
 
 ## Reviewer Roster (`<prefix>` = `rev-` or `des-`)
 
-| Reviewer | Lane / Assignment | Model (Tier 1 `swarm`) | Present when |
+| Reviewer | Lane / Assignment | Model class (Tier 1 `swarm`) | Present when |
 | :--- | :--- | :--- | :--- |
-| `<prefix>a` | `general`, or `A` under `--panel` | `gemini-launch-candidate-high` (or `opus-5.5-max` with `--claude`/`--opus` in Standard mode) | Every review except `--fast` |
-| `<prefix>b` | `B` | `gemini-launch-candidate-high`, or `opus-5.5-max` with `--claude`/`--opus` | `--panel`, `--max` |
-| `<prefix>f`, `<prefix>f2`, `<prefix>f3` | `focus:<theme-id>` (one theme each) | `gemini-launch-candidate-high` | Explicit `--focus <id>` (up to 3), or strong triage match above 400 substantive lines within the depth cap |
+| `<prefix>a` | `general`, or `A` under `--panel` | Top-tier Gemini (top-tier third-party with `--claude`/`--opus` in Standard mode) | Every review except `--fast` |
+| `<prefix>b` | `B` | Top-tier Gemini, or top-tier third-party with `--claude`/`--opus` | `--panel`, `--max` |
+| `<prefix>f`, `<prefix>f2`, `<prefix>f3` | `focus:<theme-id>` (one theme each) | Top-tier Gemini | Explicit `--focus <id>` (up to 3), or strong triage match above 400 substantive lines within the depth cap |
 
 Tier 2 role names:
 - `code-review`: `Code Reviewer`, `Code Reviewer A`, `Code Reviewer B`, `Focus Reviewer (<theme-id>)`.
 - `design-review`: `Design Reviewer`, `Design Reviewer A`, `Design Reviewer B`, `Focus Reviewer (<playbook-id>)`.
 
+## Model Classes
+
+The roster gives each reviewer a model class, never a model ID. Resolve each class when you spawn or switch a worker:
+
+- `swarm{action: "models"}` lists the current model IDs and the quota left in each pool. When the environment has a model reference file (for example `$MY_CHEATS_DIR/models.md`), take ranks and quota pools from it.
+- Top-tier Gemini is the highest-ranked Gemini model. Top-tier third-party is the highest-ranked model in the third-party (Claude) pool.
+- `auto` is the host's built-in alias. It draws on its own quota pool.
+- Never review with a lite model, or with a coordinator model that hands work to lighter models.
+
 ## Quota Check and Failover
 
 Before spawning or waking workers, call `swarm{action: "models"}` once:
 
-- Failover order: `opus-5.5-max` → `gemini-launch-candidate-high` → `auto` (Gemini Pro Next, a separate quota bucket).
+- Failover order: top-tier third-party (only with `--claude`/`--opus`) → top-tier Gemini → a top-tier model in another quota pool → `auto`. Never fail over to a lower tier.
 - If the preferred model has zero remaining quota at spawn time, use the next model in the order and report the fallback in chat and in `## Summary`.
 - If a worker hits `RESOURCE_EXHAUSTED` or drops out of quota between passes, switch it in place via `swarm{action: "model", name: "<name>", model: "<fallback>"}`.
-- Focus reviewers always run on Gemini (`gemini-launch-candidate-high` → `auto`) to protect third-party quota.
+- Focus reviewers always run on top-tier Gemini (failing over to `auto`) to protect third-party quota.
 
 ## Worker Lifecycle: Reuse vs. Fresh Unanchored Context
 

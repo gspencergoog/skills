@@ -2,20 +2,27 @@ import io
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+_SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 import classify_artifacts
 from classify_artifacts import (
     FOCUS_MIN_LINES,
     PANEL_MIN_LINES,
+    RISK_ESCALATION_MIN_LINES,
     classify,
     classify_combined,
     classify_file_ring,
     classify_ring,
     main,
+    scan_ring_risk_signals,
 )
 
 BLUEPRINT_FRONTMATTER = "---\nname: core\ntype: module\ndescription: x\n---\n\n# Core\n"
@@ -140,9 +147,72 @@ class TestClassify(unittest.TestCase):
             "blueprints/README.md", "# Blueprints\n\nHow to use.\n", "reference-doc"
         )
 
-    def test_blueprint_skill_is_reference_doc(self):
+    def test_blueprint_skill_is_agent_instructions(self):
         content = "---\nname: foo\ndescription: bar\n---\n\n# Foo\n"
-        self.assert_type("blueprints/skills/foo/SKILL.md", content, "reference-doc")
+        result = self.assert_type(
+            "blueprints/skills/foo/SKILL.md",
+            content,
+            "agent-instructions",
+            "agent-instructions-path",
+        )
+        self.assertEqual(result["rubric"], "references/rubrics/agent_instructions.md")
+
+    def test_agent_instructions_paths_and_precedence(self):
+        design_and_rfc = "# Policy\n\n## Decision\n\n## Non-goals\n\n" + MUST_LINES
+        instruction_paths = (
+            "AGENTS.md",
+            "CLAUDE.md",
+            "GEMINI.md",
+            "sub/SKILL.md",
+            ".cursorrules",
+            ".clinerules",
+            ".windsurfrules",
+            "rules/security.md",
+            "rules/security.mdx",
+            "policies/deploy.mdx",
+            "prompts/reviewer.md",
+            "prompts/reviewer.mdx",
+            ".github/instructions/python.md",
+            ".github/instructions/python.mdx",
+            "agents/skills/foo/references/mandate.md",
+            "agents/guide.mdx",
+        )
+        for path in instruction_paths:
+            with self.subTest(path=path):
+                res = self.assert_type(
+                    path,
+                    design_and_rfc,
+                    "agent-instructions",
+                    "agent-instructions-path",
+                )
+                self.assertEqual(
+                    res["rubric"], "references/rubrics/agent_instructions.md"
+                )
+
+        # Blueprint still takes rank 1 precedence over agent-instructions dirs.
+        self.assert_type(
+            "agents/foo.blueprint.md",
+            BLUEPRINT_FRONTMATTER,
+            "blueprint",
+            "blueprint-frontmatter-or-name",
+        )
+        # Non-prose code under agents/ stays code.
+        self.assert_type("agents/skills/foo/scripts/tool.py", "x = 1\n", "code")
+        # Ordinary .mdx pages outside agent-instruction directories stay code (not-prose).
+        self.assertNotIn(".mdx", classify_artifacts.PROSE_EXTENSIONS)
+        for non_instruction_mdx in (
+            "docs/page.mdx",
+            "src/components/Card.mdx",
+            "README.mdx",
+        ):
+            with self.subTest(path=non_instruction_mdx):
+                res = self.assert_type(
+                    non_instruction_mdx,
+                    "# Page\n\nYou MUST click.\n",
+                    "code",
+                    "not-prose",
+                )
+                self.assertIsNone(res["rubric"])
 
     # Code false-positive regressions.
     def test_code_files_stay_code(self):
@@ -224,6 +294,31 @@ class TestMain(unittest.TestCase):
         self.assertEqual(code, 2)
         code, _ = self.run_main(["--bogus", "x.md"])
         self.assertEqual(code, 2)
+
+    def test_read_head_blocks_traversal_and_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as outer:
+            outer_path = Path(outer)
+            repo = outer_path / "repo"
+            repo.mkdir()
+            outside = outer_path / "outside_spec.md"
+            outside.write_text(MUST_LINES, encoding="utf-8")
+            escape_link = repo / "escape.md"
+            escape_link.symlink_to(outside)
+
+            self.assertIsNone(classify_artifacts._read_head(repo, "../outside_spec.md"))
+            self.assertIsNone(classify_artifacts._read_head(repo, str(outside)))
+            self.assertIsNone(classify_artifacts._read_head(repo, "escape.md"))
+
+            # Crafted diff path with ../ does not sniff outside file content.
+            crafted_diff = (
+                "diff --git a/../outside_spec.md b/../outside_spec.md\n"
+                "--- a/../outside_spec.md\n"
+                "+++ b/../outside_spec.md\n"
+                "@@ -1,0 +1,1 @@\n"
+                "+note\n"
+            )
+            combined = classify_combined([], repo, crafted_diff)
+            self.assertEqual(combined["artifacts"][0]["type"], "reference-doc")
 
 
 class TestClassifyRing(unittest.TestCase):
@@ -495,6 +590,122 @@ class TestClassifyCombined(unittest.TestCase):
         self.assertEqual(data["ring"], 3)
         self.assertEqual(data["review_level"], "standard")
         self.assertTrue(data["api_mandate"])
+
+    def test_ring_1_and_2_risk_x_volume_escalation(self):
+        self.assertEqual(RISK_ESCALATION_MIN_LINES, 350)
+
+        # Mechanical 500-line Ring 2 diff stays standard.
+        mech_diff = _make_diff_block("src/service.py", 500)
+        mech_res = classify_combined([], self.root, mech_diff)
+        self.assertEqual(mech_res["ring"]["ring"], 2)
+        self.assertEqual(mech_res["ring"]["review_level"], "standard")
+        self.assertEqual(mech_res["ring"]["flags"], [])
+        self.assertEqual(mech_res["ring"]["risk_signals"], [])
+        self.assertIsNone(mech_res["ring"]["gate_reason"])
+
+        # Boundary: <= 350 lines with risk signal stays standard.
+        at_boundary = classify_ring(
+            ["src/service.py"],
+            substantive_lines=RISK_ESCALATION_MIN_LINES,
+            risk_signals=["concurrency-or-locks"],
+        )
+        self.assertEqual(at_boundary["review_level"], "standard")
+        self.assertEqual(at_boundary["flags"], [])
+        self.assertEqual(at_boundary["risk_signals"], ["concurrency-or-locks"])
+        self.assertIsNone(at_boundary["gate_reason"])
+
+        # Ring 2 > 350 lines with risk signal escalates to --panel.
+        risky_ring2_diff = (
+            "diff --git a/src/service.py b/src/service.py\n"
+            "--- a/src/service.py\n"
+            "+++ b/src/service.py\n"
+            "@@ -1,0 +1,360 @@\n"
+            "+lock = threading.Lock()\n"
+            + "".join(f"+x{i} = compute({i})\n" for i in range(359))
+        )
+        r2 = classify_combined([], self.root, risky_ring2_diff)
+        self.assertEqual(r2["ring"]["ring"], 2)
+        self.assertEqual(r2["ring"]["review_level"], "panel")
+        self.assertEqual(r2["ring"]["flags"], ["--panel"])
+        self.assertFalse(r2["ring"]["api_mandate"])
+        self.assertEqual(r2["ring"]["risk_signals"], ["concurrency-or-locks"])
+        self.assertIn("risk_signals", r2["ring"]["gate_reason"])
+
+        # Ring 1 > 350 lines with risk signal escalates to --panel.
+        risky_ring1_diff = (
+            "diff --git a/scripts/deploy.py b/scripts/deploy.py\n"
+            "--- a/scripts/deploy.py\n"
+            "+++ b/scripts/deploy.py\n"
+            "@@ -1,0 +1,360 @@\n"
+            "+subprocess.run(['deploy'], check=True)\n"
+            + "".join(f"+step_{i} = run_step({i})\n" for i in range(359))
+        )
+        r1 = classify_combined([], self.root, risky_ring1_diff)
+        self.assertEqual(r1["ring"]["ring"], 1)
+        self.assertEqual(r1["ring"]["review_level"], "panel")
+        self.assertEqual(r1["ring"]["flags"], ["--panel"])
+        self.assertEqual(r1["ring"]["risk_signals"], ["subprocess-or-ci-permissions"])
+
+    def test_scan_ring_risk_signals_precision_and_all_categories(self):
+        # Deleted lines, comments, tests, and markdown prose do not fire signals.
+        benign = (
+            "diff --git a/src/app.py b/src/app.py\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            "-lock = threading.Lock()\n"
+            "+# Mentioning threading.Lock and subprocess.run in a comment\n"
+            "+value = compute(1)\n"
+            "diff --git a/tests/test_app.py b/tests/test_app.py\n"
+            "--- a/tests/test_app.py\n"
+            "+++ b/tests/test_app.py\n"
+            "@@ -1,0 +1,2 @@\n"
+            "+conn = sqlite3.connect(':memory:')\n"
+            "+subprocess.run(['echo', 'hi'])\n"
+            "diff --git a/docs/notes.md b/docs/notes.md\n"
+            "--- a/docs/notes.md\n"
+            "+++ b/docs/notes.md\n"
+            "@@ -1,0 +1,2 @@\n"
+            "+Use CREATE TABLE and jwt.decode with exponential_backoff.\n"
+        )
+        self.assertEqual(scan_ring_risk_signals(benign), [])
+
+        # All five canonical signal categories fire on production '+' logic lines/paths.
+        all_five = (
+            "diff --git a/src/auth/tokens.py b/src/auth/tokens.py\n"
+            "--- a/src/auth/tokens.py\n"
+            "+++ b/src/auth/tokens.py\n"
+            "@@ -1,0 +1,5 @@\n"
+            "+lock = threading.Lock()\n"
+            "+claims = jwt.decode(token)\n"
+            "+cur.execute('ALTER TABLE users ADD COLUMN role TEXT')\n"
+            "+subprocess.run(['audit'], check=True)\n"
+            "+delay = exponential_backoff(attempt)\n"
+        )
+        self.assertEqual(
+            scan_ring_risk_signals(all_five),
+            [
+                "concurrency-or-locks",
+                "auth-or-trust-boundary",
+                "schema-or-sql",
+                "subprocess-or-ci-permissions",
+                "retry-or-state-machine",
+            ],
+        )
+
+        # CI workflow permissions fire subprocess-or-ci-permissions.
+        ci_diff = (
+            "diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml\n"
+            "--- a/.github/workflows/release.yml\n"
+            "+++ b/.github/workflows/release.yml\n"
+            "@@ -1,0 +1,3 @@\n"
+            "+permissions:\n"
+            "+  contents: write\n"
+        )
+        self.assertEqual(
+            scan_ring_risk_signals(ci_diff),
+            ["subprocess-or-ci-permissions"],
+        )
 
 
 if __name__ == "__main__":

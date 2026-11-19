@@ -6,7 +6,7 @@ import json
 import pathlib
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -18,27 +18,26 @@ for _rel_scripts in (("write-prose", "scripts"), ("review-core", "scripts")):
 
 from analyze_prose import analyze_prose
 from review_lint_common import (
-    CLASS_ORDER,
-    CLEAN_TIERS,
-    ID_TO_SEVERITY,
-    MAX_SENTENCE_PCC,
-    MAX_SENTENCE_WORDS,
-    VALID_TIERS,
-    VALID_VERDICTS,
+    GROUNDING_FIX_HINTS,
     VERDICT_LINE_RE,
     FenceMeta,
     ReportProfile,
+    StagedDiffIndex,
     Violation,
     check_clean_lines,
     check_evidence_caps,
+    check_grounding,
     check_id_sequence,
     check_prose,
     check_questions,
     check_required_fields,
     check_severity_matches_id,
     check_single_fence_per_field,
+    check_worker_playbook_feedback,
+    cluster_findings,
     extract_evidence_detail,
     extract_tier,
+    load_staged_diff_index,
     strip_ticks,
     update_fence,
 )
@@ -185,6 +184,7 @@ class Report:
     verified_lines: list[int] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
     playbook_feedback_line: int = 0
+    playbook_feedback_lines: list[tuple[int, str]] | None = None
 
 
 _FIX_HINTS: dict[str, str] = {
@@ -254,6 +254,7 @@ _FIX_HINTS: dict[str, str] = {
         "Remove banned AI words/phrases, replace em-dashes with commas or parentheses, and "
         "break up 4+ noun stacks with prepositions."
     ),
+    **GROUNDING_FIX_HINTS,
 }
 
 
@@ -293,6 +294,10 @@ def _record_section_line(
         report.structural_text += stripped + "\n"
     elif section == "comments" and current is None and stripped:
         report.review_comments_text += stripped + "\n"
+    elif section == "playbook_feedback" and stripped:
+        if report.playbook_feedback_lines is None:
+            report.playbook_feedback_lines = []
+        report.playbook_feedback_lines.append((lineno, stripped))
     return current
 
 
@@ -351,7 +356,11 @@ def _enter_section(state: _ParserState, title: str, lineno: int) -> None:
     if state.section == "comments":
         state.report.review_comments_line = lineno
     elif state.section == "playbook_feedback":
-        state.report.playbook_feedback_line = lineno
+        state.report.playbook_feedback_line = (
+            state.report.playbook_feedback_line or lineno
+        )
+        if state.report.playbook_feedback_lines is None:
+            state.report.playbook_feedback_lines = []
     state.current = None
     state.current_field = None
 
@@ -490,18 +499,6 @@ def _check_focus_field(report: Report) -> list[Violation]:
     return check_required_fields(report.findings + report.questions, _FOCUS_PROFILE)
 
 
-def _check_no_playbook_feedback_section(report: Report) -> list[Violation]:
-    if report.playbook_feedback_line:
-        return [
-            Violation(
-                "playbook-feedback-leaked",
-                "Playbook Feedback section must be stripped before writing review_results.md.",
-                report.playbook_feedback_line,
-            )
-        ]
-    return []
-
-
 def _check_single_fence_per_field(report: Report) -> list[Violation]:
     return check_single_fence_per_field(report.findings)
 
@@ -618,7 +615,6 @@ RULES: list[Callable[[Report], list[Violation]]] = [
     _check_clean_section,
     _check_verified_removed,
     _check_focus_field,
-    _check_no_playbook_feedback_section,
     _check_single_fence_per_field,
 ]
 
@@ -635,21 +631,84 @@ def _attach_fix_hint(v: Violation, caps: CommentCaps) -> Violation:
     return replace(v, fix_hint=hint) if hint else v
 
 
-def check_report(report: Report, profile: str = "default") -> list[Violation]:
+def _resolve_grounding_index(
+    diff_dir: pathlib.Path | str | None,
+    diff_index: StagedDiffIndex | None,
+) -> StagedDiffIndex | None:
+    """Returns `diff_index`, or loads one from `diff_dir` when provided."""
+    if diff_index is not None and diff_dir is not None:
+        raise ValueError("Pass at most one of diff_dir and diff_index.")
+    if diff_index is not None:
+        return diff_index
+    if diff_dir is not None:
+        return load_staged_diff_index(pathlib.Path(diff_dir))
+    return None
+
+
+def _check_playbook_feedback(
+    report: Report,
+    worker_mode: bool,
+    playbook_path: pathlib.Path | None,
+) -> list[Violation]:
+    """Validates `## Playbook Feedback` rules for final reports or worker drafts."""
+    # Preserve detection if a caller constructed `Report(playbook_feedback_line=N)`.
+    feedback_lines = (
+        []
+        if report.playbook_feedback_lines is None and report.playbook_feedback_line
+        else report.playbook_feedback_lines
+    )
+    return check_worker_playbook_feedback(
+        feedback_lines,
+        worker_mode=worker_mode,
+        playbook_path=playbook_path,
+        section_line=report.playbook_feedback_line or 1,
+    )
+
+
+def check_report(
+    report: Report,
+    profile: str = "default",
+    *,
+    workspace: pathlib.Path | str | None = None,
+    diff_dir: pathlib.Path | str | None = None,
+    diff_index: StagedDiffIndex | None = None,
+    worker_mode: bool = False,
+    playbook_path: pathlib.Path | str | None = None,
+) -> list[Violation]:
     """Run all lint rules against a parsed Report.
 
     `profile` names an entry in COMMENT_PROFILES and sets the comment prose caps.
-    Raises ValueError for an unknown profile.
+    When `workspace`, `diff_dir`, or `diff_index` is given, validates file
+    existence, line bounds, changed lines, and `Evidence: Read` quotes across
+    findings and questions. When `worker_mode` is True, validates
+    `## Playbook Feedback` against `playbook_path` (when given) instead of
+    rejecting the section. Raises ValueError for an unknown profile or if both
+    `diff_dir` and `diff_index` are passed.
     """
     if profile not in COMMENT_PROFILES:
         raise ValueError(
             f"Unknown comment profile '{profile}' "
             f"(expected one of: {', '.join(COMMENT_PROFILES)})."
         )
+    resolved_workspace = pathlib.Path(workspace) if workspace is not None else None
+    resolved_index = _resolve_grounding_index(diff_dir, diff_index)
+    resolved_playbook = (
+        pathlib.Path(playbook_path) if playbook_path is not None else None
+    )
+
     caps = COMMENT_PROFILES[profile]
     violations: list[Violation] = []
     for rule_fn in RULES:
         violations.extend(rule_fn(report))
+    violations.extend(_check_playbook_feedback(report, worker_mode, resolved_playbook))
+    if resolved_workspace is not None or resolved_index is not None:
+        violations.extend(
+            check_grounding(
+                report.findings + report.questions,
+                workspace=resolved_workspace,
+                diff_index=resolved_index,
+            )
+        )
     violations.extend(_check_comment_prose(report, caps))
     with_hints = [_attach_fix_hint(v, caps) for v in violations]
     return sorted(with_hints, key=lambda v: (v.line, v.rule))
@@ -663,6 +722,7 @@ def _parse_line_range(line_val: str) -> tuple[int, int]:
     start = int(m.group(1))
     end = int(m.group(2)) if m.group(2) else start
     return start, end
+
 
 # Process sentences that code-review's Summary carries for the orchestrator
 # (ring classification banner, Pre-Execution Security Gate status, citation
@@ -1013,16 +1073,36 @@ def export_report_to_json(report: Report, output_path: pathlib.Path) -> dict[str
     return payload
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint.
+class _CliUsageError(Exception):
+    """Raised when CLI arguments or input paths fail validation."""
 
-    lint_review.py <review_results.md> [--comment-profile {default,pr}]
-    [--export-json <output.json>]
-    """
-    parser = argparse.ArgumentParser(
-        prog="lint_review.py", description="Lint a code-review review_results.md."
+
+def _one_line_error(exc: BaseException) -> str:
+    text = str(exc).strip()
+    return text.splitlines()[0] if text else type(exc).__name__
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    epilog = (
+        "Grounding and mode combinations:\n"
+        "  (no flags)                Structural, ID, evidence-tier, and prose checks; rejects ## Playbook Feedback.\n"
+        "  --workspace DIR           Adds file existence, line bounds, and Evidence: Read quote checks against DIR.\n"
+        "  --diff-dir DIR            Adds changed-line (+, deletion seam, or deleted old line) anchor checks.\n"
+        "  --workspace + --diff-dir  Runs all file, bounds, changed-line, and quote checks (including deleted files/lines).\n"
+        "  --worker [--playbook MD]  Allows ## Playbook Feedback; with --playbook, validates checked mode numbers.\n"
+        "  --cluster A.md B.md ...   Clusters nearby same-file findings across 2+ reports and prints JSON to stdout."
     )
-    parser.add_argument("report", help="Path to review_results.md")
+    parser = argparse.ArgumentParser(
+        prog="lint_review.py",
+        description="Lint a code-review review_results.md or cluster findings across worker drafts.",
+        epilog=epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "report",
+        nargs="?",
+        help="Path to review_results.md (required unless --cluster is set).",
+    )
     parser.add_argument(
         "--comment-profile",
         choices=sorted(COMMENT_PROFILES),
@@ -1030,21 +1110,151 @@ def main(argv: list[str] | None = None) -> int:
         help="Comment prose caps: default or pr (both 120 words / 6 sentences).",
     )
     parser.add_argument(
-        "--export-json", help="Write review_results.json here on success"
+        "--export-json", help="Write review_results.json here on success."
     )
+    parser.add_argument(
+        "--workspace",
+        help="Path to the reviewed checkout directory (checks file existence, line bounds, and Read quotes).",
+    )
+    parser.add_argument(
+        "--diff-dir",
+        help="Path to staged diff directory containing diff_lines.jsonl (checks changed-line anchors).",
+    )
+    parser.add_argument(
+        "--worker",
+        action="store_true",
+        help="Lint a worker draft (allows ## Playbook Feedback; other rules match final reports).",
+    )
+    parser.add_argument(
+        "--playbook",
+        help="Path to the assigned focus playbook markdown file (validates mode numbers under --worker).",
+    )
+    parser.add_argument(
+        "--cluster",
+        nargs="*",
+        metavar="REPORT_MD",
+        help="Cluster same-file findings across two or more report files and print JSON to stdout.",
+    )
+    return parser
+
+
+def _read_utf8_file(raw_path: str, label: str = "file") -> tuple[pathlib.Path, str]:
+    if not raw_path:
+        raise _CliUsageError(f"{label} path must not be empty.")
+    path = pathlib.Path(raw_path)
+    if not path.is_file():
+        raise _CliUsageError(f"file not found: {path}")
     try:
-        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
-    except SystemExit as exc:
-        return 2 if exc.code else 0
+        return path, path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise _CliUsageError(f"cannot read {path}: {_one_line_error(exc)}") from exc
 
-    report_path = pathlib.Path(args.report)
-    if not report_path.is_file():
-        print(f"Error: file not found: {report_path}", file=sys.stderr)
-        return 2
 
-    raw_text = report_path.read_text(encoding="utf-8")
+def _validate_workspace(raw: str | None) -> pathlib.Path | None:
+    if raw is None:
+        return None
+    if not raw:
+        raise _CliUsageError("--workspace path must not be empty.")
+    path = pathlib.Path(raw)
+    if not path.is_dir():
+        raise _CliUsageError(f"--workspace is not a directory: {path}")
+    return path
+
+
+def _validate_diff_index(raw: str | None) -> StagedDiffIndex | None:
+    if raw is None:
+        return None
+    if not raw:
+        raise _CliUsageError("--diff-dir path must not be empty.")
+    path = pathlib.Path(raw)
+    if not path.is_dir():
+        raise _CliUsageError(f"--diff-dir is not a directory: {path}")
+    try:
+        return load_staged_diff_index(path)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise _CliUsageError(
+            f"invalid --diff-dir '{path}': {_one_line_error(exc)}"
+        ) from exc
+
+
+def _validate_playbook(raw: str | None) -> pathlib.Path | None:
+    if raw is None:
+        return None
+    if not raw:
+        raise _CliUsageError("--playbook path must not be empty.")
+    path = pathlib.Path(raw)
+    if not path.is_file():
+        raise _CliUsageError(f"--playbook is not a readable file: {path}")
+    try:
+        path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise _CliUsageError(
+            f"cannot read --playbook '{path}': {_one_line_error(exc)}"
+        ) from exc
+    return path
+
+
+def _cluster_reviewer_labels(paths: Sequence[pathlib.Path]) -> list[str]:
+    stems = [path.stem for path in paths]
+    if len(set(stems)) == len(stems):
+        return stems
+    return [str(path) for path in paths]
+
+
+def _run_cluster(args: argparse.Namespace) -> int:
+    if args.report is not None:
+        raise _CliUsageError(
+            "--cluster does not accept a positional report; pass all files after --cluster."
+        )
+    if args.worker or any(
+        val is not None
+        for val in (args.export_json, args.workspace, args.diff_dir, args.playbook)
+    ):
+        raise _CliUsageError(
+            "--cluster prints JSON to stdout and cannot be combined with "
+            "--workspace, --diff-dir, --worker, --playbook, or --export-json."
+        )
+    raw_paths = args.cluster or []
+    if len(raw_paths) < 2:
+        raise _CliUsageError("--cluster requires at least 2 report files.")
+
+    parsed_reports: list[tuple[pathlib.Path, Report]] = []
+    for raw_path in raw_paths:
+        path, raw_text = _read_utf8_file(raw_path)
+        parsed_reports.append((path, parse_report(raw_text)))
+
+    labels = _cluster_reviewer_labels([path for path, _ in parsed_reports])
+    reports = [
+        (label, report.findings + report.questions)
+        for label, (_, report) in zip(labels, parsed_reports, strict=True)
+    ]
+    print(json.dumps(cluster_findings(reports), indent=2))
+    return 0
+
+
+def _run_lint(args: argparse.Namespace) -> int:
+    if args.report is None:
+        raise _CliUsageError(
+            "missing required report path (or pass --cluster with 2+ report files)."
+        )
+    _, raw_text = _read_utf8_file(args.report)
+    workspace_path = _validate_workspace(args.workspace)
+    diff_index = _validate_diff_index(args.diff_dir)
+    playbook_path = _validate_playbook(args.playbook)
+
     report = parse_report(raw_text)
-    violations = check_report(report, profile=args.comment_profile)
+    try:
+        violations = check_report(
+            report,
+            profile=args.comment_profile,
+            workspace=workspace_path,
+            diff_index=diff_index,
+            worker_mode=args.worker,
+            playbook_path=playbook_path,
+        )
+    except (OSError, UnicodeError) as exc:
+        raise _CliUsageError(_one_line_error(exc)) from exc
+
     for v in violations:
         print(f"{v.line}: {v.rule}: {v.message}")
         if v.fix:
@@ -1054,9 +1264,31 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.export_json:
-        export_report_to_json(report, pathlib.Path(args.export_json))
+        try:
+            export_report_to_json(report, pathlib.Path(args.export_json))
+        except OSError as exc:
+            raise _CliUsageError(
+                f"cannot write --export-json '{args.export_json}': {_one_line_error(exc)}"
+            ) from exc
 
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Runs report linting or multi-report finding clustering from CLI arguments."""
+    parser = _build_parser()
+    try:
+        args = parser.parse_args(sys.argv[1:] if argv is None else argv)
+    except SystemExit as exc:
+        return 2 if exc.code else 0
+
+    try:
+        if args.cluster is not None:
+            return _run_cluster(args)
+        return _run_lint(args)
+    except _CliUsageError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

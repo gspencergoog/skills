@@ -12,9 +12,9 @@ This reference defines the lane assignments, volume gates, and focus depth cap f
 
 | Lane | Theme | Code criteria | Document lenses | Reviewer |
 | :--- | :--- | :--- | :--- | :--- |
-| `general` | Everything | All criteria in [review_criteria.md](review_criteria.md) | All four lenses | `rev-a` |
+| `general` | Everything | Step 0 (system fit and necessity), then all criteria in [review_criteria.md](review_criteria.md) | All four lenses | `rev-a` |
 | `A` | Does it work, and can it be verified? | Correctness; concurrency and failure modes; edge cases; tests ([reviewing_tests.md](reviewing_tests.md)) | Implementer; Tester / Verifier | `rev-a` |
-| `B` | Is it safe to ship and to maintain? | Security; maintainability and cognitive complexity; efficiency; API soundness ([reviewing_apis.md](reviewing_apis.md)) | Consumer; Operator / Adversary | `rev-b` |
+| `B` | Is it safe to ship and to maintain? | Step 0 (system fit and necessity); security; maintainability and cognitive complexity; efficiency; API soundness ([reviewing_apis.md](reviewing_apis.md)) | Consumer; Operator / Adversary | `rev-b` |
 | `focus:<theme-id>` | Does this one mechanism change hold up across the whole diff? | The theme's playbook failure modes only | None (code partition only) | `rev-f*` |
 
 Lane Assignment block for reviewer A (swap in lane B's lists for reviewer B):
@@ -29,7 +29,7 @@ In the Structural Assessment, fill in only your own lenses.
 
 - For a code-only diff, omit the document lenses line. For a document-only diff, omit the code criteria line.
 - For a split diff, launch one A/B pair per partition ([splitting_reviews.md](splitting_reviews.md)).
-- Label each seeded hypothesis with its lane spec: `[A]` for correctness, state, edge cases, and tests; `[B]` for wiring, security, API, performance, and dependencies; `[focus:<theme-id>]` for theme hypotheses.
+- Label each seeded hypothesis with its lane spec: `[A]` for correctness, state, edge cases, and tests; `[B]` for system fit, wiring, security, API, performance, and dependencies; `[focus:<theme-id>]` for theme hypotheses.
 
 ## Volume Gates
 
@@ -38,7 +38,10 @@ In the Structural Assessment, fill in only your own lenses.
 | Gate | Threshold | Above the threshold | At or below the threshold |
 | :--- | :--- | :--- | :--- |
 | `panelMinLines` | 225 substantive lines | Ring 3 runs `--panel` (`rev-a` + `rev-b`) | Ring 3 runs Standard with `rev-a` only, and `rev-a` gets the API Review Mandate block (`ring.api_mandate`) |
+| `riskEscalationMinLines` | 350 substantive lines | Ring 1 and Ring 2 run `--panel` when the diff also has a static risk signal (`concurrency-or-locks`, `auth-or-trust-boundary`, `schema-or-sql`, `subprocess-or-ci-permissions`, or `retry-or-state-machine`); without a signal they stay Standard | Ring 1 and Ring 2 run Standard |
 | `focusMinLines` | 400 substantive lines | Step 2d may give strong themes a dedicated `rev-f*` (`focus_dedicated_allowed`) | Every theme folds into `rev-a` (or `rev-b`) as Focus Priority |
+
+An escalated ring records the matched signals in `ring.risk_signals` and the reason in `ring.gate_reason`, so the Summary can say why a panel ran.
 
 Substantive lines:
 
@@ -46,7 +49,7 @@ Substantive lines:
 - Count 1.0x: production code logic lines, and every non-blank line in Markdown (`.md`, `.mdx`), since skills, references, blueprints, and docs are reviewed like code.
 - Count 0.25x: logic lines in test files.
 
-Explicit `--panel`, `--max`, and `--focus` flags bypass both gates. The thresholds come from an audit of 98 past reviews: below about 225 lines a second reviewer added no unique findings, and below 400 lines dedicated focus reviewers found nothing in 4 of 5 runs.
+An explicit depth flag (`--fast`, `--panel`, `--verify`, `--claude`, or `--max`) skips `panelMinLines` and `riskEscalationMinLines`, and an explicit `--focus` flag skips `focusMinLines`. The thresholds come from an audit of 98 past reviews: below about 225 lines a second reviewer added no unique findings, and below 400 lines dedicated focus reviewers found nothing in 4 of 5 runs.
 
 ## Depth Cap
 

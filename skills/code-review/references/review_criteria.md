@@ -2,15 +2,19 @@
 
 This reference document outlines the criteria to prioritize when performing a code review, as well as guidelines for severity and constraints to ensure high-quality feedback.
 
-Sections 1–6 apply to code files. Document files (specs, design docs, blueprints, and reference docs, as classified in SKILL.md Step 1b) use [reviewing_documents.md](reviewing_documents.md) and its rubrics instead.
+Sections 0 to 6 apply to code files. Document files (specs, design docs, blueprints, and reference docs, as classified in SKILL.md Step 1b) use [reviewing_documents.md](reviewing_documents.md) and its rubrics instead. Agent instruction files (`SKILL.md`, `AGENTS.md`, and rule files) get both: these criteria for their control flow and commands, and their rubric.
 
 Under `--panel`, each criterion belongs to one lane: **A** (does it work, and can it be verified?) or **B** (is it safe to ship and to maintain?). The lane is shown in each heading. The roster, lane blocks, and focus lanes are defined in [lanes.md](lanes.md).
 
 ## Prioritized Criteria
 
+### 0. System Fit and Necessity (lane B)
+
+Before the hunk-by-hunk review, check whether each new wrapper, flag, pair of booleans that always change together, or effect that copies derivable state duplicates or bypasses a mechanism the repository already has. The procedure, including the exemption for staged code in stacked changes, is Step 0 in [reviewer_mandate.md](reviewer_mandate.md#step-0-system-fit--necessity).
+
 ### 1. Testing (lane A)
 
-New or modified code should be tested with tests that cover the modified code. Fixes for bugs should include regression tests if possible. Review the tests before reviewing the code using the [Reviewing Tests reference](./reviewing_tests.md).
+New or modified code should be tested with tests that cover the modified code. Fixes for bugs should include regression tests if possible. When the diff changes test files, read the [Reviewing Tests reference](./reviewing_tests.md) and review the tests before the code.
 
 When `--verify` is on and the change is trusted, back a test or correctness claim with an `Executed` run where you can, including the two mutation patterns (break the changed implementation and run its test; revert the fix hunk and run the new regression test) described in [verification.md](verification.md#mutation-testing).
 
@@ -54,7 +58,7 @@ Identify potential vulnerabilities.
 
 ### 6. API Soundness (lane B)
 
-If changes alter public APIs, exported signatures, or configuration surfaces, evaluate them against [reviewing_apis.md](./reviewing_apis.md) and the canonical principles in [canonical_api_design.md](../../review-core/references/canonical_api_design.md):
+Only when the diff changes public APIs, exported signatures, or configuration surfaces, read [reviewing_apis.md](./reviewing_apis.md) and evaluate the changes against it and the canonical principles in [canonical_api_design.md](../../review-core/references/canonical_api_design.md):
 
 - **Contract Integrity**: Ensure interfaces expose capabilities rather than internal implementation details or storage models.
 - **Minimal Surface Area (KISS/YAGNI)**: Avoid speculative parameters or over-generalized helper abstractions.

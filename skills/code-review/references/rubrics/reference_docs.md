@@ -1,6 +1,8 @@
 # Rubric: Reference Docs
 
-Use this rubric for READMEs, user guides, API reference pages, `SKILL.md` and `AGENTS.md` files, changelogs, and other docs that describe existing behavior. The main question is: is the doc accurate, and does it do one job well?
+Use this rubric for READMEs, user guides, API reference pages, changelogs, and other docs that describe existing behavior. The main question is: is the doc accurate, and does it do one job well?
+
+`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and `rules/*.md` files are executable instructions. Their primary rubric is [agent_instructions.md](agent_instructions.md); the accuracy and link checks below also apply to them.
 
 Read [reviewing_documents.md](../reviewing_documents.md) first for the lenses, categories, evidence rules, and severity scale. Reference docs are where most `wording` findings come from. Keep them `low`.
 
@@ -35,15 +37,6 @@ A change that mixes jobs on one page is `structure`, usually `low` or `medium`. 
 - Relative links resolve to files that exist. Heading anchors (`#section-name`) match a real heading.
 - Renamed or moved files have their inbound links updated. List broken inbound links in the Structural Assessment.
 - A broken link is `medium` `structure`. A broken link in installation or setup steps is `high`.
-
-## Agent Instruction Files
-
-For `SKILL.md`, `AGENTS.md`, rules, and prompt files, the reader is a model:
-
-- Instructions that conflict with each other, or with another instruction file the agent also loads, are `inconsistency`.
-- Steps are in the order they must run, and each step says when it is done.
-- Referenced scripts, files, and tools exist at the paths given.
-- Frontmatter fields match the format the loader expects.
 
 ## Changelogs
 

@@ -13,7 +13,7 @@ This reference defines the reviewer roster, the Lane A and Lane B split, the `< 
 
 ## Reviewer Roster and Quota Failover
 
-Use the delegation tiers, roster table, quota check, failover order (`opus-5.5-max` -> `gemini-launch-candidate-high` -> `auto`), and warm-worker lifecycle rules in [delegation.md](../../review-core/references/delegation.md) with prefix `<prefix>` = `des-`:
+Use the delegation tiers, roster table, model classes, quota check, failover order, and warm-worker lifecycle rules in [delegation.md](../../review-core/references/delegation.md) with prefix `<prefix>` = `des-`:
 - `des-a`: `general` (Standard) or `Lane A` (`--panel`).
 - `des-b`: `Lane B` (One-Way Doors or explicit `--panel`).
 - `des-f`, `des-f2`, `des-f3`: `focus:<playbook-id>` (explicit `--focus <id>` up to 3, or strong triage match when `substantive_lines > 400`, up to 1 in Standard and 2 in `--panel`).

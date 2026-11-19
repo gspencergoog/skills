@@ -1,6 +1,6 @@
 # Reviewing Documents
 
-This reference covers document-type files in a review: normative specifications, design docs, blueprints, and reference docs. For these files the review looks at structure, correctness, completeness, consistency, verifiability, and downstream impact. Wording and grammar findings are still reported, but always at `low` severity.
+This reference covers document-type files in a review: normative specifications, design docs, blueprints, agent instructions, and reference docs. For these files the review looks at structure, correctness, completeness, consistency, verifiability, and downstream impact. Wording and grammar findings are still reported, but always at `low` severity.
 
 Code files keep using [review_criteria.md](review_criteria.md). A mixed diff gets both: the code mandate first, then the document mandate.
 
@@ -12,18 +12,21 @@ Run [classify_artifacts.py](../scripts/classify_artifacts.py) on the changed fil
 git diff --name-only <base>...HEAD | python3 <skill-dir>/scripts/classify_artifacts.py --root <repo-root> -
 ```
 
-Only prose files (`.md`, `.rst`, `.adoc`, `.txt`) and JSON Schema files can be documents. JSON Schema files are `*.schema.json` files, or `.json` files whose `"$schema"` names a `json-schema.org` meta-schema. Every other file is `code`, which keeps `spec/` test directories, `*.spec.ts`, and design-token code out of document mode. For eligible files, the first matching rule wins:
+Only prose files (`.md`, `.rst`, `.adoc`, `.txt`), the agent instruction files in rank 2, and JSON Schema files can be documents. JSON Schema files are `*.schema.json` files, or `.json` files whose `"$schema"` names a `json-schema.org` meta-schema. Every other file is `code`, which keeps `spec/` test directories, `*.spec.ts`, and design-token code out of document mode. For eligible files, the first matching rule wins:
 
 | Rank | Rule | Type | Rubric |
 | :--- | :--- | :--- | :--- |
 | 1 | Frontmatter `type: module`, `feature`, or `codebase`, or filename `*.blueprint.md` | `blueprint` | [blueprints.md](rubrics/blueprints.md) |
-| 2 | A JSON Schema file | `normative-spec` | [normative_specs.md](rubrics/normative_specs.md) |
-| 3 | At least 2 design headings (Alternatives considered, Non-goals, Decision, Drawbacks, Unresolved questions, Consequences, `Status:`), or a path under `rfcs/`, `adr/`, or `proposals/` | `design` | [design_docs.md](rubrics/design_docs.md) |
-| 4 | At least 3 lines with uppercase RFC 2119 keywords (`MUST`, `SHALL`, `SHOULD`, `MAY`, and so on), or a path under `spec/`, `specs/`, or `specification/` | `normative-spec` | [normative_specs.md](rubrics/normative_specs.md) |
-| 5 | `CHANGELOG*` | `reference-doc` | [reference_docs.md](rubrics/reference_docs.md) |
-| 6 | Any other eligible file (`README`, `docs/`, `SKILL.md`, `AGENTS.md`, plans) | `reference-doc` | [reference_docs.md](rubrics/reference_docs.md) |
+| 2 | `SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.clinerules`, or `.windsurfrules`, or a `.md` or `.mdx` file under `rules/`, `policies/`, `prompts/`, `.github/instructions/`, or `agents/` | `agent-instructions` | [agent_instructions.md](rubrics/agent_instructions.md) |
+| 3 | A JSON Schema file | `normative-spec` | [normative_specs.md](rubrics/normative_specs.md) |
+| 4 | At least 2 design headings (Alternatives considered, Non-goals, Decision, Drawbacks, Unresolved questions, Consequences, `Status:`), or a path under `rfcs/`, `adr/`, or `proposals/` | `design` | [design_docs.md](rubrics/design_docs.md) |
+| 5 | At least 3 lines with uppercase RFC 2119 keywords (`MUST`, `SHALL`, `SHOULD`, `MAY`, and so on), or a path under `spec/`, `specs/`, or `specification/` | `normative-spec` | [normative_specs.md](rubrics/normative_specs.md) |
+| 6 | `CHANGELOG*` | `reference-doc` | [reference_docs.md](rubrics/reference_docs.md) |
+| 7 | Any other eligible file (`README`, `docs/`, plans) | `reference-doc` | [reference_docs.md](rubrics/reference_docs.md) |
 
-Headings and keywords inside fenced code blocks don't count. If the classifier gets a file wrong (for example, a guide that quotes many `MUST` lines), override it and say so in the reviewer prompt.
+Headings and keywords inside fenced code blocks don't count. Rank 2 wins even when an instruction file has `MUST` lines or design headings. If the classifier gets a file wrong (for example, a guide that quotes many `MUST` lines), override it and say so in the reviewer prompt.
+
+Agent instruction files are executable: a model follows them step by step. On top of the lenses, they keep the code-level checks for control flow, failure paths, shell quoting, and paths and flags that must exist on disk ([agent_instructions.md](rubrics/agent_instructions.md)).
 
 ## The Four Lenses
 
@@ -74,7 +77,7 @@ Keep reporting wording and grammar issues, at `low`, sorted last. When a wording
 
 ## Evidence and Anchoring
 
-- **Quote the text.** Every document finding uses the universal `Evidence` field ([evidence.md](../../review-core/references/evidence.md#tiers)) at the `Read` tier (or `Fetched` for linked web docs), quoting the text it is about with its `path:line` location (`Evidence: Read — "…" (path:line)`). An `inconsistency` finding quotes both sides with both locations. Findings without a quote are dropped in critique. This rule exists because models find ambiguity and inconsistency well but invent problems when they don't cite the source.
+- **Quote the text.** Every document finding uses the universal `Evidence` field ([evidence.md](../../review-core/references/evidence.md#tiers)) at the `Read` tier (or `Fetched` for linked web docs), quoting the text it is about with its `path:line` location (`Evidence: Read: "..." (path:line)`). An `inconsistency` finding quotes both sides with both locations. Findings without a quote are dropped in critique. This rule exists because models find ambiguity and inconsistency well but invent problems when they don't cite the source.
 - **Anchor to changed lines.** Each finding's `Line` is a changed line (`+` or `-`) in the new file. You may quote unchanged text as evidence. When a change contradicts unchanged text, anchor the finding to the changed line.
 - **Unchanged files go in the Structural Assessment.** A finding that lives only in an unchanged file (for example, an inbound link broken by a rename) goes in the Structural Assessment, not in the per-line comments.
 - **Check before claiming a gap.** Before reporting an `incompleteness`, `traceability`, or "undefined" finding, search the rest of the document, its parent document, and its linked files. Drop the finding if the term is defined elsewhere, or if the document explicitly defers or scopes out the gap and the deferral causes no concrete risk.
@@ -144,9 +147,9 @@ The report gains a `## Structural Assessment` section right after `## Summary`. 
 - **Tester / Verifier**: <one-line verdict>
 - **Consumer**: <one-line verdict>
 - **Operator / Adversary**: <one-line verdict>
-- **Repo validators**: <command> — <pass | N issues | none found>
-- **Downstream impact**: <artifact> — <updated in this diff | needs update | not affected>
-- **Unchanged-file findings**: <path:line> — <finding> (omit if none)
+- **Repo validators**: <command>: <pass | N issues | none found>
+- **Downstream impact**: <artifact>: <updated in this diff | needs update | not affected>
+- **Unchanged-file findings**: <path:line>: <finding> (omit if none)
 ```
 
 Each lens verdict names what the reviewer checked and what it found, for example "Checked each v1.0 example against `common_types.json`: all use `@path`; the builder section names a host-language member `DataBinding.@path` that can't exist (L2)". A bare "no issues" or a restatement of the change is not a verdict.

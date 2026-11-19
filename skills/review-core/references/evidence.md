@@ -15,6 +15,8 @@ Every finding states the evidence tier that backs it:
 | `Speculation` | Reasoning over incomplete information, an incomplete trace, or an unmeasured claim. | `medium`, `low`, or a Question (`Q1…`) |
 | `Recalled` | "I remember this API / spec / tool working this way." | Never acceptable. Drop it, verify it on disk or over the network, or turn it into a Question. |
 
+A `Deduction` trace may take at most 3 hops (calls, returns, assignments, or state changes) between an input that a caller can reach and the failure. Drop longer chains.
+
 Two rules follow directly from the tiers and are broken most often:
 
 - **Never quote documentation from memory.** If a finding depends on what an API, library, or spec guarantees, read the declaration or docstring on disk (including installed dependencies under `node_modules/`, `~/.pub-cache/`, `.venv/` / `site-packages/`, or vendor directories). When the source is not on disk, fetch the official reference page with `read_url_content` (at most 3 network fetches per reviewer) and quote what you saw. If you cannot reach the source, file a Question instead of a finding.
@@ -52,7 +54,7 @@ Theme hypotheses instantiated from a focus catalog ([code-review focus_areas](..
 Report the outcome of every seeded and self-added hypothesis:
 
 - **Confirmed** → a finding in the findings section.
-- **Disproved** → a one-line entry in `## Checked and Found Clean`, naming the tier and the disproving evidence.
+- **Disproved** → a one-line entry in `## Checked and Found Clean`, naming the tier and the [disproof witness](#disproof-witness).
 - **Unresolved** → a Question (`Q1…`, up to 3 total), naming the check that would settle it.
 - If you skip a seeded hypothesis, state that you skipped it and why. Never drop an assigned hypothesis silently.
 
@@ -78,12 +80,30 @@ Before writing up any surviving finding, try to disprove it using the cheapest c
 
 Four falsification techniques cover most code findings:
 
-- **Mutation testing** (under `--verify` in your own reserved checkout; mental trace otherwise): when claiming a test is tautological or misses a bug in changed code, apply one small mutation (invert a condition, remove a guard, return a constant, or revert the fix hunk) and run the targeted test; see [verification.md](../../code-review/references/verification.md#mutation-testing). If the test fails, the behavior is already guarded—revert and drop the finding. If the test still passes, revert and report the gap at `Executed`.
+- **Mutation testing** (under `--verify` in your own reserved checkout; mental trace otherwise): when claiming a test is tautological or misses a bug in changed code, apply one small mutation (invert a condition, remove a guard, return a constant, or revert the fix hunk) and run the targeted test; see [verification.md](../../code-review/references/verification.md#mutation-testing). If the test fails, the behavior is already guarded: revert and drop the finding. If the test still passes, revert and report the gap at `Executed`.
 - **Call-site audit**: search all invocations with `rg` across the repository to verify whether callers actually reach the path or pass the construct in practice.
 - **Dependency contract inspection**: open the actual source definitions, headers, or type declarations of dependencies on disk (or fetch the official reference page) rather than assuming behavior from memory.
 - **Execution-graph query**: for questions about build ordering, task dependencies, or lifecycle hooks, run the toolchain's dry-run or task-graph query (`--dry-run`, `make -n`, `bazel query`, `gradle tasks`) rather than guessing from config files. These read-only queries belong to tier 1 in [verification.md](../../code-review/references/verification.md#tiers).
 
 Drop any candidate finding that fails the falsification pass, or downgrade it to match the surviving evidence.
+
+## Structural Theater Filters
+
+Drop these findings even when every cited line is real:
+
+1. A demand for another null, bounds, or `try`/`catch` guard inside a private helper with one caller, when the enclosing constructor, static type, or public seam with many callers already enforces the invariant.
+2. A suggestion to catch an error and return an empty value or a default when the error signals a broken internal invariant. That hides the bug instead of fixing it.
+3. An "uncaught exception" claim when an enclosing boundary already handles the error, and a lifetime or race claim on a callback that runs synchronously (`map`, `all_of`, a synchronous test step).
+
+## Disproof Witness
+
+A disproof needs evidence as strong as a finding. Each `## Checked and Found Clean` line cites the `path:line` and quotes at most 2 lines that rule out the failure mode, or shows the command and output line for `Executed`. None of these disproves a hypothesis:
+
+- A debug-only `assert` or `DCHECK`, which does not guard production inputs.
+- A warning log. Logging an error does not handle it.
+- A default-off flag. The bug still ships inside the flagged branch.
+- A sibling file that does the same thing, unless you also checked the readers downstream.
+- Passing unit tests, when none of them covers the input path in question.
 
 ## Anti-Patterns
 
@@ -111,11 +131,11 @@ Every finding uses a `### <ID>. <short claim>` heading (`C1…`, `H1…`, `M1…
 - **Severity**: `critical | high | medium | low`
 - **Category**: `<document category>` (document files only)
 - **Focus**: `<theme-id>` (focus reviewers only; see [focus_blocks.md](focus_blocks.md#focus-mandate-block))
-- **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>` — <command and trimmed output, quoted text with path:line, or a line-cited trace>
+- **Evidence**: `<Executed | Read | Fetched | Deduction | Speculation>`: <command and trimmed output, quoted text with path:line, or a line-cited trace>
 - **Body**: <1-3 short peer sentences explaining the defect without restating the diff lines (<= 30 words/sentence, PCC <= 5)>
 - **Why**: <1 short sentence (<= 30 words) naming the concrete consequence if shipped as-is (combined visible prose <= 120 words and <= 6 sentences)>
 - **Suggestion**: <smallest compilable fix, replacement text, or specific question>
-- **Details**: <optional, up to 150 words, may continue on indented lines: root-cause trace, affected callers, or alternatives you rejected. Exported inside a collapsed `<details>` block and never counted toward the visible comment caps>
+- **Details**: <optional, up to 150 words, may continue on indented lines: root-cause trace, affected callers, alternatives you rejected, or `Other occurrences:` for a recurring pattern. Exported inside a collapsed `<details>` block and never counted toward the visible comment caps>
 ```
 
 ### Design Review Finding Layout
@@ -143,17 +163,23 @@ Use `File` + `Line` for `code-review`, or `Target` for `design-review`:
 - **File**: `path/to/file`
 - **Line**: `<line number in the new file>`
   (or `- **Target**: \`path/to/file:15\`` in design-review)
-- **Evidence**: `<Speculation | Deduction>` — <what was checked and where the trace stopped>
+- **Evidence**: `<Speculation | Deduction>`: <what was checked and where the trace stopped>
 - **Why**: <1 short sentence (<= 30 words): if true, what breaks and what severity (`critical | high | medium`) it would carry>
 - **To settle**: <the exact file, symbol, or command that answers the question>
 ```
 
 ### Checked and Found Clean (at most 10 lines per review)
 
-Every line pairs a disproved hypothesis with its tier and disproving evidence:
+Every line pairs a disproved hypothesis with its tier and its [disproof witness](#disproof-witness). Write the tier with its capital letter, because the linter matches it exactly:
 
 ```markdown
-- <hypothesis>: `<Executed | Read | Fetched | Deduction>` — <command output or path:line quote that disproved it>
+- <hypothesis>: `<Executed | Read | Fetched | Deduction>`: `<path:line>` "<quote of at most 2 lines>" <or the command and its output line>
+```
+
+For example:
+
+```markdown
+- `load()` can receive `None` from `parse()`: `Read`: `src/config.py:88` "return self._parse(text) or {}" always returns a dict.
 ```
 
 Lines without an evidence tier and a specific disproof are removed during synthesis so the section stays a record of falsified hypotheses rather than general praise.

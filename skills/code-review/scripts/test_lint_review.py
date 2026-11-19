@@ -1,13 +1,23 @@
 """Unit tests for lint_review.py."""
 
 import contextlib
+import difflib
 import importlib.util
 import io
 import json
+import os
 import pathlib
+import sys
 import tempfile
 import unittest
 
+_SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
+_CONTEXT_INDEXER_SCRIPTS = _SCRIPTS_DIR.parents[1] / "context-indexer" / "scripts"
+for _p in map(str, (_SCRIPTS_DIR, _CONTEXT_INDEXER_SCRIPTS)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+import stage_diffs
 from lint_review import _FIX_HINTS, check_report, main, parse_report
 
 CLEAN_REPORT = """\
@@ -868,10 +878,82 @@ new()
                 self.assertIn(v.rule, _FIX_HINTS)
                 self.assertTrue(v.fix)
                 self.assertEqual(v.fix, _FIX_HINTS[v.rule])
-        self.assertEqual(emitted_rules, set(_FIX_HINTS.keys()))
 
         with tempfile.TemporaryDirectory() as tmp:
-            bad_path = pathlib.Path(tmp) / "bad.md"
+            tmp_path = pathlib.Path(tmp)
+            ws = tmp_path / "ws"
+            ws.mkdir()
+            old_src = "\n".join(f"line_{i} = {i}" for i in range(1, 12)) + "\n"
+            new_src = old_src.replace("line_8 = 8", "line_8 = 99")
+            (ws / "app.py").write_text(new_src, encoding="utf-8")
+            diff_dir = tmp_path / "staged"
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("app.py", old_src, new_src), str(diff_dir)
+            )
+            playbook = tmp_path / "playbook.md"
+            playbook.write_text(
+                "## Failure modes\n\n1. Check nulls.\n", encoding="utf-8"
+            )
+
+            grounding_bad = """\
+## Review Comments (Ordered by Severity)
+### M1. Missing file
+- **File**: `missing.py`
+- **Line**: `1`
+- **Severity**: `medium`
+- **Evidence**: `Read` - missing.py:1
+- **Body**: Missing file anchor.
+- **Why**: Breaks lookup.
+
+### M2. Out of bounds
+- **File**: `app.py`
+- **Line**: `999`
+- **Severity**: `medium`
+- **Evidence**: `Read` - app.py:8 `"line_8 = 99"`
+- **Body**: Line past end of file.
+- **Why**: Breaks navigation.
+
+### M3. Unchanged line and drifted quote
+- **File**: `app.py`
+- **Line**: `2`
+- **Severity**: `medium`
+- **Evidence**: `Read` - app.py:2 `"nonexistent quote text here"`
+- **Body**: Line was not modified and quote mismatches.
+- **Why**: Misleads the author.
+
+## Playbook Feedback
+- Forgot the header.
+"""
+            grounding_violations = check_report(
+                parse_report(grounding_bad),
+                workspace=ws,
+                diff_dir=diff_dir,
+                worker_mode=True,
+                playbook_path=playbook,
+            )
+            for v in grounding_violations:
+                emitted_rules.add(v.rule)
+                self.assertIn(v.rule, _FIX_HINTS)
+                self.assertTrue(v.fix)
+                if v.rule in ("anchor-line-unchanged", "evidence-quote-mismatch"):
+                    self.assertTrue(v.fix.startswith(_FIX_HINTS[v.rule]), v)
+                else:
+                    self.assertEqual(v.fix, _FIX_HINTS[v.rule], v)
+
+            modes_bad = grounding_bad.replace(
+                "- Forgot the header.", "Failure modes checked: 9"
+            )
+            for v in check_report(
+                parse_report(modes_bad),
+                worker_mode=True,
+                playbook_path=playbook,
+            ):
+                emitted_rules.add(v.rule)
+                self.assertEqual(v.fix, _FIX_HINTS[v.rule])
+
+            self.assertEqual(emitted_rules, set(_FIX_HINTS.keys()))
+
+            bad_path = tmp_path / "bad.md"
             bad_path.write_text(all_rules_samples[1], encoding="utf-8")
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -879,8 +961,33 @@ new()
             self.assertEqual(exit_code, 1)
             output = buf.getvalue()
             self.assertIn("Fix: ", output)
-            for rule in emitted_rules - {"review-comments-unparsed"}:
+            sample2_rules = {
+                v.rule for v in check_report(parse_report(all_rules_samples[1]))
+            }
+            for rule in (emitted_rules & sample2_rules) - {"review-comments-unparsed"}:
                 self.assertIn(f"Fix: {_FIX_HINTS[rule]}", output)
+
+            g_path = tmp_path / "g_bad.md"
+            g_path.write_text(grounding_bad, encoding="utf-8")
+            g_buf = io.StringIO()
+            with contextlib.redirect_stdout(g_buf):
+                g_exit = main(
+                    [
+                        str(g_path),
+                        "--workspace",
+                        str(ws),
+                        "--diff-dir",
+                        str(diff_dir),
+                        "--worker",
+                        "--playbook",
+                        str(playbook),
+                    ]
+                )
+            self.assertEqual(g_exit, 1)
+            g_out = g_buf.getvalue()
+            self.assertIn("Nearest changed lines in `app.py`: 7-8.", g_out)
+            for v in grounding_violations:
+                self.assertIn(f"Fix: {v.fix}", g_out)
 
     def test_comment_sentence_complexity_fails(self):
         complex_sentence = (
@@ -1181,6 +1288,724 @@ Failure modes checked: 1, 2
         self.assertEqual(normalized["findings"][0]["focus"], "adhoc:retry-storm")
         self.assertEqual(
             normalized["review_summary"]["focus_themes"], ["adhoc:retry-storm"]
+        )
+
+
+def _git_file_diff(
+    path: str, old: str | None, new: str | None, context: int = 3
+) -> str:
+    """Builds a git-style unified diff block for one file."""
+    header = [f"diff --git a/{path} b/{path}\n"]
+    if old is None:
+        header.append("new file mode 100644\n")
+    if new is None:
+        header.append("deleted file mode 100644\n")
+    body = difflib.unified_diff(
+        (old or "").splitlines(keepends=True),
+        (new or "").splitlines(keepends=True),
+        fromfile="/dev/null" if old is None else f"a/{path}",
+        tofile="/dev/null" if new is None else f"b/{path}",
+        n=context,
+    )
+    return "".join([*header, *body])
+
+
+class _TempWorkspaceMixin:
+    """Helper mixin for running lint_review CLI in temporary workspaces."""
+
+    def _run_cli(self, argv: list[str]) -> tuple[int, str, str]:
+        out_buf = io.StringIO()
+        err_buf = io.StringIO()
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            code = main(argv)
+        return code, out_buf.getvalue(), err_buf.getvalue()
+
+
+class TestGroundingCli(unittest.TestCase, _TempWorkspaceMixin):
+    """Tests --workspace and --diff-dir grounding in check_report and CLI."""
+
+    def test_on_hunk_quotes_and_question_grounding_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            old_a = "def calc(x):\n    return x\n"
+            new_a = "def calc(x):\n    raw = fetch_value(x)\n    return raw + 1\n"
+            (ws / "calc.py").write_text(new_a, encoding="utf-8")
+            diff_dir = root / "staged"
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("calc.py", old_a, new_a), str(diff_dir)
+            )
+
+            report_text = """\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### H1. Unchecked lookup return value
+- **File**: `calc.py`
+- **Line**: `2-3`
+- **Severity**: `high`
+- **Evidence**: `Read` - `calc.py:2` shows "raw = fetch_value(x)" without a None guard
+- **Body**: `raw + 1` runs directly after `fetch_value(x)`.
+- **Why**: A missing item raises TypeError at runtime.
+
+## Questions
+
+### Q1. Can `fetch_value` return None for archived keys?
+- **File**: `calc.py`
+- **Line**: `2`
+- **Evidence**: `Read` - `calc.py:2` calls "raw = fetch_value(x)"
+- **Why**: Confirms whether the None guard is needed (`medium`).
+- **To settle**: Inspect `fetch_value` callers.
+"""
+            report_path = root / "report.md"
+            report_path.write_text(report_text, encoding="utf-8")
+            json_plain = root / "plain.json"
+            json_ground = root / "ground.json"
+
+            code1, _, _ = self._run_cli(
+                [str(report_path), "--export-json", str(json_plain)]
+            )
+            code2, _, _ = self._run_cli(
+                [
+                    str(report_path),
+                    "--workspace",
+                    str(ws),
+                    "--diff-dir",
+                    str(diff_dir),
+                    "--export-json",
+                    str(json_ground),
+                ]
+            )
+            self.assertEqual(code1, 0)
+            self.assertEqual(code2, 0)
+            self.assertEqual(
+                json_plain.read_text(encoding="utf-8"),
+                json_ground.read_text(encoding="utf-8"),
+            )
+
+    def test_deletion_seams_u3_and_u0_and_eof_and_deleted_files(self):
+        mid_old = "".join(f"mid_{i} = {i}\n" for i in range(1, 11))
+        mid_new = "".join(f"mid_{i} = {i}\n" for i in (1, 2, 3, 4, 7, 8, 9, 10))
+        top_old = "".join(f"top_{i} = {i}\n" for i in range(1, 6))
+        top_new = "".join(f"top_{i} = {i}\n" for i in range(3, 6))
+        eof_old = "".join(f"eof_{i} = {i}\n" for i in range(1, 7))
+        eof_new = "".join(f"eof_{i} = {i}\n" for i in range(1, 5))
+        gone_old = "def removed_guard():\n    return True\n"
+
+        for ctx in (3, 0):
+            with self.subTest(context=ctx), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp)
+                ws = root / "ws"
+                ws.mkdir()
+                (ws / "mid.py").write_text(mid_new, encoding="utf-8")
+                (ws / "top.py").write_text(top_new, encoding="utf-8")
+                (ws / "eof.py").write_text(eof_new, encoding="utf-8")
+                diff_text = "".join(
+                    [
+                        _git_file_diff("mid.py", mid_old, mid_new, context=ctx),
+                        _git_file_diff("top.py", top_old, top_new, context=ctx),
+                        _git_file_diff("eof.py", eof_old, eof_new, context=ctx),
+                        _git_file_diff("gone.py", gone_old, None, context=ctx),
+                        _git_file_diff("empty_gone.py", "", None, context=ctx),
+                    ]
+                )
+                diff_dir = root / "staged"
+                stage_diffs.split_diff_grouped(diff_text, str(diff_dir))
+
+                report_text = """\
+## Summary
+Verdict: Critical blockers.
+
+## Review Comments (Ordered by Severity)
+
+### H1. Mid-file deletion seam
+- **File**: `mid.py`
+- **Line**: `4`
+- **Severity**: `high`
+- **Evidence**: `Read` - `mid.py:4` removed "mid_5 = 5" before line 4
+- **Body**: Removing line 5 changes the offset for later rows.
+- **Why**: Lookups read the wrong slot.
+
+### H2. Top-of-file deletion seam
+- **File**: `top.py`
+- **Line**: `1`
+- **Severity**: `high`
+- **Evidence**: `Read` - `top.py:1` removed "top_1 = 1" at top of file
+- **Body**: Dropping the header alters startup order.
+- **Why**: Initialization fails.
+
+### H3. EOF deletion using old line number
+- **File**: `eof.py`
+- **Line**: `6`
+- **Severity**: `high`
+- **Evidence**: `Read` - `eof.py:6` removed "eof_6 = 6" at EOF
+- **Body**: Removing the trailing guard leaves the tail open.
+- **Why**: Tail records are dropped.
+
+### M1. Deleted file still referenced
+- **File**: `gone.py`
+- **Line**: `1`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `gone.py:1` deleted "def removed_guard():"
+- **Body**: `removed_guard` was deleted while callers remain.
+- **Why**: Importing it raises ImportError.
+
+### L1. Empty deleted file anchor
+- **File**: `empty_gone.py`
+- **Line**: `1`
+- **Severity**: `low`
+- **Evidence**: `Deduction` - empty marker file deleted
+- **Body**: Packaging still expects the empty marker file.
+- **Why**: Discovery skips the directory.
+"""
+                report_path = root / "report.md"
+                report_path.write_text(report_text, encoding="utf-8")
+                code, out, err = self._run_cli(
+                    [
+                        str(report_path),
+                        "--workspace",
+                        str(ws),
+                        "--diff-dir",
+                        str(diff_dir),
+                    ]
+                )
+                self.assertEqual(code, 0, f"out={out}\nerr={err}")
+
+    def test_trailing_cross_file_and_ellipsis_quotes_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            old_a = "def retry():\n    limit = 3\n    return limit\n"
+            new_a = "def retry():\n    limit = 5\n    return limit + extra_check()\n"
+            new_b = "MAX_LIMIT = 3\ndef check():\n    return MAX_LIMIT\n"
+            (ws / "a.py").write_text(new_a, encoding="utf-8")
+            (ws / "b.py").write_text(new_b, encoding="utf-8")
+            diff_dir = root / "staged"
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("a.py", old_a, new_a), str(diff_dir)
+            )
+            report_text = """\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Retry limit diverges across modules
+- **File**: `a.py`
+- **Line**: `2-3`
+- **Severity**: `medium`
+- **Evidence**: `Read` - "limit = 5" (a.py:2) contradicts "MAX_LIMIT = 3" (b.py:1), and "def retry(): ... return limit + extra_check()"
+- **Body**: `a.py` sets limit to 5 while `b.py` still enforces 3.
+- **Why**: Callers disagree on the retry ceiling.
+"""
+            report_path = root / "report.md"
+            report_path.write_text(report_text, encoding="utf-8")
+            code, out, err = self._run_cli(
+                [
+                    str(report_path),
+                    "--workspace",
+                    str(ws),
+                    "--diff-dir",
+                    str(diff_dir),
+                ]
+            )
+            self.assertEqual(code, 0, f"out={out}\nerr={err}")
+
+    def test_off_hunk_anchor_fails_with_nearest_hint_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            old_src = "\n".join(f"line_{i} = {i}" for i in range(1, 21)) + "\n"
+            new_src = old_src.replace("line_15 = 15", "line_15 = 999")
+            (ws / "mod.py").write_text(new_src, encoding="utf-8")
+            diff_dir = root / "staged"
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("mod.py", old_src, new_src), str(diff_dir)
+            )
+            report_text = """\
+## Summary
+Verdict: Minor revisions needed.
+
+## Review Comments (Ordered by Severity)
+
+### M1. Anchor placed on unchanged line
+- **File**: `mod.py`
+- **Line**: `2`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `mod.py:15` has "line_15 = 999"
+- **Body**: Line 15 changes the threshold without updating callers.
+- **Why**: Callers send invalid payloads.
+"""
+            report_path = root / "report.md"
+            report_path.write_text(report_text, encoding="utf-8")
+            code, out, _ = self._run_cli(
+                [
+                    str(report_path),
+                    "--workspace",
+                    str(ws),
+                    "--diff-dir",
+                    str(diff_dir),
+                ]
+            )
+            self.assertEqual(code, 1)
+            self.assertIn("anchor-line-unchanged", out)
+            self.assertIn("Nearest changed lines in `mod.py`: 14-15.", out)
+            self.assertEqual(report_path.read_text(encoding="utf-8"), report_text)
+
+    def test_drifted_quote_and_out_of_bounds_fail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            ws = root / "ws"
+            ws.mkdir()
+            old_src = "a = 1\nb = 2\n"
+            new_src = "a = 1\nb = 3\n"
+            (ws / "mod.py").write_text(new_src, encoding="utf-8")
+            diff_dir = root / "staged"
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("mod.py", old_src, new_src), str(diff_dir)
+            )
+            report_text = """\
+## Review Comments (Ordered by Severity)
+
+### M1. Drifted quote
+- **File**: `mod.py`
+- **Line**: `2`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `mod.py:2` reads "totally missing quote text"
+- **Body**: Value 3 exceeds limit.
+- **Why**: Breaks callers.
+
+### L1. Line past EOF
+- **File**: `mod.py`
+- **Line**: `99`
+- **Severity**: `low`
+- **Evidence**: `Deduction` - `mod.py:2` changed b
+- **Body**: Extra check needed.
+- **Why**: Fails validation.
+"""
+            violations = check_report(
+                parse_report(report_text), workspace=ws, diff_dir=diff_dir
+            )
+            rules = {v.rule for v in violations}
+            self.assertEqual(
+                rules,
+                {
+                    "evidence-quote-mismatch",
+                    "anchor-line-out-of-bounds",
+                },
+            )
+
+    def test_workspace_only_checks_file_bounds_and_quotes_but_skips_hunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = pathlib.Path(tmp) / "ws"
+            ws.mkdir()
+            (ws / "mod.py").write_text(
+                "alpha = 1\nbeta = 2\ngamma = 3\n", encoding="utf-8"
+            )
+            passing = """\
+## Review Comments (Ordered by Severity)
+
+### M1. Valid file, bounds, and quote without diff-dir
+- **File**: `mod.py`
+- **Line**: `2`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `mod.py:2` sets "beta = 2" without bounds check
+- **Body**: `beta` accepts negative values.
+- **Why**: Breaks invariant.
+"""
+            self.assertEqual(check_report(parse_report(passing), workspace=ws), [])
+
+            failing = """\
+## Review Comments (Ordered by Severity)
+
+### M1. Missing file
+- **File**: `absent.py`
+- **Line**: `1`
+- **Severity**: `medium`
+- **Evidence**: `Deduction` - absent file
+- **Body**: Missing module.
+- **Why**: Import fails.
+
+### M2. Bad bounds and drifted quote
+- **File**: `mod.py`
+- **Line**: `50`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `mod.py:2` has "not actually in file"
+- **Body**: Line is out of bounds.
+- **Why**: Breaks navigation.
+"""
+            rules = {v.rule for v in check_report(parse_report(failing), workspace=ws)}
+            self.assertEqual(
+                rules,
+                {
+                    "anchor-file-missing",
+                    "anchor-line-out-of-bounds",
+                    "evidence-quote-mismatch",
+                },
+            )
+
+    def test_diff_dir_only_checks_changed_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            diff_dir = root / "staged"
+            old_src = "\n".join(f"line_{i} = {i}" for i in range(1, 10)) + "\n"
+            new_src = old_src.replace("line_8 = 8", "line_8 = 99")
+            stage_diffs.split_diff_grouped(
+                _git_file_diff("mod.py", old_src, new_src),
+                str(diff_dir),
+            )
+            ok = """\
+## Review Comments (Ordered by Severity)
+
+### M1. Changed line without workspace
+- **File**: `mod.py`
+- **Line**: `8`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `mod.py:8` sets "anything here is unchecked without workspace"
+- **Body**: Changed value 99 breaks limit.
+- **Why**: Downstream overflow.
+"""
+            self.assertEqual(check_report(parse_report(ok), diff_dir=diff_dir), [])
+            bad = ok.replace("- **Line**: `8`", "- **Line**: `1`")
+            rules = [v.rule for v in check_report(parse_report(bad), diff_dir=diff_dir)]
+            self.assertEqual(rules, ["anchor-line-unchanged"])
+
+    def test_check_report_rejects_both_diff_dir_and_diff_index(self):
+        from review_lint_common import StagedDiffIndex
+
+        empty_index = StagedDiffIndex({}, {}, {}, {}, frozenset())
+        with self.assertRaises(ValueError):
+            check_report(
+                parse_report(CLEAN_REPORT),
+                diff_dir=pathlib.Path("."),
+                diff_index=empty_index,
+            )
+
+
+class TestWorkerModeCli(unittest.TestCase, _TempWorkspaceMixin):
+    """Tests --worker and --playbook draft validation vs synthesis leaks."""
+
+    def test_parse_report_captures_playbook_feedback_lines(self):
+        self.assertIsNone(parse_report(CLEAN_REPORT).playbook_feedback_lines)
+
+        empty_section = "## Review Comments\nNone.\n\n## Playbook Feedback\n"
+        parsed_empty = parse_report(empty_section)
+        self.assertEqual(parsed_empty.playbook_feedback_lines, [])
+        self.assertEqual(parsed_empty.playbook_feedback_line, 4)
+
+        filled = (
+            "## Review Comments\nNone.\n\n"
+            "## Playbook Feedback\nFailure modes checked: 1, 2\n"
+            "- Note for step 5b.\n"
+        )
+        parsed_filled = parse_report(filled)
+        self.assertEqual(
+            parsed_filled.playbook_feedback_lines,
+            [(5, "Failure modes checked: 1, 2"), (6, "- Note for step 5b.")],
+        )
+
+    def test_worker_flag_allows_catalog_and_adhoc_playbook_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            playbook = root / "sync_to_async.md"
+            playbook.write_text(
+                "# Sync to Async\n\n## Failure modes\n\n1. Unawaited call.\n2. Cancelled timer.\n3. Reentrant lock.\n",
+                encoding="utf-8",
+            )
+            base_body = CLEAN_REPORT.replace("Flags: `--verify`.", "Flags: `--panel`.")
+            catalog_draft = base_body + (
+                "\n## Playbook Feedback\n"
+                "Failure modes checked: 1-2, 3\n"
+                "- Mode 2 matched `split_diff.py`.\n"
+            )
+            catalog_path = root / "rev_f.md"
+            catalog_path.write_text(catalog_draft, encoding="utf-8")
+            json_worker = root / "worker.json"
+            json_clean = root / "clean.json"
+            clean_path = root / "clean.md"
+            clean_path.write_text(base_body, encoding="utf-8")
+
+            code_w, out_w, err_w = self._run_cli(
+                [
+                    str(catalog_path),
+                    "--worker",
+                    "--playbook",
+                    str(playbook),
+                    "--export-json",
+                    str(json_worker),
+                ]
+            )
+            code_c, _, _ = self._run_cli(
+                [str(clean_path), "--export-json", str(json_clean)]
+            )
+            self.assertEqual(code_w, 0, f"out={out_w}\nerr={err_w}")
+            self.assertEqual(code_c, 0)
+            self.assertEqual(
+                json_worker.read_text(encoding="utf-8"),
+                json_clean.read_text(encoding="utf-8"),
+            )
+
+            # Inline adhoc:<slug> draft passes --worker without --playbook.
+            adhoc_path = root / "rev_adhoc.md"
+            adhoc_path.write_text(
+                base_body + "\n## Playbook Feedback\nFailure modes checked: 1, 4\n",
+                encoding="utf-8",
+            )
+            code_a, _, _ = self._run_cli([str(adhoc_path), "--worker"])
+            self.assertEqual(code_a, 0)
+
+            # General worker draft without ## Playbook Feedback passes --worker.
+            code_g, _, _ = self._run_cli([str(clean_path), "--worker"])
+            self.assertEqual(code_g, 0)
+
+    def test_worker_rejects_missing_and_invalid_playbook_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            playbook = root / "playbook.md"
+            playbook.write_text(
+                "## Failure modes\n\n1. First mode.\n2. Second mode.\n",
+                encoding="utf-8",
+            )
+            no_section = root / "missing_section.md"
+            no_section.write_text(CLEAN_REPORT, encoding="utf-8")
+            code1, out1, _ = self._run_cli(
+                [str(no_section), "--worker", "--playbook", str(playbook)]
+            )
+            self.assertEqual(code1, 1)
+            self.assertIn("playbook-feedback-missing", out1)
+
+            bad_modes = root / "bad_modes.md"
+            bad_modes.write_text(
+                CLEAN_REPORT + "\n## Playbook Feedback\nFailure modes checked: 1, 7\n",
+                encoding="utf-8",
+            )
+            code2, out2, _ = self._run_cli(
+                [str(bad_modes), "--worker", "--playbook", str(playbook)]
+            )
+            self.assertEqual(code2, 1)
+            self.assertIn("playbook-modes-invalid", out2)
+
+            # Even without --playbook, non-header text or mode 0 fails under --worker.
+            bad_adhoc = root / "bad_adhoc.md"
+            bad_adhoc.write_text(
+                CLEAN_REPORT + "\n## Playbook Feedback\nChecked all of them.\n",
+                encoding="utf-8",
+            )
+            code3, out3, _ = self._run_cli([str(bad_adhoc), "--worker"])
+            self.assertEqual(code3, 1)
+            self.assertIn("playbook-feedback-missing", out3)
+
+    def test_worker_still_enforces_all_other_rules(self):
+        bad_worker = """\
+## Review Comments (Ordered by Severity)
+
+### H1. Speculative high in worker draft
+- **File**: `foo.py`
+- **Line**: `10`
+- **Severity**: `high`
+- **Evidence**: `Speculation` - guess
+- **Body**: We should delve into this guess.
+
+## Playbook Feedback
+Failure modes checked: 1
+"""
+        rules = {
+            v.rule for v in check_report(parse_report(bad_worker), worker_mode=True)
+        }
+        self.assertEqual(rules, {"severity-cap", "why-required", "comment-ai-ism"})
+
+    def test_synthesis_mode_reports_playbook_feedback_leaked_once(self):
+        leaked = CLEAN_REPORT + "\n## Playbook Feedback\nFailure modes checked: 1\n"
+        violations = check_report(parse_report(leaked))
+        leaked_rules = [v for v in violations if v.rule == "playbook-feedback-leaked"]
+        self.assertEqual(len(leaked_rules), 1)
+        self.assertEqual(leaked_rules[0].fix, _FIX_HINTS["playbook-feedback-leaked"])
+
+
+class TestClusterCli(unittest.TestCase, _TempWorkspaceMixin):
+    """Tests --cluster CLI mode without positional report."""
+
+    def test_cluster_groups_similar_same_file_findings_and_keeps_singletons(self):
+        rev_a = """\
+## Review Comments (Ordered by Severity)
+
+### H1. Null guard missing on lookup
+- **File**: `pkg/store.py`
+- **Line**: `17`
+- **Severity**: `high`
+- **Evidence**: `Read` - `pkg/store.py:17`
+- **Body**: `get_item` indexes the query row without checking for `None`.
+- **Why**: Missing keys raise `TypeError`.
+
+### L1. Import sorting order
+- **File**: `pkg/store.py`
+- **Line**: `2`
+- **Severity**: `low`
+- **Evidence**: `Read` - `pkg/store.py:2`
+- **Body**: Standard library imports follow local imports.
+- **Why**: Minor style drift.
+"""
+        rev_b = """\
+## Review Comments (Ordered by Severity)
+
+### M1. Lookup crashes on missing key
+- **File**: `./pkg/store.py`
+- **Line**: `15-18`
+- **Severity**: `medium`
+- **Evidence**: `Read` - `pkg/store.py:16`
+- **Body**: Query row is indexed without a `None` check, so a missing key raises `TypeError`.
+- **Why**: Unhandled exception crashes the request.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            a_path = root / "rev_a.md"
+            b_path = root / "rev_b.md"
+            a_path.write_text(rev_a, encoding="utf-8")
+            b_path.write_text(rev_b, encoding="utf-8")
+            code, out, err = self._run_cli(["--cluster", str(a_path), str(b_path)])
+            self.assertEqual(code, 0, err)
+            self.assertEqual(err, "")
+            clusters = json.loads(out)
+            self.assertEqual(len(clusters), 2)
+            self.assertEqual(clusters[0]["size"], 2)
+            self.assertEqual(clusters[0]["file"], "pkg/store.py")
+            self.assertEqual(clusters[0]["reviewers"], ["rev_a", "rev_b"])
+            self.assertEqual(
+                [(m["reviewer"], m["id"]) for m in clusters[0]["members"]],
+                [("rev_a", "H1"), ("rev_b", "M1")],
+            )
+            self.assertEqual(clusters[1]["size"], 1)
+            self.assertEqual(clusters[1]["members"][0]["id"], "L1")
+
+    def test_cluster_keeps_identical_wording_in_different_files_separate(self):
+        template = """\
+## Review Comments (Ordered by Severity)
+
+### H1. Retry backoff counter never resets
+- **File**: `{path}`
+- **Line**: `10`
+- **Severity**: `high`
+- **Evidence**: `Read` - `{path}:10`
+- **Body**: The retry loop never resets its backoff counter after a success.
+- **Why**: Latency grows without bound.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            dir_a = root / "a"
+            dir_b = root / "b"
+            dir_a.mkdir()
+            dir_b.mkdir()
+            p1 = dir_a / "report.md"
+            p2 = dir_b / "report.md"
+            p1.write_text(template.format(path="a.py"), encoding="utf-8")
+            p2.write_text(template.format(path="b.py"), encoding="utf-8")
+            code, out, err = self._run_cli(["--cluster", str(p1), str(p2)])
+            self.assertEqual(code, 0, err)
+            clusters = json.loads(out)
+            self.assertEqual(len(clusters), 2)
+            self.assertEqual([c["size"] for c in clusters], [1, 1])
+            self.assertEqual([c["file"] for c in clusters], ["a.py", "b.py"])
+            self.assertEqual([c["reviewers"][0] for c in clusters], [str(p1), str(p2)])
+
+
+class TestUsageErrorsAndHelp(unittest.TestCase, _TempWorkspaceMixin):
+    """Tests single-line stderr usage errors (exit 2) and --help combinations."""
+
+    def _assert_usage_error(self, argv: list[str]) -> str:
+        code, out, err = self._run_cli(argv)
+        self.assertEqual(code, 2, f"argv={argv} out={out!r} err={err!r}")
+        self.assertEqual(out, "")
+        lines = [line for line in err.splitlines() if line.strip()]
+        self.assertEqual(len(lines), 1, f"Expected 1 stderr line, got {err!r}")
+        self.assertNotIn("Traceback", err)
+        return lines[0]
+
+    def test_usage_errors_print_one_line_to_stderr_and_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            report = root / "report.md"
+            report.write_text(CLEAN_REPORT, encoding="utf-8")
+            not_a_dir = root / "plain_file.txt"
+            not_a_dir.write_text("hi", encoding="utf-8")
+            empty_dir = root / "empty_diff_dir"
+            empty_dir.mkdir()
+            bad_json_dir = root / "bad_json_dir"
+            bad_json_dir.mkdir()
+            (bad_json_dir / "diff_lines.jsonl").write_text(
+                "{bad json\n", encoding="utf-8"
+            )
+
+            self._assert_usage_error([])
+            self._assert_usage_error([str(report), "--workspace", str(not_a_dir)])
+            self._assert_usage_error(
+                [str(report), "--workspace", str(root / "missing")]
+            )
+            self._assert_usage_error([str(report), "--workspace", ""])
+            self._assert_usage_error([str(report), "--diff-dir", str(empty_dir)])
+            self._assert_usage_error([str(report), "--diff-dir", str(bad_json_dir)])
+            self._assert_usage_error([str(report), "--diff-dir", str(not_a_dir)])
+            self._assert_usage_error([str(report), "--playbook", str(root / "nope.md")])
+            self._assert_usage_error([str(report), "--playbook", str(root)])
+            self._assert_usage_error(["--cluster"])
+            self._assert_usage_error(["--cluster", str(report)])
+            self._assert_usage_error(
+                ["--cluster", str(report), str(root / "missing.md")]
+            )
+            self._assert_usage_error(
+                [str(report), "--cluster", str(report), str(report)]
+            )
+            self._assert_usage_error(
+                [
+                    "--cluster",
+                    str(report),
+                    str(report),
+                    "--export-json",
+                    str(root / "o.json"),
+                ]
+            )
+            self._assert_usage_error(
+                ["--cluster", str(report), str(report), "--worker"]
+            )
+            self._assert_usage_error(
+                ["--cluster", str(report), str(report), "--workspace", str(root)]
+            )
+            self._assert_usage_error(
+                ["--cluster", str(report), str(report), "--diff-dir", str(empty_dir)]
+            )
+            self._assert_usage_error(
+                ["--cluster", str(report), str(report), "--playbook", str(report)]
+            )
+
+            if os.geteuid() != 0:
+                unreadable = root / "locked_playbook.md"
+                unreadable.write_text("1. Hidden.\n", encoding="utf-8")
+                unreadable.chmod(0o000)
+                try:
+                    self._assert_usage_error(
+                        [str(report), "--worker", "--playbook", str(unreadable)]
+                    )
+                finally:
+                    unreadable.chmod(0o644)
+
+    def test_help_documents_all_flag_combinations(self):
+        code, out, err = self._run_cli(["--help"])
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+        for flag in (
+            "--workspace",
+            "--diff-dir",
+            "--worker",
+            "--playbook",
+            "--cluster",
+        ):
+            self.assertIn(flag, out)
+        self.assertIn(
+            "file existence, line bounds, and Evidence: Read quote checks", out
         )
 
 

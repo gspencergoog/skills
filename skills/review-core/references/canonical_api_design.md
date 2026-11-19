@@ -23,7 +23,7 @@ This document contains the canonical principles for designing and improving APIs
 - [Data handling & evolution](#data-handling--evolution)
   - [1. Scalable pagination (cursor over offset)](#1-scalable-pagination-cursor-over-offset)
   - [2. Evolutionary design (versioning)](#2-evolutionary-design-versioning)
-  - [3. Type safety & strict validation](#3-type-safety-strict-validation)
+  - [3. Type safety & strict validation](#3-type-safety--strict-validation)
   - [4. Structured error reporting](#4-structured-error-reporting)
   - [5. Single source of truth (DRY data)](#5-single-source-of-truth-dry-data)
 
@@ -41,7 +41,7 @@ Complexity is the primary vector for defects and integration friction. Expose th
 
 ### 3. YAGNI (avoid speculative generality)
 
-Do not add parameters, operations, or data fields for hypothetical future needs. Speculative features introduce "accidental complexity"—complexity arising from the solution rather than the problem. Aim to build only what is required for current, concrete use cases to maintain a lean and testable interface.
+Do not add parameters, operations, or data fields for hypothetical future needs. Speculative features introduce "accidental complexity": complexity that comes from the solution rather than the problem. Aim to build only what is required for current, concrete use cases to maintain a lean and testable interface.
 
 ### 4. Separation of concerns (information hiding)
 

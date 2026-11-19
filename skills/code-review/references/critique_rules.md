@@ -28,6 +28,15 @@ Apply these falsification rules (from [evidence.md](../../review-core/references
 - **Tree checked before claiming removal, misuse, or missing coverage**: Drop any claim that code or test coverage was deleted unless `rg` against `HEAD` confirmed it did not move. Drop any API-misuse or missing-argument claim unless you read the target signature and call sites in this session. Drop any "test pins incidental behavior" claim unless you checked the docstring or spec first.
 - **Inline comment prose budget**: Strip any sentence that merely restates what the diff lines already show. Keep each comment's combined prose (`Body` + `Why` + unfenced `Suggestion`) to at most 120 words and 6 sentences, with every sentence $\le 30$ words, cognitive complexity $\text{PCC} \le 5$, and zero banned AI words, em-dashes, or 4+ noun clusters.
 
+Then remove these structural false positives:
+
+- Findings caught by the three [structural theater filters](../../review-core/references/evidence.md#structural-theater-filters): an extra guard inside a private helper whose enclosing seam already enforces the invariant, a catch-and-return-empty fix for a broken internal invariant, and a crash or race claim that an enclosing boundary or a synchronous callback rules out.
+- `Deduction` chains longer than 3 hops from an input that a caller can reach.
+- `low` findings on lines inside a surface that another finding recommends removing (Step 0 in [reviewer_mandate.md](reviewer_mandate.md#step-0-system-fit--necessity)).
+- `## Checked and Found Clean` lines without a [disproof witness](../../review-core/references/evidence.md#disproof-witness), or whose only disproof is an `assert`, a warning log, a default-off flag, an unchecked sibling file, or passing tests that skip the input path.
+
+When 3 or more findings report the same defect pattern, keep one primary finding at its strongest site and list the other sites in its `- **Details**:` field as `Other occurrences: path:line, path:line`.
+
 ## Questions
 
 Keep `## Questions` (`Q1…`) tight and actionable:

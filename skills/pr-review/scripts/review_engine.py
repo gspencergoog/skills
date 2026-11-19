@@ -20,12 +20,21 @@ from typing import Any
 
 _PR_REVIEW_SCRIPTS = Path(__file__).resolve().parent
 _CODE_REVIEW_SCRIPTS = Path(__file__).resolve().parents[2] / "code-review" / "scripts"
-for _script_dir in (_PR_REVIEW_SCRIPTS, _CODE_REVIEW_SCRIPTS):
+_REVIEW_CORE_SCRIPTS = Path(__file__).resolve().parents[2] / "review-core" / "scripts"
+for _script_dir in (_PR_REVIEW_SCRIPTS, _CODE_REVIEW_SCRIPTS, _REVIEW_CORE_SCRIPTS):
     if str(_script_dir) not in sys.path:
         sys.path.insert(0, str(_script_dir))
 
 import diff_parser
 import lint_review
+import prepare_code_review as code_review_prep
+from security_prescan import (
+    _extract_header_path,
+    apply_hardened_git_env_in_place,
+    generate_untrusted_nonce,
+    scan_diff_execution_risks,
+    wrap_salted_untrusted,
+)
 
 ALIGNMENT_HEADINGS: dict[str, str] = {
     "MATCHES": "Matches Stated Purpose",
@@ -59,25 +68,10 @@ DESCRIPTION_BUDGETS: dict[str, SectionBudget] = {
 
 _FALLBACK_FIX_HINTS: dict[str, str] = dict(getattr(lint_review, "_FIX_HINTS", {}))
 
-_HARDENED_GIT_CONFIG: tuple[tuple[str, str], ...] = (
-    ("core.hooksPath", "/dev/null"),
-    ("core.fsmonitor", "false"),
-    ("diff.external", ""),
-)
-
 
 def _apply_hardened_git_env(env: dict[str, str]) -> None:
     """Appends safe git config overrides to env via GIT_CONFIG_COUNT/KEY/VALUE."""
-    try:
-        base_count = max(0, int(env.get("GIT_CONFIG_COUNT", "0")))
-    except ValueError:
-        base_count = 0
-
-    for offset, (key, value) in enumerate(_HARDENED_GIT_CONFIG):
-        idx = base_count + offset
-        env[f"GIT_CONFIG_KEY_{idx}"] = key
-        env[f"GIT_CONFIG_VALUE_{idx}"] = value
-    env["GIT_CONFIG_COUNT"] = str(base_count + len(_HARDENED_GIT_CONFIG))
+    apply_hardened_git_env_in_place(env)
 
 
 def run_command(cmd: list[str], cwd: str | None = None) -> tuple[int, str, str]:
@@ -972,261 +966,6 @@ def get_incremental_diff(
     return diff_out if ret == 0 else None
 
 
-_RISKY_CONFIG_EXACT = frozenset(
-    {
-        "package.json",
-        ".npmrc",
-        "setup.py",
-        "setup.cfg",
-        "pyproject.toml",
-        "tox.ini",
-        "noxfile.py",
-        "makefile",
-        "gnumakefile",
-        "build.gradle",
-        "build.gradle.kts",
-        "settings.gradle",
-        "settings.gradle.kts",
-        "cargo.toml",
-        "build.rs",
-        "package.swift",
-        "workspace",
-        "workspace.bazel",
-        "module.bazel",
-        ".bazelrc",
-        "build",
-        "build.bazel",
-        "pubspec.yaml",
-        "build.yaml",
-        "analysis_options.yaml",
-        "conftest.py",
-        "pytest.ini",
-        ".gitattributes",
-        ".gitmodules",
-        ".pre-commit-config.yaml",
-        ".envrc",
-        ".mise.toml",
-        ".tool-versions",
-    }
-)
-
-_RISKY_CONFIG_PREFIXES = (
-    ".eslintrc",
-    "eslint.config.",
-    "tsconfig",
-    ".yarnrc",
-)
-
-_RISKY_CONFIG_SUFFIXES = (
-    ".mk",
-    ".gradle",
-    ".gradle.kts",
-    ".bzl",
-)
-
-_RISKY_PATH_SEGMENTS = (
-    ".githooks/",
-    ".husky/",
-    ".github/workflows/",
-    ".cargo/config",
-)
-
-_DIFF_GIT_HEADER_RE = re.compile(r"^diff --git a/.+? b/(.+)$")
-_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-
-_LINE_RISK_PATTERNS: tuple[tuple[str, re.Pattern[str], str], ...] = (
-    (
-        "process_and_dynamic_execution",
-        re.compile(
-            r"\b(?:subprocess\b|os\.(?:system|popen|exec\w*|spawn\w*)|pty\.spawn|"
-            r"eval\s*\(|exec\s*\(|compile\s*\(|__import__\s*\(|importlib\.import_module|"
-            r"child_process|execSync|spawnSync|execFile\w*|new\s+Function\s*\(|"
-            r"Process\.(?:run|runSync|start)|Isolate\.spawnUri|Command::new)\b"
-        ),
-        "Process spawn or dynamic code execution",
-    ),
-    (
-        "network_and_exfiltration",
-        re.compile(
-            r"(?:\b(?:urllib\.request|requests\.(?:get|post|put|delete|request|Session)|"
-            r"httpx\.|aiohttp\.|socket\.socket|fetch\s*\(|XMLHttpRequest|new\s+WebSocket|"
-            r"http\.(?:get|post|request)|HttpClient|curl\s+|wget\s+)\b|"
-            r"(?:~|\$HOME|/home/|/Users/)[/\w.-]*\.(?:ssh|aws|env|gemini|gnupg|netrc|npmrc|pypirc)\b|"
-            r"\.config/gh\b|/etc/(?:passwd|shadow)\b|"
-            r"\b(?:os\.environ|process\.env|Platform\.environment)\b)"
-        ),
-        "Network egress, sensitive path, or environment access",
-    ),
-    (
-        "obfuscation_and_payloads",
-        re.compile(
-            r"(?:\b(?:base64\.b64decode|codecs\.decode|"
-            r"Buffer\.from\s*\([^)]*['\"]base64['\"]|atob\s*\(|bytes\.fromhex)\b|"
-            r"(?:\\x[0-9a-fA-F]{2}){8,})"
-        ),
-        "Encoded payload or obfuscation primitive",
-    ),
-)
-
-
-def _check_config_file_risk(file_path: str) -> str | None:
-    """Returns a risk reason when file_path is a build, linter plugin, or hook config."""
-    norm = file_path.strip().replace("\\", "/")
-    if not norm:
-        return None
-    lower_norm = norm.lower()
-    base = lower_norm.rsplit("/", 1)[-1]
-    if base in _RISKY_CONFIG_EXACT:
-        return f"Modified build, hook, or tool config ({base})"
-    if base.startswith(_RISKY_CONFIG_PREFIXES) or base.endswith(_RISKY_CONFIG_SUFFIXES):
-        return f"Modified linter, compiler, or build config ({base})"
-    for seg in _RISKY_PATH_SEGMENTS:
-        if lower_norm.startswith(seg) or f"/{seg}" in lower_norm:
-            return f"Modified hook or workflow path ({norm})"
-    return None
-
-
-def _extract_header_path(line: str) -> str | None:
-    """Extracts the target file path from diff --git, rename to, or +++ b/ headers."""
-    if line.startswith("diff --git "):
-        m = _DIFF_GIT_HEADER_RE.match(line)
-        return m.group(1).strip() if m else None
-    if line.startswith("rename to "):
-        return line[len("rename to ") :].strip() or None
-    if line.startswith("+++ b/"):
-        return line[6:].strip() or None
-    return None
-
-
-def _parse_hunk_new_line(line: str) -> int | None:
-    """Extracts the starting new-file line number from a unified diff @@ header."""
-    m = _HUNK_HEADER_RE.match(line)
-    return int(m.group(1)) if m else None
-
-
-def _scan_added_line(
-    file_path: str, line_num: int, content: str
-) -> list[dict[str, Any]]:
-    """Matches an added diff line against execution, network, and obfuscation patterns."""
-    matches: list[dict[str, Any]] = []
-    snippet = content.strip()[:160]
-    for category, pattern, reason in _LINE_RISK_PATTERNS:
-        if pattern.search(content):
-            matches.append(
-                {
-                    "category": category,
-                    "file_path": file_path,
-                    "line": line_num,
-                    "reason": reason,
-                    "snippet": snippet,
-                }
-            )
-    return matches
-
-
-def _record_signal(
-    signal: dict[str, Any],
-    signals: list[dict[str, Any]],
-    categories: dict[str, int],
-    flagged_files: list[str],
-) -> None:
-    """Appends a risk signal and updates category counts and ordered flagged_files."""
-    signals.append(signal)
-    cat = signal["category"]
-    categories[cat] = categories.get(cat, 0) + 1
-    fp = signal["file_path"]
-    if fp and fp not in flagged_files:
-        flagged_files.append(fp)
-
-
-def _record_config_if_needed(
-    current_file: str,
-    raw_line: str,
-    seen_config_files: set[str],
-    signals: list[dict[str, Any]],
-    categories: dict[str, int],
-    flagged_files: list[str],
-) -> None:
-    """Records a build_and_hook_configs signal once per modified config file."""
-    if current_file in seen_config_files:
-        return
-    config_reason = _check_config_file_risk(current_file)
-    if not config_reason:
-        return
-    seen_config_files.add(current_file)
-    _record_signal(
-        {
-            "category": "build_and_hook_configs",
-            "file_path": current_file,
-            "line": 1,
-            "reason": config_reason,
-            "snippet": raw_line[:160],
-        },
-        signals,
-        categories,
-        flagged_files,
-    )
-
-
-def _step_hunk_line(
-    raw_line: str,
-    current_file: str,
-    new_line: int,
-    signals: list[dict[str, Any]],
-    categories: dict[str, int],
-    flagged_files: list[str],
-) -> int:
-    """Processes one hunk body line and returns the updated new_line counter."""
-    if raw_line.startswith(("+++", "-", "\\")):
-        return new_line
-    if raw_line.startswith("+"):
-        for sig in _scan_added_line(current_file, new_line, raw_line[1:]):
-            _record_signal(sig, signals, categories, flagged_files)
-    return new_line + 1
-
-
-def scan_diff_execution_risks(diff_text: str) -> dict[str, Any]:
-    """Scans a unified diff for local code execution hazards before running local tools."""
-    signals: list[dict[str, Any]] = []
-    categories: dict[str, int] = {}
-    flagged_files: list[str] = []
-    seen_config_files: set[str] = set()
-    current_file = ""
-    new_line: int | None = None
-
-    for raw_line in (diff_text or "").splitlines():
-        header_path = _extract_header_path(raw_line)
-        if header_path is not None:
-            current_file = header_path
-            if raw_line.startswith("diff --git "):
-                new_line = None
-            _record_config_if_needed(
-                current_file,
-                raw_line,
-                seen_config_files,
-                signals,
-                categories,
-                flagged_files,
-            )
-            continue
-
-        hunk_start = _parse_hunk_new_line(raw_line)
-        if hunk_start is not None:
-            new_line = hunk_start
-        elif new_line is not None and current_file:
-            new_line = _step_hunk_line(
-                raw_line, current_file, new_line, signals, categories, flagged_files
-            )
-
-    return {
-        "status": "flagged" if signals else "clean",
-        "risk_count": len(signals),
-        "flagged_files": flagged_files,
-        "categories": categories,
-        "signals": signals,
-    }
-
-
 def _write_json_file(path_str: str, data: dict[str, Any]) -> None:
     """Writes a dictionary as formatted JSON, creating parent directories if needed."""
     path = Path(path_str)
@@ -1240,7 +979,9 @@ def _run_security_scan(args: argparse.Namespace) -> int:
         if args.security_scan == "-":
             diff_text = sys.stdin.read()
         else:
-            diff_text = Path(args.security_scan).read_text(encoding="utf-8")
+            diff_text = Path(args.security_scan).read_text(
+                encoding="utf-8", errors="replace"
+            )
     except OSError as e:
         print(f"Error reading diff for --security-scan: {e}", file=sys.stderr)
         return 1
@@ -1499,15 +1240,181 @@ def _resolve_target_from_args(args: argparse.Namespace) -> tuple[str, str, int, 
     )
 
 
+_FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
+
+
+def frame_ci_log_tail(
+    name: str, log_text: str, *, nonce: str, max_chars: int = 1024
+) -> str:
+    """Wraps the trailing `max_chars` tail of a failed CI log in a salted fence.
+
+    Args:
+        name: Job or check name written into the `source` attribute.
+        log_text: Raw CI log output.
+        nonce: Hex nonce shared across the review prompt.
+        max_chars: Maximum character length kept from the end of `log_text`.
+
+    Returns:
+        A salted `<untrusted_repo_content_<nonce>>` block containing the log tail.
+    """
+    raw = (log_text or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if max_chars > 0 and len(raw) > max_chars:
+        raw = raw[-max_chars:]
+    wrapped = wrap_salted_untrusted(
+        f"ci_log:{name or 'unknown'}",
+        raw,
+        nonce=nonce,
+        max_chars=0,
+        multiline=True,
+    )
+    if max_chars <= 0:
+        return wrapped
+    open_end = wrapped.index("\n") + 1
+    close_start = wrapped.rindex("\n")
+    body = wrapped[open_end:close_start]
+    if len(body) <= max_chars:
+        return wrapped
+    trimmed = "..." + body[-(max_chars - 3) :] if max_chars > 3 else body[-max_chars:]
+    return wrapped[:open_end] + trimmed + wrapped[close_start:]
+
+
+def _frame_one_prose_entry(
+    entry: dict[str, Any], kind: str, nonce: str, max_chars: int
+) -> dict[str, Any]:
+    """Wraps one comment or review dict with a salted untrusted body fence."""
+    author = str(entry.get("author") or "unknown")
+    item: dict[str, Any] = {
+        "author": author,
+        "url": str(entry.get("url") or ""),
+        "framed_body": wrap_salted_untrusted(
+            f"{kind}:{author}",
+            str(entry.get("body") or ""),
+            nonce=nonce,
+            max_chars=max_chars,
+            multiline=True,
+        ),
+    }
+    for meta_key in ("state", "created_at", "submitted_at"):
+        if meta_key in entry:
+            item[meta_key] = str(entry.get(meta_key) or "")
+    return item
+
+
+def _frame_prose_entries(
+    entries: Sequence[Any],
+    kind: str,
+    nonce: str,
+    *,
+    max_chars: int = 1000,
+) -> list[dict[str, Any]]:
+    """Wraps comment or review body text in salted untrusted fences."""
+    return [
+        _frame_one_prose_entry(entry, kind, nonce, max_chars)
+        for entry in (entries or ())
+        if isinstance(entry, dict)
+    ]
+
+
+def _frame_thread_excerpts(threads: Sequence[Any], nonce: str) -> list[dict[str, Any]]:
+    """Wraps inline review thread comments in salted untrusted fences."""
+    framed_threads: list[dict[str, Any]] = []
+    for thread in threads or ():
+        if not isinstance(thread, dict):
+            continue
+        path = str(thread.get("path") or "")
+        line = thread.get("line")
+        source = f"review_thread:{path or 'unknown'}:{line or 0}"
+        excerpts = [
+            {
+                "author": str(comment.get("author") or "unknown"),
+                "created_at": str(comment.get("created_at") or ""),
+                "url": str(comment.get("url") or ""),
+                "framed_body": wrap_salted_untrusted(
+                    source,
+                    str(comment.get("body") or ""),
+                    nonce=nonce,
+                    max_chars=600,
+                    multiline=True,
+                ),
+            }
+            for comment in (thread.get("comments") or ())
+            if isinstance(comment, dict)
+        ]
+        framed_threads.append(
+            {
+                "path": path,
+                "line": line,
+                "is_resolved": bool(thread.get("is_resolved", False)),
+                "is_outdated": bool(thread.get("is_outdated", False)),
+                "framed_excerpts": excerpts,
+            }
+        )
+    return framed_threads
+
+
+def _frame_failed_ci_logs(raw_logs: Sequence[Any], nonce: str) -> list[dict[str, str]]:
+    """Wraps any failed CI log entries into salted log-tail records."""
+    framed: list[dict[str, str]] = []
+    for idx, entry in enumerate(raw_logs or (), 1):
+        if isinstance(entry, dict):
+            name = str(entry.get("name") or f"check-{idx}")
+            text = str(entry.get("tail") or entry.get("log") or "")
+        else:
+            name = f"check-{idx}"
+            text = str(entry or "")
+        framed.append(
+            {
+                "name": name,
+                "framed_tail": frame_ci_log_tail(name, text, nonce=nonce),
+            }
+        )
+    return framed
+
+
+def build_framed_pr_prose(context: dict[str, Any], nonce: str) -> dict[str, Any]:
+    """Builds salted `<untrusted_repo_content_<nonce>>` wrappers for Stage 2 PR prose.
+
+    Wraps the PR title, body, comments, reviews, inline review thread excerpts,
+    and any failed CI log tails with `nonce` so downstream review prompts can
+    treat external GitHub prose as passive data.
+    """
+    return {
+        "title": wrap_salted_untrusted(
+            "pr_title", str(context.get("title") or ""), nonce=nonce, max_chars=400
+        ),
+        "body": wrap_salted_untrusted(
+            "pr_body",
+            str(context.get("body") or ""),
+            nonce=nonce,
+            max_chars=8000,
+            multiline=True,
+        ),
+        "comments": _frame_prose_entries(
+            context.get("comments") or (), "pr_comment", nonce
+        ),
+        "reviews": _frame_prose_entries(
+            context.get("reviews") or (), "pr_review", nonce
+        ),
+        "threads": _frame_thread_excerpts(context.get("threads") or (), nonce),
+        "failed_ci_log_tails": _frame_failed_ci_logs(
+            context.get("failed_ci_logs") or (), nonce
+        ),
+    }
+
+
 def _write_code_review_prep_if_requested(
     args: argparse.Namespace,
     metadata: dict[str, Any],
     context: dict[str, Any],
+    *,
+    untrusted_nonce: str | None = None,
 ) -> None:
     """Populates code_review_prep in context and writes code_review_prep.json when requested."""
     if not getattr(args, "prepare_code_review", False):
         return
-    prep = _prepare_code_review_from_args(args, metadata)
+    prep = _prepare_code_review_from_args(
+        args, metadata, untrusted_nonce=untrusted_nonce
+    )
     context["code_review_prep"] = prep
     prep_out = getattr(args, "output_prep", None)
     if not prep_out and args.output_context:
@@ -1544,7 +1451,10 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
     prescan_clean = _is_prescan_clean(args.input_coords, blind_text)
     for line in check_description_budgets(blind_text, prescan_clean):
         print(line, file=sys.stderr)
+    nonce = generate_untrusted_nonce()
     context["blind_sha256"] = _compute_file_sha256(blind_path)
+    context["untrusted_nonce"] = nonce
+    context["framed_pr_prose"] = build_framed_pr_prose(context, nonce)
     context["stack"] = stack
     if stack:
         metadata["stack"] = {
@@ -1569,7 +1479,7 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
     if args.output_meta:
         _write_json_file(args.output_meta, metadata)
         print(f"Wrote PR metadata to {args.output_meta}")
-    _write_code_review_prep_if_requested(args, metadata, context)
+    _write_code_review_prep_if_requested(args, metadata, context, untrusted_nonce=nonce)
     if args.output_context:
         _write_json_file(args.output_context, context)
         print(f"Wrote PR context to {args.output_context}")
@@ -1580,133 +1490,85 @@ def _run_fetch_context(args: argparse.Namespace) -> int:
 _CONTEXT_INDEXER_SCRIPTS = (
     Path(__file__).resolve().parents[2] / "context-indexer" / "scripts"
 )
-_ENTITY_QUERY_LIMIT = 25
 
 
-def _run_duckdb_macro(macro: str, diff_dir: str) -> list[dict[str, Any]] | None:
-    """Runs a staged_diff_macros.sql table macro and returns rows, or None on failure."""
-    duckdb = shutil.which("duckdb")
-    if not duckdb:
+def _normalize_origin_base_ref(base_ref: str) -> str | None:
+    """Prefixes bare branch refs with `origin/` while keeping SHAs and `origin/` refs intact."""
+    cleaned = (base_ref or "").strip()
+    if not cleaned:
         return None
-    sql_file = _CONTEXT_INDEXER_SCRIPTS / "staged_diff_macros.sql"
-    escaped_dir = diff_dir.replace("'", "''")
-    query = f"SELECT * FROM {macro}('{escaped_dir}') LIMIT {_ENTITY_QUERY_LIMIT};"
-    ret, stdout, _ = run_command(
-        [duckdb, "-batch", "-json", "-init", str(sql_file), "-c", query]
-    )
-    if ret != 0:
-        return None
-    try:
-        rows = json.loads(stdout or "[]")
-    except ValueError:
-        return None
-    return rows if isinstance(rows, list) else None
+    if cleaned.startswith("origin/") or _FULL_SHA_RE.fullmatch(cleaned):
+        return cleaned
+    return f"origin/{cleaned}"
 
 
 def _run_packrat_context(
     paths: list[str], repo_dir: Path, pull_number: Any
 ) -> dict[str, Any] | None:
-    """Runs code-review's packrat_context.py read-only; returns its JSON or None."""
-    script = _CODE_REVIEW_SCRIPTS / "packrat_context.py"
-    cmd = [sys.executable, str(script), "--root", str(repo_dir)]
-    if pull_number:
-        cmd.extend(["--pr", str(pull_number)])
-    cmd.append("-")
-    try:
-        proc = subprocess.run(
-            cmd,
-            input="\n".join(paths),
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=120,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    try:
-        parsed = json.loads(proc.stdout or "{}")
-    except ValueError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
+    """Delegates read-only `packrat` context lookup to `prepare_code_review.py`."""
+    pr_num = int(pull_number) if pull_number else None
+    return code_review_prep.query_packrat_bundle(repo_dir, paths, pull_number=pr_num)
 
 
 def _stage_diff_for_review(
     diff_path: Path, repo_dir: Path, base_ref: str, diff_dir: str
 ) -> str | None:
-    """Runs stage_diffs.py --grouped --with-entities; returns an error or None.
-
-    The diff is passed as a positional input, so stage_diffs never writes to it.
-    """
-    cmd = [
-        sys.executable,
-        str(_CONTEXT_INDEXER_SCRIPTS / "stage_diffs.py"),
-        str(diff_path),
-        "--output-dir",
+    """Delegates grouped diff staging and AST extraction to `prepare_code_review.py`."""
+    return code_review_prep.stage_diff_for_review(
+        diff_path,
+        repo_dir,
+        _normalize_origin_base_ref(base_ref),
         diff_dir,
-        "--grouped",
-        "--with-entities",
-        "--repo-dir",
-        str(repo_dir),
-    ]
-    if base_ref:
-        cmd.extend(["--base-ref", f"origin/{base_ref}"])
-    ret, _, stderr = run_command(cmd)
-    return None if ret == 0 else (stderr or f"stage_diffs.py exited {ret}")
+    )
 
 
 def prepare_code_review(
-    coords: dict[str, Any], diff_path: Path, repo_dir: Path, scratch: Path
+    coords: dict[str, Any],
+    diff_path: Path,
+    repo_dir: Path,
+    scratch: Path,
+    *,
+    untrusted_nonce: str | None = None,
 ) -> dict[str, Any]:
     """Bundles code-review pre-flight steps for pr-review Stage 2.
 
-    Runs classify_artifacts.classify_combined(), stage_diffs.py, optional
-    duckdb churn and drift queries, and packrat_context.py. Every optional
-    step degrades to a `warnings` entry instead of failing. `scratch` is the
-    conversation scratch directory, recorded for callers.
+    Delegates to `code-review/scripts/prepare_code_review.py`, normalizing bare
+    `base_ref` names to `origin/<base_ref>`. Every optional step degrades to a
+    `warnings` entry instead of failing. `scratch` is the conversation scratch
+    directory, recorded for callers.
     """
-    import classify_artifacts
+    origin_base = _normalize_origin_base_ref(str(coords.get("base_ref") or ""))
+    pull_raw = coords.get("pull_number")
+    pull_number = int(pull_raw) if pull_raw else None
 
-    warnings: list[str] = []
-    diff_text = diff_path.read_text(encoding="utf-8", errors="replace")
-    paths = classify_artifacts._extract_paths_from_diff(diff_text)
-    classification = classify_artifacts.classify_combined(paths, repo_dir, diff_text)
+    def _stage_adapter(
+        d_path: Path, r_dir: Path, b_ref: str | None, d_dir: str
+    ) -> str | None:
+        return _stage_diff_for_review(d_path, r_dir, b_ref or origin_base or "", d_dir)
 
-    diff_dir: str | None = tempfile.mkdtemp(prefix="pr-review-diffs-")
-    stage_error = _stage_diff_for_review(
-        diff_path, repo_dir, str(coords.get("base_ref") or ""), diff_dir
+    def _packrat_adapter(
+        paths: Sequence[str], r_dir: Path, pr_num: int | None
+    ) -> dict[str, Any] | None:
+        return _run_packrat_context(list(paths), r_dir, pr_num)
+
+    return code_review_prep.prepare_review_bundle(
+        repo_dir,
+        diff_path=diff_path,
+        base_ref=origin_base,
+        pull_number=pull_number,
+        scratch_dir=scratch,
+        untrusted_nonce=untrusted_nonce,
+        _mkdtemp=tempfile.mkdtemp,
+        _stage_fn=_stage_adapter,
+        _packrat_fn=_packrat_adapter,
     )
-    churn = drift = None
-    if stage_error:
-        shutil.rmtree(diff_dir, ignore_errors=True)
-        diff_dir = None
-        warnings.append(f"stage_diffs.py failed: {stage_error}")
-    elif not shutil.which("duckdb"):
-        warnings.append("duckdb not installed; churn and drift skipped")
-    else:
-        churn = _run_duckdb_macro("diff_entity_churn", diff_dir)
-        drift = _run_duckdb_macro("diff_signature_drift", diff_dir)
-        if churn is None or drift is None:
-            warnings.append("duckdb churn or drift query failed")
-
-    packrat = _run_packrat_context(paths, repo_dir, coords.get("pull_number"))
-    if packrat is None:
-        warnings.append("packrat_context.py unavailable or failed")
-
-    return {
-        "classification": classification,
-        "diff_dir": diff_dir,
-        "scratch_dir": str(scratch),
-        "entity_churn": churn,
-        "signature_drift": drift,
-        "packrat": packrat,
-        "warnings": warnings,
-    }
 
 
 def _prepare_code_review_from_args(
-    args: argparse.Namespace, metadata: dict[str, Any]
+    args: argparse.Namespace,
+    metadata: dict[str, Any],
+    *,
+    untrusted_nonce: str | None = None,
 ) -> dict[str, Any]:
     """Resolves pr.diff, the checkout, and scratch paths, then runs prepare_code_review()."""
     scratch = Path(args.input_coords).parent if args.input_coords else Path.cwd()
@@ -1719,6 +1581,10 @@ def _prepare_code_review_from_args(
                 f"--prepare-code-review skipped: missing {diff_path} or checkout {repo_dir}"
             ]
         }
+    if untrusted_nonce is not None:
+        return prepare_code_review(
+            metadata, diff_path, repo_dir, scratch, untrusted_nonce=untrusted_nonce
+        )
     return prepare_code_review(metadata, diff_path, repo_dir, scratch)
 
 
@@ -2252,8 +2118,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--prepare-code-review",
         action="store_true",
         help=(
-            "With --fetch-context: also run classify_artifacts --combined, stage_diffs.py, "
-            "optional duckdb churn/drift, and packrat_context.py, writing code_review_prep.json "
+            "With --fetch-context: also run prepare_code_review.py (classification, "
+            "stage_diffs, pure-Python AST churn/drift/untested/deleted summaries, "
+            "1-hop call sites, and packrat history), writing code_review_prep.json "
             "and storing the result under pr_context.json['code_review_prep']. Reads --diff "
             "(default <coords dir>/pr.diff) and --repo-dir (default <coords dir>/workspace_dir.txt)."
         ),

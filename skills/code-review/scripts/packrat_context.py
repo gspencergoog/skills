@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -32,11 +33,23 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+_REVIEW_CORE_SCRIPTS = str(
+    Path(__file__).resolve().parents[2] / "review-core" / "scripts"
+)
+if _REVIEW_CORE_SCRIPTS not in sys.path:
+    sys.path.insert(0, _REVIEW_CORE_SCRIPTS)
+
+import security_prescan
+
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "packrat" / "repos.sqlite"
 _IMPORT_DEFAULT_DB_PATH = DEFAULT_DB_PATH
 _AUTH_ERROR_MARKERS = ("auth_expired", "auth expired", "unauthorized", "401")
 _CLOSING_UNTRUSTED_RE = re.compile(
     r"</\s*untrusted_repo_content\b[^>]*>", re.IGNORECASE
+)
+_WRAPPED_UNTRUSTED_RE = re.compile(
+    r'^<untrusted_repo_content\s+source="([^"]*)">(.*)</untrusted_repo_content>$',
+    re.DOTALL,
 )
 _BACKFILL_STREAMS = ("issues", "prs", "discussions")
 _COUNT_TABLES = ("chunks", "commits", "pull_requests", "issues", "review_threads")
@@ -1787,28 +1800,34 @@ def _append_bounded_lines(
             lines.append(candidate)
 
 
-def format_markdown_context(payload: dict[str, Any], max_bytes: int = 600) -> str:
-    """Formats `query_changed_files_context` output into a byte-capped Markdown block.
+def _validate_nonce(nonce: str | None) -> None:
+    """Validates an optional hex nonce using `security_prescan.wrap_salted_untrusted`."""
+    if nonce is not None:
+        security_prescan.wrap_salted_untrusted("validate", "", nonce=nonce)
 
-    Args:
-        payload: Result dictionary from `query_changed_files_context`.
-        max_bytes: Maximum UTF-8 byte budget for the rendered block.
 
-    Returns:
-        Formatted Markdown sub-list, `user_note` when unsynced, or `""` when empty.
-    """
-    probe_data = payload.get("probe", {})
-    if probe_data.get("status") != "ready":
-        return str(probe_data.get("user_note") or "")
+def _resalt_untrusted_text(text: str, default_source: str, nonce: str | None) -> str:
+    """Re-wraps an untrusted snippet with a salted nonce tag when `nonce` is given."""
+    if nonce is None:
+        return text
+    match = _WRAPPED_UNTRUSTED_RE.match((text or "").strip())
+    if match:
+        source = html.unescape(match.group(1))
+        inner = match.group(2)
+    else:
+        source = default_source
+        inner = text or ""
+    return security_prescan.wrap_salted_untrusted(
+        source, inner, nonce=nonce, max_chars=160
+    )
 
+
+def _build_markdown_candidates(payload: dict[str, Any], nonce: str | None) -> list[str]:
+    """Builds candidate Markdown lines for hotspots, related items, and threads."""
+    candidates: list[str] = []
     hotspots = payload.get("hotspots", [])
     threads = payload.get("prior_review_threads", [])
     related = payload.get("related_items", [])
-    if not hotspots and not threads and not related:
-        return ""
-
-    lines = ["- **Historical Context (packrat, upstream/main)**:"]
-    candidates: list[str] = []
     if hotspots:
         parts = [
             f"`{h['file_path']}` ({h['commit_count']}c/{h['review_thread_count']}t)"
@@ -1817,17 +1836,61 @@ def format_markdown_context(payload: dict[str, Any], max_bytes: int = 600) -> st
         candidates.append(f"  - Hotspots: {', '.join(parts)}")
     for item in related[:2]:
         label = "Issue" if item["kind"] == "issue" else "PR"
-        candidates.append(
-            f"  - {label} #{item['number']} ({item['state']}): {item['untrusted_title']}"
+        title = _resalt_untrusted_text(
+            str(item["untrusted_title"]),
+            f"{item['kind']}#{item['number']}",
+            nonce,
         )
+        candidates.append(f"  - {label} #{item['number']} ({item['state']}): {title}")
     for th in threads[:2]:
         loc = f"{th['file_path']}:{th['line']}" if th["line"] else th["file_path"]
-        candidates.append(
-            f"  - PR#{th['pr_number']} (`{loc}`, @{th['reviewer']}): "
-            f"{th['untrusted_excerpt']}"
+        excerpt = _resalt_untrusted_text(
+            str(th["untrusted_excerpt"]),
+            f"review_thread:PR#{th['pr_number']}",
+            nonce,
         )
+        candidates.append(
+            f"  - PR#{th['pr_number']} (`{loc}`, @{th['reviewer']}): {excerpt}"
+        )
+    return candidates
+
+
+def format_markdown_context(
+    payload: dict[str, Any],
+    max_bytes: int = 600,
+    *,
+    nonce: str | None = None,
+) -> str:
+    """Formats `query_changed_files_context` output into a byte-capped Markdown block.
+
+    Args:
+        payload: Result dictionary from `query_changed_files_context`.
+        max_bytes: Maximum UTF-8 byte budget for the rendered block.
+        nonce: Optional hex nonce for salted `<untrusted_repo_content_<nonce>>`
+            fencing. When `None`, preserves the unsalted `<untrusted_repo_content>`
+            tags from `payload`.
+
+    Returns:
+        Formatted Markdown sub-list, `user_note` when unsynced, or `""` when empty.
+
+    Raises:
+        ValueError: `nonce` is not 4 to 64 hexadecimal characters.
+    """
+    _validate_nonce(nonce)
+    probe_data = payload.get("probe", {})
+    if probe_data.get("status") != "ready":
+        return str(probe_data.get("user_note") or "")
+
+    candidates = _build_markdown_candidates(payload, nonce)
+    if not candidates:
+        return ""
+
+    lines = ["- **Historical Context (packrat, upstream/main)**:"]
     _append_bounded_lines(lines, candidates, max_bytes)
     return "\n".join(lines) if len(lines) > 1 else ""
+
+
+format_packrat_markdown = format_markdown_context
 
 
 def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
@@ -1862,6 +1925,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--markdown",
         action="store_true",
         help="Emit a <=600-byte Markdown summary instead of JSON.",
+    )
+    parser.add_argument(
+        "--nonce",
+        default=None,
+        help="Hex nonce for salted <untrusted_repo_content_<nonce>> tags in --markdown output.",
     )
     parser.add_argument(
         "--check-skill-budget",
@@ -2000,6 +2068,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Runs the CLI entrypoint and returns the process exit code."""
     try:
         args = _parse_args(sys.argv[1:] if argv is None else argv)
+        _validate_nonce(args.nonce)
     except (argparse.ArgumentError, SystemExit, ValueError):
         print(__doc__, file=sys.stderr)
         return 2
@@ -2019,7 +2088,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if args.markdown:
-        rendered = format_markdown_context(payload)
+        rendered = format_markdown_context(payload, nonce=args.nonce)
         if rendered:
             sys.stdout.write(rendered + "\n")
         return 0
