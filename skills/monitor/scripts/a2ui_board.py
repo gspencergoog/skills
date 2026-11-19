@@ -867,11 +867,13 @@ def _mine_counts(snaps: Sequence[PrSnapshot], total_open: int) -> str:
     return f"{text} in `{repos[0]}`" if repos else text
 
 
-def _mine_removal_notes(mine: MineBoard, labels: Mapping[str, str]) -> list[str]:
+def _removal_notes(
+    recent_retired: Sequence[Mapping[str, Any]], labels: Mapping[str, str]
+) -> list[str]:
     """Returns one ``merged today: a2ui#4153`` note per removal state, newest first."""
     notes: list[str] = []
     for state, heading in _REMOVAL_HEADINGS:
-        keys = [str(e.get("pr")) for e in reversed(mine.recent_retired) if e.get("state") == state]
+        keys = [str(e.get("pr")) for e in reversed(recent_retired) if e.get("state") == state]
         if not keys:
             continue
         shown = ", ".join(labels.get(key, key) for key in keys[:MINE_REMOVALS_SHOWN])
@@ -889,9 +891,7 @@ def _mine_sync_note(set_synced_at: str | None, observed_at: str) -> str:
     return f"membership as of {_format_utc_short(set_synced_at or '')}"
 
 
-def _mine_subtitle(
-    snapshots: Mapping[str, PrSnapshot], mine: MineBoard, observed_at: str
-) -> str:
+def _mine_subtitle(snapshots: Mapping[str, PrSnapshot], mine: MineBoard, observed_at: str) -> str:
     """Builds the ``--mine`` subtitle: counts, pending rows, the cap note, removals, sync age.
 
     The source note (``via packrat``) is not part of it: ``monitor_prs.py``
@@ -903,7 +903,7 @@ def _mine_subtitle(
         parts.append(f"{mine.pending} pending")
     if mine.total_open > len(snaps) + mine.pending:
         parts.append(f"showing {len(snaps)} of {mine.total_open}")
-    parts.extend(_mine_removal_notes(mine, _mine_labels(snapshots, mine)))
+    parts.extend(_removal_notes(mine.recent_retired, _mine_labels(snapshots, mine)))
     sync_note = _mine_sync_note(mine.set_synced_at, observed_at)
     if sync_note:
         parts.append(sync_note)
@@ -1463,25 +1463,42 @@ def _review_status_badge(
     return f"Watching{suffix}", "active", True
 
 
+def _review_removal_labels(
+    all_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
+    recent_retired: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    retired_keys = [str(entry.get("pr") or "") for entry in recent_retired if entry.get("pr")]
+    if not retired_keys:
+        return {}
+    return mine_row_labels([*(snap.key for snap, _, _, _ in all_rows), *retired_keys])
+
+
+def _review_scope(snaps: Sequence[PrSnapshot]) -> str:
+    repos = {s.repo for s in snaps if s.repo}
+    noun = "PR" if len(snaps) == 1 else "PRs"
+    if len(repos) == 1:
+        return f"{len(snaps)} {noun} in `{next(iter(repos))}`"
+    return f"{len(snaps)} {noun} across {len(repos)} repos"
+
+
 def _review_subtitle(
     sorted_rows: Sequence[tuple[PrSnapshot, ReviewStep, ReviewSortTier, int]],
     viewer: str,
     events: Sequence[Event] | None,
+    recent_retired: Sequence[Mapping[str, Any]] = (),
+    labels: Mapping[str, str] | None = None,
 ) -> str:
+    notes = _removal_notes(recent_retired, labels or {})
     if not sorted_rows:
-        return f"Review queue for @{viewer}" if viewer else ""
-    snaps = [s for s, _, _, _ in sorted_rows]
-    repos = sorted({s.repo for s in snaps if s.repo})
-    noun = "PR" if len(snaps) == 1 else "PRs"
-    if len(repos) == 1:
-        scope = f"{len(snaps)} {noun} in `{repos[0]}`"
-    else:
-        scope = f"{len(snaps)} {noun} across {len(repos)} repos"
+        parts = [f"Review queue for @{viewer}"] if viewer else []
+        return " · ".join([*parts, *notes])
+    parts = [_review_scope([s for s, _, _, _ in sorted_rows])]
     if events:
         changed = len({ev.pr for ev in events})
         ev_noun = "PR" if changed == 1 else "PRs"
-        return f"{scope} · {changed} {ev_noun} updated"
-    return scope
+        parts.append(f"{changed} {ev_noun} updated")
+    parts.extend(notes)
+    return " · ".join(parts)
 
 
 def _resolve_now_epoch(
@@ -1583,6 +1600,7 @@ def review_board_data_model(
     overrides: ReviewOverrides | None = None,
     stale_days: int = 30,
     now_epoch: float | None = None,
+    recent_retired: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Builds the reviewer queue board ``dataModel`` dictionary."""
     all_rows = sort_review_snapshots(snapshots, viewer)
@@ -1619,8 +1637,17 @@ def review_board_data_model(
     status_text, status_tone, status_pulse = _review_status_badge(
         active_rows, observed_at, drawer_count=len(drawer_items)
     )
+    removal_labels = _review_removal_labels(all_rows, recent_retired)
     resolved_subtitle = (
-        subtitle if subtitle is not None else _review_subtitle(active_rows, viewer, events)
+        subtitle
+        if subtitle is not None
+        else _review_subtitle(
+            active_rows,
+            viewer,
+            events,
+            recent_retired=recent_retired,
+            labels=removal_labels,
+        )
     )
     title = f"Review Queue ({len(items)})" if items else "Review Queue"
     return {
@@ -1653,6 +1680,7 @@ def review_board_dsl(
     overrides: ReviewOverrides | None = None,
     stale_days: int = 30,
     now_epoch: float | None = None,
+    recent_retired: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Renders A2UI Express data statements for the reviewer queue board."""
     _ = surface_id
@@ -1670,6 +1698,7 @@ def review_board_dsl(
             overrides=overrides,
             stale_days=stale_days,
             now_epoch=now_epoch,
+            recent_retired=recent_retired,
         )
     keys = (
         "title",

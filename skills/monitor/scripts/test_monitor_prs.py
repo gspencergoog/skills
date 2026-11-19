@@ -1580,7 +1580,11 @@ class TestReviewsMode(unittest.TestCase):
         self.assertNotIn("acme/widget#5", payload["prs"])
         self.assertNotIn("acme/widget#7", payload["prs"])
         self.assertIn("acme/widget#3339", payload["prs"])
-        self.assertIn("acme/widget#6", payload["prs"])
+        self.assertNotIn("acme/widget#6", payload["prs"])
+        self.assertEqual(
+            [(e["pr"], e["state"]) for e in payload["recent_retired"]],
+            [("acme/widget#6", "CLOSED")],
+        )
         kinds = {(e["pr"], e["kind"]) for e in payload["events"]}
         self.assertIn(("acme/widget#3339", "new_review_request"), kinds)
         self.assertIn(("acme/widget#6", "terminal"), kinds)
@@ -1765,7 +1769,7 @@ class TestReviewsMode(unittest.TestCase):
         self.assertIn("other/repo#20", payload_gh["prs"])
         self.assertEqual(payload_gh["events"][0]["kind"], "new_review_request")
 
-    def test_reviews_mid_session_close_retains_snapshot_unleases_and_reopens(
+    def test_reviews_mid_session_close_retires_snapshot_unleases_and_reopens(
         self,
     ) -> None:
         pr_open = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
@@ -1816,19 +1820,32 @@ class TestReviewsMode(unittest.TestCase):
         with redirect_stdout(out_close), redirect_stderr(io.StringIO()):
             code_close = mon_close.run(close_args)
         self.assertEqual(code_close, 0)
-        self.assertIn("acme/widget#3339", mon_close.state.snapshots)
-        self.assertEqual(mon_close.state.snapshots["acme/widget#3339"].state, "CLOSED")
+        payload_close = json.loads(out_close.getvalue())
+        self.assertNotIn("acme/widget#3339", mon_close.state.snapshots)
+        self.assertEqual(
+            [(e["pr"], e["state"]) for e in payload_close["recent_retired"]],
+            [("acme/widget#3339", "CLOSED")],
+        )
+        self.assertEqual(
+            mon_close.state.recent_retired, payload_close["recent_retired"]
+        )
         self.assertNotIn("acme/widget#3339", mon_close.watched_keys)
         remove_calls = [
             c for c in self.cli.by_command("remove") if "acme/widget#3339" in c
         ]
         self.assertEqual(len(remove_calls), 1)
-        dm_closed = review_board_data_model(mon_close.state.snapshots, viewer="alice")
-        self.assertEqual(dm_closed["items"][0]["step"], 0)
-        self.assertEqual(dm_closed["items"][0]["state"], "Closed")
-        self.assertFalse(dm_closed["items"][0]["canReview"])
+        dm_closed = review_board_data_model(
+            mon_close.state.snapshots,
+            viewer="alice",
+            recent_retired=mon_close.state.recent_retired,
+        )
+        self.assertEqual(dm_closed["items"], [])
+        self.assertEqual(
+            dm_closed["subtitle"],
+            "Review queue for @alice · closed today: PR 3339",
+        )
 
-        # Reopen recovery on a subsequent discovery sweep / viewer_changed
+        # Reopen recovery on a subsequent discovery sweep / viewer_changed clears recent_retired
         pr_reopened = _review_pr_node(
             3339,
             repo="acme/widget",
@@ -1844,8 +1861,91 @@ class TestReviewsMode(unittest.TestCase):
         self.assertIn("acme/widget#3339", mon_close.watched_keys)
         mon_close.refresh(added)
         self.assertEqual(mon_close.state.snapshots["acme/widget#3339"].state, "OPEN")
-        dm_reopened = review_board_data_model(mon_close.state.snapshots, viewer="alice")
+        self.assertEqual(mon_close.state.recent_retired, [])
+        dm_reopened = review_board_data_model(
+            mon_close.state.snapshots,
+            viewer="alice",
+            recent_retired=mon_close.state.recent_retired,
+        )
         self.assertTrue(dm_reopened["items"][0]["canReview"])
+        self.assertNotIn("closed today", dm_reopened["subtitle"])
+
+    def test_reviews_mid_session_merge_retires_and_expires_from_pane(self) -> None:
+        pr1 = _review_pr_node(3339, repo="acme/widget", requested_viewer="alice")
+        pr2 = _review_pr_node(3340, repo="acme/widget", requested_viewer="alice")
+        store_graphql_pr(self.db, pr1)
+        store_graphql_pr(self.db, pr2)
+        self._add_viewer_item("review_requested", "acme/widget#3339")
+        self._add_viewer_item("review_requested", "acme/widget#3340")
+
+        store_dir = self.dir / "pane_store"
+        store_dir.mkdir()
+        current_epoch = 1793135700.0
+        current_iso = "2026-10-27T21:15:00Z"
+
+        def run_with_clock(argv: list[str]) -> tuple[int, dict[str, Any]]:
+            args = parse_args(
+                [
+                    "--reviews",
+                    "--source",
+                    "packrat",
+                    "--packrat-db",
+                    str(self.db),
+                    "--state",
+                    self.state_path,
+                    "--conversation-id",
+                    "conv-rev-retire",
+                    "--a2ui-store-dir",
+                    str(store_dir),
+                    *argv,
+                ]
+            )
+            mon = Monitor(
+                runner=FakeGh([]),
+                state_path=self.state_path,
+                clock=self.clk,
+                sleep=self.clk.sleep,
+                now=lambda: current_iso,
+                epoch_now=lambda: current_epoch,
+                packrat_runner=self.cli,
+            )
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                code = mon.run(args)
+            return code, json.loads(out.getvalue())
+
+        code1, _ = run_with_clock(["--once"])
+        self.assertEqual(code1, 0)
+
+        pr1_merged = _review_pr_node(
+            3339, repo="acme/widget", requested_viewer="alice", state="MERGED"
+        )
+        store_graphql_pr(self.db, pr1_merged)
+        code2, payload2 = run_with_clock(["--once"])
+        self.assertEqual(code2, 0)
+        self.assertEqual(list(payload2["prs"]), ["acme/widget#3340"])
+        self.assertEqual(
+            [(e["pr"], e["state"]) for e in payload2["recent_retired"]],
+            [("acme/widget#3339", "MERGED")],
+        )
+        pane_path = store_dir / "conversations" / "conv-rev-retire" / "monitor.jsonl"
+        line_merged = json.loads(pane_path.read_text(encoding="utf-8").splitlines()[0])
+        self.assertIn(
+            "merged today: PR 3339",
+            line_merged["message"]["createSurface"]["dataModel"]["subtitle"],
+        )
+
+        # After 24h TTL expires with unchanged active rows, the pane updates its subtitle.
+        current_epoch += 24 * 60 * 60 + 1
+        current_iso = "2026-10-28T21:15:01Z"
+        code3, payload3 = run_with_clock(["--once"])
+        self.assertEqual(code3, 0)
+        self.assertEqual(payload3["recent_retired"], [])
+        line_expired = json.loads(pane_path.read_text(encoding="utf-8").splitlines()[0])
+        self.assertNotIn(
+            "merged today",
+            line_expired["message"]["createSurface"]["dataModel"]["subtitle"],
+        )
 
     def test_reviews_daemon_suppresses_wakeups_unless_wake_on_review(self) -> None:
         pr_rev1 = _review_pr_node(

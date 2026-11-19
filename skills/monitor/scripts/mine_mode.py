@@ -289,12 +289,16 @@ class RecentRetired:
             dict(entry) for entry in entries if isinstance(entry, Mapping)
         ]
 
+    def remove(self, pr: str) -> None:
+        """Drops any recorded removal entry for ``pr``."""
+        self._entries = [entry for entry in self._entries if entry.get("pr") != pr]
+
     def add(self, pr: str, title: str, state: str, at: str) -> None:
         """Records that ``pr`` left the board at ISO-8601 time ``at``.
 
         An earlier entry for the same pull request is replaced.
         """
-        self._entries = [entry for entry in self._entries if entry.get("pr") != pr]
+        self.remove(pr)
         self._entries.append({"pr": pr, "title": title, "state": state, "at": at})
         del self._entries[:-RECENT_RETIRED_MAX]
 

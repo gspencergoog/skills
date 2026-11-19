@@ -303,9 +303,7 @@ _MINE_NOW = "2026-10-27T21:15:00Z"
 class TestMineBoard(unittest.TestCase):
     """The ``--mine`` board: title, row order, labels, subtitle, and source badges."""
 
-    def _board(
-        self, snaps: list[Any], observed_at: str = _MINE_NOW, **mine: Any
-    ) -> dict[str, Any]:
+    def _board(self, snaps: list[Any], observed_at: str = _MINE_NOW, **mine: Any) -> dict[str, Any]:
         board = MineBoard(**{"total_open": len(snaps), **mine})
         by_key = {s.key: s for s in snaps}
         dm = board_data_model(by_key, [], observed_at=observed_at, mine=board)
@@ -430,9 +428,7 @@ class TestMineBoard(unittest.TestCase):
         fresh = self._board(snaps, set_synced_at="2026-10-27T20:45:00Z")
         self.assertEqual(fresh["subtitle"], "1 open in `acme/widget`")
         old = self._board(snaps, set_synced_at="2026-10-27T20:44:59Z")
-        self.assertEqual(
-            old["subtitle"], "1 open in `acme/widget` · membership as of 20:44 UTC"
-        )
+        self.assertEqual(old["subtitle"], "1 open in `acme/widget` · membership as of 20:44 UTC")
         unknown = self._board(snaps, set_synced_at=None)
         self.assertEqual(unknown["subtitle"], "1 open in `acme/widget`")
 
@@ -1397,6 +1393,58 @@ class TestReviewBoard(unittest.TestCase):
         self.assertEqual(parsed["$/drawerTitle"], "")
         self.assertEqual(parsed["$/drawerSummary"], "")
         self.assertEqual(parsed["$/drawerItems"], [])
+
+    def test_review_board_recent_retired_subtitle_and_labels(self) -> None:
+        def gone(pr: str, state: str) -> dict[str, str]:
+            return {"pr": pr, "title": "t", "state": state, "at": "2026-11-05T11:30:00Z"}
+
+        snap = make_snapshot(
+            number=600,
+            key="acme/widget#600",
+            mine=False,
+            author="bob",
+            requested_reviewers=["alice"],
+            updated_at="2026-11-05T10:00:00Z",
+        )
+        single_repo = review_board_data_model(
+            [snap],
+            viewer="alice",
+            observed_at="2026-11-05T12:00:00Z",
+            recent_retired=[gone("acme/widget#599", "MERGED")],
+        )
+        self.assertEqual(single_repo["items"][0]["id"], "PR 600")
+        self.assertEqual(single_repo["subtitle"], "1 PR in `acme/widget` · merged today: PR 599")
+
+        retired_multi = [
+            gone("acme/widget#1", "MERGED"),
+            gone("other/repo#2", "CLOSED"),
+            gone("acme/widget#3", "MERGED"),
+            gone("acme/widget#4", "MERGED"),
+            gone("acme/widget#5", "MERGED"),
+        ]
+        multi = review_board_data_model(
+            [snap],
+            viewer="alice",
+            observed_at="2026-11-05T12:00:00Z",
+            recent_retired=retired_multi,
+        )
+        self.assertEqual(
+            multi["subtitle"],
+            "1 PR in `acme/widget` · merged today: widget#5, widget#4, widget#3 +1 more"
+            " · closed today: repo#2",
+        )
+
+        empty_queue_dsl = review_board_dsl(
+            [],
+            viewer="alice",
+            observed_at="2026-11-05T12:00:00Z",
+            recent_retired=[gone("acme/widget#1", "MERGED")],
+        )
+        parsed_empty = {
+            line.split(" = ", 1)[0]: json.loads(line.split(" = ", 1)[1])
+            for line in empty_queue_dsl.splitlines()
+        }
+        self.assertEqual(parsed_empty["$/subtitle"], "Review queue for @alice · merged today: PR 1")
 
     def test_mute_and_dormancy_partitioning_segments_and_unhide_pin(self) -> None:
         now_ts = 1793880000.0  # 2026-11-05T12:00:00Z

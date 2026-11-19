@@ -768,8 +768,8 @@ class Monitor:
         """False during the first sync of a fresh state, which emits no ``pr_added``."""
         self._source_state_dirty = False
         """True when the board has not been written since the source state changed."""
-        self._mine_pane_heading: tuple[Any, ...] | None = None
-        """The ``--mine`` title, subtitle, and source state last written to the pane store."""
+        self._pane_heading: tuple[Any, ...] | None = None
+        """The dynamic board title, subtitle, and source state last written to the pane store."""
         self.poller: NotificationPoller = NotificationPoller(runner)
         self.source_mode = "github"
         self._source_note: str | None = None
@@ -952,12 +952,39 @@ class Monitor:
             if leased_terminal:
                 self.packrat.unlease(leased_terminal)
 
+    def _pruned_recent_retired(self) -> list[dict[str, Any]]:
+        """Prunes expired ``recent_retired`` entries in place and returns a copy."""
+        recent = RecentRetired(self.state.recent_retired)
+        recent.prune(self.epoch_now())
+        pruned = recent.to_list()
+        self.state.recent_retired = pruned
+        return pruned
+
+    def _clear_reopened_retired(self, keys: list[str]) -> None:
+        """Drops ``recent_retired`` entries for reviewer PRs that are open again."""
+        if self.role != ReviewRole.REVIEWER or not self.state.recent_retired:
+            return
+        recent = RecentRetired(self.state.recent_retired)
+        for key in keys:
+            snap = self.state.snapshots.get(key)
+            if snap is not None and snap.state == "OPEN":
+                recent.remove(key)
+        self.state.recent_retired = recent.to_list()
+
     def _retire_finished_reviews(self, terminal_keys: set[str]) -> None:
         unassigned_keys = {
             k
             for k, s in self.state.snapshots.items()
             if self._is_unassigned_open_review(k, s)
         }
+        recent = RecentRetired(self.state.recent_retired)
+        now_iso = self.now()
+        for key in sorted(terminal_keys):
+            snap = self.state.snapshots.pop(key, None)
+            if snap is not None:
+                recent.add(key, snap.title, snap.state, now_iso)
+        recent.prune(self.epoch_now())
+        self.state.recent_retired = recent.to_list()
         for key in unassigned_keys:
             self.state.snapshots.pop(key, None)
         retired_keys = terminal_keys | unassigned_keys
@@ -985,6 +1012,7 @@ class Monitor:
         target_keys = self._normalize_target_keys(
             target_keys, raw_map, from_packrat, prev_snapshots
         )
+        self._clear_reopened_retired(target_keys)
 
         resolve_stack_parents(self.state.snapshots)
         ctx = DiffContext(
@@ -1075,12 +1103,10 @@ class Monitor:
             return None
         health = self.packrat.last_health if self.packrat is not None else None
         synced = health.viewer_sets_synced_at if health is not None else {}
-        recent = RecentRetired(self.state.recent_retired)
-        recent.prune(self.epoch_now())
         return MineBoard(
             total_open=self.rows.total_open,
             pending=len(self.rows.pending),
-            recent_retired=tuple(recent.to_list()),
+            recent_retired=tuple(self._pruned_recent_retired()),
             set_synced_at=synced.get(AUTHORED_OPEN_SET),
             source_state=self.source_state,
             stale_since=self.stale_since,
@@ -1102,6 +1128,7 @@ class Monitor:
                 overrides=ov,
                 stale_days=self.stale_days,
                 now_epoch=now_ep,
+                recent_retired=self._pruned_recent_retired(),
             )
             return dm, review_board_dsl(dm), REVIEW_BOARD_COMPONENTS
         etas = self._compute_etas()
@@ -1111,16 +1138,18 @@ class Monitor:
         dsl = board_dsl(ordered_snaps, events, etas, observed_at=ts, mine=mine)
         return dm, dsl, None
 
-    def _mine_heading(self, dm: dict[str, Any]) -> tuple[Any, ...] | None:
-        """Returns the ``--mine`` title, subtitle, and source state, or None in other modes.
+    def _dynamic_heading(self, dm: dict[str, Any]) -> tuple[Any, ...] | None:
+        """Returns the board heading fields that should force a pane write when changed.
 
-        The pane store skips a write whose rows are unchanged, but a ``--mine``
-        heading changes on its own: the source state, the counts, and the
-        removals. ``_sync_board()`` forces a write when the heading changed.
+        The pane store skips a write whose rows are unchanged, but dynamic
+        boards (``--mine`` and ``--reviews``) update their subtitle or source
+        badge on their own (for example when ``recent_retired`` entries expire).
         """
-        if self.membership != Membership.MINE:
-            return None
-        return dm.get("title"), dm.get("subtitle"), self.source_state
+        if self.membership == Membership.MINE:
+            return dm.get("title"), dm.get("subtitle"), self.source_state
+        if self.role == ReviewRole.REVIEWER:
+            return dm.get("title"), dm.get("subtitle")
+        return None
 
     def _sync_board(
         self,
@@ -1147,7 +1176,7 @@ class Monitor:
             or not getattr(self, "_board_synced", False)
             or any(ev.actionable for ev in events)
         )
-        heading = self._mine_heading(dm)
+        heading = self._dynamic_heading(dm)
         store_status = sync_pane_store(
             getattr(args, "conversation_id", None),
             dm,
@@ -1156,10 +1185,10 @@ class Monitor:
             observed_at=ts,
             allow_create=allow_create,
             components=components,
-            force=heading is not None and heading != self._mine_pane_heading,
+            force=heading is not None and heading != self._pane_heading,
         )
         if store_status == "written":
-            self._mine_pane_heading = heading
+            self._pane_heading = heading
         self._board_synced = True
         return {
             "template": "stack_board",
@@ -1240,6 +1269,7 @@ class Monitor:
             payload["untriaged_discussions"] = self._compute_untriaged_discussions(
                 ordered_snaps
             )
+            payload["recent_retired"] = self._pruned_recent_retired()
         if self.membership == Membership.MINE:
             payload.update(self._mine_payload())
         if batch_id is not None:
@@ -2125,16 +2155,13 @@ class Monitor:
 
     def _mine_payload(self) -> dict[str, Any]:
         """Returns the payload fields that only ``--mine`` reports."""
-        recent = RecentRetired(self.state.recent_retired)
-        recent.prune(self.epoch_now())
-        self.state.recent_retired = recent.to_list()
         return {
             "membership": self.membership.value,
             "source_state": self.source_state.value,
             "stale_since": self.stale_since,
             "total_open": self.rows.total_open,
             "pending": len(self.rows.pending),
-            "recent_retired": recent.to_list(),
+            "recent_retired": self._pruned_recent_retired(),
         }
 
     def _sync_board_if_source_state_changed(self, args: argparse.Namespace) -> None:
@@ -2497,6 +2524,7 @@ class Monitor:
         return None
 
     def _prune_startup_reviewer_snapshots(self) -> list[str]:
+        self._pruned_recent_retired()
         drop = {
             key
             for key, snap in self.state.snapshots.items()
