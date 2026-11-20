@@ -60,6 +60,7 @@ python3 <skill-dir>/scripts/packrat.py install-cli
 2. Register repositories and configure how `packrat` obtains git history. By default `repo add` manages its own single-branch bare clone under `~/.local/share/packrat/git/<owner>/<name>.git`; pass `--path` to use an existing local checkout instead, or `--github-only` when no code index is needed.
    - Use `repo set-git` to switch an existing repository between `managed`, `path`, and `none` (`repo set-path` is an alias for `set-git path`), or `packrat git status|fetch|gc|prune` to inspect and maintain managed clones.
    - When a tracked GitHub repository is transferred or renamed, run `repo rename` so existing rows, embeddings, and the managed clone directory carry over without re-syncing.
+   - When moving a local checkout tracked in `path` mode (usually the repo's main branch checkout), update it with `repo set-path <owner>/<name> <new-path>`. Before removing a `path`-mode checkout from disk, ask whether to switch `packrat` to a managed bare clone (`repo set-git <owner>/<name> managed --clone-now`), switch to GitHub-only (`repo set-git <owner>/<name> none`), or stop tracking the repo (`repo remove <owner>/<name>`).
 
    ```bash
    python3 <skill-dir>/scripts/packrat.py repo list
