@@ -44,7 +44,7 @@ from review_overrides import (
     save_overrides,
 )
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-flash-latest"
 DEFAULT_STALE_DAYS = 30
 TRIAGE_BATCH_SIZE = 25
 HTTP_TIMEOUT_S = 30

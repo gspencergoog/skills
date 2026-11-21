@@ -22,6 +22,7 @@ from review_overrides import (
 )
 from testing import FakeGh, make_snapshot, make_viewer_review
 from triage_discussions import (
+    DEFAULT_MODEL,
     _default_http_post,
     main,
     sanitize_triage_summary,
@@ -451,7 +452,7 @@ class TestTriageDiscussions(unittest.TestCase):
                     "--overrides-file",
                     str(overrides_path),
                     "--model",
-                    "gemini-2.5-flash",
+                    "gemini-flash-latest",
                 ],
                 env={"GEMINI_API_KEY": api_key},
                 gh_runner=fake_gh,
@@ -465,7 +466,7 @@ class TestTriageDiscussions(unittest.TestCase):
             url, headers, body = captured_requests[0]
             self.assertEqual(
                 url,
-                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
             )
             self.assertNotIn(api_key, url)
             self.assertNotIn("key=", url)
@@ -564,7 +565,7 @@ class TestTriageDiscussions(unittest.TestCase):
             captured_req.append((req, timeout))
             return mock_cm
 
-        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
         secret = "AIzaSyUrllibHeaderOnlyKey"
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
             res = _default_http_post(
@@ -611,6 +612,11 @@ class TestTriageDiscussions(unittest.TestCase):
                 headers: Mapping[str, str],
                 body: Mapping[str, Any],
             ) -> dict[str, Any]:
+                self.assertEqual(DEFAULT_MODEL, "gemini-flash-latest")
+                self.assertEqual(
+                    url,
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{DEFAULT_MODEL}:generateContent",
+                )
                 self.assertEqual(headers.get("x-goog-api-key"), "fallback-google-key")
                 self.assertNotIn("fallback-google-key", url)
                 return _gemini_response(

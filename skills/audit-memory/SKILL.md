@@ -65,7 +65,7 @@ The gate collects three choices:
 
 - Audit lens: `Veracity + Promotion (Recommended)`, `Veracity Only`, or `Promotion Only`.
 - Worker concurrency: `Wide fan-out: <N> concurrent workers (Recommended)`, `Fork 2 concurrent workers (batched)`, or `In-session only (1 agent)`.
-- Worker model picker: populated from `swarm{action: "models"}` and annotated with quota-pool notes from `$MY_CHEATS_DIR/models.md` when present. Preselect `auto` (`inherit`) so external model quota is used only when explicitly chosen.
+- Worker model picker: populated from `swarm{action: "models"}` and annotated with optional quota-pool notes from `$AGENT_MODELS_FILE` when set and readable. Preselect `auto` (`inherit`) so external model quota is used only when explicitly chosen.
 
 ### Step 3: Parallel Veracity & Promotion Audit
 

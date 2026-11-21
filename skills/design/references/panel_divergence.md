@@ -71,7 +71,7 @@ When the user triggers Round 2 after a panel split, wake only the clashing domai
 
 ## 3. Cross-Harness Engine Routing
 
-Borrow only the 3-tier delegation hierarchy and the swarm creation-turn rule from [delegation.md](../../review-core/references/delegation.md). Override `delegation.md` in two ways: keep this protocol model-ID-free (do not hardcode stale model IDs), and tear down `panel-*` workers at Phase 3 instead of leaving them parked indefinitely.
+Borrow the 3-tier delegation hierarchy, model-class resolution, and the swarm creation-turn rule from [delegation.md](../../review-core/references/delegation.md). Override `delegation.md` in one way: tear down `panel-*` workers at Phase 3 instead of leaving them parked indefinitely.
 
 Select the highest available engine and stay on that engine for the full panel:
 

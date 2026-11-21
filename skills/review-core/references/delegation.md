@@ -34,7 +34,7 @@ Tier 2 role names:
 
 The roster gives each reviewer a model class, never a model ID. Resolve each class when you spawn or switch a worker:
 
-- `swarm{action: "models"}` lists the current model IDs and the quota left in each pool. When the environment has a model reference file (for example `$MY_CHEATS_DIR/models.md`), take ranks and quota pools from it.
+- `swarm{action: "models"}` lists the current model IDs and the quota left in each pool. When `$AGENT_MODELS_FILE` is set and readable, take ranks and quota pools from it; otherwise fall back to `swarm{action: "models"}` and host defaults.
 - Top-tier Gemini is the highest-ranked Gemini model. Top-tier third-party is the highest-ranked model in the third-party (Claude) pool.
 - `auto` is the host's built-in alias. It draws on its own quota pool.
 - Never review with a lite model, or with a coordinator model that hands work to lighter models.
@@ -43,9 +43,9 @@ The roster gives each reviewer a model class, never a model ID. Resolve each cla
 
 Before spawning or waking workers, call `swarm{action: "models"}` once:
 
-- Failover order: top-tier third-party (only with `--claude`/`--opus`) → top-tier Gemini → a top-tier model in another quota pool → `auto`. Never fail over to a lower tier.
-- If the preferred model has zero remaining quota at spawn time, use the next model in the order and report the fallback in chat and in `## Summary`.
-- If a worker hits `RESOURCE_EXHAUSTED` or drops out of quota between passes, switch it in place via `swarm{action: "model", name: "<name>", model: "<fallback>"}`.
+- Failover order: top-tier third-party (only with `--claude`/`--opus`) → top-tier Gemini → highest-ranked available top-tier model in a different quota pool → `auto`. Never fail over to a lower tier, and skip any rows that share an exhausted quota pool.
+- If the preferred model has zero remaining quota at spawn time, skip all rows sharing that exhausted quota pool, step to the highest-ranked available model in a different quota pool (falling back to `auto`), and report the fallback in chat and in `## Summary`.
+- If a worker hits `RESOURCE_EXHAUSTED` or drops out of quota between passes, skip all rows sharing the exhausted quota pool and switch it in place via `swarm{action: "model", name: "<name>", model: "<fallback>"}` to the highest-ranked available model in a different quota pool (falling back to `auto`).
 - Focus reviewers always run on top-tier Gemini (failing over to `auto`) to protect third-party quota.
 
 ## Worker Lifecycle: Reuse vs. Fresh Unanchored Context
